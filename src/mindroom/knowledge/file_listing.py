@@ -224,7 +224,11 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
 
 @contextmanager
 def pinned_canonical_directory(path: Path) -> Iterator[int]:
-    """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
+    """Pin one canonical absolute directory by a no-follow walk from the filesystem root.
+
+    Worker code can write bases inside agent workspaces, so a folder checked by name may be swapped for a link before
+    it is used; acting relative to the pinned descriptor refuses the swap instead of reaching the link target.
+    """
     with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
         yield directory_fd
 

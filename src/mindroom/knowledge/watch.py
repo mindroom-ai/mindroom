@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import sys
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from watchfiles import Change, DefaultFilter, awatch
+from watchfiles._rust_notify import WatchfilesRustInternalError
 
 from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path, pinned_canonical_directory
 from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
@@ -139,12 +142,29 @@ def _shared_poll_targets(
     return targets
 
 
-def _watched_folders(root: Path) -> list[Path]:
-    """Return the base folder and the folders below it, reached without a link, up to the cap."""
+def _has_utf8_name(name: str) -> bool:
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _watched_folders(root: Path, unnamed: set[str]) -> list[Path]:
+    """Return the base folder and the folders below it, reached without a link, up to the cap.
+
+    Watchfiles takes only paths that are valid UTF-8, so the folders whose names are not are added to ``unnamed``
+    instead, as printable paths, together with everything below them.
+    """
     folders: list[Path] = []
     with pinned_canonical_directory(root) as root_fd:
         for folder, subfolders, _files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
-            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES]
+            unnamed.update(
+                os.fsencode(root / folder / name).decode(errors="backslashreplace")
+                for name in subfolders
+                if not _has_utf8_name(name)
+            )
+            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and _has_utf8_name(name)]
             folders.append(root / folder)
             if len(folders) == _MAX_WATCHED_FOLDERS:
                 break
@@ -152,15 +172,29 @@ def _watched_folders(root: Path) -> list[Path]:
 
 
 def _is_new_watched_folder(change: Change, path: str) -> bool:
-    changed = Path(path)
+    if change != Change.added or Path(path).name in _IGNORED_FOLDER_NAMES:
+        return False
+    try:
+        # A folder that cannot be entered, for example after losing its search permission, is not walked either.
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _is_removed_watched_folder(change: Change, path: str, folders: frozenset[Path]) -> bool:
+    return change == Change.deleted and Path(path) in folders
+
+
+def _report_change(change: Change, path: str, folders: frozenset[Path]) -> bool:
+    """Filter changes as watchfiles does by default, but report every new folder and every removed watched one.
+
+    A new folder must be watched too, and a removed one takes the files it holds out of the base.
+    """
     return (
-        change == Change.added and changed.name not in _IGNORED_FOLDER_NAMES and changed.is_dir(follow_symlinks=False)
+        _DEFAULT_FILTER(change, path)
+        or _is_new_watched_folder(change, path)
+        or _is_removed_watched_folder(change, path, folders)
     )
-
-
-def _report_change(change: Change, path: str) -> bool:
-    """Filter changes as watchfiles does by default, but report every new folder, since it must be watched too."""
-    return _DEFAULT_FILTER(change, path) or _is_new_watched_folder(change, path)
 
 
 def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_path: Path) -> bool:
@@ -178,13 +212,13 @@ def _changes_include_indexable_path(
     target: _WatchTarget,
     config: Config,
     changes: set[tuple[Change, str]],
+    folders: frozenset[Path],
 ) -> bool:
-    for change, changed_path in changes:
-        if change not in {Change.added, Change.modified, Change.deleted}:
-            continue
-        if _changed_path_is_indexable(target, config, Path(changed_path)):
-            return True
-    return False
+    """Return whether a change touches an indexable file, or removes one of ``folders`` with the files it holds."""
+    return any(
+        _changed_path_is_indexable(target, config, Path(path)) or _is_removed_watched_folder(change, path, folders)
+        for change, path in changes
+    )
 
 
 class KnowledgeSourceWatcher:
@@ -259,7 +293,7 @@ class KnowledgeSourceWatcher:
                 await self._watch_each_folder(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event)
             else:
                 async for changes in awatch(target.path, stop_event=stop_event):
-                    if _changes_include_indexable_path(target, config, changes):
+                    if _changes_include_indexable_path(target, config, changes, frozenset()):
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
         except Exception:
             logger.exception(
@@ -285,8 +319,18 @@ class KnowledgeSourceWatcher:
         """Watch every real folder of the base on its own, walking the base again whenever a folder appears."""
         refresh_pending = False
         warned_cap = False
+        unnamed: set[str] = set()
         while not stop_event.is_set():
-            folders = await asyncio.to_thread(_watched_folders, target.path)
+            skipped: set[str] = set()
+            folders = await asyncio.to_thread(_watched_folders, target.path, skipped)
+            for folder in sorted(skipped - unnamed):
+                logger.warning(
+                    "Knowledge filesystem watcher skips a folder whose name is not valid UTF-8; changes in it refresh on search",
+                    knowledge_path=str(target.path),
+                    base_ids=list(target.base_ids),
+                    folder=folder,
+                )
+            unnamed |= skipped
             if len(folders) == _MAX_WATCHED_FOLDERS and not warned_cap:
                 warned_cap = True
                 logger.warning(
@@ -317,10 +361,11 @@ class KnowledgeSourceWatcher:
         stop_event: asyncio.Event,
     ) -> None:
         """Watch ``folders`` until stopped or until the base must be walked again."""
+        watched = frozenset(folders)
         # Yielding on timeouts delivers a first batch within a second of the watch starting, even without a change.
         watcher = awatch(
             *folders,
-            watch_filter=_report_change,
+            watch_filter=partial(_report_change, folders=watched),
             stop_event=stop_event,
             rust_timeout=1_000,
             yield_on_timeout=True,
@@ -334,16 +379,21 @@ class KnowledgeSourceWatcher:
                     # parent, but before that parent was watched, shows up only by walking again.
                     if not checked:
                         checked = True
-                        if set(await asyncio.to_thread(_watched_folders, target.path)) != set(folders):
+                        if set(await asyncio.to_thread(_watched_folders, target.path, set())) != watched:
                             return
                     if any(_is_new_watched_folder(change, path) for change, path in changes):
                         return
-                    if refresh_pending or _changes_include_indexable_path(target, config, changes):
+                    if refresh_pending or _changes_include_indexable_path(target, config, changes, watched):
                         refresh_pending = False
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
         except FileNotFoundError:
             # Before the first batch, a folder disappeared between the walk and the watch, so walk again.
             if checked:
+                raise
+        except ExceptionGroup as group:
+            # Watchfiles ends a running watch when a name in a watched folder is not valid UTF-8, so walk again, which
+            # skips such folders. A failure to start the watch is not wrapped in a group, and still stops the watcher.
+            if group.split(WatchfilesRustInternalError)[1] is not None:
                 raise
 
     async def _poll_source(
