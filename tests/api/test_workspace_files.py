@@ -25,7 +25,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.workspace_files import operations
+from mindroom.workspace_files import operations, watch
 from tests.access_schema_support import joined_members_response
 from tests.api.test_plugin_room_agents import ALICE, BOB, CAROL, ROOM, _agents, _Room, _room, _turn_root
 from tests.conftest import test_runtime_paths
@@ -402,3 +402,49 @@ async def test_the_change_stream_closes_once_the_workspace_is_no_longer_open(
             message = await bob.receive()
 
     assert (message.type, bob.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+
+
+@pytest.mark.asyncio
+async def test_the_change_stream_of_an_agent_whose_tools_reach_no_files_closes(tmp_path: Path) -> None:
+    """An agent Alice may use but whose tools take no paths and run no code opens no workspace to follow."""
+    chat = AgentConfig(display_name="Chat", tools=[], access={"users": [ALICE]})
+    room = _room(tmp_path, {"chat": chat}, MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
+    async with _served(room) as (client, base):
+        stream = await _changes(client, room, f"{base}/agents/{room.ids['chat']}/workspace/changes", ALICE)
+
+        assert ((await stream.receive()).type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+
+
+@pytest.mark.asyncio
+async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recheck that can't finish in time closes the stream for the client to try again."""
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
+    async with _served(room) as (client, base):
+        stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
+        stalled = asyncio.Event()
+        room.client.joined_members.side_effect = lambda *_args, **_kwargs: stalled.wait()
+        async with asyncio.timeout(10):
+            message = await stream.receive()
+
+    assert (message.type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1013)
+
+
+@pytest.mark.asyncio
+async def test_the_watcher_stops_once_the_client_leaves(tmp_path: Path) -> None:
+    """A client that closes its stream releases the workspace's watcher at once, without waiting for a change."""
+    room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
+    root = _turn_root(room, "coder", ALICE)
+    root.mkdir(parents=True)
+    async with _served(room) as (client, base):
+        stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
+        await _settled(stream, root)
+        assert list(watch._watches) == [root]
+
+        await stream.close()
+        async with asyncio.timeout(5):
+            while watch._watches:  # noqa: ASYNC110 - the watcher table signals nothing
+                await asyncio.sleep(0.01)
