@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_va
 
 from mindroom.api.config_lifecycle import commit_config
 from mindroom.authorization import (
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     responder_candidate_entities_from_cached_room,
 )
@@ -33,6 +32,7 @@ from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus

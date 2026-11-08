@@ -16,7 +16,7 @@ from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import ClientSessionStore, _client_session_store
+from mindroom.api.client_sessions import ClientSessionStore, client_session_store
 from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
@@ -38,7 +38,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from mindroom.plugin_http import ClientUser, require_room_member
+from mindroom.plugin_http import ClientUser, require_platform_administrator, require_room_member
 
 router = APIRouter()
 
@@ -95,6 +95,11 @@ async def secret(room_id: str) -> dict:
 
 @router.get("/me")
 async def me_without_room(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
+    return {"user_id": user.user_id}
+
+
+@router.get("/admin")
+async def admin(user: Annotated[ClientUser, Depends(require_platform_administrator)]) -> dict:
     return {"user_id": user.user_id}
 """
 
@@ -246,7 +251,7 @@ def test_unknown_plugin_404(tmp_path: Path) -> None:
 
 
 def _signed_in(app: FastAPI, user_id: str = ALICE) -> dict[str, str]:
-    return {"Authorization": f"Bearer {_client_session_store(app).create(user_id).token}"}
+    return {"Authorization": f"Bearer {client_session_store(app).create(user_id).token}"}
 
 
 def _server_plugin_api() -> str:
@@ -476,6 +481,30 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
     # A route without ``{room_id}`` never checks a room the query string names, even one the caller is in.
     alice = _signed_in(app)
     assert client.get(f"/api/plugins/demo/me?room_id={quote(ROOM)}", headers=alice).status_code == 422
+
+
+def test_administrator_route_admits_only_an_administrator_of_the_config_served_now(tmp_path: Path) -> None:
+    """Only a signed-in administrator passes, and a reload that removes them from ``administrators`` refuses them."""
+    _write_plugin(tmp_path, ROUTES)
+    without_alice, runtime_paths = _config(tmp_path)
+    config = bind_runtime_paths(Config(plugins=["./plugins/demo"], administrators=[ALICE]), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    alice = _signed_in(app)
+
+    def admin(headers: dict[str, str]) -> tuple[int, object]:
+        response = client.get("/api/plugins/demo/admin", headers=headers)
+        return response.status_code, response.json()
+
+    assert admin(alice) == (200, {"user_id": ALICE})
+    assert admin({})[0] == 401
+    assert admin(_signed_in(app, "@bob:example.org")) == (403, {"detail": "Not a platform administrator."})
+
+    state = config_lifecycle.require_api_state(app)
+    state.snapshot = config_lifecycle.ApiSnapshot(2, runtime_paths, runtime_config=without_alice)
+
+    assert admin(alice) == (403, {"detail": "Not a platform administrator."})
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
