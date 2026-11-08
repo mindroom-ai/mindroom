@@ -423,40 +423,24 @@ def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> N
 
 
 def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
-    """CI output should preserve the plugin error without a Typer traceback."""
-    plugin_root = _write_plugin(
-        tmp_path / "plugin",
-        manifest={"name": "broken-import", "hooks_module": "hooks.py"},
-        modules={"hooks.py": "raise RuntimeError('plugin exploded: list[str]')\n"},
-    )
-
-    result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
-
-    assert result.exit_code == 1
-    assert "Plugin check failed:" in result.stdout
-    assert "plugin exploded" in result.stdout
-    assert "list[str]" in result.stdout
-    assert "Traceback (most recent call last)" not in result.output
-    assert result.exception is not None
-
-
-def test_plugins_check_cli_prints_failure_with_a_long_path_on_one_line(tmp_path: Path) -> None:
-    """A failure naming a path longer than the terminal stays on one line, so logs show the path unbroken."""
+    """CI output keeps the plugin error on one line, even with a path longer than the terminal, and has no traceback."""
     plugin_root = _write_plugin(
         tmp_path / ("long-directory-name-" * 5) / "plugin",
         manifest={"name": "broken-import", "hooks_module": "hooks.py"},
-        modules={"hooks.py": "raise RuntimeError('plugin exploded')\n"},
+        modules={"hooks.py": "raise RuntimeError('plugin exploded: list[str]')\n"},
     )
 
     result = runner.invoke(app, ["plugins", "check", str(plugin_root)], env={"COLUMNS": "80"})
 
     assert result.exit_code == 1
     assert (
-        f"Plugin check failed: Plugin hooks module execution failed for {plugin_root / 'hooks.py'}: plugin exploded\n"
+        f"Plugin check failed: Plugin hooks module execution failed for {plugin_root / 'hooks.py'}: "
+        "plugin exploded: list[str]\n"
     ) in result.stdout
+    assert "Traceback (most recent call last)" not in result.output
+    assert result.exception is not None
 
 
-@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
     """A missing plugin path fails the check, naming the path, without a traceback."""
     missing_plugin = tmp_path / "missing-plugin"
