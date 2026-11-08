@@ -881,7 +881,7 @@ def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
+async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
     """Check if a room is a Direct Message (DM) room.
 
     Detection uses multiple signals in this order:
@@ -894,7 +894,8 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         room_id: The room ID to check
 
     Returns:
-        True if the room is a DM room, False otherwise
+        True if the room is a DM room, False if it is not, and None when the ``m.direct`` read failed and the other
+        signals do not mark the room as a DM, since ``m.direct`` alone may list it
 
     """
     cache_key = _dm_cache_key(client, room_id)
@@ -917,18 +918,19 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
-        return False
+        return None if direct_room_ids is None else False
 
     is_dm = _has_is_direct_marker(response.events)
-    # After a failed m.direct read the state answer is not cached, so the next call reads m.direct again.
-    if direct_room_ids is not None:
-        _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
+    # After a failed m.direct read only a marked room is known; nothing is cached, so the next call reads it again.
+    if direct_room_ids is None:
+        return is_dm or None
+    _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
 
 
 async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
-    """Return rooms from *room_ids* that are not DM rooms."""
-    return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
+    """Return rooms from *room_ids* that are not DM rooms, leaving out rooms whose DM status is unknown."""
+    return [room_id for room_id in room_ids if await is_dm_room(client, room_id) is False]
 
 
 async def _leave_room(
@@ -966,9 +968,13 @@ async def leave_non_dm_rooms(
     *,
     leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
-    """Leave non-DM rooms and settle each departure before continuing."""
+    """Leave non-DM rooms, settling each departure before continuing, and skip rooms whose DM status is unknown."""
     for room_id in room_ids:
-        if await is_dm_room(client, room_id):
+        is_dm = await is_dm_room(client, room_id)
+        if is_dm is None:
+            logger.warning("dm_room_status_unknown_leave_skipped", room_id=room_id)
+            continue
+        if is_dm:
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
         operation = asyncio.create_task(
