@@ -68,9 +68,9 @@ class ToolFunction:
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
-    ``prepare_approval`` is the toolkit's trusted preparation of a gated call: it returns the call's arguments with
-    what its approval must judge and its run must check, such as the terminal line the call types onto, so that the
-    approval and the run read the same arguments.
+    ``prepare_approval`` is the toolkit's trusted preparation of a gated call the model loop plans: it returns the
+    call's arguments with what its approval must judge and its run must check, such as the terminal line the call types
+    onto, so that the approval and the run read the same arguments. Other callers pass the arguments as they came.
     ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
     tool jobs name it by; for an implied or preset tool that is the tool that brings it in.
     ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
@@ -113,14 +113,11 @@ class ToolFunction:
         """Return the execution a call of this function starts as, before it runs.
 
         A call whose gate pauses its run starts paused. A confirmation an approval rule asks for stores
-        ``POLICY_CONFIRMATION_APPROVAL_TYPE``, which decides how it is approved. A gated call's arguments are the ones
-        ``prepare_approval`` returns.
+        ``POLICY_CONFIRMATION_APPROVAL_TYPE``, which decides how it is approved.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
 
-        if self.gate is not None and self.prepare_approval is not None and arguments is not None:
-            arguments = self.prepare_approval(arguments)
         execution = ToolExecution(tool_call_id=call_id, tool_name=self.name, tool_args=arguments)
         if self.gate in CONFIRMATION_GATES:
             execution.requires_confirmation = True

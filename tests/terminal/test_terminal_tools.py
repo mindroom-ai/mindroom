@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.agent_loop.tools import PlannedCall, plan_tool_batch
 from mindroom.agents import build_agent_toolkit
 from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools import terminal as terminal_tools
 from mindroom.terminal.resolution import agent_terminals
+from mindroom.terminal.session import TerminalEvent
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -67,18 +71,32 @@ def _terminals(config: Config, paths: RuntimePaths) -> WorkerTerminals:
     return terminals
 
 
+def _planned(function: ToolFunction, arguments: dict[str, object]) -> dict[str, Any]:
+    """Return the arguments the model loop stores for one call of ``function``, which its approval judges and it runs."""
+    call = {"id": "call", "function": {"name": function.name, "arguments": json.dumps(arguments)}}
+    batch = plan_tool_batch(
+        [call],
+        {function.name: function},
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+        failing_tools={},
+    )
+    [planned] = batch.calls
+    assert isinstance(planned, PlannedCall)
+    return planned.execution.tool_args or {}
+
+
 async def _call(function: ToolFunction, **arguments: object) -> str:
     """Run one call as the agent's turn runs it: with the arguments its approval judged."""
-    execution = function.planned_execution("call", dict(arguments))
-    result = await function.entrypoint(**(execution.tool_args or {}))
+    result = await function.entrypoint(**_planned(function, arguments))
     assert isinstance(result, str)
     return result
 
 
 async def _asks(config: Config, paths: RuntimePaths, function: ToolFunction, arguments: dict[str, object]) -> bool:
     """Return whether the shell's rules ask before this call, judging the arguments the turn stores for it."""
-    stored = function.planned_execution("call", arguments).tool_args or {}
-    return await _asks_for(config, paths, function.name, stored)
+    return await _asks_for(config, paths, function.name, _planned(function, arguments))
 
 
 async def _asks_for(config: Config, paths: RuntimePaths, function_name: str, arguments: dict[str, Any]) -> bool:
@@ -187,7 +205,7 @@ async def test_keys_judged_before_someone_typed_on_the_line_are_not_typed(tmp_pa
     session_id = await _open(functions)
     kept = agent_workspace_root_path(tmp_path / "storage", "code") / "tmp"
     kept.mkdir()
-    judged = send.planned_execution("call", {"session_id": session_id, "keys": "<enter>"}).tool_args or {}
+    judged = _planned(send, {"session_id": session_id, "keys": "<enter>"})
     assert not await _asks_for(config, paths, "terminal_send", judged)
 
     async with _terminals(config, paths).attach(session_id) as person:
@@ -242,3 +260,23 @@ async def test_a_judged_line_runs_only_as_written(tmp_path: Path, runner: str) -
     # Typed alone: Ctrl-C in the same write would make the terminal drop the key before the shell reads it.
     await _call(send, session_id=session_id, keys="q")
     assert "planted-9" not in await _call(functions["terminal_read"], session_id=session_id)
+
+
+class _Chatty:
+    """A viewer of a terminal printing far more than a call keeps, then exiting."""
+
+    prompt = None
+
+    def __init__(self, chunks: int) -> None:
+        self._chunks = chunks
+
+    async def receive(self) -> TerminalEvent:
+        self._chunks -= 1
+        return TerminalEvent("output", data=b"x" * 65536) if self._chunks >= 0 else TerminalEvent("exit", code=0)
+
+
+async def test_a_call_keeps_only_the_newest_output_however_much_the_terminal_prints() -> None:
+    """Output a worker prints for minutes never grows the primary past what one answer can use."""
+    output, cut, ended = await terminal_tools._output(_Chatty(64), 10)  # type: ignore[arg-type]
+
+    assert (len(output), cut, ended) == (256 * 1024, True, True)
