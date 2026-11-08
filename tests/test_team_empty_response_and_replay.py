@@ -488,7 +488,7 @@ async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("member_finding", [None, "Queue depth is elevated."])
+@pytest.mark.parametrize("member_finding", [None, SILENT_SCHEDULE_NO_REPLY_TOKEN, "Queue depth is elevated."])
 async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_member_found_something(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -497,7 +497,8 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
 ) -> None:
     """The leader's acknowledgment reaches delivery without team chrome, but cannot hide a member's finding.
 
-    A document with a finding drops the leader's token, so delivery shows it.
+    A member that answers the token found nothing either. A document with a finding drops the leader's token, so
+    delivery shows it.
     """
     leader = (
         [answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)]
@@ -513,7 +514,7 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
     )
 
     assert team.recorder.outcome == "completed"
-    if member_finding is None:
+    if member_finding in {None, SILENT_SCHEDULE_NO_REPLY_TOKEN}:
         assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
     else:
         assert (

@@ -1390,8 +1390,8 @@ class ResponseRunner:
         """Admit, prepare, generate, and settle one agent or team turn while the conversation's lock is held.
 
         ``team`` names the members a team turn runs; an agent turn has none, and only it may wait on a participation
-        decision. A preparation failure before that decision declines the turn quietly. What differs between the two
-        kinds is decided in ``_prepare_agent_turn`` and ``_prepare_team_turn``.
+        decision. A preparation failure before that decision ends the turn quietly, as a failed check. What differs
+        between the two kinds is decided in ``_prepare_agent_turn`` and ``_prepare_team_turn``.
         """
         try:
             prepared = await self._prepare_locked_turn(
@@ -1406,7 +1406,7 @@ class ResponseRunner:
             if participation is None or participation.decision is not None:
                 raise
             participation.decline("preparation_failed")
-            return await self._decline_unprepared_turn(request, error, participation)
+            return await self._end_unprepared_turn(request, error, participation)
         if not isinstance(prepared, _LockedTurn):
             return prepared
         await self._generate_and_settle(prepared)
@@ -2083,7 +2083,7 @@ class ResponseRunner:
             ),
         )
 
-    async def _decline_unprepared_turn(
+    async def _end_unprepared_turn(
         self,
         request: ResponseRequest,
         error: Exception,

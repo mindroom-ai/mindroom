@@ -246,16 +246,22 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
 
 
 def silent_team_answer(presentation: TeamStreamPresentation, record: TeamRunRecord) -> str | None:
-    """Return the leader's bare answer when a quiet turn's team reports nothing, else None for its document.
+    """Return the leader's bare answer when a quiet turn's team reports nothing, else None, editing the document it keeps.
 
-    Only a team run whose leader reports nothing and whose members found nothing reports nothing; delivery withholds
-    that answer, as an agent's. A member's finding stays in the document, without the leader's no-report token.
+    The team reports nothing when its leader does and so does each member's slot without its tool markers, as an
+    answer does; delivery withholds that answer, as an agent's. A document that stays keeps every finding but loses
+    its slots' no-report lines, which this removes from ``presentation``.
     """
-    if not is_silent_schedule_no_report_response(record.handover_content or ""):
-        return None
-    if not any(strip_visible_tool_markers(text).strip() for text in presentation.per_member.values()):
-        return (record.handover_content or "").strip()
+    answer = (record.handover_content or "").strip()
+    if is_silent_schedule_no_report_response(answer) and all(
+        is_silent_schedule_no_report_response(strip_visible_tool_markers(text))
+        for text in presentation.per_member.values()
+    ):
+        return answer
     presentation.consensus = without_no_report_lines(presentation.consensus)
+    presentation.per_member.update(
+        {member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()},
+    )
     return None
 
 

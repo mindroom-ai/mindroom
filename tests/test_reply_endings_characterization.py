@@ -1137,8 +1137,8 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
 ) -> None:
     """Pins a silent schedule's team whose leader answers the no-report token after a member's approved call.
 
-    With nothing found, its waiting message ends with the nothing-to-show note; a member's finding stays shown, without
-    the leader's token.
+    The other member answers the token too. With nothing found, the waiting message ends with the nothing-to-show note;
+    a member's finding stays shown, without any token.
     """
     turn = await _turn(
         tmp_path,
@@ -1148,7 +1148,7 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
         scripts={
             "default": [calls(tool_call("delegate_task_to_members", "call-all", task="Check")), answer("NO_REPLY")],
             "writer-model": [calls(tool_call("echo", "call-1", text="hi")), answer(finding)],
-            "checker-model": [answer("")],
+            "checker-model": [answer("NO_REPLY")],
         },
     )
     turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]

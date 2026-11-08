@@ -1510,7 +1510,7 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("settlement_began", [False, True])
-async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_begins(
+async def test_a_judged_turn_that_fails_ends_quietly_only_until_its_settlement_begins(
     tmp_path: Path,
     *,
     settlement_began: bool,
@@ -1554,7 +1554,7 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
             with pytest.raises(RuntimeError, match=r"^delivery failed$"):
                 await turn
         else:
-            # No reply was claimed, so the declined turn's caller settles its sources.
+            # No reply was claimed, so the quiet turn's caller settles its sources.
             assert await turn == Unclaimed(UnclaimedReason.DECLINED)
             # The check never decided, so the turn ends as a failed check, not a decline.
             ending = effects.await_args.args[0].ending
