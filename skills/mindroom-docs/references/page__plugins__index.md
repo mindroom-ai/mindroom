@@ -1252,7 +1252,9 @@ Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
 
 A route with an admission rule of its own, such as a cap on each user's open streams, passes it as `admit`: a function, plain or `async`, that gets the signed-in `ClientUser` once the checks above pass and returns whether to accept.
-When it returns false or raises, `client_stream` refuses the handshake with 503 and `The route refused this stream; try again later.`, so the client never sees the stream open, as it would if the route closed it after accepting; MindRoom logs a raising check with the plugin's name.
+A plain function runs on the server's event loop, so it must not block.
+When it returns false, `client_stream` refuses the handshake with 503 and `The route refused this stream; try again later.`, so the client never sees the stream open, as it would if the route closed it after accepting.
+A check that raises `HTTPException` refuses with that answer instead, and one that raises anything else answers 500, as a route that raises does.
 
 ```python
 # routes.py

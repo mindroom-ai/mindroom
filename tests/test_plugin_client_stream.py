@@ -19,7 +19,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
-from structlog.testing import capture_logs
 
 from mindroom import plugin_http
 from mindroom.api import client_sessions
@@ -410,16 +409,11 @@ def test_a_refusing_check_refuses_the_handshake_with_503(
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_a_raising_check_refuses_the_handshake_and_is_logged_with_its_plugin(
-    app: FastAPI,
-    client: TestClient,
-    asynchronous: bool,
-) -> None:
-    """A check that fails is a refusal, never an accept, and the log names the plugin whose check it was."""
+def test_a_check_may_refuse_with_its_own_http_answer(app: FastAPI, client: TestClient, asynchronous: bool) -> None:
+    """A check that raises `HTTPException` refuses the handshake with that answer instead of 503."""
 
     def check(_user: ClientUser) -> bool:
-        msg = "boom"
-        raise RuntimeError(msg)
+        raise HTTPException(429, "Too many streams.")
 
     async def async_check(user: ClientUser) -> bool:
         return check(user)
@@ -427,14 +421,9 @@ def test_a_raising_check_refuses_the_handshake_and_is_logged_with_its_plugin(
     _admit_with(async_check if asynchronous else check)
     token = client_session_store(app).create(ALICE).token
 
-    with capture_logs() as logs:
-        denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
+    denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
 
-    assert (denial.status_code, denial.json()) == (503, {"detail": REFUSED})
-    failures = [log for log in logs if log["log_level"] == "error"]
-    assert [(log["event"], log["plugin"], log["exc_info"]) for log in failures] == [
-        ("Plugin stream admission check failed", "demo", True),
-    ]
+    assert (denial.status_code, denial.json()) == (429, {"detail": "Too many streams."})
 
 
 def test_a_check_is_asked_only_once_the_handshakes_own_checks_pass(app: FastAPI, client: TestClient) -> None:
@@ -686,6 +675,22 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(ap
             lines, body = await _handshake(port, path, origin, protocols)
             _assert_well_formed_denial(lines, body, status)
             assert token.encode() not in body
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_refuses_with_500_on_the_embedded_servers_transport(app: FastAPI) -> None:
+    """A check that fails answers the handshake as any route that raises does, and never accepts."""
+
+    async def check(_user: ClientUser) -> bool:
+        msg = "check failed"
+        raise RuntimeError(msg)
+
+    _admit_with(check)
+    token = client_session_store(app).create(ALICE).token
+    async with _serving(app) as port:
+        lines, _ = await _handshake(port, _admits_path(), CLIENT_ORIGIN, ", ".join(_offers(token)))
+
+    assert lines[0].split()[1] == "500"
 
 
 @pytest.mark.asyncio
