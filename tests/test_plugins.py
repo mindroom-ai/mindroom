@@ -1271,32 +1271,74 @@ def test_a_tools_module_shares_the_hooks_module_it_imports_before_and_after_a_re
     assert shared_state()
 
 
-def test_an_unpublished_load_restores_a_nested_package_plugin_on_its_parent_package(
+def _write_nested_package_plugin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A load that is not published leaves ``from pack import demo`` and ``pack.demo`` one module again."""
+    *,
+    package_source: str = "",
+    tools_source: str = "from pack.demo.helpers import STATE\n",
+) -> tuple[Path, Config]:
+    """Write the package plugin ``pack.demo``, inside the importable package ``pack``, and return its root and config."""
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "pack" / "demo"
     plugin_root.mkdir(parents=True)
     (site_packages / "pack" / "__init__.py").write_text("", encoding="utf-8")
-    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "__init__.py").write_text(package_source, encoding="utf-8")
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
         encoding="utf-8",
     )
     (plugin_root / "helpers.py").write_text("STATE = {}\n", encoding="utf-8")
-    (plugin_root / "tools.py").write_text("from pack.demo.helpers import STATE\n", encoding="utf-8")
+    (plugin_root / "errors.py").write_text("class ApiError(Exception):\n    pass\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(tools_source, encoding="utf-8")
     monkeypatch.syspath_prepend(str(site_packages))
-    config = _bind_runtime_paths(Config(plugins=["python:pack.demo"]), tmp_path / "config.yaml")
-    runtime_paths = runtime_paths_for(config)
+    return plugin_root, _bind_runtime_paths(Config(plugins=["python:pack.demo"]), tmp_path / "config.yaml")
 
+
+def test_an_unpublished_load_restores_a_nested_package_plugin_on_its_parent_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load that is not published leaves ``from pack import demo`` and ``pack.demo`` one module again."""
     with _forgetting_modules("pack"):
+        _plugin_root, config = _write_nested_package_plugin(tmp_path, monkeypatch)
+        runtime_paths = runtime_paths_for(config)
         _load(config, runtime_paths)
         dispose_plugins(prepare_plugins(config, runtime_paths))
 
         assert sys.modules["pack"].demo is sys.modules["pack.demo"]
         assert sys.modules["pack.demo"].helpers is sys.modules["pack.demo.helpers"]
+
+
+@_PRIMARY_AND_WORKER
+def test_a_reload_imports_a_nested_package_plugin_afresh_through_its_parent_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """After a reload, ``from pack import demo`` gives the package that raises the reloaded exception class."""
+    with _forgetting_modules("pack"):
+        plugin_root, config = _write_nested_package_plugin(
+            tmp_path,
+            monkeypatch,
+            package_source="from pack.demo.errors import ApiError\n\n\ndef fail():\n    raise ApiError\n",
+            tools_source=(
+                "from pack import demo\n"
+                "from pack.demo.errors import ApiError\n\n\n"
+                "def run():\n"
+                "    try:\n"
+                "        demo.fail()\n"
+                "    except ApiError:\n"
+                "        return 'handled'\n"
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+        tools_path = plugin_root / "tools.py"
+        for _ in range(2):
+            load(config, runtime_paths)
+            assert cached_plugin_module(tools_path).run() == "handled"
+            tools_path.write_text(f"{tools_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+            _bump_mtime(tools_path)
 
 
 def test_validation_executes_a_module_another_plugin_module_imported_once(tmp_path: Path) -> None:

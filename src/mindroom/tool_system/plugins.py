@@ -398,8 +398,7 @@ def _evict_plugin_modules(
     prefix = f"{plugin_imports._plugin_package_name(plugin.name, plugin.root)}."
     modules = _plugin_modules(plugin)
     cache = {name: entry for name, entry in plugin_imports._MODULE_IMPORT_CACHE.items() if name.startswith(prefix)}
-    for module_name in modules:
-        sys.modules.pop(module_name, None)
+    _remove_modules(modules)
     for module_name in cache:
         del plugin_imports._MODULE_IMPORT_CACHE[module_name]
     return modules, cache
@@ -440,11 +439,19 @@ def _install_canonical_modules(
     module_cache: Mapping[str, plugin_imports._ModuleCacheEntry],
 ) -> None:
     """Make ``modules`` the canonical plugin modules in sys.modules, and ``module_cache`` the module cache."""
-    for module_name in _canonical_plugin_modules():
-        sys.modules.pop(module_name, None)
+    _remove_modules(_canonical_plugin_modules())
     _reinstate_modules(modules)
     plugin_imports._MODULE_IMPORT_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+
+
+def _remove_modules(modules: Mapping[str, ModuleType]) -> None:
+    """Take ``modules`` out of sys.modules and off their parent packages, so importing them executes them again."""
+    for module_name, module in modules.items():
+        sys.modules.pop(module_name, None)
+        parent_name, _, child_name = module_name.rpartition(".")
+        if (parent := sys.modules.get(parent_name)) is not None and vars(parent).get(child_name) is module:
+            delattr(parent, child_name)
 
 
 def _reinstate_modules(modules: Mapping[str, ModuleType]) -> None:
@@ -643,19 +650,14 @@ def _execute_candidate_plugin(
     loaded_before = set(sys.modules)
     try:
         # A file that serves several kinds executes once, and each kind it serves is checked on that module.
-        executed: dict[Path, plugin_imports._ModuleCacheEntry] = {}
         for kind, module_path in (
             ("tools", plugin.tools_module_path),
             ("hooks", plugin.hooks_module_path),
             ("oauth", plugin.oauth_module_path),
         ):
-            if module_path is None:
-                continue
-            entry = executed.get(module_path)
+            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
             if entry is None:
-                entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
-                assert entry is not None
-                executed[module_path] = entry
+                continue
             if kind == "tools":
                 registrations.update(entry.registrations)
             elif kind == "oauth":
@@ -663,8 +665,7 @@ def _execute_candidate_plugin(
             completed.append(kind)
     finally:
         candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
-        for module_name in candidate_modules:
-            sys.modules.pop(module_name, None)
+        _remove_modules(candidate_modules)
         _cancel_module_tasks(candidate_modules.values())
 
 
@@ -752,8 +753,8 @@ def _load_each_plugin(
         if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
             plugins[plugin_base.root] = _with_current_manifest(loaded, plugin_base)
             continue
-        # The plugin loads whole: each of its modules executes once, and the modules under its root's package names leave
-        # with them, so they share one instance of each other and their tools register again.
+        # The plugin loads whole: each of its modules executes once, and the modules under its root's package names
+        # leave with them, so they share one instance of each other and their tools register again.
         installed_modules, installed_cache = _evict_plugin_modules(plugin_base)
         try:
             plugin = _materialize_plugin(plugin_base, primary_modules=primary_modules)
@@ -788,7 +789,7 @@ def _dispose_failed_plugin(
 
 
 def _with_current_manifest(loaded: _LoadedPlugin, plugin: plugin_imports._PluginBase) -> _LoadedPlugin:
-    """Return the unchanged modules ``loaded`` holds with what ``plugin``'s manifest declares now; itself if equal."""
+    """Return ``loaded``, whose modules are unchanged, with what ``plugin``'s manifest declares now; itself if equal."""
     if (
         loaded.mindroom_plugin_api == plugin.mindroom_plugin_api
         and loaded.skill_dirs == tuple(plugin.skill_dirs)
