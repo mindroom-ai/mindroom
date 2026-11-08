@@ -39,7 +39,7 @@ from mindroom.worker_computer.screencast import ScreencastViewer
 from tests.test_worker_computer_runtime import FakeDisplay, unused
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
     from playwright.async_api import Page
@@ -90,6 +90,25 @@ class _Viewer:
     async def frame(self) -> bytes:
         async with asyncio.timeout(_TIMEOUT):
             return await self.frames.get()
+
+    def screencast(
+        self,
+        page: Callable[[], Page | None],
+        controls: Callable[[], bool],
+        **options: float,
+    ) -> ScreencastViewer:
+        """A screencast of the agent's page to this viewer, from a browser that may not reach private networks."""
+        return ScreencastViewer(page, lambda: False, controls, self.send_text, self.send_bytes, **options)
+
+
+def _location(url: str, title: str, *, back: bool = False, forward: bool = False) -> dict[str, Any]:
+    return {"type": "url-changed", "url": url, "title": title, "canGoBack": back, "canGoForward": forward}
+
+
+_LOADING = {"type": "loading", "loading": True}
+_LOADED = {"type": "loading", "loading": False}
+_INVALID = {"type": "error", "detail": "Invalid screencast message."}
+_REFUSED = {"type": "error", "detail": "This address cannot be opened."}
 
 
 @asynccontextmanager
@@ -189,22 +208,9 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
     """Frames, the page's address, and input that reaches the page only under control, released when it leaves."""
     controls = False
     sent = _Viewer()
-    viewer = ScreencastViewer(
-        lambda: page,
-        lambda: False,
-        lambda: controls,
-        sent.send_text,
-        sent.send_bytes,
-        poll_seconds=0.05,
-    )
+    viewer = sent.screencast(lambda: page, lambda: controls, poll_seconds=0.05)
     async with _watching(viewer):
-        assert await sent.message("url-changed") == {
-            "type": "url-changed",
-            "url": "about:blank",
-            "title": "Form",
-            "canGoBack": False,
-            "canGoForward": False,
-        }
+        assert await sent.message("url-changed") == _location("about:blank", "Form")
         assert await sent.message("viewport") == {"type": "viewport", "width": 800, "height": 600}
         assert (await sent.frame()).startswith(b"\xff\xd8")
 
@@ -249,9 +255,9 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
         assert int(await page.input_value("#slider")) > 90
 
         await viewer.receive("{}")
-        assert await sent.message("error") == {"type": "error", "detail": "Invalid screencast message."}
+        assert await sent.message("error") == _INVALID
         await viewer.receive('{"type": "mouse", "event": "move", "x": NaN, "y": 1}')
-        assert await sent.message("error") == {"type": "error", "detail": "Invalid screencast message."}
+        assert await sent.message("error") == _INVALID
 
         await page.evaluate("released.length = 0")
         await viewer.receive(json.dumps({"type": "key", "event": "down", "key": "Shift", "code": "ShiftLeft"}))
@@ -267,14 +273,7 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
     await second.set_content("<title>Second</title><p>second page</p>")
     shown: Page | None = page
     sent = _Viewer()
-    viewer = ScreencastViewer(
-        lambda: shown,
-        lambda: False,
-        lambda: True,
-        sent.send_text,
-        sent.send_bytes,
-        poll_seconds=0.05,
-    )
+    viewer = sent.screencast(lambda: shown, lambda: True, poll_seconds=0.05)
     async with _watching(viewer):
         assert (await sent.message("url-changed"))["title"] == "Form"
         assert await sent.message("viewport") == {"type": "viewport", "width": 800, "height": 600}
@@ -284,8 +283,7 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
         assert (await sent.message("url-changed"))["title"] == "Second"
         assert await sent.message("viewport") == {"type": "viewport", "width": 640, "height": 480}
         shown = None
-        blank = {"type": "url-changed", "url": "", "title": "", "canGoBack": False, "canGoForward": False}
-        assert await sent.message("url-changed") == blank
+        assert await sent.message("url-changed") == _location("", "")
         await _click(viewer, second, "p")
         while not sent.frames.empty():
             sent.frames.get_nowait()
@@ -294,32 +292,16 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
         assert sent.frames.empty()
 
 
-def _location(url: str, title: str, *, back: bool, forward: bool) -> dict[str, Any]:
-    return {"type": "url-changed", "url": url, "title": title, "canGoBack": back, "canGoForward": forward}
-
-
-_LOADING = {"type": "loading", "loading": True}
-_LOADED = {"type": "loading", "loading": False}
-_REFUSED = {"type": "error", "detail": "This address cannot be opened."}
-
-
 @pytest.mark.asyncio
 async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(page: Page, site: _Site) -> None:
     """Navigation, history, reload and stop act only under control, and the viewer sees where the page is."""
     controls = False
     sent = _Viewer()
     # Each navigation updates the viewer at once, long before the next poll.
-    viewer = ScreencastViewer(
-        lambda: page,
-        lambda: False,
-        lambda: controls,
-        sent.send_text,
-        sent.send_bytes,
-        poll_seconds=60,
-    )
+    viewer = sent.screencast(lambda: page, lambda: controls, poll_seconds=60)
     one, two = site.url("/page/One"), site.url("/page/Two")
     async with _watching(viewer):
-        assert await sent.message("url-changed") == _location("about:blank", "Form", back=False, forward=False)
+        assert await sent.message("url-changed") == _location("about:blank", "Form")
         assert await sent.message("loading") == _LOADED
         # A frame inside the page loading is not the page loading, as a browser's own loading indicator shows.
         await page.evaluate(
@@ -336,9 +318,9 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
 
         controls = True
         await viewer.receive(json.dumps({"type": "navigate", "url": one}))
-        await sent.reaches(_location(one, "One", back=True, forward=False))
+        await sent.reaches(_location(one, "One", back=True))
         await viewer.receive(json.dumps({"type": "navigate", "url": two}))
-        await sent.reaches(_location(two, "Two", back=True, forward=False))
+        await sent.reaches(_location(two, "Two", back=True))
         # The navigation and reload sent without control never reached the page.
         assert site.hits == {"/page/One": 1, "/page/Two": 1}
         assert await page.evaluate("history.length") == 3
@@ -346,7 +328,7 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         await viewer.receive(json.dumps({"type": "back"}))
         await sent.reaches(_location(one, "One", back=True, forward=True))
         await viewer.receive(json.dumps({"type": "forward"}))
-        await sent.reaches(_location(two, "Two", back=True, forward=False))
+        await sent.reaches(_location(two, "Two", back=True))
         await viewer.receive(json.dumps({"type": "forward"}))
         await page.evaluate("window.before = true")
         await viewer.receive(json.dumps({"type": "reload"}))
@@ -360,6 +342,10 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         await sent.reaches(_LOADED)
         assert page.url == two
         assert await page.evaluate("history.length") == 3
+        # An in-page navigation reaches the viewer at once as well.
+        pushed = two + "#pushed"
+        await page.evaluate("history.pushState(null, '', '#pushed')")
+        await sent.reaches(_location(pushed, "Two", back=True))
 
         for refused in (
             "file:///etc/passwd",
@@ -373,7 +359,7 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         ):
             await viewer.receive(json.dumps({"type": "navigate", "url": refused}))
             assert await sent.message("error") == _REFUSED
-        assert page.url == two
+        assert page.url == pushed
         assert await page.title() == "Two"
         await viewer.receive(json.dumps({"type": "navigate", "url": "about:blank"}))
         await page.wait_for_url("about:blank", timeout=_TIMEOUT * 1000)
@@ -383,9 +369,9 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
 async def test_viewer_of_no_page_is_told_there_is_nothing_to_show() -> None:
     """Before the agent's browser starts, the viewer gets an empty location and no loading."""
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: None, lambda: False, lambda: True, sent.send_text, sent.send_bytes)
+    viewer = sent.screencast(lambda: None, lambda: True)
     async with _watching(viewer):
-        assert await sent.message("url-changed") == _location("", "", back=False, forward=False)
+        assert await sent.message("url-changed") == _location("", "")
         assert await sent.message("loading") == _LOADED
 
 
@@ -394,7 +380,7 @@ async def test_viewer_connecting_while_the_page_loads_is_told_so(page: Page, sit
     """A page still loading when the viewer arrives shows as loading until it finishes."""
     await page.goto(site.url("/image"), wait_until="domcontentloaded")
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: page, lambda: False, lambda: False, sent.send_text, sent.send_bytes)
+    viewer = sent.screencast(lambda: page, lambda: False)
     async with _watching(viewer):
         assert await sent.message("loading") == _LOADING
         site.release.set()
@@ -479,10 +465,7 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
         await link.acquire()
         await delivered.put(jpeg)
 
-    async def ignore(_text: str) -> None:
-        return None
-
-    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, ignore, over_a_slow_link)
+    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, unused, over_a_slow_link)
 
     async def acknowledged() -> int:
         return await asyncio.wait_for(fake.session.acknowledged.get(), _TIMEOUT)
@@ -517,14 +500,7 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
     old.session.frame_on_detach = b"old"
     shown = old
     sent = _Viewer()
-    viewer = ScreencastViewer(
-        lambda: cast("Page", shown),
-        lambda: False,
-        lambda: True,
-        sent.send_text,
-        sent.send_bytes,
-        poll_seconds=0.01,
-    )
+    viewer = sent.screencast(lambda: cast("Page", shown), lambda: True, poll_seconds=0.01)
     async with _watching(viewer):
         await asyncio.wait_for(old.session.screencasting.wait(), _TIMEOUT)
         shown = new
@@ -545,14 +521,7 @@ async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkey
     loading.session.ready_state = "loading"
     shown: _FakePage | None = frozen
     sent = _Viewer()
-    viewer = ScreencastViewer(
-        lambda: cast("Page | None", shown),
-        lambda: False,
-        lambda: True,
-        sent.send_text,
-        sent.send_bytes,
-        poll_seconds=0.01,
-    )
+    viewer = sent.screencast(lambda: cast("Page | None", shown), lambda: True, poll_seconds=0.01)
 
     async def framed(fake: _FakePage) -> list[dict[str, Any]]:
         """Wait for a frame of the shown page, which follows what the viewer was told about it, and return loading."""
@@ -586,7 +555,7 @@ async def test_navigate_waits_for_a_slow_address_lookup(monkeypatch: pytest.Monk
     monkeypatch.setattr("mindroom.worker_computer.screencast.validate_server_fetch_url", slow_lookup)
     fake = _FakePage()
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, sent.send_text, sent.send_bytes)
+    viewer = sent.screencast(lambda: cast("Page", fake), lambda: True)
     async with _watching(viewer):
         await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
         await viewer.receive(json.dumps({"type": "navigate", "url": "https://slow.example/"}))
@@ -601,7 +570,7 @@ async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_vie
     monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
     fake = _FakePage()
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, sent.send_text, sent.send_bytes)
+    viewer = sent.screencast(lambda: cast("Page", fake), lambda: True)
     follow = asyncio.create_task(viewer.follow())
     await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
     fake.session.frozen = True
@@ -615,13 +584,7 @@ async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_vie
 
 
 _HEADERS = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
-_EXAMPLE = {
-    "type": "url-changed",
-    "url": "https://example.org/",
-    "title": "Example",
-    "canGoBack": False,
-    "canGoForward": False,
-}
+_EXAMPLE = _location("https://example.org/", "Example")
 
 
 @contextmanager
@@ -648,7 +611,7 @@ def _worker(tmp_path: Path, session: BrowserSession) -> Iterator[tuple[TestClien
 def _connected(websocket: WebSocketTestSession) -> None:
     """Take the page's location and loading state, which the viewer is sent on connect."""
     assert json.loads(websocket.receive_text()) == _EXAMPLE
-    assert json.loads(websocket.receive_text()) == {"type": "loading", "loading": False}
+    assert json.loads(websocket.receive_text()) == _LOADED
 
 
 def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control_lease(tmp_path: Path) -> None:
@@ -712,5 +675,5 @@ def test_viewer_opens_a_private_address_only_when_the_agents_browser_may(tmp_pat
         websocket.send_text("{}")
         if not allowed:
             assert json.loads(websocket.receive_text()) == _REFUSED
-        assert json.loads(websocket.receive_text()) == {"type": "error", "detail": "Invalid screencast message."}
+        assert json.loads(websocket.receive_text()) == _INVALID
     assert (("Page.navigate", {"url": "http://10.0.0.1/"}) in fake.session.sent) is allowed
