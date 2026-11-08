@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -138,10 +137,8 @@ async def save_file(
     """Save a file; given ``etag``, only while the file has it, else 409 with the file's current etag."""
     try:
         payload = body.content.encode() if body.encoding == "utf-8" else base64.b64decode(body.content, validate=True)
-    except UnicodeEncodeError:
-        raise HTTPException(400, "content is not valid Unicode text.") from None
-    except binascii.Error:
-        raise HTTPException(400, "content is not valid base64.") from None
+    except ValueError:  # Half of a surrogate pair, or text that is not base64.
+        raise HTTPException(400, f"content is not valid {body.encoding}.") from None
     if len(payload) > operations.MAX_FILE_BYTES:
         raise HTTPException(413, f"The file is over {operations.MAX_FILE_BYTES >> 20} MiB.")
     root = await _made_root(request, room, room_id, agent_user_id)

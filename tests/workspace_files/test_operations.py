@@ -6,6 +6,8 @@ import base64
 import hashlib
 import os
 import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -442,3 +444,23 @@ def test_a_path_that_names_a_credential_answers_404_whatever_it_leads_to(root: P
     assert _status(lambda: read_file(root, ".config/gh/hosts.yml")) == 404
     assert _status(lambda: delete(root, ".config/gh")) == 404
     assert (root / "cfg" / "gh" / "hosts.yml").is_file()
+
+
+def test_two_moves_onto_one_name_never_both_land(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two people move different files to the same new name at once: one lands, the other answers 409."""
+    (root / "a.md").write_text("a")
+    (root / "b.md").write_text("b")
+    real_rename = os.rename
+
+    def slow_rename(*args: object, **kwargs: object) -> None:
+        time.sleep(0.2)
+        real_rename(*args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", slow_rename)
+    with ThreadPoolExecutor(2) as pool:
+        statuses = sorted(pool.map(lambda name: _status(lambda: move(root, name, "report.md")), ["a.md", "b.md"]))
+
+    assert statuses == [200, 409]
+    # The file that did not move is still there under its own name.
+    assert len([name for name in ("a.md", "b.md") if (root / name).exists()]) == 1
+    assert (root / "report.md").read_text() in {"a", "b"}

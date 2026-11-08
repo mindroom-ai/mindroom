@@ -193,14 +193,9 @@ def test_files_travel_as_text_or_base64_both_ways(client: _Client) -> None:
 
     assert saved.json()["size"] == 256
     assert (read["encoding"], read["content"], read["etag"]) == ("base64", encoded, _etag(binary))
-    assert (
-        client.put(
-            ALICE,
-            f"/agents/{coder}/workspace/file",
-            {"path": "x", "content": "@@", "encoding": "base64"},
-        ).status_code
-        == 400
-    )
+    for not_base64 in ("@@", "é"):
+        body = {"path": "x", "content": not_base64, "encoding": "base64"}
+        assert client.put(ALICE, f"/agents/{coder}/workspace/file", body).status_code == 400
 
 
 def test_a_save_over_the_limit_answers_413(client: _Client, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -379,7 +374,7 @@ async def test_the_change_stream_closes_once_the_workspace_is_no_longer_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Carol, whom the agent leaves out, is closed at once; Alice once a save takes the agent from her, Bob once it moves."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
     room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
     url_of = f"/agents/{room.ids['coder']}/workspace/changes"
     async with _served(room) as (client, base):
@@ -428,7 +423,7 @@ async def test_the_change_stream_closes_once_the_agent_s_tools_no_longer_reach_f
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Alice may still use the agent, but once a config save takes its tools away there are no files to follow."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
     room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
@@ -451,7 +446,7 @@ async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A recheck that can't finish in time closes the stream for the client to try again."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
     room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
     root = _turn_root(room, "coder", ALICE)
     root.mkdir(parents=True)

@@ -69,8 +69,9 @@ _KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFLNK: "link",
 }
 _NOT_A_FILE = "That path is not a regular file."
-# Saves through this process check the etag and write one at a time, so two saves of one version never both land.
-_SAVES = threading.Lock()
+# Saves and moves through this process check what is there and change it one at a time, so two saves of one version,
+# or two moves onto one name, never both land.
+_CHANGES = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -323,7 +324,7 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Sa
     _refuse_git(path)
     found = _find(root, path)
     _refuse_git(found.relative)
-    with _SAVES:
+    with _CHANGES:
         try:
             current = _etag(_read(found)[0])
         except HTTPException as error:
@@ -360,7 +361,7 @@ def move(root: Path, raw_path: str, raw_to: str) -> None:
     _refuse_credential_place(moved, destination)
     if destination.is_relative_to(moved):
         raise HTTPException(400, "A folder can't move into itself.")
-    with _refusals(), open_directory_within_root(source.base, source.relative) as source_directory:
+    with _CHANGES, _refusals(), open_directory_within_root(source.base, source.relative) as source_directory:
         os.stat(source_name, dir_fd=source_directory, follow_symlinks=False)
         with open_directory_within_root(target.base, target.relative, create=True) as target_directory:
             try:

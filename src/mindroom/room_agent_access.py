@@ -228,7 +228,8 @@ class AgentWorkspace:
     """The workspace folder, which may not exist before the agent's first turn for this caller."""
     files: Literal["none", "read", "write"]
     """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code
-    and power to post messages in the room."""
+    where it works in the workspace, not a ``static_runner`` that sees only its own storage, and power to post
+    messages in the room."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
     the workspace, as a dedicated worker does, and the caller may post messages in the room."""
