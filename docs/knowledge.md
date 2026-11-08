@@ -101,6 +101,7 @@ Agents search the last successfully published index, and a missing, stale, or fa
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
 On Linux, `watch: true` watches at most 2,000 folders of a base, and changes in folders past that cap are picked up when an agent searches the base, at most every five minutes.
 Folders such as `.git` and `node_modules` do not count toward the cap, since changes in them never start a refresh.
+A folder holding a file or folder name that is not valid UTF-8 may not be watched either; MindRoom logs a warning naming that folder, and changes in it are picked up when an agent searches the base.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
