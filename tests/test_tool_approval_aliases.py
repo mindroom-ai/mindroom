@@ -3,23 +3,29 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+import threading
+from collections import UserList
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.approval.response import plan_approval_calls
-from mindroom.approval.tool_approval import evaluate_tool_approval, tool_may_require_approval
+from mindroom.approval.tool_approval import ToolApprovalScriptError, evaluate_tool_approval, tool_may_require_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.llm.runs import ToolExecution
-from mindroom.tool_system.catalog import export_tools_metadata
+from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tool_system.catalog import export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugins import candidate_tool_registry
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.conftest import bind_runtime_paths, publish_test_plugins, register_test_tool, test_runtime_paths
+from tests.tool_approval_helpers import timed_out_judge
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -139,6 +145,19 @@ async def test_a_call_that_amounts_to_several_judged_calls_asks_when_any_of_them
     )
 
     assert (await _asks(config, runtime_paths, {"command": command}, alias))[0] is asks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sequence", [list, tuple, UserList], ids=["list", "tuple", "user-list"])
+async def test_a_judge_may_return_its_calls_as_any_sequence(
+    tmp_path: Path,
+    sequence: Callable[[list[dict[str, object]]], Sequence[Mapping[str, object]]],
+) -> None:
+    """The shell's rules judge the calls a judge returns in any sequence, not only in a list."""
+    config, runtime_paths = _config(tmp_path, _shell_review())
+    alias = ApprovalAlias(judged_as=_SHELL, judge=lambda arguments: sequence([{"args": arguments["command"]}]))
+
+    assert (await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias))[0] is True
 
 
 @pytest.mark.asyncio
@@ -316,10 +335,109 @@ async def test_validating_a_plugin_edit_leaves_the_live_alias_judging(tmp_path: 
     assert await _planned_asks(config, runtime_paths, "lines", _paused_line("rm -rf build")) == [True]
 
 
-def test_the_tools_catalog_lists_a_tool_that_declares_an_alias() -> None:
-    """The dashboard's tool catalog lists a toolkit with an alias as JSON, since the alias's judge is code."""
-    (tool,) = export_tools_metadata({"lines": _lines_tool()})
+class _LineTools(Toolkit):
+    name = "lines"
+
+    @tool
+    def run_line(self, command: str) -> str:
+        """Run one command line."""
+        return command
+
+
+@pytest.mark.parametrize(
+    ("alias_key", "declared"),
+    [
+        pytest.param("run_line", (), id="offered"),
+        # An option of the toolkit, such as one that turns a function off, may leave a declared function out.
+        pytest.param("run_lines", ("run_line", "run_lines"), id="declared"),
+    ],
+)
+def test_a_toolkit_builds_when_each_alias_names_one_of_its_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_key: str,
+    declared: tuple[str, ...],
+) -> None:
+    """An alias for a function the toolkit offers, or declares, builds the toolkit."""
+    metadata = replace(_lines_tool(aliases={alias_key: _LINES}), function_names=declared, factory=lambda: _LineTools)
+    register_test_tool(monkeypatch, metadata)
+
+    toolkit = get_tool_by_name("lines", test_runtime_paths(tmp_path), tools=builtin_tool_registry(), worker_target=None)
+
+    assert isinstance(toolkit, _LineTools)
+
+
+def test_a_toolkit_whose_alias_names_none_of_its_functions_does_not_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misspelled alias refuses the toolkit, naming it and the alias, instead of leaving its function unjudged."""
+    register_test_tool(
+        monkeypatch,
+        replace(_lines_tool(aliases={"run_lien": _LINES}), factory=lambda: _LineTools),
+    )
+
+    with pytest.raises(ToolMetadataValidationError, match=r"Tool 'lines' .*approval alias.*run_lien"):
+        get_tool_by_name("lines", test_runtime_paths(tmp_path), tools=builtin_tool_registry(), worker_target=None)
+
+
+class _SessionTools:
+    """A judge and a factory bound to state no copy can take, such as a lock guarding a client session."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def judge(self, arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
+        with self._lock:
+            return _judge_lines(arguments)
+
+    def toolkit(self) -> type:
+        return object
+
+
+def test_the_tools_catalog_lists_a_tool_whose_alias_and_factory_hold_uncopyable_state() -> None:
+    """The dashboard's tool catalog lists a toolkit with an alias as JSON, though its judge and factory hold a lock."""
+    session = _SessionTools()
+    metadata = replace(
+        _lines_tool(aliases={"run_line": ApprovalAlias(judged_as=_SHELL, judge=session.judge)}),
+        factory=session.toolkit,
+    )
+
+    (tool,) = export_tools_metadata({"lines": metadata})
 
     assert tool["name"] == "lines"
     json.dumps(tool)
     assert "approval_aliases" not in tool
+    assert "factory" not in tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("judge", "error"),
+    [
+        pytest.param(timed_out_judge, "failed with TimeoutError", id="raises"),
+        pytest.param(lambda arguments: arguments["command"], "neither a sequence", id="text"),
+        pytest.param(lambda arguments: {"args": arguments["command"]}, "neither a sequence", id="one-mapping"),
+        pytest.param(lambda arguments: [arguments["command"]], "neither a sequence", id="list-of-text"),
+        pytest.param(lambda _arguments: "", "neither a sequence", id="empty-text"),
+        pytest.param(lambda _arguments: b"", "neither a sequence", id="empty-bytes"),
+        pytest.param(lambda _arguments: {}, "neither a sequence", id="empty-mapping"),
+    ],
+)
+async def test_a_judge_that_fails_is_an_approval_policy_error_like_a_failing_script(
+    tmp_path: Path,
+    judge: Callable[[Mapping[str, object]], Any],
+    error: str,
+) -> None:
+    """A judge that raises or returns no sequence of calls fails the decision the way a failing approval script does.
+
+    Its error names the function, never the judge's own message, and a malformed result never approves the call.
+    """
+    config, runtime_paths = _config(tmp_path, _shell_review())
+    alias = ApprovalAlias(judged_as=_SHELL, judge=judge)
+
+    with pytest.raises(ToolApprovalScriptError, match=error) as raised:
+        await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias)
+
+    assert "run_line" in str(raised.value)
+    assert "judging service" not in str(raised.value)

@@ -309,6 +309,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     member_model_names=None,
                     show_tool_calls=True,
                     tool_trace_collector=[],
+                    system_enrichment_items=(),
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
@@ -330,6 +331,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(),
         )
 
     assert helper_results == []

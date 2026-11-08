@@ -79,7 +79,7 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 - Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
-Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms they joined because [one of their rooms lists them](#rooms-under-a-room).
+Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).
 
 On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.

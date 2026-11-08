@@ -199,6 +199,8 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It also accepts `mindroom.script_sdk`, the client that [background scripts](https://docs.mindroom.chat/tools/background-scripts/#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
@@ -209,7 +211,7 @@ It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does
 `PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page and [Hooks](https://docs.mindroom.chat/hooks/) let plugins use: the manifest format, and the names they say to import from `mindroom.plugin_api` and the other modules they name.
 A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
 A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
-Anything a major bump removes or changes is first deprecated for at least 30 days.
+Anything a major bump removes or changes is first deprecated for at least 30 days, announced in this section with the date from which it may go.
 
 A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
 MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
@@ -232,6 +234,7 @@ my-plugin/
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
 Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+`mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -428,6 +431,8 @@ def lines_tools() -> type[LineTools]:
 A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
 `judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
+When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
 In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
@@ -536,6 +541,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
+| `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](https://docs.mindroom.chat/tools/execution-and-coding/#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
 
 ```python
 from mindroom.plugin_api import (
@@ -726,6 +732,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
@@ -1063,6 +1070,13 @@ A route that finds its room some other way awaits `require_room_member(request, 
 Either way the user is always the session's own: no parameter of the request can name another.
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
+
+A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
+
+```json
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
+```
 
 ## Plugin skills
 

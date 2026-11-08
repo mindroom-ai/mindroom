@@ -410,7 +410,7 @@ class ConversationResolver:
         room_id: str,
         related_event_id: str,
     ) -> str | None:
-        """Return thread membership from local state, raising ``TimeoutError`` if a homeserver read stalls."""
+        """Return the related event's thread from local state or the homeserver, raising ``TimeoutError`` on a stall."""
         async with asyncio.timeout(_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS):
             resolution = await resolve_related_event_thread_membership(
                 room_id,

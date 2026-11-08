@@ -378,6 +378,7 @@ async def resume(
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
 
@@ -564,6 +565,7 @@ async def resume_team(
             history_scope=None,
             show_tool_calls=True,
             tool_trace_collector=[],
+            system_enrichment_items=(),
         )
 
 

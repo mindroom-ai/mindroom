@@ -1,8 +1,9 @@
 """The plugin API exports exactly the supported plugin entry points, pinned together with `PLUGIN_API_VERSION`.
 
-Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name or an enum
-member, or renaming, reordering, or changing the kind of a parameter, breaks them; update this pin together with the
-plugin docs and the fleet, and bump `PLUGIN_API_VERSION` as docs/plugins.md says.
+Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name, an enum
+member, a documented method or property, or a manifest field, renaming, reordering, or changing the kind of a
+parameter, or changing a constant's value breaks them; update this pin together with the plugin docs and the fleet,
+and bump `PLUGIN_API_VERSION` as docs/plugins.md says.
 """
 
 from __future__ import annotations
@@ -12,10 +13,16 @@ import hashlib
 import inspect
 import json
 import pkgutil
+from typing import TYPE_CHECKING
 
+import pytest
 import typing_extensions
 
 from mindroom import plugin_api, plugin_http
+from mindroom.tool_system import plugin_imports
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _EXPORTS = [
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
@@ -54,6 +61,7 @@ _EXPORTS = [
     "BeforeResponseContext",
     "CancelledResponseContext",
     "CompactionHookContext",
+    "Config",
     "ConfigField",
     "ConfigReloadedContext",
     "ContactBeforeSendContext",
@@ -66,6 +74,9 @@ _EXPORTS = [
     "GoogleWorkspaceConfig",
     "HelperResult",
     "HookBindings",
+    "HookContext",
+    "HookMatrixAdmin",
+    "HookMessageSender",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -83,6 +94,7 @@ _EXPORTS = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "RoomMemberLeftContext",
+    "RuntimePaths",
     "ScheduleFiredContext",
     "SenderKind",
     "SessionHookContext",
@@ -97,6 +109,7 @@ _EXPORTS = [
     "ToolManagedInitArg",
     "ToolRuntimeContext",
     "ToolStatus",
+    "ToolTraceEntry",
     "ToolValue",
     "Toolkit",
     "TranscriptLine",
@@ -190,6 +203,7 @@ _SIGNATURES = {
         "(registry, registry_state, message_sender, matrix_admin, room_state_querier, room_state_putter, "
         "agent_message_snapshot_reader, runtime_started_at)"
     ),
+    "HookContext": f"({_HOOK}, *, {_HOOK_HELPERS})",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "
@@ -272,8 +286,8 @@ _SIGNATURES = {
     "current_call": "()",
     "current_execution_identity": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
-    "fetch_public_url": "(url, *, max_bytes, use_env_proxy)",
-    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy)",
+    "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
+    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "get_logger": "(name)",
     "get_tool_by_name": (
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
@@ -306,6 +320,10 @@ _SIGNATURES = {
     "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
 }
+
+# Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
+# pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
+_ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry"]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
 _ENUM_MEMBERS = {
@@ -354,6 +372,121 @@ _ENUM_MEMBERS = {
     "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
 }
 
+# The methods and properties docs/plugins.md and docs/hooks.md have plugins use, by owning class, each method's
+# parameters written as `_SIGNATURES` writes them. `ScheduleFiredContext` overrides `send_message` with the same ones.
+_SEND_MESSAGE = "(self, room_id, text, *, thread_id, extra_content, trigger_dispatch, mentions, wake_mentioned)"
+_MEMBERS = {
+    "mindroom.plugin_api.HookContext": {
+        "state_root": "property",
+        "send_message": _SEND_MESSAGE,
+        "query_room_state": "(self, room_id, event_type, state_key)",
+        "get_latest_agent_message_snapshot": "(self, room_id, sender, *, thread_id)",
+        "put_room_state": "(self, room_id, event_type, state_key, content)",
+    },
+    "mindroom.plugin_api.ScheduleFiredContext": {"send_message": _SEND_MESSAGE},
+    "mindroom.plugin_api.MessageEnrichContext": {"add_metadata": "(self, key, text, *, cache_policy, persist)"},
+    "mindroom.plugin_api.SystemEnrichContext": {"add_instruction": "(self, key, text, *, cache_policy)"},
+    "mindroom.plugin_api.ToolBeforeCallContext": {"chat_preview": "(self)", "decline": "(self, reason)"},
+    "mindroom.plugin_api.ToolAfterCallContext": {"chat_preview": "(self)"},
+    "mindroom.plugin_api.ToolEnvironmentContext": {
+        "set_env": "(self, name, value)",
+        "unset_env": "(self, name)",
+        "pass_through": "(self, name)",
+        "prepend_path": "(self, directory)",
+        "decline": "(self, reason)",
+    },
+    "mindroom.plugin_api.ContactBeforeSendContext": {
+        "rewrite": "(self, text)",
+        "revise": "(self, feedback)",
+        "deny": "(self, reason)",
+    },
+    "mindroom.plugin_api.MessageEnvelope": {
+        "room_id": "property",
+        "requester_id": "property",
+        "sender_id": "property",
+        "source_kind": "property",
+    },
+    "mindroom.plugin_api.TurnOrigin": {
+        "may_dispatch_without_mention": "property",
+        "may_answer_interactive_prompt": "property",
+    },
+    "mindroom.plugin_api.ToolRuntimeContext": {
+        "room_id": "property",
+        "thread_id": "property",
+        "resolved_thread_id": "property",
+        "execution_identity": "property",
+        "resolve_worker_target": "(self)",
+    },
+    "mindroom.plugin_api.RuntimePaths": {"env_value": "(self, name, *, default)"},
+    "mindroom.plugin_api.HookMessageSender": {
+        "__call__": (
+            "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
+        ),
+    },
+    "mindroom.plugin_api.HookMatrixAdmin": {
+        "get_joined_rooms": "(self)",
+        "retain_room": "(self, room_id)",
+        "resolve_alias": "(self, alias)",
+        "create_room": "(self, *, name, alias_localpart, topic, power_user_ids)",
+        "invite_user": "(self, room_id, user_id)",
+        "force_join_user": "(self, room_id, user_id)",
+        "kick_user": "(self, room_id, user_id, *, reason)",
+        "get_room_members": "(self, room_id)",
+        "get_profile_avatar": "(self, user_id)",
+        "get_room_state_event": "(self, room_id, event_type, state_key)",
+        "add_room_to_space": "(self, space_room_id, room_id)",
+        "put_room_state": "(self, room_id, event_type, state_key, content)",
+    },
+    "mindroom.history.types.HistoryScope": {"key": "property"},
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit": {
+        "_google_cloud_credentials": "(self)",
+        "_google_cloud_client": "(self, name, factory)",
+        "_google_cloud_error_result": "(self, service_name, operation, exc)",
+    },
+}
+
+# Plugins compare with these values, and docs/hooks.md writes the event names as literals in `@hook(...)`.
+_CONSTANTS = {
+    "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND": "active_thread_follow_up",
+    "EVENT_AGENT_STARTED": "agent:started",
+    "EVENT_AGENT_STOPPED": "agent:stopped",
+    "EVENT_BOT_READY": "bot:ready",
+    "EVENT_COMPACTION_AFTER": "compaction:after",
+    "EVENT_COMPACTION_BEFORE": "compaction:before",
+    "EVENT_CONFIG_RELOADED": "config:reloaded",
+    "EVENT_CONTACT_BEFORE_SEND": "contact:before_send",
+    "EVENT_MESSAGE_AFTER_RESPONSE": "message:after_response",
+    "EVENT_MESSAGE_BEFORE_RESPONSE": "message:before_response",
+    "EVENT_MESSAGE_CANCELLED": "message:cancelled",
+    "EVENT_MESSAGE_ENRICH": "message:enrich",
+    "EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM": "message:final_response_transform",
+    "EVENT_MESSAGE_RECEIVED": "message:received",
+    "EVENT_REACTION_RECEIVED": "reaction:received",
+    "EVENT_ROOM_MEMBER_JOINED": "room:member_joined",
+    "EVENT_ROOM_MEMBER_LEFT": "room:member_left",
+    "EVENT_SCHEDULE_FIRED": "schedule:fired",
+    "EVENT_SESSION_STARTED": "session:started",
+    "EVENT_SYSTEM_ENRICH": "system:enrich",
+    "EVENT_TOOL_AFTER_CALL": "tool:after_call",
+    "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
+    "EVENT_TOOL_ENVIRONMENT": "tool:environment",
+    "ROUTER_AGENT_NAME": "router",
+    "TRUSTED_INTERNAL_RELAY_SOURCE_KIND": "trusted_internal_relay",
+    "VOICE_PREFIX": "🎤 ",
+}
+
+
+# Every manifest field docs/plugins.md documents, set as a plugin sets it.
+_MANIFEST = {
+    "name": "demo",
+    "mindroom_plugin_api": "1.0",
+    "tools_module": "tools.py",
+    "oauth_module": "oauth.py",
+    "hooks_module": "hooks.py",
+    "routes_module": "routes.py",
+    "skills": ["skills"],
+    "reserved_namespaces": ["com.example.demo."],
+}
 
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
@@ -370,11 +503,15 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 1), "6baf72b0f088b2b1d1e3ce05b54e531938e2e4361530ec948295ea68c1810303")
+_PINNED_VERSION = ((1, 3), "bb6506982e28ff02bf04e022555626fe6ca05da7df541217cf1ad88501e5dad0")
 
 
 def _is_enum(obj: object) -> bool:
     return isinstance(obj, type) and issubclass(obj, enum.Enum)
+
+
+def _member_shape(obj: object) -> str:
+    return "property" if isinstance(obj, property) else _parameter_shape(obj)
 
 
 def _parameter_shape(obj: object) -> str:
@@ -396,15 +533,19 @@ def test_plugin_api_exports_exactly_the_supported_names() -> None:
 def test_each_exported_callable_keeps_its_parameter_names_and_kinds() -> None:
     """A plugin calls these by position or keyword as documented, so each parameter's name and kind stay put.
 
-    A protocol, such as `ModelProvider`, is a type plugins annotate with and never call.
+    A protocol, such as `ModelProvider`, and each of `_ANNOTATION_TYPES` is a type plugins annotate with and never call.
     """
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
     shapes = {
         name: _parameter_shape(obj)
         for name, obj in exported.items()
-        if callable(obj) and not _is_enum(obj) and not typing_extensions.is_protocol(obj)
+        if callable(obj)
+        and not _is_enum(obj)
+        and not typing_extensions.is_protocol(obj)
+        and name not in _ANNOTATION_TYPES
     }
     assert shapes == _SIGNATURES
+    assert all(isinstance(exported[name], type) for name in _ANNOTATION_TYPES)
 
 
 def test_each_exported_enum_keeps_its_member_names() -> None:
@@ -412,6 +553,41 @@ def test_each_exported_enum_keeps_its_member_names() -> None:
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
     members = {name: list(obj.__members__) for name, obj in exported.items() if _is_enum(obj)}
     assert members == _ENUM_MEMBERS
+
+
+def test_each_documented_method_and_property_keeps_its_name_and_parameters() -> None:
+    """Plugins call these methods and read these properties as the docs show, so each one stays put."""
+    shapes = {
+        owner: {name: _member_shape(getattr(pkgutil.resolve_name(owner), name)) for name in members}
+        for owner, members in _MEMBERS.items()
+    }
+    assert shapes == _MEMBERS
+
+
+def test_each_exported_constant_keeps_its_value() -> None:
+    """A plugin that compares with a constant's value, or writes it as a literal, breaks when the value changes."""
+    exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
+    assert {name: value for name, value in exported.items() if isinstance(value, str)} == _CONSTANTS
+
+
+def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
+    """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
+    root = tmp_path.resolve()
+    for module in ("tools.py", "oauth.py", "hooks.py", "routes.py"):
+        (root / module).touch()
+    (root / "skills").mkdir()
+    (root / "mindroom.plugin.json").write_text(json.dumps(_MANIFEST))
+    (root / "later").mkdir()
+    (root / "later" / "mindroom.plugin.json").write_text(json.dumps({**_MANIFEST, "mindroom_plugin_api": "1.999"}))
+
+    plugin = plugin_imports._load_plugin_base(root)
+
+    modules = (plugin.tools_module_path, plugin.oauth_module_path, plugin.hooks_module_path, plugin.routes_module_path)
+    assert plugin.name == "demo"
+    assert modules == (root / "tools.py", root / "oauth.py", root / "hooks.py", root / "routes.py")
+    assert (plugin.skill_dirs, plugin.reserved_namespaces) == ([root / "skills"], ("com.example.demo.",))
+    with pytest.raises(plugin_imports.PluginValidationError, match=r"needs plugin API 1\.999"):
+        plugin_imports._load_plugin_base(root / "later")
 
 
 def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:
@@ -424,8 +600,8 @@ def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter
 
 def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
     """A change to the pinned surface fails here until the version is bumped and pinned with the surface's digest."""
-    pins = json.dumps([_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES], sort_keys=True)
-    digest = hashlib.sha256(pins.encode()).hexdigest()
+    pins = [_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _MEMBERS, _CONSTANTS, _MANIFEST, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES]
+    digest = hashlib.sha256(json.dumps(pins, sort_keys=True).encode()).hexdigest()
 
     assert (plugin_api.PLUGIN_API_VERSION, digest) == _PINNED_VERSION, (
         "The plugin API changed: bump PLUGIN_API_VERSION in mindroom/tool_system/plugin_imports.py, the minor for an "

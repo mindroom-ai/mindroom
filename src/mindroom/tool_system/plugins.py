@@ -76,6 +76,8 @@ class _LoadedPlugin:
     """One plugin a generation loaded: what its modules registered and discovered, and the modules themselves."""
 
     name: str
+    # The plugin API version it needs, as its manifest states it.
+    mindroom_plugin_api: str | None
     root: Path
     skill_dirs: tuple[Path, ...]
     # The content-key and event-type prefixes its manifest reserves from agent tools.
@@ -591,7 +593,7 @@ def _skipped_plugin(
     exc: BaseException,
 ) -> SkippedPlugin:
     """Log one plugin that failed to load and return the record of its skip."""
-    plugin_imports._log_skipped_plugin_entry(entry.path, plugin.root, exc)
+    plugin_imports._log_failed_plugin_entry(entry, plugin.root, exc)
     if isinstance(exc, Exception):
         return SkippedPlugin(entry.path, exc, plugin.root)
     msg = f"Plugin materialization failed for {plugin.root}: {exc}"
@@ -743,6 +745,7 @@ def _materialize_plugin(
     if (
         previous is not None
         and previous.name == plugin.name
+        and previous.mindroom_plugin_api == plugin.mindroom_plugin_api
         and previous.modules == modules
         and previous.skill_dirs == tuple(plugin.skill_dirs)
         and previous.reserved_namespaces == plugin.reserved_namespaces
@@ -751,6 +754,7 @@ def _materialize_plugin(
     hooks_module = hooks_entry.module if hooks_entry is not None else None
     return _LoadedPlugin(
         name=plugin.name,
+        mindroom_plugin_api=plugin.mindroom_plugin_api,
         root=plugin.root,
         skill_dirs=tuple(plugin.skill_dirs),
         reserved_namespaces=plugin.reserved_namespaces,

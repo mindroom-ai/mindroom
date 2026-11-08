@@ -35,8 +35,8 @@ Matrix sync callback
 | `failure_text.py` | The text a caught exception reports: its text, or its type name when it has none |
 | `github_app_auth.py` | GitHub App installation tokens minted from an App private key and cached until near expiry, shared by Git knowledge sources and Agent Keys |
 | `tls_trust.py` | Shared TLS trust (system store plus certifi's roots, unless the operator sets `SSL_CERT_FILE` or `SSL_CERT_DIR`) for Matrix, the egress broker's upstream connections, and Realtime speech |
-| `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
-| `public_fetch.py` | The guarded fetch of one public HTTP(S) URL under one deadline, shared by the `website` tool, worker media, and plugins |
+| `bounded_bytes.py` | Shared asynchronous byte collection that rejects overflowing chunks before buffering them |
+| `public_fetch.py` | The guarded fetch of one public HTTP(S) URL under one deadline, shared by the `website`, `trafilatura`, and `newspaper` tools, worker media, and plugins |
 | `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers and Connections MindRoom Chat allowlists, and MCP gateway origins |
 | `matrix_openid.py` | Matrix OpenID verification at the configured homeserver and audience binding, shared by Computers and the Connections portal |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
@@ -151,7 +151,7 @@ Matrix sync callback
 | `thread_summary/generation.py` | The summary model call, its response schemas, and initial tag normalization |
 | `thread_summary/notices.py` | Summary notice sends ordered after their predecessors, and the manual and welcome writes |
 | `thread_summary/automatic.py` | The automatic pass after a reply: thresholds, pin and resolved checks, initial tags, and the source pin re-check before delivery |
-| `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through, and the size-checked reads of files that upload tools send |
+| `file_access.py` | Agent `file_access` resolution, the shared path authorization its callers, such as plugin tools, read and write model-supplied paths through, and the size-checked reads of files that upload tools send |
 | `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins without a worker-routed shell or python) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
@@ -190,7 +190,7 @@ Matrix sync callback
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
 | `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
 | `api/client_sessions.py` | `/api/client-sessions`: exchanges a Matrix OpenID token from a web client for an in-memory, one-hour session token, resolves the token a request presents for plugin routes, and revokes it at sign-out |
-| `api/plugin_routes.py` | Serves each published plugin's `routes_module` router under `/api/plugins/<plugin>/` from the app built as the plugin loads, looked up per request so reloads take effect |
+| `api/plugin_routes.py` | Lists the published plugins to signed-in clients at `/api/plugins`, and serves each one's `routes_module` router under `/api/plugins/<plugin>/` from the app built as the plugin loads, looked up per request so reloads take effect |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
 | `api/connections_contacts.py` | Contacts page routes under `/api/connections/contacts`: the signed-in owner's contacts with their own side's rules and tools, and accepting, declining, editing, and removing them without an approval card |
 | `api/connections_native.py` | Connections portal sign-in from the iOS app: the browser gets a pending cookie, and the app confirms it with its own token before the session starts |
@@ -327,6 +327,7 @@ Matrix sync callback
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
 | `plugin_http.py` | The supported import surface for plugin HTTP routes: `require_client_user` resolves a client session's bearer token to its Matrix user, and `require_room_member` resolves it too and checks that user's live room membership |
+| `orchestration/plugin_http_runtime.py` | The live room-membership reader behind `require_room_member`: a running bot in the room answers each lookup, the router first, and concurrent callers for one room share it |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |

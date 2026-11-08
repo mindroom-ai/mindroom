@@ -99,7 +99,12 @@ from tests.scheduling_helpers import joined_member_state, run_once_task, schedul
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions, judge_test_tool_function_as_shell, scheduled_call_approvals
+from tests.tool_approval_helpers import (
+    gated_functions,
+    judge_test_tool_function_as_shell,
+    scheduled_call_approvals,
+    timed_out_judge,
+)
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -1443,6 +1448,30 @@ async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(m
         await _schedule_from_tool()
 
     request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_fails_refuses_the_schedule_as_a_failing_approval_script_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge that times out leaves the call unscheduled with the approval-policy error and posts no card."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out_judge)
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(
+            SchedulingError,
+            match=r"Could not evaluate the approval policy for `post_slack_message`: .*failed with TimeoutError",
+        ),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_not_awaited()
 
 
 _CARD_REFUSED = "Could not post an approvable approval card for this call; nothing was scheduled."
