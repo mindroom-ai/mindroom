@@ -374,9 +374,7 @@ def retire(storage: ConversationStore, *, session: ConversationSession, scope_ke
             "VALUES (?, ?, ?, ?)",
             (session_id, scope_key, rows[-1].through if rows else 0, int(time())),
         )
-        owners = {row.fold_run_id for row in rows if row.fold_run_id is not None}
-        removed = delete_runs_in_transaction(connection, names, owners, session_id=session_id)
-        _record_removed(connection, names, session_id, owners | removed)
+        _remove_runs(connection, names, session_id, {row.fold_run_id for row in rows if row.fold_run_id is not None})
 
 
 def _cut(
@@ -394,8 +392,7 @@ def _cut(
     row is gone; such a run's member rows go too, as a member saved after its team run's row went may hold one.
     """
     expanded = _expanded(rows, runs, cut)
-    removed = delete_runs_in_transaction(connection, names, expanded.owners, session_id=session_id)
-    _record_removed(connection, names, session_id, expanded.owners | removed)
+    _remove_runs(connection, names, session_id, expanded.owners)
     connection.execute(
         f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
         "WHERE id IN (SELECT value FROM json_each(?))",
@@ -482,16 +479,16 @@ def _first_holder(
     return None
 
 
-def _record_removed(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    session_id: str,
-    run_ids: Collection[str],
-) -> None:
+def _remove_runs(connection: sqlite3.Connection, names: TableNames, session_id: str, run_ids: set[str]) -> None:
+    """Delete runs ``run_ids`` with their member runs, and record them and every run deleted as removed.
+
+    A run without a row is recorded too, so neither it nor a member of it writes again.
+    """
+    deleted = delete_runs_in_transaction(connection, names, run_ids, session_id=session_id)
     connection.execute(
         f"INSERT OR IGNORE INTO {quote_identifier(names.log_removed)} (run_id, session_id) "  # noqa: S608
         "SELECT value, ? FROM json_each(?)",
-        (session_id, json.dumps(sorted(run_ids))),
+        (session_id, json.dumps(sorted(run_ids | deleted))),
     )
 
 

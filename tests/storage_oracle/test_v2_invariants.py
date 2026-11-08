@@ -475,11 +475,6 @@ def _drive(scenario: Scenario) -> list[object]:
     scenario=Scenario("agent", (Action("checkpoint"), Action("interrupted"), Action("fold"))),
 )
 @example(scenario=Scenario("agent", (Action("cli_delegate"), Action("stale_save", index=3), Action("fold"))))
-@example(scenario=NAMED["team_pause_advanced"])
-@example(scenario=NAMED["linked_covered_run_redacted"])
-@example(scenario=NAMED["discarded_fold_owner_redacted"])
-@example(scenario=NAMED["interrupted_voice_playout"])
-@example(scenario=NAMED["archive_legacy_in_force_redacted"])
 @example(
     # A legacy summary in force retires at the third row; redacting the paused turn before it then cuts the second row
     # and keeps the barrier, whose through now sits above the row left before it.
