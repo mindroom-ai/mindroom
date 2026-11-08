@@ -10,6 +10,7 @@ from mindroom.plugin_api import (
     MessageReceivedContext,
     SystemEnrichContext,
     ToolBeforeCallContext,
+    emit_custom_event,
     hook,
 )
 
@@ -67,6 +68,12 @@ async def note_cancelled(ctx: CancelledResponseContext) -> None:
 
 @hook("greeter:waved")
 async def wave_back(ctx: CustomEventContext) -> None:
-    """Wave back at whoever waved."""
+    """Answer a wave with an event of the plugin's own, as a tool's event can chain another."""
+    await emit_custom_event("greeter", "greeter:waved_back", {"times": ctx.payload["times"]})
+
+
+@hook("greeter:waved_back")
+async def say_waved_back(ctx: CustomEventContext) -> None:
+    """Say in the room that the plugin waved back."""
     if ctx.room_id is not None:
         await ctx.send_message(ctx.room_id, f"Waving back at {ctx.sender_id} for {ctx.payload['times']} waves")

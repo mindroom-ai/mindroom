@@ -45,7 +45,6 @@ from mindroom.hooks import (
     BeforeResponseContext,
     CancelledResponseContext,
     CancelledResponseInfo,
-    CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookBindings,
@@ -76,7 +75,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepare_plugins, publish_plugins
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.turn_origin import classify_turn_origin
 
@@ -341,48 +340,50 @@ class LoadedPlugin:
         """Run the plugins' hooks for ``event`` on ``sender``'s message ``body`` to ``agent`` in ``room``.
 
         ``fields`` are the event's own; for ``message:before_response``, ``message:final_response_transform``,
-        ``message:after_response`` and ``message:cancelled`` they are those of its draft, result or info. It raises
-        ``TurnRefused`` when the agent would not answer the sender there, and returns what the event's hooks returned
-        to MindRoom: the enrichment items, the transformed draft, or the context the hooks changed.
+        ``message:after_response`` and ``message:cancelled`` they are those of its draft, result or info, and for a
+        custom event its ``payload`` and ``source_plugin``. It raises ``TurnRefused`` when the agent would not answer
+        the sender there, and returns what the event's hooks returned to MindRoom: the enrichment items, the
+        transformed draft, the context the hooks changed, or None for a custom event.
         """
         event = validate_event_name(event)
         if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS:
             msg = f"mindroom.plugin_testing fires message, system:enrich and custom events, not {event}"
             raise ValueError(msg)
         context = await self._turn_context(agent, sender, room)
+        if event not in _TURN_EVENTS:
+            # A custom event comes from a tool call, so it runs as that call emits it, in the call's conversation.
+            with tool_runtime_context(context):
+                return await emit_custom_event(fields["source_plugin"], event, fields["payload"])
         base = context.hooks.context_kwargs(
             event,
             config=self.config,
             runtime_paths=self.runtime_paths,
             correlation_id=f"plugin-testing:{uuid4().hex}",
         )
-        if event not in _TURN_EVENTS:
-            hook_context = CustomEventContext(**base, room_id=room, thread_id=None, sender_id=sender, **fields)
+        event_id = f"$message{next(self._event_ids)}"
+        origin = classify_turn_origin(
+            transport_sender_id=sender,
+            requester_id=sender,
+            sender_entity_name=None,
+            requester_entity_name=None,
+            source_kind=MESSAGE_SOURCE_KIND,
+            original_sender=None,
+            trusted_user_relay=False,
+        )
+        envelope = MessageEnvelope(
+            event_id,
+            MessageTarget.resolve(room, None, event_id),
+            body,
+            (),
+            (),
+            agent,
+            origin=origin,
+        )
+        context_type, holder = _TURN_EVENTS[event]
+        if holder is None:
+            hook_context = context_type(**base, envelope=envelope, **fields)
         else:
-            event_id = f"$message{next(self._event_ids)}"
-            origin = classify_turn_origin(
-                transport_sender_id=sender,
-                requester_id=sender,
-                sender_entity_name=None,
-                requester_entity_name=None,
-                source_kind=MESSAGE_SOURCE_KIND,
-                original_sender=None,
-                trusted_user_relay=False,
-            )
-            envelope = MessageEnvelope(
-                event_id,
-                MessageTarget.resolve(room, None, event_id),
-                body,
-                (),
-                (),
-                agent,
-                origin=origin,
-            )
-            context_type, holder = _TURN_EVENTS[event]
-            if holder is None:
-                hook_context = context_type(**base, envelope=envelope, **fields)
-            else:
-                hook_context = context_type(**base, **{holder[0]: holder[1](envelope=envelope, **fields)})
+            hook_context = context_type(**base, **{holder[0]: holder[1](envelope=envelope, **fields)})
         registry = context.hooks.registry
         if isinstance(hook_context, MessageEnrichContext | SystemEnrichContext):
             return await emit_collect(registry, event, hook_context)

@@ -178,7 +178,7 @@ async def test_message_fires_the_hook_whose_send_lands_in_the_room(plugin: Loade
 
 @pytest.mark.asyncio
 async def test_each_event_returns_what_its_hooks_give_mindroom(plugin: LoadedPlugin) -> None:
-    """Enrichment returns its items, a transform the changed draft, and observers and custom events run their hooks."""
+    """Enrichment returns its items, a transform the changed draft, and observers and chained custom events run."""
     room = plugin.add_room(ROOM, members={ALICE: "Alice"})
     fire = {"agent": "helper", "sender": ALICE, "room": ROOM, "body": "hi"}
     items = await plugin.fire("message:enrich", **fire, target_entity_name="helper", target_member_names=None)
@@ -206,7 +206,7 @@ async def test_each_event_returns_what_its_hooks_give_mindroom(plugin: LoadedPlu
     assert [(item.key, item.text) for item in items] == [("greeting", f"Greet {ALICE} with Howdy.")]
     assert [(item.key, item.text) for item in instructions] == [("tone", "Be friendly.")]
     assert draft.response_text == final.response_text == "Hello -- the greeter"
-    assert waved.payload == {"times": 2}
+    assert waved is None
     assert [sent.text for sent in room.sent] == [
         "Replied: Hello",
         "Cancelled: stopped",
