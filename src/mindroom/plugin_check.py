@@ -150,12 +150,32 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 dispose_plugins(generation)
 
 
+def _root_tests(plugin_root: Path) -> set[Path]:
+    """Return the ``conftest.py`` and ``test_*.py`` files beside the plugin's manifest, except any it names as a module."""
+    try:
+        base = plugin_imports._load_plugin_base(plugin_root)
+    except plugin_imports.PluginValidationError:
+        # `check_plugin` fails on this manifest, and the scan still lists the imports of every other file.
+        named_modules: set[Path | None] = set()
+    else:
+        named_modules = {
+            base.tools_module_path,
+            base.hooks_module_path,
+            base.oauth_module_path,
+            base.routes_module_path,
+        }
+    candidates = (plugin_root / "conftest.py", *plugin_root.glob("test_*.py"))
+    return {path for path in candidates if path.resolve() not in named_modules}
+
+
 def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
     """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, by file and line."""
     manifest = plugin_imports._PLUGIN_MANIFEST
     if not (plugin_root / manifest).exists():
         # Not a plugin, such as an installed package a mistyped name resolved to: `check_plugin` fails on it at once.
         return []
+    # The plugin's tests kept beside its modules, which MindRoom never loads.
+    root_tests = _root_tests(plugin_root)
     found: list[OutsideImport] = []
     for directory, subdirectories, file_names in plugin_root.walk():
         # MindRoom never loads these as this plugin: installed packages, such as a virtual environment's copy of MindRoom,
@@ -170,7 +190,7 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
             and not (directory == plugin_root and name == "tests")
             and not os.path.exists(directory / name / manifest)  # noqa: PTH110
         ]
-        for path in (directory / name for name in file_names if name.endswith(".py")):
+        for path in {directory / name for name in file_names if name.endswith(".py")} - root_tests:
             try:
                 tree = ast.parse(path.read_bytes(), filename=str(path))
             except (OSError, SyntaxError, RecursionError, MemoryError):
