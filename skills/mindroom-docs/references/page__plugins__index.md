@@ -678,16 +678,18 @@ from mindroom.plugin_api import ToolBeforeCallContext, hook, redact_sensitive_te
 
 @hook("tool:before_call")
 async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
-    command = ctx.arguments.get("args")
-    if ctx.tool_name == "run_shell_command" and isinstance(command, str):
-        line = redact_sensitive_text(" ".join(command.split()), max_length=500)
-        with (ctx.state_root / "commands.log").open("a") as log:
-            log.write(f"{ctx.room_id} {line}\n")
+    if ctx.tool_name != "run_shell_command":
+        return
+    args = ctx.arguments.get("args", "")
+    command = args if isinstance(args, str) else " ".join(args)
+    line = redact_sensitive_text(" ".join(command.split()), max_length=500)
+    with (ctx.state_root / "commands.log").open("a") as log:
+        log.write(f"{ctx.room_id} {line}\n")
 ```
 
 It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
 `max_length` cuts the result to that many characters, ending in `... [truncated]`.
-It never raises: text it cannot check, such as text over 64 KiB without `max_length`, comes back as `[redaction failed]`.
+It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
 What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
 To show a tool call's whole arguments as its reply's tool trace does, use the hook context's [`chat_preview()`](https://docs.mindroom.chat/hooks/#event-specific-fields) instead.
 
