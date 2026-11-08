@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import pytest
+from aiohttp import web
 
 from mindroom.agent_loop.tools import plan_tool_batch
 from mindroom.approval.tool_approval import evaluate_tool_approval
@@ -13,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import terminal as terminal_tools
+from mindroom.terminal import client as client_module
 from mindroom.terminal.client import TerminalDetachedError
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalEvent
@@ -24,6 +31,7 @@ from tests.terminal.conftest import IDENTITY, agent_toolkit, primary_paths
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -291,3 +299,85 @@ async def test_a_call_whose_terminal_connection_ends_says_so_rather_than_still_r
     """A lost connection is no timeout, so a run never answers "still running" for it."""
     with pytest.raises(TerminalDetachedError):
         await terminal_tools._output(_Gone(), 10, prompt_after=0)  # type: ignore[arg-type]
+
+
+@asynccontextmanager
+async def _late_first_keys(runner: str) -> AsyncIterator[str]:
+    """Serve a proxy to ``runner`` that holds the first input of the first connection to send one.
+
+    It releases it once another connection sends input, or after half a second, as a network may deliver it late.
+    """
+    sent_elsewhere = asyncio.Event()
+    first: list[web.WebSocketResponse] = []
+
+    async def relay(request: web.Request) -> web.WebSocketResponse:
+        viewer = web.WebSocketResponse()
+        await viewer.prepare(request)
+        async with (
+            aiohttp.ClientSession() as client,
+            client.ws_connect(f"{runner}{request.path_qs}", headers=request.headers) as upstream,
+        ):
+
+            async def output() -> None:
+                async for message in upstream:
+                    await viewer.send_bytes(message.data) if message.type == aiohttp.WSMsgType.BINARY else None
+
+            shown = asyncio.create_task(output())
+            async for message in viewer:
+                if not first:
+                    first.append(viewer)
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(sent_elsewhere.wait(), 0.5)
+                elif first[0] is not viewer:
+                    sent_elsewhere.set()
+                await upstream.send_str(message.data)
+            shown.cancel()
+        return viewer
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", relay)
+    server = web.AppRunner(app, access_log=None)
+    await server.setup()
+    try:
+        site = web.TCPSite(server, "127.0.0.1", 0)
+        await site.start()
+        yield f"http://127.0.0.1:{server.addresses[0][1]}"
+    finally:
+        await server.cleanup()
+
+
+async def test_typing_reaches_the_shell_in_the_order_it_was_recorded(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A person's keystroke never lands on the line an agent's later call was judged against, late or kept by the shell.
+
+    The person types `r`, the agent clears the line with Ctrl-C and runs `m -rf tmp`, judged as just that.
+    """
+    paths = primary_paths(tmp_path, runner)
+    config = _config(paths, ["shell", "terminal"], ask_for_rm=True)
+    functions = _functions(config, paths)
+    session_id = await _open(functions)
+    kept = agent_workspace_root_path(tmp_path / "storage", "code") / "tmp"
+    kept.mkdir()
+    real_worker_call = client_module.worker_call
+    async with _late_first_keys(runner) as proxy:
+
+        def through_proxy(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+            call = real_worker_call(*args, **kwargs)
+            return replace(call, api_root=call.api_root.replace(runner, proxy))
+
+        monkeypatch.setattr(client_module, "worker_call", through_proxy)
+        async with _terminals(config, paths).attach(session_id) as person:
+            await person.send_input("r")
+            # The line is empty only once the shell prompts after a Ctrl-C, which a Ctrl-C right after typing can
+            # leave out, keeping the typing; the agent then sends another, as the run's refusal says.
+            for _ in range(5):
+                await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>")
+                ran = await _call(functions["terminal_run"], session_id=session_id, command="m -rf tmp")
+                if not ran.startswith("Error: the terminal's shell is not waiting at an empty prompt"):
+                    break
+
+    assert kept.is_dir()
+    assert ran.endswith("[Exit status 127.]")

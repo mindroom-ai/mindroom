@@ -14,6 +14,7 @@ from aiohttp import web
 from structlog.testing import capture_logs
 
 from mindroom.agent_cli.shell_contract import AGENT_CLI_TOKEN_ENV, AgentCliShellEnv, bound_agent_cli_shell_env
+from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -181,6 +182,41 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
     assert (ended.id, ended.alive, ended.exit_code, ended.cols, ended.rows) == (info.id, False, 3, 100, 30)
     await terminals.close(info.id)
     assert await terminals.sessions() == []
+
+
+async def test_viewers_type_through_one_connection_that_ends_with_the_last_viewer(tmp_path: Path, runner: str) -> None:
+    """The terminal's input connection is a viewer of its own, held while anyone watches, and gone with the last one."""
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    call = worker_call(terminals.stand_ins, "run_shell_command", start=False)
+    assert call is not None
+    session = sandbox_runner_app.state.worker_terminals.get(client_module._owner(call.request), info.id)
+    async with terminals.attach(info.id) as first, terminals.attach(info.id) as second:
+        await first.send_input("echo $((3*3))one\r")
+        await second.send_input("echo $((4*4))two\r")
+        await _read_until(second, b"16two")
+        assert session.idle_seconds() == 0.0
+    async with asyncio.timeout(10):
+        while session.idle_seconds() == 0.0:  # noqa: ASYNC110 - the runner signals no event when a viewer leaves
+            await asyncio.sleep(0.01)
+
+
+async def test_typing_that_may_not_have_reached_the_shell_leaves_its_line_unknown(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that drops the input connection may not have read what it carried last."""
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    with monkeypatch.context() as limited:
+        # Any output at all puts a viewer, the input connection too, too far behind.
+        limited.setattr(session_module, "_MAX_VIEWER_BACKLOG_BYTES", 0)
+        async with terminals.attach(info.id) as stream:
+            await stream.send_input("echo hi")
+            async with asyncio.timeout(10):
+                while stream.line.state().typed is not None:  # noqa: ASYNC110 - the drop signals no event here
+                    await asyncio.sleep(0.01)
 
 
 async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(

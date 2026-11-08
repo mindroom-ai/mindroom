@@ -102,7 +102,8 @@ class TerminalLine:
     def __init__(self, *, opened: bool) -> None:
         self.revision = 0
         self.typed: str | None = "" if opened else None
-        # An Enter went in since the last prompt, so a command or a continuation reads what is typed now.
+        # An Enter or a Ctrl-C went in since the last prompt: a command or a continuation reads what is typed now, or
+        # the interrupt may drop it, and typing that reaches the shell first may keep it from printing that prompt.
         self._busy = not opened
         # Something typed while busy waits for the next prompt, whose line it then holds.
         self._ahead = not opened
@@ -134,18 +135,11 @@ class TerminalLine:
     def type(self, text: str) -> None:
         """Record ``text`` as sent to the terminal."""
         self.revision += 1
-        for index, char in enumerate(text):
+        for char in text:
             if self._busy:
                 # Ctrl-C interrupts the command, and the terminal drops the typing it has not read yet.
                 self._ahead = char != _INTERRUPT
-            elif char == _INTERRUPT and text[index + 1 :].strip(_INTERRUPT):
-                # The terminal may drop part of what follows it, and the shell then prints no prompt for the Ctrl-C.
-                self._busy = self._ahead = True
-                return
-            elif char == _INTERRUPT:
-                self.typed = ""
-                self._owed += 1
-            elif char in "\r\n":
+            elif char in "\r\n\x03":
                 self._busy, self._ahead = True, False
                 self._owed += 1
             elif self.typed is not None:
