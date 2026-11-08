@@ -1270,6 +1270,54 @@ def test_a_tools_module_shares_the_hooks_module_it_imports_before_and_after_a_re
     assert shared_state()
 
 
+def test_an_unpublished_load_restores_a_nested_package_plugin_on_its_parent_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load that is not published leaves ``from pack import demo`` and ``pack.demo`` one module again."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "pack" / "demo"
+    plugin_root.mkdir(parents=True)
+    (site_packages / "pack" / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helpers.py").write_text("STATE = {}\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text("from pack.demo.helpers import STATE\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    config = _bind_runtime_paths(Config(plugins=["python:pack.demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("pack"):
+        _load(config, runtime_paths)
+        dispose_plugins(prepare_plugins(config, runtime_paths))
+
+        assert sys.modules["pack"].demo is sys.modules["pack.demo"]
+        assert sys.modules["pack.demo"].helpers is sys.modules["pack.demo.helpers"]
+
+
+def test_validation_executes_a_module_another_plugin_module_imported_once(tmp_path: Path) -> None:
+    """Candidate validation reuses the hooks module the tools module imported, as loading the plugin does."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    runs = tmp_path / "hooks-runs.txt"
+    (plugin_root / "hooks.py").write_text(
+        f"with open({str(runs)!r}, 'a') as runs:\n    runs.write('run\\n')\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("from . import hooks\n", encoding="utf-8")
+
+    _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+
+    assert runs.read_text(encoding="utf-8").splitlines() == ["run"]
+
+
 def test_a_worker_serves_a_module_saved_while_its_plugin_loaded(tmp_path: Path) -> None:
     """A hooks module saved after the tools module imported it, while the load runs, is served at the next refresh."""
     plugin_root = tmp_path / "plugins" / "demo"

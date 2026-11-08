@@ -442,9 +442,18 @@ def _install_canonical_modules(
     """Make ``modules`` the canonical plugin modules in sys.modules, and ``module_cache`` the module cache."""
     for module_name in _canonical_plugin_modules():
         sys.modules.pop(module_name, None)
-    sys.modules.update(modules)
+    _reinstate_modules(modules)
     plugin_imports._MODULE_IMPORT_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+
+
+def _reinstate_modules(modules: Mapping[str, ModuleType]) -> None:
+    """Put ``modules`` in sys.modules and on their parent packages, as importing them does."""
+    sys.modules.update(modules)
+    for module_name, module in modules.items():
+        parent_name, _, child_name = module_name.rpartition(".")
+        if (parent := sys.modules.get(parent_name)) is not None:
+            setattr(parent, child_name, module)
 
 
 def _installed_generation(
@@ -743,8 +752,8 @@ def _load_each_plugin(
         if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
             plugins[plugin_base.root] = _with_current_manifest(loaded, plugin_base)
             continue
-        # The plugin loads whole: each of its modules executes once, and every module they import from its root executes
-        # again with them, so they share one instance of each other and their tools register again.
+        # The plugin loads whole: each of its modules executes once, and the modules under its root's package names leave
+        # with them, so they share one instance of each other and their tools register again.
         installed_modules, installed_cache = _evict_plugin_modules(plugin_base)
         try:
             plugin = _materialize_plugin(plugin_base, primary_modules=primary_modules)
@@ -774,7 +783,7 @@ def _dispose_failed_plugin(
     installed = {id(module) for module in installed_modules.values()}
     executed, _ = _evict_plugin_modules(plugin)
     _cancel_module_tasks(module for module in executed.values() if id(module) not in installed)
-    sys.modules.update(installed_modules)
+    _reinstate_modules(installed_modules)
     plugin_imports._MODULE_IMPORT_CACHE.update(installed_cache)
 
 
@@ -1075,27 +1084,19 @@ def _load_plugin_module(
     kind: str,
     prefix: str = PLUGIN_MODULE_PREFIX,
 ) -> plugin_imports._ModuleCacheEntry | None:
-    """Execute one plugin module, or return the instance this load already has.
+    """Execute one plugin module once per load, or return the instance this load already has.
 
-    The canonical ``prefix`` installs the module and caches it, once per load: another of the plugin's modules may have
-    imported it already, and executing it again would leave that importer a copy of its own. Another prefix executes it
-    under a separate namespace, with its relative imports, and caches nothing.
+    Another of the plugin's modules may have imported it already, and executing it again would leave that importer a
+    copy of its own. The canonical ``prefix`` installs the module and caches it; another prefix executes it under a
+    separate namespace, with its relative imports, and caches nothing.
     """
     if module_path is None:
         return None
-    try:
-        module_path.stat()
-    except OSError as exc:
-        msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
-        logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
-        raise plugin_imports.PluginValidationError(msg) from exc
-
     canonical = prefix == PLUGIN_MODULE_PREFIX
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path, prefix)
-    if canonical and (loaded := _loaded_module(module_name)) is not None:
+    if (loaded := _loaded_module(module_name, canonical=canonical)) is not None:
         return loaded
 
-    previous_module = sys.modules.get(module_name)
     prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name, prefix)
     if prepared_module is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
@@ -1111,10 +1112,7 @@ def _load_plugin_module(
     except BaseException as exc:
         # Its tasks go with it: once it leaves sys.modules, the failed plugin's cleanup no longer finds them.
         _cancel_module_tasks((module,))
-        if previous_module is None:
-            sys.modules.pop(module_name, None)
-        else:
-            sys.modules[module_name] = previous_module
+        sys.modules.pop(module_name, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
@@ -1130,9 +1128,9 @@ def _load_plugin_module(
     return entry
 
 
-def _loaded_module(module_name: str) -> plugin_imports._ModuleCacheEntry | None:
-    """Return the canonical module this load has already, whether the loader or another plugin module imported it."""
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name)
+def _loaded_module(module_name: str, *, canonical: bool) -> plugin_imports._ModuleCacheEntry | None:
+    """Return the module this load has already, whether the loader or another plugin module imported it."""
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name) if canonical else None
     if cached is not None:
         return cached
     imported = sys.modules.get(module_name)
@@ -1140,7 +1138,8 @@ def _loaded_module(module_name: str) -> plugin_imports._ModuleCacheEntry | None:
         return None
     # What it registered as it executed belongs to the module that imported it.
     entry = plugin_imports._ModuleCacheEntry(module=imported, registrations=MappingProxyType({}))
-    plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
+    if canonical:
+        plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
     return entry
 
 
