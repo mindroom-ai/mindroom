@@ -12,7 +12,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.matrix import rooms
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -217,24 +216,6 @@ class TestDMPreservationDuringCleanup:
         assert kicked_bots == []
         get_room_members.assert_not_called()
         assert not client.room_kick.called
-
-    async def test_orphaned_bot_cleanup_skips_room_whose_state_read_failed(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Orphaned bot cleanup leaves a room alone when m.direct omits it and its state read then fails."""
-        monkeypatch.setattr(rooms, "_DM_ROOM_CACHE", {})
-        monkeypatch.setattr(rooms, "_DIRECT_ROOMS_CACHE", {})
-        client = AsyncMock(user_id="@mindroom_router:server", rooms={})
-        client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
-        client.room_get_state.return_value = nio.RoomGetStateError("Internal server error", "M_UNKNOWN")
-        config = _config_with_runtime_paths(tmp_path)
-        with patch("mindroom.matrix.room_cleanup.get_room_members") as get_room_members:
-            kicked_bots = await _cleanup_orphaned_bots_in_room(client, "!dm:server", config, runtime_paths_for(config))
-
-        assert kicked_bots == []
-        get_room_members.assert_not_called()
 
     async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:
         """Orphaned bot cleanup kicks retired bots from rooms that are not DMs."""

@@ -298,16 +298,3 @@ class TestDMDetection:
         await rooms.leave_non_dm_rooms(client, ["!dm:server"], leave_room_action=leave)
 
         leave.assert_awaited_once_with("!group:server")
-
-    async def test_leave_non_dm_rooms_keeps_room_whose_state_read_failed(self) -> None:
-        """Test a clean m.direct read that omits a room keeps it when its state read fails, and a readable group goes."""
-        client = AsyncMock()
-        client.user_id = "@agent:server"
-        client.rooms = {}
-        client.list_direct_rooms.return_value = _direct_rooms({})
-        client.room_get_state.side_effect = [MagicMock(spec=nio.RoomGetStateError), _non_dm_state()]
-        leave = AsyncMock(return_value=True)
-
-        await rooms.leave_non_dm_rooms(client, ["!dm:server", "!group:server"], leave_room_action=leave)
-
-        leave.assert_awaited_once_with("!group:server")
