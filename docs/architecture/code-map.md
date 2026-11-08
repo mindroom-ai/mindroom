@@ -324,7 +324,7 @@ Matrix sync callback
 | `custom_tools/knowledge_graph.py` | The `knowledge_graph` tool: lookups, and the edits `knowledge_graph_edits` allows; also the graph as a `search_knowledge_base` source |
 | `tool_system/skills.py` | OpenClaw-compatible skill loading from skill roots and workspaces, and the read-only `SkillsToolkit` with its prompt block |
 | `tool_system/skill_usage.py` | Workspace skill usage records the skill learner's archival reads as an inactivity clock |
-| `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation in a separate module namespace, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
+| `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation under the plugin lock, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
 | `entity_directory.py` | `entity_directory`, the router and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
