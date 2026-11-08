@@ -328,11 +328,11 @@ class WorkerTerminals:
         try:
             yield TerminalStream(websocket, line, connect)
         finally:
+            typing.viewers -= 1
             keepalive.cancel()
             await asyncio.wait({keepalive})
             await websocket.close()
             await client.close()
-            typing.viewers -= 1
             async with line.lock:
                 if not typing.viewers:
                     await typing.close()

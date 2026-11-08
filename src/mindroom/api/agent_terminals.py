@@ -67,7 +67,8 @@ class _OpenTerminal(BaseModel):
 
 class _Input(BaseModel):
     type: Literal["input"]
-    data: str = Field(max_length=65536)
+    # At most 4 bytes a character, so within what the runner takes at once.
+    data: str = Field(max_length=16384)
 
 
 class _Resize(BaseModel):

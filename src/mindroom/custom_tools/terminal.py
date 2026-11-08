@@ -44,6 +44,8 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 _MAX_TIMEOUT_SECONDS = 600.0
 # How long a viewer waits for the scrollback, which the runner sends first, and for more output to read.
 _SCROLLBACK_SECONDS = 1.0
+# How long a viewer waits after the scrollback for the exit, which follows it at once for an ended shell.
+_EXIT_SECONDS = 0.1
 _OUTPUT_SECONDS = 0.5
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
@@ -56,6 +58,7 @@ _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
     "typing); nothing was typed. Read the terminal, and send keys such as <ctrl-c> with terminal_send."
 )
+_EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
 _DETACHED = "Error: the connection to the terminal ended, and keys sent may or may not have arrived. Read it again."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -72,11 +75,17 @@ def _plain_text(data: bytes) -> str:
     return _CONTROL.sub("", "\n".join(lines))
 
 
-async def _scrollback(stream: TerminalStream) -> None:
-    """Read the scrollback, which the runner sends a viewer first, so its prompt marks count before anything is typed."""
+async def _ended(stream: TerminalStream) -> bool:
+    """Read what the runner sends a viewer first, the scrollback and an ended shell's exit; return whether it ended.
+
+    Its prompt marks so count before anything is typed.
+    """
     with contextlib.suppress(TimeoutError):
-        async with asyncio.timeout(_SCROLLBACK_SECONDS):
-            await stream.receive()
+        for seconds in (_SCROLLBACK_SECONDS, _EXIT_SECONDS):
+            async with asyncio.timeout(seconds):
+                if (await stream.receive()).type == "exit":
+                    return True
+    return False
 
 
 async def _output(
@@ -186,7 +195,7 @@ class TerminalTools(Toolkit):
 
         It types only while the shell waits at an empty prompt. A command still running at the timeout keeps running:
         read on with terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and
-        leave them running.
+        leave them running; a terminal nobody types in or watches ends 30 minutes after its last input.
 
         Args:
             session_id: The terminal, from terminal_open or terminal_list.
@@ -207,7 +216,8 @@ class TerminalTools(Toolkit):
         timeout = max(0.1, min(float(timeout_s), _MAX_TIMEOUT_SECONDS))
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
-                await _scrollback(stream)
+                if await _ended(stream):
+                    return _EXITED
                 before = await stream.send_input(text, empty_line=True)
                 output, cut, finished = await _output(stream, timeout, prompt_after=before)
         except TerminalError as error:
@@ -246,15 +256,17 @@ class TerminalTools(Toolkit):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
-                await _scrollback(stream)
+                if await _ended(stream):
+                    return _EXITED
                 await stream.send_input(text, judged=line)
-                output, _, _ = await _output(stream, _OUTPUT_SECONDS)
+                output, _, ended = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _LINE_CHANGED if error.status_code == 409 else _refused(error, session_id)
         except TerminalDetachedError:
             return _DETACHED
         shown = _plain_text(output).strip()[-_MAX_TEXT_CHARS:]
-        return f"Sent. New output:\n{shown}" if shown else "Sent."
+        exited = "\n[The terminal's shell has exited.]" if ended else ""
+        return f"Sent. New output:\n{shown}{exited}" if shown else f"Sent.{exited}"
 
     async def terminal_read(self, session_id: str) -> str:
         """Read a terminal's recent output as text.

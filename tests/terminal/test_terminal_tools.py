@@ -381,3 +381,17 @@ async def test_typing_reaches_the_shell_in_the_order_it_was_recorded(
 
     assert kept.is_dir()
     assert ran.endswith("[Exit status 127.]")
+
+
+async def test_an_agent_is_told_when_a_terminal_s_shell_has_exited(tmp_path: Path, runner: str) -> None:
+    """Keys and commands for a shell that has exited are refused as such, not answered as sent or still running."""
+    paths = primary_paths(tmp_path, runner)
+    functions = _functions(_config(paths, ["shell", "terminal"]), paths)
+    session_id = await _open(functions)
+
+    assert (await _call(functions["terminal_send"], session_id=session_id, keys="exit<enter>")).endswith(
+        "[The terminal's shell has exited.]",
+    )
+    for function, arguments in (("terminal_send", {"keys": "<ctrl-c>"}), ("terminal_run", {"command": "ls"})):
+        answer = await _call(functions[function], session_id=session_id, **arguments)
+        assert answer == "Error: the terminal's shell has exited; open another with terminal_open."
