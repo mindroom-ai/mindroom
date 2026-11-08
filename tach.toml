@@ -5424,6 +5424,7 @@ depends_on = [
     "mindroom.agent_loop.helper",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.entity_directory",
     "mindroom.file_access",
     "mindroom.hooks",
     "mindroom.llm",
@@ -8257,11 +8258,22 @@ visibility = ["mindroom.api.main"]
 path = "mindroom.plugin_http"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.api.auth",
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_context",
     "mindroom.tool_system.plugins",
 ]
+
+# Plugins read it through mindroom.plugin_api.
+[[modules]]
+path = "mindroom.entity_directory"
+depends_on = [
+    "mindroom.config.resolution",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+]
+visibility = ["mindroom.plugin_api"]
 
 [[modules]]
 path = "mindroom.plugin_context"

@@ -38,7 +38,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from mindroom.plugin_http import ClientUser, require_room_member
+from mindroom.plugin_http import ClientUser, require_platform_administrator, require_room_member
 
 router = APIRouter()
 
@@ -95,6 +95,11 @@ async def secret(room_id: str) -> dict:
 
 @router.get("/me")
 async def me_without_room(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
+    return {"user_id": user.user_id}
+
+
+@router.get("/admin")
+async def admin(user: Annotated[ClientUser, Depends(require_platform_administrator)]) -> dict:
     return {"user_id": user.user_id}
 """
 
@@ -476,6 +481,31 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
     # A route without ``{room_id}`` never checks a room the query string names, even one the caller is in.
     alice = _signed_in(app)
     assert client.get(f"/api/plugins/demo/me?room_id={quote(ROOM)}", headers=alice).status_code == 422
+
+
+def test_administrator_route_admits_only_an_administrator_of_the_config_served_now(tmp_path: Path) -> None:
+    """Only a signed-in administrator passes, and a reload that removes them from ``administrators`` refuses them."""
+    _write_plugin(tmp_path, ROUTES)
+    _, runtime_paths = _config(tmp_path)
+    config = bind_runtime_paths(Config(plugins=["./plugins/demo"], administrators=[ALICE]), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    alice = _signed_in(app)
+
+    def admin(headers: dict[str, str]) -> tuple[int, object]:
+        response = client.get("/api/plugins/demo/admin", headers=headers)
+        return response.status_code, response.json()
+
+    assert admin(alice) == (200, {"user_id": ALICE})
+    assert admin({})[0] == 401
+    assert admin(_signed_in(app, "@bob:example.org")) == (403, {"detail": "Not a platform administrator."})
+
+    state = config_lifecycle.require_api_state(app)
+    without_alice = bind_runtime_paths(Config(plugins=["./plugins/demo"]), runtime_paths)
+    state.snapshot = config_lifecycle.ApiSnapshot(2, runtime_paths, runtime_config=without_alice)
+
+    assert admin(alice) == (403, {"detail": "Not a platform administrator."})
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

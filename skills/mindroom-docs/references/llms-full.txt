@@ -17265,7 +17265,7 @@ It answers with a random session token that lives only in the backend's memory a
 `DELETE /api/client-sessions` ends the session whose token its `Authorization: Bearer` header carries at once, as a client does at sign-out, and answers 401 for a missing, unknown, or expired token.
 Plugin routes check the session only when a request arrives, so a response already streaming outlives the session's expiry or revocation.
 The store keeps at most 8 sessions per user, evicting that user's oldest past it, and 10,000 in all, evicting the oldest of anyone's past that, so it never refuses a sign-in and, below 10,000 sessions, one user's sign-ins never sign another user out.
-A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` or `require_room_member` is public; plugin code already runs with the primary's full trust.
+A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user`, `require_room_member`, or `require_platform_administrator` is public; plugin code already runs with the primary's full trust.
 Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.
 Plugin routes share the dashboard's origin, so a route that returned `text/html` or other content a browser renders, built from untrusted input, could run script with the dashboard's signed-in session.
 MindRoom does not filter what plugin routes return, so they must answer with JSON; as a backstop, every response under `/api/plugins/` carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, replacing whatever the route set.
@@ -17273,6 +17273,7 @@ A plugin route that raises answers 500 without the error's detail, except that o
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
 `GET /api/plugins` checks the session the same way and answers any session, whatever its user's rooms, with this MindRoom's plugin API version and the manifest `name` and `mindroom_plugin_api` of each enabled plugin that loaded, never a plugin's path, settings, or load error.
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
+Routes only administrators may use depend on `require_platform_administrator`, which authenticates the caller the same way and answers 403 unless the session's user, or the person it is a bridge alias of, is in `administrators` in the config the API serves when the request arrives.
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
 CORS for `/api/client-sessions`, `/api/plugins`, and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
@@ -18584,7 +18585,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -18657,6 +18658,24 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
 Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
 A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
+
+## People, agents, and administrators
+
+These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.
+Each takes a `config` and `runtime_paths`, such as a hook's `ctx.config` and `ctx.runtime_paths` or a `PluginContext`'s, and a plugin that uses them states `"mindroom_plugin_api": "1.5"` in its manifest.
+
+| Function | Returns |
+|----------|---------|
+| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the router and each configured agent and team to its `ManagedEntity` |
+| `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
+| `is_platform_administrator(sender_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) for one |
+
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it, with defaults and presets expanded.
+The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
+A tool name grants nothing, so never decide what a caller may do from one.
+
+A route only administrators may use depends on `require_platform_administrator` from `mindroom.plugin_http`, which returns the same `ClientUser` as `require_client_user`.
+It answers 401 as `require_client_user` does, and 403 unless the caller is an administrator in the config MindRoom serves at that moment, so a config change that removes someone from `administrators` refuses their next request.
 
 ## Plugin skills
 

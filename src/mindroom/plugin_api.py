@@ -14,6 +14,7 @@ from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, resolve_config_relative_path
+from mindroom.entity_directory import ManagedEntity, entity_directory
 from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -86,6 +87,8 @@ from mindroom.path_confinement import open_directory_within_root, read_regular_f
 from mindroom.plugin_context import PluginContext, current_plugin_context
 from mindroom.providers.registry import build_model_provider
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
+from mindroom.requester_identity import is_human_requester_id as is_human_user
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -175,6 +178,7 @@ __all__ = [
     "HookContext",
     "HookMatrixAdmin",
     "HookMessageSender",
+    "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -226,6 +230,7 @@ __all__ = [
     "current_execution_identity",
     "current_plugin_context",
     "emit_custom_event",
+    "entity_directory",
     "fetch_public_url",
     "fetch_public_url_sync",
     "get_logger",
@@ -234,6 +239,8 @@ __all__ = [
     "google_cloud_oauth_provider",
     "google_workspace_oauth_providers",
     "hook",
+    "is_human_user",
+    "is_platform_administrator",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
