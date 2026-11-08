@@ -491,7 +491,7 @@ def format_validation_errors(
     # A location or message can quote a config key, which may contain brackets Rich reads as markup.
     for location, message in iter_config_validation_messages(exc):
         display_location = location.replace(" → ", " -> ")
-        console.print(f"  [red]*[/red] {escape(display_location)}: {escape(message)}")
+        print_literal("  [red]*[/red] ", f"{display_location}: {message}")
     console.print("\nFix these issues:")
     console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")

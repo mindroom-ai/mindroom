@@ -229,10 +229,11 @@ def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_
     assert f"Validating configuration: {target}" in (validate := lines("validate"))
     assert f"Error: Configuration file not found: {target}" in validate
     assert f"Error: Configuration file not found: {target}" in lines("resolve")
-    target.write_text("agents: [\n", encoding="utf-8")
+    target.write_text("agents: !include missing.yaml\n", encoding="utf-8")
     assert f"Config file: {target}" in lines("show")
     assert f"Resolved config path: {target} (exists)" in lines("path")
-    assert f"Error: Invalid configuration in {target}" in lines("validate")
+    assert f"Error: Invalid configuration in {target}" in (invalid := lines("validate"))
+    assert f"  * config: !include: included file 'missing.yaml' does not exist (in {target}, line 1)" in invalid
     edit = lines("edit", env={"EDITOR": "[missing]-editor"})
     assert f"Opening {target} with [missing]-editor..." in edit
     assert "Editor '[missing]-editor' not found." in edit
