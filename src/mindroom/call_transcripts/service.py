@@ -670,7 +670,7 @@ class CallTranscriptService:
             return
         notes = self._written_notes.get(call.id)
         writes_notes = (
-            bool(turns) and notes is None and call.transcript_attempts < _NOTES_ATTEMPTS and self._notes.writes_notes()
+            bool(turns) and notes is None and call.notes_failures < _NOTES_ATTEMPTS and self._notes.writes_notes()
         )
         # Only notes name people, by display name; until the room can be read they wait, without using an attempt.
         names = await self._room.display_names(call.room_id, {turn.sender for turn in turns}) if writes_notes else {}
@@ -691,7 +691,7 @@ class CallTranscriptService:
             except Exception:
                 logger.exception("call_transcript_notes_failed", room_id=call.room_id, call_id=call.id)
                 await asyncio.to_thread(self._store.count_failed_notes, call.id)
-                if call.transcript_attempts + 1 < _NOTES_ATTEMPTS:
+                if call.notes_failures + 1 < _NOTES_ATTEMPTS:
                     await self._postpone(call, reason="notes-failed")
                     return
             if notes is not None:

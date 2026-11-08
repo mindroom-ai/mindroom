@@ -48,7 +48,7 @@ def test_a_room_has_at_most_one_live_call(tmp_path: Path) -> None:
         ended_at=None,
         row_event_id=None,
         retry_at=None,
-        transcript_attempts=0,
+        notes_failures=0,
         transcript_done_at=None,
         transcript_event_id=None,
         row_edit=None,
@@ -173,7 +173,7 @@ def test_a_calls_writes_wait_after_a_failure_and_its_failed_notes_are_counted(tm
 
     postponed = CallTranscriptStore(tmp_path).call(call.id)
     assert postponed is not None
-    assert (postponed.retry_at, postponed.transcript_attempts) == (340.0, 1)
+    assert (postponed.retry_at, postponed.notes_failures) == (340.0, 1)
 
 
 def test_finished_calls_are_forgotten_after_a_while(tmp_path: Path) -> None:

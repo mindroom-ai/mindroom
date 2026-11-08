@@ -31,7 +31,7 @@ _SCHEMA = (
         ended_at REAL,
         row_event_id TEXT,
         retry_at REAL,
-        transcript_attempts INTEGER NOT NULL DEFAULT 0,
+        notes_failures INTEGER NOT NULL DEFAULT 0,
         transcript_done_at REAL,
         transcript_event_id TEXT,
         row_edit TEXT,
@@ -82,7 +82,7 @@ class StoredCall:
     """The call's row notice, None until it is posted."""
     retry_at: float | None
     """When the call's Matrix writes may be tried again after one failed; None until one fails."""
-    transcript_attempts: int
+    notes_failures: int
     """How many times the call's notes have failed."""
     transcript_done_at: float | None
     """When the transcript message was posted, or found to have nothing to post; its lines are gone from then on."""
@@ -145,7 +145,7 @@ class CallTranscriptStore:
                 ended_at=None,
                 row_event_id=None,
                 retry_at=None,
-                transcript_attempts=0,
+                notes_failures=0,
                 transcript_done_at=None,
                 transcript_event_id=None,
                 row_edit=None,
@@ -194,7 +194,7 @@ class CallTranscriptStore:
 
     def count_failed_notes(self, call_id: str) -> None:
         """Count a failed attempt at the call's notes."""
-        self._write("UPDATE calls SET transcript_attempts = transcript_attempts + 1 WHERE id = ?", (call_id,))
+        self._write("UPDATE calls SET notes_failures = notes_failures + 1 WHERE id = ?", (call_id,))
 
     def finish_transcript(self, call_id: str, *, at: float, event_id: str | None = None) -> float | None:
         """Mark an ended call's transcript message done at ``at``, posted as ``event_id``, and delete its lines.
@@ -435,7 +435,7 @@ def _call(row: sqlite3.Row) -> StoredCall:
         ended_at=row["ended_at"],
         row_event_id=row["row_event_id"],
         retry_at=row["retry_at"],
-        transcript_attempts=row["transcript_attempts"],
+        notes_failures=row["notes_failures"],
         transcript_done_at=row["transcript_done_at"],
         transcript_event_id=row["transcript_event_id"],
         row_edit=cast("RowEdit | None", row["row_edit"]),
