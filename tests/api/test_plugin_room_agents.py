@@ -30,7 +30,7 @@ from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from tests.conftest import test_runtime_paths
+from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_generated_agents import _load, _personal, _with_template
@@ -246,6 +246,51 @@ async def test_files_follow_what_each_toolkit_offers_by_its_own_settings(
     room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})})
 
     assert _access(await room.agents(ALICE)) == [("helper", files, terminal)]
+
+
+PLUGIN_TOOLS = """
+from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+
+class NotesTools(Toolkit):
+    name = "notes"
+
+    @tool
+    def read_note(self, path: str) -> str:
+        \"\"\"Read a note.
+
+        Args:
+            path: The note's path.
+        \"\"\"
+        return path
+
+
+@register_tool_with_metadata(
+    name="notes",
+    file_access=ToolFileAccess.AGENT,
+    display_name="Notes",
+    description="Notes in the workspace",
+    category=ToolCategory.PRODUCTIVITY,
+)
+def notes_tools() -> type[NotesTools]:
+    return NotesTools
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_toolkit_that_names_no_functions_reaches_by_its_file_access(tmp_path: Path) -> None:
+    """A plugin toolkit that takes local paths but declares no function names reads; only declared writers write."""
+    plugin = tmp_path / "plugins" / "notes"
+    plugin.mkdir(parents=True)
+    (plugin / "mindroom.plugin.json").write_text('{"name": "notes", "tools_module": "tools.py"}')
+    (plugin / "tools.py").write_text(PLUGIN_TOOLS)
+    paths = test_runtime_paths(tmp_path)
+    helper = AgentConfig(display_name="Helper", tools=["notes"], access={"users": [ALICE]})
+    config = bind_runtime_paths(Config(plugins=["./plugins/notes"], agents={"helper": helper}), paths)
+    publish_test_plugins(config, paths)
+    room = _Room(config, paths, ("helper",))
+
+    assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
 
 
 @pytest.mark.asyncio

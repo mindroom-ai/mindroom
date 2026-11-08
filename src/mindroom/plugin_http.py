@@ -215,7 +215,8 @@ class RoomReader:
     async def agents(self) -> list[AgentWorkspace]:
         """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
 
-        It answers 503 while the agents' identities or access rules cannot be resolved, as the Computer does.
+        It leaves out an agent whose contact room this is, and answers 503 while the agents' identities or access rules
+        cannot be resolved, as the Computer does, or while the runtime has not applied the API's membership policy.
         """
         return await self._room_agents(self.power, None)
 
@@ -223,7 +224,8 @@ class RoomReader:
         """Return the agent ``agent_user_id`` names with its workspace once the caller may use it there.
 
         It answers as the Computer does: 403 for a user ID that is no current agent, an agent not joined to the room, or
-        one whose access rules refuse the caller, and 503 while those cannot be resolved.
+        one whose access rules refuse the caller, and 503 while those cannot be resolved. It also answers 403 in the
+        agent's contact room, and 503 while the runtime has not applied the API's membership policy.
         """
         (workspace,) = await self._room_agents(self.power, agent_user_id)
         return workspace

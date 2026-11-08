@@ -231,7 +231,8 @@ def _workspace(
             ),
             tool_config_overrides=entry.tool_config_overrides,
         )
-        if functions := _offered_functions(metadata, settings.values):
+        # A toolkit that declares no function names, as a plugin or MCP server may, offers what it builds.
+        if (functions := _offered_functions(metadata, settings.values)) or not metadata.function_names:
             path_toolkits[entry.name] = (metadata, functions)
     writes = any(
         not functions.isdisjoint(_WRITERS[toolkit]) if toolkit in _WRITERS else metadata.executes_code
