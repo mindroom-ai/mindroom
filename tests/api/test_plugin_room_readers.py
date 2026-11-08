@@ -334,6 +334,15 @@ async def test_a_failed_direct_message_read_answers_503(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_a_failed_state_read_after_a_clean_direct_message_read_answers_503() -> None:
+    """A room the direct-message list leaves out is 503 when its state read fails, never a guess that it is a group."""
+    client = _client()
+    reader = await _reader(client)
+    client.room_get_state.return_value = nio.RoomGetStateError("Internal server error", "M_UNKNOWN")
+    assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
+
+
+@pytest.mark.asyncio
 async def test_client_rooms_keeps_the_joined_candidates_in_order() -> None:
     """Only candidates the session's user is joined to now come back, in the given order; a failed lookup leaves its room out."""
     client = _client(joined_rooms=(ROOM, OTHER_ROOM, THIRD_ROOM))

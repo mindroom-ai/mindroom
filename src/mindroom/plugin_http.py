@@ -262,7 +262,8 @@ class RoomReader:
         """Return whether MindRoom's agents treat the room as a direct message; a hint for display, never a grant.
 
         It is their own answer, which they keep for a few minutes; it answers 503 when the bot's direct-message list
-        cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
+        or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or
+        times out.
         """
         return await self._room_direct()
 
