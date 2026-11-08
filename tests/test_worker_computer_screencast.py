@@ -126,6 +126,7 @@ class _Site:
 
     origin: str = ""
     hits: Counter[str] = field(default_factory=Counter)
+    held: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
     def url(self, path: str) -> str:
@@ -142,6 +143,7 @@ async def site() -> AsyncIterator[_Site]:
         return web.Response(text=f"<title>{request.match_info['name']}</title>", content_type="text/html")
 
     async def held(_request: web.Request) -> web.Response:
+        served.held.set()
         await served.release.wait()
         return web.Response(text="<title>Held</title>", content_type="text/html", headers={"Cache-Control": "no-store"})
 
@@ -305,18 +307,29 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
     """Navigation, history, reload and stop act only under control, and the viewer sees where the page is."""
     controls = False
     sent = _Viewer()
+    # Each navigation updates the viewer at once, long before the next poll.
     viewer = ScreencastViewer(
         lambda: page,
         lambda: False,
         lambda: controls,
         sent.send_text,
         sent.send_bytes,
-        poll_seconds=0.05,
+        poll_seconds=60,
     )
     one, two = site.url("/page/One"), site.url("/page/Two")
     async with _watching(viewer):
         assert await sent.message("url-changed") == _location("about:blank", "Form", back=False, forward=False)
         assert await sent.message("loading") == _LOADED
+        # A frame inside the page loading is not the page loading, as a browser's own loading indicator shows.
+        await page.evaluate(
+            f"document.body.append(Object.assign(document.createElement('iframe'), {{src: '{site.url('/held')}'}}))",
+        )
+        await asyncio.wait_for(site.held.wait(), _TIMEOUT)
+        # Chromium reports a frame loading before it requests the frame, and this answer comes after that report.
+        await page.evaluate("1")
+        await viewer.receive("{}")
+        await sent.message("error")
+        assert not [message for message in sent.messages if message["type"] == "loading"]
         for message in ({"type": "navigate", "url": one}, {"type": "reload"}, {"type": "navigate", "url": "file:///"}):
             await viewer.receive(json.dumps(message))
 
@@ -363,6 +376,16 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         assert await page.title() == "Two"
         await viewer.receive(json.dumps({"type": "navigate", "url": "about:blank"}))
         await page.wait_for_url("about:blank", timeout=_TIMEOUT * 1000)
+
+
+@pytest.mark.asyncio
+async def test_viewer_of_no_page_is_told_there_is_nothing_to_show() -> None:
+    """Before the agent's browser starts, the viewer gets an empty location and no loading."""
+    sent = _Viewer()
+    viewer = ScreencastViewer(lambda: None, lambda: False, lambda: True, sent.send_text, sent.send_bytes)
+    async with _watching(viewer):
+        assert await sent.message("url-changed") == _location("", "", back=False, forward=False)
+        assert await sent.message("loading") == _LOADED
 
 
 @pytest.mark.asyncio
