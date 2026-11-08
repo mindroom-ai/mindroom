@@ -212,12 +212,22 @@ async def test_watch_refreshes_when_a_folder_leaves_the_base(
     recorded_watch: _RecordedWatch,
     folder: str,
 ) -> None:
-    """Moving a folder out of the base schedules a refresh, since the files it holds leave the base with it."""
+    """Moving a folder out of the base schedules a refresh, since the files it holds leave the base with it.
+
+    Deleting a file that is not indexable schedules none.
+    """
     (docs / folder).mkdir(exist_ok=True)
     (docs / folder / "doc.md").write_text("indexed", encoding="utf-8")
+    image = docs / "image.bin"
+    image.write_bytes(b"")
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
         await _wait_until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
+        image.unlink()
+        await _wait_until(lambda: str(image) in recorded_watch.changed_paths(), "the deletion was not seen")
+        # The watcher takes its next batch only after handling the last one.
+        await _write_until_seen(recorded_watch, docs / "other.bin")
+        assert not scheduler.schedule_refresh.called
         (docs / folder).rename(tmp_path / "moved")
         await _wait_until(lambda: scheduler.schedule_refresh.called, "moving a folder out of the base did not refresh")
 
