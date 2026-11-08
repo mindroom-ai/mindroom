@@ -120,16 +120,14 @@ def _reported(root: Path, raw: str) -> str | None:
     return str(relative)
 
 
-def _batch(root: Path, folders: set[str], changes: set[tuple[watchfiles.Change, str]]) -> tuple[set[str], bool]:
-    """Return a batch's reported paths, and whether a folder appeared or went, so the tree needs walking again."""
+def _batch(root: Path, changes: set[tuple[watchfiles.Change, str]]) -> tuple[set[str], bool]:
+    """Return a batch's reported paths, and whether a folder appeared, so the tree needs walking again."""
     paths = {path for _, raw in changes if (path := _reported(root, raw)) is not None}
-    regrown = any(
-        raw in folders
-        if change is watchfiles.Change.deleted
-        else change is watchfiles.Change.added and Path(raw).is_dir() and not Path(raw).is_symlink()
+    grown = any(
+        change is watchfiles.Change.added and Path(raw).is_dir() and not Path(raw).is_symlink()
         for change, raw in changes
     )
-    return paths, regrown
+    return paths, grown
 
 
 async def _wait(watch: _Watch, seconds: float) -> None:
@@ -153,11 +151,11 @@ async def _run(watch: _Watch) -> None:
                 recursive=False,
                 ignore_permission_denied=True,
             ):
-                paths, regrown = await asyncio.to_thread(_batch, watch.root, set(folders), changes)
+                paths, grown = await asyncio.to_thread(_batch, watch.root, changes)
                 if paths:
                     for follower in watch.followers:
                         follower.add(paths)
-                if regrown:
+                if grown:
                     break
         except Exception:
             logger.exception("Workspace watcher failed; retrying", root=str(watch.root))

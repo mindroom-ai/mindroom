@@ -123,6 +123,8 @@ def test_nothing_below_git_is_changed(root: Path) -> None:
     assert _status(lambda: move(root, "notes.md", "repo/.git/notes.md")) == 403
     assert _status(lambda: delete(root, "repo/.git")) == 403
     assert _status(lambda: delete(root, "repo/.git/HEAD")) == 403
+    assert _status(lambda: delete(root, "repo/.git/config")) == 403
+    assert _status(lambda: move(root, "repo/.git/config", "config")) == 403
     (root / "g").symlink_to("repo/.git")
     assert _status(lambda: save_file(root, "g/hooks/pre-commit", b"x", None)) == 403
     assert _status(lambda: make_folder(root, "g/hooks")) == 403
@@ -140,7 +142,7 @@ def test_nothing_below_git_is_changed(root: Path) -> None:
         ".envrc",
         ".ssh",
         ".ssh/id_ed25519",
-        ".SSH/id_ed25519",
+        ".AWS/credentials",
         ".config/gh/hosts.yml",
         ".gnupg/secring.gpg",
         ".aws/credentials",
@@ -206,6 +208,10 @@ def test_a_folder_that_keeps_a_credential_by_its_place_is_never_moved_or_deleted
     assert _status(lambda: move(root, "settings", ".claude")) == 403
     assert _status(lambda: move(root, "settings", ".config")) == 403
     assert (root / ".config" / "gh" / "hosts.yml").read_text() == "token"
+    (root / "here").symlink_to(".")
+    assert _status(lambda: move(root, "here/.config", "config")) == 403
+    assert _status(lambda: move(root, "settings", "here/.config")) == 403
+    assert _status(lambda: delete(root, "here/.config")) == 403
     move(root, ".config/app.toml", "app.toml")
     assert (root / "app.toml").is_file()
 
@@ -235,6 +241,7 @@ def test_a_folder_lists_folders_first_then_by_name_with_sizes_and_times(root: Pa
         1_700_000_000_123,
         None,
     )
+    assert listing.entries[0].size == 0
     assert [entry.path for entry in list_folder(root, "src").entries] == ["src/main.py"]
 
 
@@ -361,7 +368,8 @@ def test_move_renames_an_entry_and_moves_a_link_as_a_link(root: Path) -> None:
     assert (root / "lib" / "src" / "main.py").is_file()
     assert (root / "lib" / "code").readlink() == Path("src")
     assert _status(lambda: move(root, "notes.md", "lib/src")) == 409
-    assert _status(lambda: move(root, "missing.md", "found.md")) == 404
+    assert _status(lambda: move(root, "missing.md", "new/found.md")) == 404
+    assert not (root / "new").exists()
 
 
 def test_a_folder_cannot_move_into_itself(root: Path) -> None:

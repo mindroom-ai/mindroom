@@ -122,6 +122,8 @@ async def test_a_workspace_made_after_following_starts_is_followed(tmp_path: Pat
     """Before the agent's first turn the root does not exist; once it does, its changes come through."""
     root = tmp_path / "workspace"
     async with workspace_changes(root) as next_changes:
+        # The watcher finds no workspace first, and looks again.
+        await asyncio.sleep(0.3)
         root.mkdir()
         await _settled(root)
         (root / "first.md").write_text("x")

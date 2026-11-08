@@ -357,7 +357,7 @@ def move(root: Path, raw_path: str, raw_to: str) -> None:
     target, target_name = _leaf(root, to)
     moved, destination = source.relative / source_name, target.relative / target_name
     _refuse_git(moved, destination)
-    _refuse_credential_place(path, to, moved, destination)
+    _refuse_credential_place(moved, destination)
     if destination.is_relative_to(moved):
         raise HTTPException(400, "A folder can't move into itself.")
     with _refusals(), open_directory_within_root(source.base, source.relative) as source_directory:
@@ -378,7 +378,7 @@ def delete(root: Path, raw_path: str) -> None:
     parent, name = _leaf(root, path)
     removed = parent.relative / name
     _refuse_git(removed)
-    _refuse_credential_place(path, removed)
+    _refuse_credential_place(removed)
     with _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
         if stat.S_ISDIR(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
             # Walks every level by descriptor, never following a link.
