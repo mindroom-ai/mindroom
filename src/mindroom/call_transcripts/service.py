@@ -578,7 +578,10 @@ class CallTranscriptService:
     def _settle(self, call: StoredCall, now: float) -> None:
         """Start the call's Matrix writes in a task of its own, unless none are owed, can be made now, or one is running."""
         if call.id not in self._settling and self._can_settle(call, now):
-            self._settling[call.id] = create_background_task(self._settle_now(call.id), name="call_transcript_settle")
+            task = create_background_task(self._settle_now(call.id), name="call_transcript_settle")
+            self._settling[call.id] = task
+            # Once done, even cancelled before it first ran, so the call's writes can start again.
+            task.add_done_callback(lambda _: self._settling.pop(call.id, None))
 
     def _can_settle(self, call: StoredCall, now: float) -> bool:
         """Return whether the router can make Matrix writes the call owes now: its row, its due message, a row edit.
@@ -608,8 +611,6 @@ class CallTranscriptService:
             logger.exception("call_transcript_write_failed", call_id=call_id)
             if call is not None:
                 await self._postpone(call, reason="error")
-        finally:
-            self._settling.pop(call_id, None)
 
     async def _settle_step(self, call: StoredCall) -> None:
         """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made.

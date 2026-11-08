@@ -2217,6 +2217,25 @@ async def test_stopping_cancels_the_messages_being_posted_and_a_restart_posts_th
 
 
 @pytest.mark.asyncio
+async def test_writes_cancelled_before_they_began_are_made_at_the_next_check(world: World) -> None:
+    """Writes cancelled before their task first ran, as when call transcripts go off at once, start again later."""
+    joining = asyncio.create_task(world.service.join(ROOM, ANN))
+    # Looking every turn of the event loop sees the join's task for the row before that task's first turn.
+    while not world.service._settling and not joining.done():  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    [writing] = world.service._settling.values()
+    world.service.cancel_writes()
+    call = await joining
+    await asyncio.wait([writing])
+
+    assert writing.cancelled()
+    assert world.room.row_attempts == 0
+    assert world.service._settling == {}
+    await world.tick()
+    assert world.room.rows == [(ROOM, call.id)]
+
+
+@pytest.mark.asyncio
 async def test_one_failing_call_does_not_stop_the_others(world: World) -> None:
     """A bug while posting one call's message leaves it to the retry rules; other calls' messages still go."""
     world.room.crashing_rooms = {ROOM}
