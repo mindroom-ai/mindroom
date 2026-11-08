@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -38,7 +38,7 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.access_schema_support import joined_members_response
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.runtime_fakes import ready_runtime
+from tests.runtime_fakes import RecordingRouter, ready_runtime
 from tests.test_generated_agents import _load, _personal, _with_template
 
 if TYPE_CHECKING:
@@ -53,6 +53,7 @@ ROOM = "!room:localhost"
 ALICE = "@alice:localhost"
 BOB = "@bob:localhost"
 CAROL = "@carol:localhost"
+DAVE = "@DAVE:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
 READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}
@@ -73,34 +74,6 @@ def _agents() -> dict[str, AgentConfig]:
             access=ResponderAccessConfig(users=[ALICE, BOB, CAROL]),
         ),
     }
-
-
-@dataclass
-class _Router:
-    """The running router, recording what each grant refresh's follow-up asks of it."""
-
-    client: SimpleNamespace
-    config: Config
-    running: bool = True
-    follow_ups: list[str] = field(default_factory=list)
-
-    def schedule_pending_invite_reconciliation(self) -> None:
-        self.follow_ups.append("invites")
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        self.follow_ups.append("revoke_calls")
-
-    def schedule_reply_authorized_call_reconciliation(self) -> None:
-        self.follow_ups.append("reconcile_calls")
-
-    def schedule_reply_authorized_call_revocation(self) -> None:
-        self.follow_ups.append("scheduled_revoke")
-
-    def release_pending_turn_journal_replay(self) -> None:
-        pass
-
-    async def recover_pending_turn_journal_events(self) -> None:
-        self.follow_ups.append("turns")
 
 
 class _Room:
@@ -128,7 +101,7 @@ class _Room:
                 ),
             ),
         )
-        self.router = _Router(self.client, config)
+        self.router = RecordingRouter(self.client, config)
         self.runtime = ready_runtime(config, paths)
         self.runtime.fleet.add(ROUTER_AGENT_NAME, self.router)  # type: ignore[arg-type]
         self.app = FastAPI()
@@ -409,7 +382,6 @@ async def test_pending_membership_policy_answers_503_until_matrix_confirms_it(tm
 @pytest.mark.asyncio
 async def test_a_member_who_joined_after_the_last_refresh_is_admitted_after_one_refresh(tmp_path: Path) -> None:
     """The router applies joins from its own sync, which can trail the room's live roster, so one refresh catches up."""
-    dave = "@dave:localhost"
     room = _room(
         tmp_path,
         {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
@@ -417,12 +389,12 @@ async def test_a_member_who_joined_after_the_last_refresh_is_admitted_after_one_
     assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
     assert room.refreshes() == 1
 
-    room.client.joined_members.return_value = joined_members_response(ROOM, ALICE, BOB, CAROL, dave, *room.ids.values())
-    assert [workspace.name for workspace in await room.agents(dave)] == ["helper"]
+    room.client.joined_members.return_value = joined_members_response(ROOM, ALICE, BOB, CAROL, DAVE, *room.ids.values())
+    assert [workspace.name for workspace in await room.agents(DAVE)] == ["helper"]
     assert room.refreshes() == 2
 
     for _ in range(2):
-        assert (await room.agent(dave, room.ids["helper"])).name == "helper"
+        assert (await room.agent(DAVE, room.ids["helper"])).name == "helper"
         assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
     assert room.refreshes() == 2
 
@@ -600,14 +572,13 @@ async def test_requests_refresh_grants_only_when_they_need_it_and_share_one_refr
 @pytest.mark.asyncio
 async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp_path: Path) -> None:
     """A refresh already reading the room may predate a join, so grants that still lack the joined caller refresh again."""
-    dave = "@dave:localhost"
     room = _room(
         tmp_path,
         {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
     )
     assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
     before = room.client.joined_members.return_value
-    after = joined_members_response(ROOM, ALICE, BOB, CAROL, dave, *room.ids.values())
+    after = joined_members_response(ROOM, ALICE, BOB, CAROL, DAVE, *room.ids.values())
     reading = asyncio.Event()
     release = asyncio.Event()
 
@@ -640,7 +611,7 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
         ),
     )
     await reading.wait()
-    listing = asyncio.create_task(room.agents(dave))
+    listing = asyncio.create_task(room.agents(DAVE))
     # Dave's check reads the room's roster itself, then waits on the refresh in flight.
     await joining.wait()
     release.set()

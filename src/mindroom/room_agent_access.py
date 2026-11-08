@@ -22,7 +22,6 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import contact_room_ids
 from mindroom.entity_resolution import (
-    EntityIdentityRegistry,
     MissingManagedEntityAccountError,
     current_entity_id,
     entity_identity_registry,
@@ -76,13 +75,6 @@ _WRITERS = {
 }
 
 
-def _identities(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
-    try:
-        return entity_identity_registry(config, runtime_paths)
-    except MissingManagedEntityAccountError:
-        raise HTTPException(503, "Agent identities are not ready.") from None
-
-
 def _may_converse(
     requester_id: str,
     agent_name: str,
@@ -125,7 +117,7 @@ def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[
         )
 
 
-async def _refresh_memberships(
+async def _bring_memberships_current(
     requester_id: str,
     room_id: str,
     config: Config,
@@ -160,13 +152,17 @@ async def admit_room_agent(
     ``refresh_memberships`` refreshes ``memberships`` when they need it, or when its argument says they are stale, as
     they are while they lack a requester the room's live roster shows joined.
     """
-    name = _identities(config, runtime_paths).current_entity_name_for_user_id(agent_user_id, include_router=False)
+    try:
+        identities = entity_identity_registry(config, runtime_paths)
+    except MissingManagedEntityAccountError:
+        raise HTTPException(503, "Agent identities are not ready.") from None
+    name = identities.current_entity_name_for_user_id(agent_user_id, include_router=False)
     if name is None or name not in config.agents:
         raise HTTPException(403, "The selected user is not a current agent.")
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
-    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
     if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
@@ -195,7 +191,7 @@ async def _admitted_agents(
                 joined_agents.append((name, user_id))
     if not joined_agents:
         return []
-    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
     # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
     rooms_known = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
