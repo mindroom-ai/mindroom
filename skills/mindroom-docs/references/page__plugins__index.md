@@ -148,7 +148,7 @@ Keep in mind:
 - Only plugins already listed under `plugins:` are watched; a new plugin directory on disk is not loaded until you add it to `config.yaml`.
 - Callbacks already running finish on the old code; the new code applies to new events.
 - An editor that saves a file in two writes can briefly trigger an import error, followed by a successful reload on the second write.
-- Reload cancels `asyncio` tasks the plugin keeps in module-level variables; close connections and other resources yourself.
+- Reload cancels `asyncio` tasks the plugin keeps in module-level variables, before its old [lifespan](#plugin-lifecycle)'s stop code runs; close connections and other resources in the lifespan, and keep tasks its stop code still needs in the lifespan's own variables or `process_state`.
 
 ### Broken plugins
 
@@ -227,12 +227,13 @@ my-plugin/
 ├── oauth.py               # OAuth providers (optional)
 ├── routes.py              # HTTP routes (optional)
 ├── hooks.py               # Event hooks and automations (optional)
+├── lifecycle.py           # Start and stop code (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, a lifespan, and skills.
 Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
 `mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
@@ -247,6 +248,7 @@ Other `mindroom` modules can change in any release.
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
+  "lifecycle_module": "lifecycle.py",
   "skills": ["skills"],
   "reserved_namespaces": ["com.example.my_plugin."]
 }
@@ -260,6 +262,7 @@ Other `mindroom` modules can change in any release.
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
+| `lifecycle_module` | string | no | Relative path to the module defining `lifespan(lifecycle)`, the plugin's start and stop code; see [Plugin lifecycle](#plugin-lifecycle) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
@@ -1041,6 +1044,7 @@ MindRoom builds each plugin's app from its router as the plugin loads, and a rel
 A routes module that raises as it loads, has no `router` (`Plugin routes module must define router: APIRouter`), or has a router FastAPI refuses to serve (`Plugin router cannot be served: ...`), such as one with a route at `""` rather than `"/"`, costs the plugin only its routes: MindRoom logs `Plugin routes failed to load; serving none` with the reason, its paths answer 404, and its tools and hooks keep working, after a reload too.
 Only `mindroom plugins check` fails on such a routes module; `mindroom config validate` and `mindroom doctor` import it too, but only log it and still pass the config.
 Routes follow plugin reloads, so the next request after a reload runs the new code.
+Every plugin reload, and every config reload that changes `plugins:`, closes each open plugin websocket with code 1012 (service restart), so its client reconnects to the new code; a reload that fails leaves them open.
 A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
@@ -1049,7 +1053,7 @@ MindRoom adds no authentication of its own to these routes, so a route without `
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
-- The router's `lifespan` and `on_event` startup and shutdown handlers never run.
+- The router's `lifespan` and `on_event` startup and shutdown handlers never run; put such code in the plugin's [lifespan](#plugin-lifecycle).
 - A `GET` route answers `HEAD` with 405, as in any FastAPI app; list both in `@router.api_route(path, methods=["GET", "HEAD"])` if a client needs `HEAD`.
 - The `dependency_overrides` of MindRoom's main app do not reach plugin routes, so a test that overrides a dependency there does not change a plugin route.
 - `request.url_for` finds only the plugin's own route names, and `request.base_url` is the plugin's `/api/plugins/<name>/`.
@@ -1104,7 +1108,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
 `power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
-`is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
+`is_direct()` keeps its answer for a few minutes, but when the homeserver fails the lookup with an error it may count a direct room as not direct and does not keep that answer; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
 Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running in this room.` while the router is stopped or not in the room, as in a direct message with one agent.
@@ -1135,7 +1139,7 @@ async def change_modes(
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `modes()` or `set_modes()` states `"1.8"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `modes()` or `set_modes()` states `"1.9"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
@@ -1195,7 +1199,7 @@ async def greeting(ctx: Annotated[PluginContext, Depends(plugin_context)]) -> di
     return {"greeting": ctx.settings.get("greeting", "hello")}
 ```
 
-Each call returns the context of the config MindRoom serves at that moment, so a long-lived websocket calls `plugin_context(websocket)` again to see a later reload's settings.
+Each call returns the context of the config MindRoom serves at that moment, so a long-lived websocket calls `plugin_context(websocket)` again to see a later config reload; a reload that changes `plugins:`, such as this plugin's `settings`, closes the websocket instead, and the reconnected client reads the new settings.
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or in an OpenAI-compatible API request whose API key is [mapped to a user](https://docs.mindroom.chat/openai-api/#requester-identities-and-delegation).
 Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
@@ -1212,7 +1216,61 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 
 A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
 Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
-A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
+A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket that meets it closes with code 1013 and that reason, though the reload that disables the plugin closes its websockets with 1012 first.
+
+## Plugin lifecycle
+
+A plugin runs start and stop code from the module its manifest names as `lifecycle_module`, which defines `lifespan(lifecycle)` returning an async context manager.
+Code before its `yield` starts the plugin, and code after it stops the plugin, so use it to open connections, start background tasks, or launch child processes, and to close them again.
+This keeps a ticker running across reloads without a gap, and stops it once the plugin is disabled or MindRoom stops:
+
+```python
+# lifecycle.py
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from mindroom.plugin_api import PluginLifecycle
+
+
+async def tick(log_path: Path) -> None:
+    while True:
+        with log_path.open("a") as log:
+            log.write("tick\n")
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def lifespan(lifecycle: PluginLifecycle):
+    state = lifecycle.process_state
+    previous = state.get("ticker")
+    state["ticker"] = asyncio.create_task(tick(lifecycle.context().state_root / "ticks.log"))
+    if previous is not None:
+        previous.cancel()
+    yield
+    if lifecycle.stop_reason != "reload":
+        state.pop("ticker").cancel()
+```
+
+| Member | Value |
+|--------|-------|
+| `plugin_name` | The plugin's manifest `name` |
+| `context()` | The plugin's [context](#plugin-context) under the config MindRoom serves now; it raises once that config no longer loads the plugin |
+| `process_state` | A dict that every start of this plugin shares for as long as the MindRoom process runs; a reload cancels no task kept in it |
+| `stop_reason` | Set before the stop code runs: `"reload"` when the plugin's new lifespan already started and can take over `process_state`, `"disabled"` when no new lifespan did because a config change removed or disabled the plugin or its new code failed to load or start, and `"shutdown"` when MindRoom stops, after its agents have stopped |
+
+MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
+`mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
+The plugin's routes, tools, and hooks can import the lifecycle module, such as `from .lifecycle import STATE`, to use what its lifespan set up, and they share one copy of it with the lifespan.
+Keep what they share in the lifecycle module or in a helper module they all import: a tools, hooks, OAuth, or routes module that the lifecycle module imports can end up as a separate copy from the one MindRoom serves.
+A worker that loads a module importing the lifecycle module imports it too.
+Every plugin reload, and every config reload that changes `plugins:`, runs every plugin's code again, so it restarts every lifespan, including those of plugins that did not change.
+The new lifespan starts while the old one still runs, so hand over what only one holder can have, such as a listening port or a lock file, through `process_state` instead of opening it again, or the new start fails.
+The plugin's new tools, hooks, and routes are live while its new lifespan starts, so code that uses what the lifespan sets up handles it not being there yet.
+A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom cancels one that overran and carries on; a lifespan whose start failed never runs its stop code.
+A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
+Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
+A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## People, agents, and administrators
 

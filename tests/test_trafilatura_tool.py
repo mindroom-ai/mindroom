@@ -13,14 +13,13 @@ from typing import TYPE_CHECKING
 import agno.tools.trafilatura as agno_trafilatura
 import httpx
 import pytest
-from courlan import UrlStore
 from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
 import mindroom.tools.agno_compat_trafilatura as compat
 from mindroom import public_fetch
 from mindroom.tools.trafilatura import trafilatura_tools
-from tests.public_fetch_helpers import TrickleBody, serve, serve_routes
+from tests.public_fetch_helpers import TrickleBody, public_dns, serve, serve_routes
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -57,15 +56,10 @@ _DOCS_HTML = """
 """
 
 
-def _public_getaddrinfo(_host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
-    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
-
-
 @pytest.fixture(autouse=True)
 def _isolate_trafilatura(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use public test DNS, a fresh crawler URL store, and no crawler politeness delay."""
-    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", _public_getaddrinfo)
-    monkeypatch.setattr(spider, "URL_STORE", UrlStore(compressed=False, strict=False))
+    """Use public test DNS and no crawler politeness delay."""
+    public_dns(monkeypatch)
     monkeypatch.setitem(spider.DEFAULT_CONFIG["DEFAULT"], "SLEEP_TIME", "0")
 
 
@@ -289,6 +283,76 @@ def test_trafilatura_crawl_skips_a_discovered_link_it_refuses(
     assert all(url.startswith("https://example.com/") for url in requested_urls)
 
 
+def test_trafilatura_crawl_of_a_site_crawled_before_starts_with_fresh_crawl_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat crawl visits the site again and reports only the links it finds now, none from the earlier crawl."""
+    first, _requested_urls = _crawl(monkeypatch, httpx.Response(200, text=_DOCS_HTML))
+    guide_only = _ARTICLE_HTML.replace('href="/docs"', 'href="/guide"')
+
+    second, _requested_urls = _crawl(monkeypatch, httpx.Response(404), homepage_html=guide_only)
+
+    assert "https://example.com/docs" in json.loads(first)["known_links"]
+    assert set(json.loads(second)["known_links"]) == {"https://example.com/", "https://example.com/guide"}
+
+
+def test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two crawls of one site that run at the same time each report only the pages they found themselves."""
+    sections = ("alpha", "beta")
+    started = {section: threading.Event() for section in sections}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        section = request.url.path.strip("/")
+        if section in started:
+            # Each crawl reads its start page only once the other crawl has begun, so both run at once.
+            started[section].set()
+            (other,) = set(sections) - {section}
+            started[other].wait(timeout=10)
+            page = _ARTICLE_HTML.replace('href="/docs"', f'href="/{section}/docs"')
+        else:
+            page = _DOCS_HTML
+        return httpx.Response(200, stream=httpx.ByteStream(page.encode()))
+
+    serve(monkeypatch, handler)
+    toolkit = trafilatura_tools()()
+    results: dict[str, dict[str, object]] = {}
+
+    def crawl(section: str) -> None:
+        results[section] = json.loads(toolkit.crawl_website(f"https://example.com/{section}/"))
+
+    threads = [threading.Thread(target=crawl, args=(section,)) for section in sections]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    for section in sections:
+        assert set(results[section]["known_links"]) == {
+            f"https://example.com/{section}/",
+            f"https://example.com/{section}/docs",
+        }
+
+
+def test_trafilatura_crawler_called_outside_the_toolkit_keeps_crawling_with_its_own_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code that calls Trafilatura's crawler directly, not through the toolkit, still crawls with the crawler's store."""
+    trafilatura_tools()
+    monkeypatch.setattr(compat, "_process_url_store", compat._new_url_store())
+    serve_routes(
+        monkeypatch,
+        {
+            "https://example.com/": httpx.Response(200, text=_ARTICLE_HTML),
+            "https://example.com/docs": httpx.Response(200, text=_DOCS_HTML),
+        },
+    )
+
+    to_visit, known_links = spider.focused_crawler("https://example.com/")
+
+    assert to_visit == []
+    assert "https://example.com/docs" in known_links
+
+
 def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A batch longer than the per-call limit is refused before anything downloads."""
     requests = serve_routes(monkeypatch, {})
@@ -301,7 +365,7 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
 
 def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A download that keeps trickling ends at the call's time limit, and no later download starts."""
-    monkeypatch.setattr(compat, "_CALL_SECONDS", 0.3)
+    monkeypatch.setattr(compat, "CALL_SECONDS", 0.3)
     # Each download's own deadline stays well past the call's limit, and short enough to fail in seconds without it.
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 10)
     requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
@@ -321,7 +385,7 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A long robots.txt crawl delay ends the crawl's visits at half the time limit, and the other half extracts."""
-    monkeypatch.setattr(compat, "_CALL_SECONDS", 2.0)
+    monkeypatch.setattr(compat, "CALL_SECONDS", 2.0)
     homepage = "https://example.com/"
     serve_routes(
         monkeypatch,
