@@ -7,7 +7,8 @@ through ``LockedTurns``, which knows neither, so the dependency between them run
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -50,7 +51,7 @@ from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from datetime import datetime
 
     import nio
@@ -134,6 +135,20 @@ class LockedTurns:
     """Settle one locked reply turn and build what its settlement runs, for every owner of a reply turn."""
 
     deps: ReplyTurnDeps
+    # The turn of each run inside its bracket here, and whether an ender already took that turn's one end.
+    _live_turn_ends: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
+
+    def take_turn_end(self, turn_id: str) -> bool:
+        """Take a turn's one end; false when another ender took it while the turn's run was live here.
+
+        A departure can end an approval while its run is live, so the approval's end and the run's bracket both reach
+        for the end; whichever comes first takes it.
+        """
+        if self._live_turn_ends.get(turn_id):
+            return False
+        if turn_id in self._live_turn_ends:
+            self._live_turn_ends[turn_id] = True
+        return True
 
     def client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -470,7 +485,10 @@ class LockedTurns:
         """
         cancelled: asyncio.CancelledError | None = None
         resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
-        async with lifecycle.turn(approval_owns_end=partial(self._approval_owns_turn, request)):
+        async with (
+            self._live_turn(request.turn_id),
+            lifecycle.turn(approval_owns_end=partial(self._approval_owns_turn, request)),
+        ):
             async with session_started_on_creation(
                 reply_session,
                 correlation_id=lifecycle.identity.correlation_id,
@@ -510,16 +528,25 @@ class LockedTurns:
             if cancelled is not None:
                 raise cancelled
 
+    @asynccontextmanager
+    async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:
+        """Keep the turn's end open for one ender to take while its run is live here."""
+        self._live_turn_ends[turn_id] = False
+        try:
+            yield
+        finally:
+            del self._live_turn_ends[turn_id]
+
     async def _approval_owns_turn(self, request: ResponseRequest) -> bool:
         """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end.
 
         A run starts only once no approval owns its source, or resumes the approval that does, so any approval of its
-        source is its turn's.
+        source is its turn's. An approval that ended while the run was live may already have taken the end.
         """
         continuation = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
-        return continuation is not None
+        return continuation is not None or not self.take_turn_end(request.turn_id)
 
     async def _end_span_after_outcome(
         self,

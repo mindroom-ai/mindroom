@@ -133,6 +133,8 @@ async def _approval_turns(tmp_path: Path, seen: _Seen, *, requires_human: bool) 
         try:
             yield bot
             assert await wait_for_background_tasks(timeout=5, owner=bot)
+            # No turn's end stays open once its run left its bracket.
+            assert unwrap_extracted_collaborator(bot._response_runner).locked._live_turn_ends == {}
         finally:
             stop()
 
@@ -466,6 +468,39 @@ async def test_a_paused_turn_ends_cancelled_when_its_agent_leaves_the_room(tmp_p
         (EVENT_TURN_PAUSED, request.turn_id, None),
         (EVENT_TURN_ENDED, request.turn_id, "cancelled"),
     ]
+
+
+async def test_leaving_the_room_while_a_resume_runs_ends_the_turn_cancelled_once(tmp_path: Path) -> None:
+    """The departure drops the approval and cancels its running resume; the turn still ends once."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+        resuming = asyncio.Event()
+        response = asyncio.create_task(_respond(bot, resume=_resume_until_cancelled(resuming)))
+        await asyncio.wait_for(resuming.wait(), timeout=5)
+        await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
+        await bot._reply_runtime.departed(_target().room_id)
+        await asyncio.wait({response}, timeout=5)
+
+    assert _events(seen) == [
+        (EVENT_TURN_STARTED, None),
+        (EVENT_TURN_PAUSED, None),
+        (EVENT_TURN_RESUMED, None),
+        (EVENT_TURN_ENDED, "cancelled"),
+    ]
+
+
+async def test_leaving_the_room_while_a_run_waits_in_place_for_approval_ends_the_turn_cancelled_once(
+    tmp_path: Path,
+) -> None:
+    """The departure drops the approval a run waits for in place and cancels the run; the turn still ends once."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=True) as bot, _responding_in_place(bot) as response:
+        await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
+        await bot._reply_runtime.departed(_target().room_id)
+        await asyncio.wait({response}, timeout=5)
+        assert response.done()
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
 async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(tmp_path: Path) -> None:
