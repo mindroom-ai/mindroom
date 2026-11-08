@@ -547,7 +547,7 @@ def _transcription_usage(
 
 
 @dataclass(frozen=True, slots=True)
-class _SpeechTranscript:
+class SpeechTranscript:
     """What speech-to-text heard in one recording, and the provider's token usage for it, if it reported any."""
 
     text: str
@@ -582,7 +582,7 @@ async def transcribe_speech(
     *,
     mime_type: str | None = "audio/wav",
     language: str | None = None,
-) -> _SpeechTranscript | None:
+) -> SpeechTranscript | None:
     """Transcribe audio with the ``voice.stt`` speech service, through its OpenAI-compatible API.
 
     Records no usage: the caller records ``usage`` under its own kind.
@@ -647,7 +647,7 @@ async def transcribe_speech(
                 provider="openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None,
                 created_at=request_started_at,
             )
-        return _SpeechTranscript(text=result.get("text", "").strip(), usage=usage)
+        return SpeechTranscript(text=result.get("text", "").strip(), usage=usage)
 
     except TimeoutError:
         logger.warning("stt_transcription_timeout", timeout_seconds=_STT_TOTAL_TIMEOUT_SECONDS)

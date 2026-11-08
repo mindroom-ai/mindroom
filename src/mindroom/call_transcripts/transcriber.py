@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.voice.handler import SpeechTranscript
 
 logger = get_logger(__name__)
 
@@ -29,7 +30,7 @@ class SpeechTranscriber:
         """Return what was said, recording the speech service's usage; None when it could not be transcribed."""
         config = self.config()
         languages = config.calls.transcripts.languages
-        transcript = await transcribe_speech(
+        transcript: SpeechTranscript | None = await transcribe_speech(
             audio,
             config,
             self.runtime_paths,

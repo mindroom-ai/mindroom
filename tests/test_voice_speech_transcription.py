@@ -93,7 +93,7 @@ async def test_transcribe_speech_has_no_usage_when_the_provider_reports_none(
 
     transcript = await voice_handler.transcribe_speech(b"audio", _config(), test_runtime_paths(tmp_path))
 
-    assert transcript == voice_handler._SpeechTranscript(text="hello", usage=None)
+    assert transcript == voice_handler.SpeechTranscript(text="hello", usage=None)
 
 
 @pytest.mark.asyncio
