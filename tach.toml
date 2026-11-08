@@ -1468,7 +1468,6 @@ depends_on = [
     "mindroom.teams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
-    "mindroom.turn_model",
     "mindroom.interactive",
     "mindroom.reply_turn.request",
     "mindroom.reply_turn.enrichment",

@@ -73,7 +73,7 @@ from tests.scripted_agent_helpers import stop_turn, stored_runs
 from tests.usage_helpers import counted_total, counted_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -575,6 +575,42 @@ async def test_approval_settlement_preserves_tool_boundary(
     assert len(trace) == (1 if show_tool_calls else 0)
 
 
+async def _settle_scripted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: Callable[..., AsyncIterator[TextDelta]],
+    *,
+    quiet: bool = False,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Settle a claimed approval of ``general`` whose fresh attempt plays ``stream``, as its continuation drives it."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
+    continuation = approval_continuation(
+        approval_id="approval-status",
+        run_id="run-saved",
+        session_id="session",
+        room_id="!room:example.org",
+        requester_id="@user:example.org",
+        state="claimed",
+    )
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
+    return await _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
+        CollectedStreamPresentation(show_tool_calls=False),
+        prompt=continuation.request_body,
+        resume=TurnResume(CompletedAttempt()),
+        config=config,
+        runtime_paths=paths,
+        knowledge=None,
+        refresh_scheduler=None,
+        tool_trace_collector=[],
+        tool_context=turn_tool_context(config, paths, _identity("session")),
+        progress=None,
+        system_enrichment_items=(),
+        quiet=quiet,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [RunStatus.completed, RunStatus.error])
 @pytest.mark.parametrize("wire_status", [None, "completed", "error"])
@@ -585,17 +621,6 @@ async def test_approval_settlement_uses_typed_status(
     wire_status: str | None,
 ) -> None:
     """Display metadata cannot grant or deny completion of an approved response."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
-    identity = _identity("session")
-    continuation = approval_continuation(
-        approval_id="approval-status",
-        run_id="run-saved",
-        session_id="session",
-        room_id="!room:example.org",
-        requester_id="@user:example.org",
-        state="claimed",
-    )
 
     async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
         assert sinks.run_metadata_collector is not None
@@ -605,27 +630,11 @@ async def test_approval_settlement_uses_typed_status(
         yield TextDelta("Terminal response")
         sinks.on_completed(CompletedAttempt(status=status))
 
-    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
-    settlement = _stream_continuation_turn(
-        _continuation_turn_context(continuation, model_name="default", metadata=None),
-        CollectedStreamPresentation(show_tool_calls=False),
-        prompt=continuation.request_body,
-        resume=TurnResume(CompletedAttempt()),
-        config=config,
-        runtime_paths=paths,
-        knowledge=None,
-        refresh_scheduler=None,
-        tool_trace_collector=[],
-        tool_context=turn_tool_context(config, paths, identity),
-        progress=None,
-        system_enrichment_items=(),
-        quiet=False,
-    )
     if status is RunStatus.error:
         with pytest.raises(RuntimeError, match="Terminal response"):
-            await settlement
+            await _settle_scripted(tmp_path, monkeypatch, stream)
     else:
-        result = await settlement
+        result = await _settle_scripted(tmp_path, monkeypatch, stream)
         assert isinstance(result, CompletedApprovalRun)
         assert result.response_text == "Terminal response"
 
@@ -638,17 +647,6 @@ async def test_an_empty_last_attempt_completes_an_approved_response_only_for_a_q
     quiet: bool,
 ) -> None:
     """A quiet turn may end without an answer after its approval; any other turn's empty attempt fails it."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
-    identity = _identity("session")
-    continuation = approval_continuation(
-        approval_id="approval-empty",
-        run_id="run-saved",
-        session_id="session",
-        room_id="!room:example.org",
-        requester_id="@user:example.org",
-        state="claimed",
-    )
 
     async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
         assert sinks.on_completed is not None
@@ -657,27 +655,12 @@ async def test_an_empty_last_attempt_completes_an_approved_response_only_for_a_q
         return
         yield
 
-    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
-    settlement = _stream_continuation_turn(
-        _continuation_turn_context(continuation, model_name="default", metadata=None),
-        CollectedStreamPresentation(show_tool_calls=False),
-        prompt=continuation.request_body,
-        resume=TurnResume(CompletedAttempt()),
-        config=config,
-        runtime_paths=paths,
-        knowledge=None,
-        refresh_scheduler=None,
-        tool_trace_collector=[],
-        tool_context=turn_tool_context(config, paths, identity),
-        progress=None,
-        system_enrichment_items=(),
-        quiet=quiet,
-    )
     if quiet:
-        assert await settlement == CompletedApprovalRun(response_text="", metadata_content={})
+        settled = await _settle_scripted(tmp_path, monkeypatch, stream, quiet=True)
+        assert settled == CompletedApprovalRun(response_text="", metadata_content={})
     else:
         with pytest.raises(RuntimeError, match="did not complete"):
-            await settlement
+            await _settle_scripted(tmp_path, monkeypatch, stream)
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,7 @@ from mindroom.approval.continuation_rules import (
     continuation_facts,
     next_step,
 )
-from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.execution import AgentApprovalExecution, continuation_model
 from mindroom.approval.failure import (
     cancelled_failure,
     prepare_approval_failure,
@@ -124,7 +124,6 @@ from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1201,7 +1200,6 @@ class ApprovalContinuationRunner:
             request.response_envelope,
         )
         paused_answer = _paused_answer()
-        # The resumed work shows typing only where the turn's progress may show: never for a quiet turn.
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             async with response_typing_indicator(self.locked.client(), request, response_run_id=continuation.run_id):
                 if continuation.entity_kind == "team":
@@ -1216,16 +1214,10 @@ class ApprovalContinuationRunner:
                             run_id=continuation.run_id,
                             user_id=continuation.requester_id,
                             configured_team_name=continuation.entity_name,
-                            model_name=resolve_turn_model(
+                            model_name=continuation_model(
                                 self.deps.runtime.config,
                                 self.deps.runtime_paths,
-                                ModelScope(
-                                    entity=continuation.entity_name,
-                                    room_id=continuation.room_id,
-                                    thread_id=continuation.thread_id,
-                                    explicit=continuation.runtime_model_name,
-                                ),
-                                None,
+                                continuation,
                             ).model_name,
                             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
                             member_model_names=dict(continuation.team_member_model_names) or None,

@@ -68,7 +68,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - Deleting the message a held reply answers cancels the approval, as a Stop would, and removes the reply.
 - A released approval hands its sources back to replay, unless a Stop is recorded: the reply then ends `cancelled` instead of replaying what the user stopped.
 - A silent-schedule answer that reports nothing after its approval, resumed or approved in place, ends the message its pause showed as a completed answer without the no-report token, or with the nothing-to-show note's text when nothing else is left; any other answer a resume withholds fails its approval.
-  Final delivery alone decides it, so every path that finishes a silent turn, agent or team, keeps it; a team that reports nothing hands delivery its leader's bare answer, as its turn does, so the message ends with the leader's own text or the note.
+  Final delivery alone decides it, so every path that finishes a silent turn, agent or team, keeps it.
   Redacting that message was rejected, because a redaction removes from history every run that wrote or read the message, which includes the silent run itself.
 
 ### Lifetime

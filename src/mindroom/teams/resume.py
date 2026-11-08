@@ -261,9 +261,9 @@ def settle_quiet_team_answer(
     ):
         return answer
     presentation.consensus = without_no_report_lines(presentation.consensus)
-    presentation.per_member.update(
-        {member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()},
-    )
+    presentation.per_member = {
+        member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()
+    }
     return None
 
 
@@ -468,16 +468,17 @@ async def continue_paused_team_run(
             raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
+        # Each member run of this team run is a stored row of it, the resume's updated in place; read only when needed.
+        member_runs = (row for row in storage.session.runs if row.parent_run_id == run_id)
+        quiet_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        # Each member run of this team run is a stored row of it, the resume's updated in place.
-        member_runs = [row for row in storage.session.runs if row.parent_run_id == run_id]
-        silent_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         response_text = (
-            silent_answer
-            if silent_answer is not None
-            else presentation.render_body(finished=True)
-            or (format_team_header(members.display_names) + NO_TEAM_RESPONSE)
+            quiet_answer
+            if quiet_answer is not None
+            else (
+                presentation.render_body(finished=True) or format_team_header(members.display_names) + NO_TEAM_RESPONSE
+            )
         )
         return CompletedApprovalRun(
             response_text=response_text,

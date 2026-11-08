@@ -639,8 +639,7 @@ class _TeamTurn:
         header = format_team_header(attempt.members.display_names)
         # The text records the document the attempt's events built and its failed runs' reasons, in the configured
         # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
-        # display chrome, not replayable assistant text. A quiet scheduled reply that reports nothing records the
-        # leader's bare answer.
+        # display chrome, not replayable assistant text.
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)

@@ -442,9 +442,10 @@ def _team_scope(turn: _Turn) -> HistoryScope:
     )
 
 
-async def _team_reply(turn: _Turn) -> SourceFate:
+async def _team_reply(turn: _Turn, request: ResponseRequest | None = None) -> SourceFate:
+    """Answer ``request``, a plain message unless given, with the collaborate team of both members."""
     return await turn.runner.generate_team_response_helper(
-        _plain_request(_target()),
+        request or _plain_request(_target()),
         member_names=list(_MEMBERS),
         team_mode="collaborate",
     )
@@ -961,15 +962,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
     _require_echo_approval(turn)
     try:
         with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
-            fate = (
-                await turn.runner.generate_team_response_helper(
-                    request,
-                    member_names=list(_MEMBERS),
-                    team_mode="collaborate",
-                )
-                if team
-                else await turn.runner.generate_response(request)
-            )
+            fate = await (_team_reply(turn, request) if team else turn.runner.generate_response(request))
             assert fate == Owned()
         assert await wait_for_background_tasks(timeout=5, owner=turn.bot._runtime_view)
     finally:
@@ -1129,12 +1122,24 @@ async def test_a_silent_schedule_s_waiting_message_keeps_its_narration_without_t
 @pytest.mark.usefixtures("echo_tool")
 @pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
 @pytest.mark.parametrize(
-    ("finding", "checker_answer"),
+    ("finding", "checker_answer", "members_shown", "members_hidden"),
     [
-        pytest.param("", "NO_REPLY", id="nothing-found"),
-        pytest.param("Writer found a leak.", "NO_REPLY", id="member-finding"),
+        pytest.param("", "NO_REPLY", None, None, id="nothing-found"),
+        pytest.param(
+            "Writer found a leak.",
+            "NO_REPLY",
+            "**Writer**:\n\n🔧 `echo` [1]\n\nWriter found a leak.",
+            "**Writer**: Writer found a leak.",
+            id="member-finding",
+        ),
         # The checker reported before the writer's call paused, so its run ended before the resume.
-        pytest.param("NO_REPLY", "Checker found a leak.", id="finding-before-the-pause"),
+        pytest.param(
+            "NO_REPLY",
+            "Checker found a leak.",
+            "**Writer**:\n\n🔧 `echo` [1]\n\n**Checker**: Checker found a leak.",
+            "**Checker**: Checker found a leak.",
+            id="finding-before-the-pause",
+        ),
     ],
 )
 async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_approval(
@@ -1143,6 +1148,8 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
     show_tool_calls: bool,
     finding: str,
     checker_answer: str,
+    members_shown: str | None,
+    members_hidden: str | None,
 ) -> None:
     """Pins a silent schedule's team whose leader answers the no-report token after a member's approved call.
 
@@ -1167,24 +1174,12 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
     assert (await turn.reply()).state is rl.ReplyState.COMPLETED
     assert turn.homeserver.statuses[-1] == "completed"
     assert turn.bot.client.room_typing.await_args_list == []
-    if not finding:
+    if members_shown is None:
         ended = "Done."
-    elif checker_answer != "NO_REPLY" and show_tool_calls:
-        ended = (
-            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n**Checker**: {checker_answer}"
-            "\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
-        )
-    elif checker_answer != "NO_REPLY":
-        ended = (
-            f"{_TEAM_HEADER}**Checker**: {checker_answer}\n\n\n*No team consensus - showing individual responses only*"
-        )
     elif show_tool_calls:
-        ended = (
-            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n{finding}"
-            "\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
-        )
+        ended = f"{_TEAM_HEADER}{members_shown}\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
     else:
-        ended = f"{_TEAM_HEADER}**Writer**: {finding}\n\n\n*No team consensus - showing individual responses only*"
+        ended = f"{_TEAM_HEADER}{members_hidden}\n\n\n*No team consensus - showing individual responses only*"
     # The pause's message is the only one, and its end is an edit of it.
     assert len(turn.homeserver.writes) == 2
     assert turn.homeserver.bodies[-1] == ended

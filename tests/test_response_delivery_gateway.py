@@ -576,12 +576,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """Display-only tool markers must not turn a silent no-report result into a visible response."""
+        """Display-only tool markers must not turn a silent no-report result into a visible response.
+
+        The marker comes last, so only its stripping leaves the token as the last line.
+        """
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
         request = replace(
             self._final_request(
-                f"🔧 `run_shell_command` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}",
+                f"{SILENT_SCHEDULE_NO_REPLY_TOKEN}\n\n🔧 `run_shell_command` [1]",
                 source_kind=SILENT_SCHEDULE_SOURCE_KIND,
             ),
             tool_trace=[

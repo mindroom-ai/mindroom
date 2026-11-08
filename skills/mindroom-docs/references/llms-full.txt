@@ -4863,7 +4863,7 @@ A successful run whose final response is empty, whitespace, or has `NO_REPLY` (a
 A final `NO_REPLY` line means do not notify, so a report must not end with it.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
-When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends showing what it already showed, such as the run's text and tool calls, without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
+When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends with the run's text and tool calls without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
 A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
 After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.

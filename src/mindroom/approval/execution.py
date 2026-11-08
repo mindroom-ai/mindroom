@@ -55,7 +55,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
@@ -158,8 +158,8 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
             presentation.complete_tool(tool.call)
 
 
-def _continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
-    """Return the model a paused agent run resumes on: the one it ran, else the one its room and thread choose now."""
+def continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
+    """Return the model a paused run resumes on: the one it ran, else the one its room and thread choose now."""
     return resolve_turn_model(
         config,
         runtime_paths,
@@ -462,7 +462,7 @@ class AgentApprovalExecution:
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
         # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
-        model = _continuation_model(config, self.runtime_paths, continuation)
+        model = continuation_model(config, self.runtime_paths, continuation)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,
@@ -493,11 +493,9 @@ class AgentApprovalExecution:
         storage = scope_run_storage(scope_context)
         try:
             with helper_usage_context(scope_context):
-                operation: Callable[[], Awaitable[CompletedApprovalRun | PausedAttempt]]
                 if cli_call is not None:
                     expected_worker_target = tool_context.resolve_worker_target()
-
-                    async def recover_cli_call() -> CompletedApprovalRun | PausedAttempt:
+                    with tool_runtime_context(tool_context):
                         recovered = await continue_cli_approval(
                             build,
                             continuation,
@@ -537,18 +535,15 @@ class AgentApprovalExecution:
                             system_enrichment_items=system_enrichment_items,
                             quiet=quiet,
                         )
-
-                    operation = recover_cli_call
-                else:
-                    # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds
-                    # each approval to the toolkit it was granted for before the agent's tools are reached.
-                    validate_approval_tool_owners(
-                        tool_owners_by_agent(build),
-                        approved_calls,
-                        pending_approval_requirements(persisted),
-                    )
-                    operation = partial(
-                        _continue_persisted_agent,
+                # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds each
+                # approval to the toolkit it was granted for before the agent's tools are reached.
+                validate_approval_tool_owners(
+                    tool_owners_by_agent(build),
+                    approved_calls,
+                    pending_approval_requirements(persisted),
+                )
+                with tool_runtime_context(tool_context):
+                    return await _continue_persisted_agent(
                         build,
                         continuation,
                         persisted,
@@ -565,8 +560,5 @@ class AgentApprovalExecution:
                         system_enrichment_items=system_enrichment_items,
                         quiet=quiet,
                     )
-                with tool_runtime_context(tool_context):
-                    result = await operation()
         finally:
             await finalize_consumption()
-        return result
