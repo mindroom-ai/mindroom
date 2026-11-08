@@ -318,9 +318,11 @@ def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pyte
     assert len(requests) == 1
 
 
-def test_trafilatura_crawl_stops_at_its_time_limit_despite_a_long_crawl_delay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A robots.txt crawl delay cannot hold a crawl past the call's time limit, which also ends its extraction."""
-    monkeypatch.setattr(compat, "_CALL_SECONDS", 0.3)
+def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extracts_what_it_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long robots.txt crawl delay ends the crawl's visits at half the time limit, and the other half extracts."""
+    monkeypatch.setattr(compat, "_CALL_SECONDS", 2.0)
     homepage = "https://example.com/"
     serve_routes(
         monkeypatch,
@@ -337,8 +339,9 @@ def test_trafilatura_crawl_stops_at_its_time_limit_despite_a_long_crawl_delay(mo
     crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
 
     assert time.monotonic() - started < 5
-    assert {"https://example.com/docs", "https://example.com/guide"} <= set(crawl["known_links"])
-    assert crawl["extracted_content"] == {}
+    (unvisited,) = crawl["to_visit"]
+    assert unvisited in {"https://example.com/docs", "https://example.com/guide"}
+    assert "Configure a bridge" in crawl["extracted_content"][unvisited]
 
 
 def test_trafilatura_factory_installs_guarded_fetchers() -> None:
@@ -348,4 +351,5 @@ def test_trafilatura_factory_installs_guarded_fetchers() -> None:
     assert agno_trafilatura.fetch_url is compat._fetch_url
     assert spider.fetch_url is compat._fetch_url
     assert spider.fetch_response is compat._crawl_fetch_response
+    assert spider.crawl_page is compat._crawl_page
     assert spider.sleep is compat._pause

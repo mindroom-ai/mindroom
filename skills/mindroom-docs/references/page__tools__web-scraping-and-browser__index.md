@@ -69,7 +69,8 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that, which `extract_content=True` reports individually.
-`extract_batch()` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 120 seconds and returns what it gathered.
+`extract_batch()` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
+A crawl stops visiting new pages after 90 seconds, so the pages it found can still be extracted in the rest of that time.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
