@@ -431,6 +431,28 @@ async def test_a_resume_cut_short_before_its_run_starts_ends_the_turn_once(
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, outcome)]
 
 
+async def test_a_resume_a_shutdown_hands_to_replay_ends_no_turn(tmp_path: Path) -> None:
+    """A resume released to replay ends nothing: its sources answer again."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+        resuming = asyncio.Event()
+        response = asyncio.create_task(_respond(bot, resume=_resume_until_cancelled(resuming)))
+        await asyncio.wait_for(resuming.wait(), timeout=5)
+        request_task_cancel(response, process_shutdown=True)
+        await asyncio.wait({response}, timeout=5)
+        failing = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
+        assert failing is not None
+        await dispatch_approval(
+            unwrap_extracted_collaborator(bot._response_runner).approvals,
+            failing,
+            target=_target(),
+        )
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
+        assert await bot._reply_runtime.store.is_pending("$event")
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_RESUMED, None)]
+
+
 async def test_a_paused_turn_ends_cancelled_when_its_agent_leaves_the_room(tmp_path: Path) -> None:
     """Leaving the room drops the approval a turn waits for, and with it ends the turn."""
     seen: _Seen = []

@@ -511,11 +511,15 @@ class LockedTurns:
                 raise cancelled
 
     async def _approval_owns_turn(self, request: ResponseRequest) -> bool:
-        """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end."""
+        """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end.
+
+        A run starts only once no approval owns its source, or resumes the approval that does, so any approval of its
+        source is its turn's.
+        """
         continuation = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
-        return continuation is not None and continuation.turn_id == request.turn_id
+        return continuation is not None
 
     async def _end_span_after_outcome(
         self,
