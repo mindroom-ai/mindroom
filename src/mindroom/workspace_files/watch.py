@@ -44,8 +44,8 @@ _FILTER = watchfiles.DefaultFilter(
 
 # Files and links; like folder listings, a scan leaves out pipes, sockets and devices.
 _LISTED = frozenset({stat.S_IFREG, stat.S_IFLNK})
-# What a scan saw of one entry: its type, and for anything but a folder its size and change time; and its inode, so a
-# replaced entry counts as changed.
+# What a scan saw of one entry: its type, and for anything but a folder its size and modification time; and its inode,
+# so a replaced entry counts as changed.
 type _Seen = tuple[int, int, int, int]
 
 
@@ -133,8 +133,6 @@ def _scan(root: Path) -> dict[str, _Seen]:
                             folders.append(relative)
                     elif kind in _LISTED:
                         seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
-                    else:
-                        continue
                     if len(seen) == _MAX_ENTRIES:
                         return seen
     return seen
@@ -154,14 +152,14 @@ async def _run(watch: _Watch) -> None:
     loop = asyncio.get_running_loop()
     try:
         before = await asyncio.to_thread(_scan, watch.root)
-        watch.following.set()
-        while not watch.stop.is_set():
-            started = loop.time()
-            after = await asyncio.to_thread(_scan, watch.root)
-            if paths := _changed(before, after):
-                for follower in watch.followers:
-                    follower.add(paths)
-            before = after
-            await _rest(watch, max(_INTERVAL_SECONDS, (loop.time() - started) * _REST_FACTOR))
     finally:
+        # Followers wait for the first scan; one that fails must not keep them waiting.
         watch.following.set()
+    while not watch.stop.is_set():
+        started = loop.time()
+        after = await asyncio.to_thread(_scan, watch.root)
+        if paths := _changed(before, after):
+            for follower in watch.followers:
+                follower.add(paths)
+        before = after
+        await _rest(watch, max(_INTERVAL_SECONDS, (loop.time() - started) * _REST_FACTOR))

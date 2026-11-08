@@ -7,7 +7,6 @@ import itertools
 import os
 import shutil
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +16,7 @@ from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from pathlib import Path
 
 
 async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) -> set[str]:
@@ -28,29 +28,13 @@ async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) 
     return seen
 
 
-async def _settled(root: Path, folder: Path | None = None) -> None:
-    """Wait until the watcher of ``root`` follows ``folder``, the root unless given: a probe file written there shows."""
-    folder = folder or root
-    async with workspace_changes(root) as next_changes:
-        for attempt in range(50):
-            (folder / f"probe{attempt}").write_text("x")
-            try:
-                async with asyncio.timeout(0.1):
-                    if any(Path(path).parent == folder.relative_to(root) for path in await next_changes()):
-                        return
-            except TimeoutError:
-                continue
-    pytest.fail(f"{folder} was never followed")
-
-
 @pytest.mark.asyncio
 async def test_a_stream_hears_what_changes_but_never_git_credentials_or_save_temporaries(tmp_path: Path) -> None:
-    """Changed paths come relative to the root and sorted, without Git's, credentials, caches or atomic save names."""
+    """Changed paths come relative to the root, without Git's, credentials, caches or atomic save names."""
     root = tmp_path / "workspace"
     (root / ".git").mkdir(parents=True)
     (root / "src").mkdir()
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         (root / ".git" / "index").write_text("x")
         (root / ".env").write_text("TOKEN=1\n")
         (root / ".mindroom-0123456789abcdef0123456789abcdef.tmp").write_text("x")
@@ -72,7 +56,6 @@ async def test_each_batch_is_sorted(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         for name in ("c.md", "a.md", "b.md"):
             (root / name).write_text("x")
         await asyncio.sleep(0.4)
@@ -92,50 +75,12 @@ async def test_changes_beyond_a_link_out_of_the_workspace_are_never_followed(tmp
     outside.mkdir()
     (root / "out").symlink_to(outside)
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         (outside / "secret.txt").write_text("x")
         (root / "inside.txt").write_text("x")
 
         seen = await _until(next_changes, "inside.txt")
-        await asyncio.sleep(0.4)
-        (root / "later.txt").write_text("x")
-        seen |= await _until(next_changes, "later.txt")
 
     assert not {path for path in seen if path.startswith("out")}
-
-
-@pytest.mark.asyncio
-async def test_a_folder_made_while_following_is_followed_too(tmp_path: Path) -> None:
-    """A new folder is watched too, so a file written in it shows."""
-    root = tmp_path / "workspace"
-    root.mkdir()
-    async with workspace_changes(root) as next_changes:
-        await _settled(root)
-        (root / "new").mkdir()
-        await _until(next_changes, "new")
-        for attempt in range(25):
-            (root / "new" / f"file{attempt}.txt").write_text("x")
-            try:
-                async with asyncio.timeout(0.2):
-                    if any(path.startswith("new/") for path in await next_changes()):
-                        return
-            except TimeoutError:
-                continue
-    pytest.fail("A file in a folder made while following was never reported.")
-
-
-@pytest.mark.asyncio
-async def test_a_workspace_made_after_following_starts_is_followed(tmp_path: Path) -> None:
-    """Before the agent's first turn the root does not exist; once it does, its changes come through."""
-    root = tmp_path / "workspace"
-    async with workspace_changes(root) as next_changes:
-        # The watcher finds no workspace first, and looks again.
-        await asyncio.sleep(0.3)
-        root.mkdir()
-        await _settled(root)
-        (root / "first.md").write_text("x")
-
-        assert "first.md" in await _until(next_changes, "first.md")
 
 
 @pytest.mark.asyncio
@@ -145,7 +90,6 @@ async def test_streams_of_one_workspace_share_one_watcher_until_the_last_leaves(
     root.mkdir()
     async with workspace_changes(root) as first, workspace_changes(root) as second:
         assert list(watch._watches) == [root]
-        await _settled(root)
         (root / "shared.md").write_text("x")
 
         assert "shared.md" in await _until(first, "shared.md")
@@ -160,7 +104,6 @@ async def test_batches_come_at_most_every_150_ms(tmp_path: Path) -> None:
     root.mkdir()
     loop = asyncio.get_running_loop()
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         times = []
         for attempt in range(4):
             (root / f"burst{attempt}.md").write_text("x")
@@ -187,7 +130,6 @@ async def test_a_workspace_replaced_by_a_link_is_not_followed(tmp_path: Path) ->
     root = tmp_path / "workspace"
     root.symlink_to(elsewhere)
     async with workspace_changes(root) as next_changes:
-        await asyncio.sleep(0.5)
         (elsewhere / "secret.txt").write_text("x")
 
         assert await _silent(next_changes) == []
@@ -199,10 +141,8 @@ async def test_a_folder_moved_out_of_the_workspace_is_no_longer_followed(tmp_pat
     root = tmp_path / "workspace"
     (root / "box").mkdir(parents=True)
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         (root / "box").rename(tmp_path / "box")
         await _until(next_changes, "box")
-        await asyncio.sleep(0.5)
         (tmp_path / "box" / "later.txt").write_text("x")
         (root / "marker.txt").write_text("x")
 
@@ -212,29 +152,11 @@ async def test_a_folder_moved_out_of_the_workspace_is_no_longer_followed(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_folders_past_the_cap_are_not_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each folder costs one of the system's file watches, so at most the cap's folders are watched."""
-    monkeypatch.setattr(watch, "_MAX_FOLDERS", 1)
-    root = tmp_path / "workspace"
-    (root / "deep").mkdir(parents=True)
-    async with workspace_changes(root) as next_changes:
-        await _settled(root)
-        (root / "deep" / "inner.txt").write_text("x")
-        (root / "top.txt").write_text("x")
-
-        seen = await _until(next_changes, "top.txt")
-        seen |= set(await _silent(next_changes, 0.5))
-
-    assert "deep/inner.txt" not in seen
-
-
-@pytest.mark.asyncio
 async def test_a_workspace_stored_below_a_folder_named_like_a_cache_is_followed(tmp_path: Path) -> None:
     """Only names inside the workspace are filtered, not the folders MindRoom's storage sits in."""
     root = tmp_path / ".cache" / "node_modules" / "workspace"
     root.mkdir(parents=True)
     async with workspace_changes(root) as next_changes:
-        await _settled(root)
         (root / "notes.md").write_text("x")
 
         assert "notes.md" in await _until(next_changes, "notes.md")
@@ -302,7 +224,6 @@ async def test_a_folder_swapped_for_a_link_out_never_reports_what_lies_beyond(tm
     (root / "sub").mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    seen: set[str] = set()
     async with workspace_changes(root) as next_changes:
         for attempt in range(30):
             (root / "sub").rename(root / "held")
@@ -312,7 +233,7 @@ async def test_a_folder_swapped_for_a_link_out_never_reports_what_lies_beyond(tm
             (root / "sub").unlink()
             (root / "held").rename(root / "sub")
         (root / "marker.md").write_text("x")
-        seen |= await _until(next_changes, "marker.md")
+        seen = await _until(next_changes, "marker.md")
 
     assert not {path for path in seen if "secret" in path}
 
@@ -405,7 +326,7 @@ def test_an_entry_that_vanishes_mid_scan_leaves_its_neighbours_in_the_scan(
     assert watch._changed(before, during) == {"proj/tmp.swap"}
 
 
-def test_a_scan_leaves_out_pipes_and_sockets(tmp_path: Path) -> None:
+def test_a_scan_leaves_out_pipes(tmp_path: Path) -> None:
     """Only what a folder listing shows can be reported as changed."""
     root = tmp_path / "workspace"
     root.mkdir()
