@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import httpx
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     import pytest
+
+
+class TrickleBody(httpx.AsyncByteStream):
+    """A response body that arrives one byte every 20 ms for as long as it is read."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield one byte at a time, without end."""
+        while True:
+            await asyncio.sleep(0.02)
+            yield b"x"
 
 
 def serve(

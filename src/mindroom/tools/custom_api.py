@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import httpx
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.public_fetch import run_fetch_sync
+from mindroom.public_fetch import CONNECT_TIMEOUT_SECONDS, run_fetch_sync
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
@@ -231,12 +231,14 @@ def custom_api_tools() -> type[CustomApiTools]:
             request_headers["Accept-Encoding"] = "identity"
 
             async def send() -> str:
+                # The timeout covers the request but not closing the client after a response was read.
                 async with (
-                    asyncio.timeout(self.timeout),
                     httpx.AsyncClient(
                         transport=ServerFetchAsyncHTTPTransport(verify=self.verify_ssl),
                         event_hooks=event_hooks,
+                        timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
                     ) as client,
+                    asyncio.timeout(self.timeout),
                 ):
                     request = client.build_request(
                         method=method,
@@ -245,7 +247,6 @@ def custom_api_tools() -> type[CustomApiTools]:
                         data=data,
                         json=json_data,
                         headers=request_headers,
-                        timeout=self.timeout,
                     )
                     return await _read_final_response(client, await client.send(request, auth=auth, stream=True))
 

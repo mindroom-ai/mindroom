@@ -305,7 +305,7 @@ async def test_a_server_that_trickles_bytes_fails_at_the_deadline(
 async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each address gets its own connect timeout, so a dead first address leaves the deadline for the next one."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 1.0)
-    monkeypatch.setattr(public_fetch, "_CONNECT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(public_fetch, "CONNECT_TIMEOUT_SECONDS", 0.1)
     dead, live = "93.184.216.34", "93.184.216.35"
 
     _public_dns(monkeypatch, (dead, live))

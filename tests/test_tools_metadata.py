@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import agno.tools.crawl4ai as agno_crawl4ai
+import httpcore
 import httpx
 import pytest
 from agno.tools import Toolkit
@@ -77,7 +78,7 @@ from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
 from tests.conftest import preserved_builtin_tools
-from tests.public_fetch_helpers import serve
+from tests.public_fetch_helpers import TrickleBody, serve
 
 _BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -641,15 +642,6 @@ def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(sent) == 11
 
 
-class _TrickleBody(httpx.AsyncByteStream):
-    """A response body that arrives one byte every 20 ms for as long as it is read."""
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        while True:
-            await asyncio.sleep(0.02)
-            yield b"x"
-
-
 @pytest.mark.parametrize(
     ("tool_function", "error"),
     [
@@ -678,7 +670,7 @@ def test_web_tools_give_up_on_a_server_that_trickles_its_response(
     """A server that keeps sending slowly ends the tool call at the download deadline with the tool's error."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.3)
     call = tool_function()
-    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=_TrickleBody()))
+    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
     started = time.monotonic()
 
     result = call("http://93.184.216.34/slow")
@@ -707,6 +699,57 @@ def test_custom_api_tool_returns_at_its_timeout_while_a_hostname_lookup_hangs(mo
 
     assert payload == {"error": "Request failed: the request did not finish within 0.3 seconds"}
     assert elapsed < 2
+
+
+def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An address that drops connection attempts uses up only its own connect limit, not the request's timeout."""
+    monkeypatch.setattr(custom_api_module, "CONNECT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 443))
+            for address in ("93.184.216.34", "93.184.216.35")
+        ],
+    )
+    dialed: list[tuple[str, float | None]] = []
+
+    async def connect_tcp(
+        _backend: object,
+        host: str,
+        _port: int,
+        timeout: float | None = None,  # noqa: ASYNC109 - Signature must match httpcore.
+        **_kwargs: object,
+    ) -> None:
+        dialed.append((host, timeout))
+        if host == "93.184.216.34":
+            # Nothing answers, so the attempt lasts until its connect limit.
+            await asyncio.sleep(timeout or 0)
+            raise httpcore.ConnectTimeout
+        msg = "connection refused"
+        raise httpcore.ConnectError(msg)
+
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect_tcp)
+
+    payload = json.loads(custom_api_tools()(timeout=1).make_request("https://api.example.com/data"))
+
+    assert dialed == [("93.184.216.34", 0.1), ("93.184.216.35", 0.1)]
+    assert payload == {"error": "Request failed: connection refused"}
+
+
+def test_custom_api_tool_returns_a_response_that_arrived_before_closing_the_connection_outlasted_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout bounds the request, so a response read in time is returned even when closing takes longer."""
+    _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={"ok": True}))
+
+    async def close_slowly(_transport: httpx.MockTransport) -> None:
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(httpx.MockTransport, "aclose", close_slowly)
+
+    payload = json.loads(custom_api_tools()(timeout=0.2).make_request("https://example.com/data"))
+
+    assert payload["data"] == {"ok": True}
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
