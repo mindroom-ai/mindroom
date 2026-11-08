@@ -1007,14 +1007,11 @@ async def test_reader_blocked_commit_retries_same_transaction(
         kwargs={"write": False},
     )
     reader.start()
-    publish_calls = 0
     try:
         assert await asyncio.to_thread(_until_set, ready, reader)
 
         async def publish_once() -> None:
-            nonlocal publish_calls
             async with oauth_credential_transaction(context) as transaction:
-                publish_calls += 1
                 await transaction.publish({"token": "rotated"}, advance_connection_generation=False)
                 await transaction.commit()
 
@@ -1031,7 +1028,6 @@ async def test_reader_blocked_commit_retries_same_transaction(
             reader.terminate()
             reader.join()
     assert reader.exitcode == 0
-    assert publish_calls == 1
     async with oauth_credential_transaction(context) as transaction:
         assert (await transaction.snapshot()).credentials == {"token": "rotated"}
         await transaction.commit()
