@@ -129,7 +129,7 @@ class SentMessage:
     mentions: Sequence[str] | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class Room:
     """A room as the plugin's tests set it up, which MindRoom's router is joined to, and what was sent to it."""
 
