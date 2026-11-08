@@ -34,7 +34,7 @@ __all__ = ["ClientUser", "client_stream", "plugin_context", "require_client_user
 # A stream in a room rechecks its user's membership this long after each check, and gives a check this long.
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
 _MEMBERSHIP_RECHECK_TIMEOUT_SECONDS = 15.0
-# The websocket counterpart of HTTP 401, in the range for applications: the client signs in again.
+# The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 
 
