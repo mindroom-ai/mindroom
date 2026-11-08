@@ -13,13 +13,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Self, cast
 from uuid import uuid4
 
 import nio
 from anyio.from_thread import start_blocking_portal
 from fastapi import FastAPI
-from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -28,7 +27,6 @@ from mindroom.api.client_sessions import SESSION_PROTOCOL, client_session_store
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.connection_agents import AgentToolContext
 from mindroom.api.plugin_routes import mount_plugin_routes
-from mindroom.api.validation_errors import validation_error_response
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
@@ -140,7 +138,7 @@ class Room:
     power_levels: dict[str, Any] | None = None
     """The content of the room's ``m.room.power_levels``; None for a room without one."""
     direct: bool = False
-    """Whether its members joined it as a direct message; MindRoom counts any room of two members as one too."""
+    """Whether its members joined it as a direct message; the room has no name, so one member alone with the router counts too."""
     history_visibility: str = "shared"
     key: str | None = None
     """The room key an agent's ``rooms`` or an ``access`` rule names this room by."""
@@ -149,14 +147,15 @@ class Room:
 
 def _state_events(room: Room, joined: Mapping[str, str | None]) -> list[dict[str, Any]]:
     """Return the room's state as a homeserver lists it, each of the ``joined`` joined since the epoch."""
-    events = [
+    events: list[tuple[str, str, Mapping[str, Any]]] = [
         ("m.room.history_visibility", "", {"history_visibility": room.history_visibility}),
-        *((("m.room.power_levels", "", room.power_levels),) if room.power_levels is not None else ()),
-        *(
-            ("m.room.member", user, {"membership": "join", "displayname": name, "is_direct": room.direct})
-            for user, name in joined.items()
-        ),
     ]
+    if room.power_levels is not None:
+        events.append(("m.room.power_levels", "", room.power_levels))
+    events.extend(
+        ("m.room.member", user, {"membership": "join", "displayname": name, "is_direct": room.direct})
+        for user, name in joined.items()
+    )
     return [
         {"type": kind, "state_key": key, "content": content, "origin_server_ts": 0} for kind, key, content in events
     ]
@@ -181,6 +180,13 @@ class _PluginClient(TestClient):
         # One event loop serves every client of a load, as one server does, so sessions and streams can share it.
         self.portal = portal
         self._offers = [SESSION_PROTOCOL, f"{SESSION_PROTOCOL}.{token}"] if token is not None else []
+
+    def __enter__(self) -> Self:
+        """Keep serving on the load's event loop, which Starlette's own would replace; the app has no lifespan."""
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        """Leave the load's event loop to the block, which stops it."""
 
     def websocket_connect(
         self,
@@ -228,18 +234,15 @@ class LoadedPlugin:
             runtime_paths=runtime_paths,
             hook_context=_StandIn("router hooks", send_message=self._send),
         )
-        self._app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
+        self._app = FastAPI()
         state = ensure_app_state(self._app)
         state.api_state = ApiState(threading.Lock(), ApiSnapshot(1, runtime_paths, runtime_config=config))
+        bots = {ROUTER_AGENT_NAME: router}
         state.embedded = cast(
             "EmbeddedRuntime",
-            _StandIn(
-                "MindRoom runtime",
-                agent_bot={ROUTER_AGENT_NAME: router}.get,
-                agent_reply_memberships=self._memberships,
-            ),
+            _StandIn("MindRoom runtime", agent_bot=bots.get, agent_reply_memberships=self._memberships),
         )
-        bind_room_members(self._app, cast("Mapping[str, AgentBot]", {ROUTER_AGENT_NAME: router}))
+        bind_room_members(self._app, cast("Mapping[str, AgentBot]", bots))
         state.room_direct = self._room_direct
         mount_plugin_routes(self._app)
 
@@ -316,7 +319,7 @@ class LoadedPlugin:
                 msg = f"Tool {tool!r} has no function {function!r}"
                 raise LookupError(msg)
             if may_need_approval(gateway, tool, target):
-                msg = f"{tool}.{function} may need approval, which a call outside a conversation cannot get"
+                msg = f"{tool}.{function} may need approval, which mindroom.plugin_testing cannot give"
                 raise PermissionError(msg)
             policy = build_tool_hook_middleware(context.hooks, self.config, self.runtime_paths)
             call_context = ToolCallContext(
@@ -343,6 +346,9 @@ class LoadedPlugin:
         to MindRoom: the enrichment items, the transformed draft, or the context the hooks changed.
         """
         event = validate_event_name(event)
+        if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS:
+            msg = f"mindroom.plugin_testing fires message, system:enrich and custom events, not {event}"
+            raise ValueError(msg)
         context = await self._turn_context(agent, sender, room)
         base = context.hooks.context_kwargs(
             event,
@@ -351,9 +357,6 @@ class LoadedPlugin:
             correlation_id=f"plugin-testing:{uuid4().hex}",
         )
         if event not in _TURN_EVENTS:
-            if event in BUILTIN_EVENT_NAMES:
-                msg = f"mindroom.plugin_testing fires message, system:enrich and custom events, not {event}"
-                raise ValueError(msg)
             hook_context = CustomEventContext(**base, room_id=room, thread_id=None, sender_id=sender, **fields)
         else:
             event_id = f"$message{next(self._event_ids)}"
@@ -524,8 +527,8 @@ def load_plugin(
         storage_path=root / "mindroom_data",
         process_env={COMPUTER_ALLOWED_ORIGINS_ENV: json.dumps([_CLIENT_ORIGIN])},
     )
-    data = {"models": {"default": {"provider": "openai", "id": "unused"}}, **(config or {})}
-    data["plugins"] = [{"path": str(Path(path).resolve()), "settings": dict(settings or {})}]
+    plugin = {"path": str(Path(path).resolve()), "settings": dict(settings or {})}
+    data = {"models": {"default": {"provider": "openai", "id": "unused"}}, **(config or {}), "plugins": [plugin]}
     validated = Config.validate_with_runtime(data, runtime_paths)
     domain = validated.get_domain(runtime_paths)
 

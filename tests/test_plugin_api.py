@@ -549,7 +549,7 @@ _MANIFEST = {
     "reserved_namespaces": ["com.example.demo."],
 }
 
-# What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
+# What docs/plugins.md has plugins and their tests import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "AgentWorkspace",
@@ -568,7 +568,6 @@ _HTTP_EXPORTS = [
     "require_room_messenger",
     "require_room_reader",
 ]
-# What docs/plugins.md has a plugin's own tests import, from `mindroom.plugin_testing`.
 _TESTING_EXPORTS = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (

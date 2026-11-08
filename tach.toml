@@ -1751,7 +1751,7 @@ visibility = ["mindroom.api.main"]
 [[modules]]
 path = "mindroom.api.validation_errors"
 depends_on = []
-visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app", "mindroom.tool_system.plugins", "mindroom.plugin_testing"]
+visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app", "mindroom.tool_system.plugins"]
 
 [[modules]]
 path = "mindroom.api.frontend"
@@ -5481,7 +5481,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.connection_agents",
     "mindroom.api.plugin_routes",
-    "mindroom.api.validation_errors",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.entity_resolution",
