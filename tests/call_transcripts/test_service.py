@@ -528,6 +528,27 @@ async def test_someone_removed_from_the_room_is_out_of_the_call_at_their_next_re
     assert [edit.call_id for edit in world.room.row_edits] == [call.id]
 
 
+@pytest.mark.asyncio
+async def test_someone_removed_from_the_room_who_leaves_is_out_at_once(world: World) -> None:
+    """A leave from someone no longer in the room answers 404, as to anyone outside it, and takes them out at once."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(5)
+    world.room.members.discard(BOB)
+
+    await _refused("not-found", lambda: world.service.leave(call.id, BOB))
+
+    live = (await world.service.live(ROOM, ANN)).call
+    assert live is not None
+    assert live.members == (ANN,)
+    world.clock.advance(5)
+    world.room.members.discard(ANN)
+    await _refused("not-found", lambda: world.service.leave(call.id, ANN))
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert stored.ended_at == START + 10
+
+
 # Ending
 
 

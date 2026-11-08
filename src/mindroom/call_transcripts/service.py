@@ -50,6 +50,7 @@ _NO_SUCH_CALL = "This call does not exist."
 _NOT_IN_ROOM = "You are not in this room."
 _NOT_IN_CALL = "You are not in this call; join it first."
 _TOO_LATE = "It is too late to add to this call's transcript."
+_UNREADABLE = "The room cannot be checked right now."
 
 type RefusalCode = Literal[
     "forbidden",
@@ -256,12 +257,17 @@ class CallTranscriptService:
     async def leave(self, call_id: str, user_id: str) -> None:
         """Take the person's app out of the call at once; the last one out ends the call.
 
-        Someone whose app is not in the call records nothing. A leave is never a check-in, so one refused while the
-        room cannot be read leaves the person to drop out of the call a minute after their app last checked in.
+        Someone whose app is not in the call records nothing, and someone no longer in the room is answered as anyone
+        outside it, after their app is taken out. A leave is never a check-in, so one refused while the room cannot be
+        read leaves the person to drop out of the call a minute after their app last checked in.
         """
         call = await self._fresh(call_id)
-        await self._require_member(call.room_id, user_id, _NO_SUCH_CALL)
+        member = await self._room.is_member(call.room_id, user_id)
+        if member is None:
+            raise CallRefusedError(code="unavailable", message=_UNREADABLE)
         await self._leave(call, user_id)
+        if not member:
+            raise CallRefusedError(code="not-found", message=_NO_SUCH_CALL)
 
     async def pause(self, call_id: str, user_id: str, *, paused: bool) -> Call:
         """Pause or resume transcription for everyone in the call; only someone in the call can do either."""
@@ -767,7 +773,7 @@ class CallTranscriptService:
         in_call = call is not None and await self._check_in(call, user_id)
         member = await self._room.is_member(room_id, user_id)
         if member is None:
-            raise CallRefusedError(code="unavailable", message="The room cannot be checked right now.")
+            raise CallRefusedError(code="unavailable", message=_UNREADABLE)
         if not member:
             if call is not None and in_call:
                 await self._leave(call, user_id)
@@ -804,7 +810,7 @@ class CallTranscriptService:
 
 def _require_poster(may_post: bool | None) -> None:
     if may_post is None:
-        raise CallRefusedError(code="unavailable", message="The room cannot be checked right now.")
+        raise CallRefusedError(code="unavailable", message=_UNREADABLE)
     if not may_post:
         raise CallRefusedError(code="forbidden", message="You may not post messages in this room.")
 
