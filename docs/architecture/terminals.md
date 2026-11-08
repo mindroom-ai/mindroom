@@ -29,9 +29,9 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 ## How typing is judged
 
 `run_shell_command`'s approval rules judge the toolkit's typing through approval aliases: `terminal_open` as a shell no argument describes, `terminal_run` as its command, and `terminal_send` as the command its Enters run, joined to what the terminal's line held before.
-An alias's judge reads only the call's arguments, so the line comes from trusted preparation before approval (`ToolFunction.prepare_approval`), which adds the line's revision and text to the stored arguments that the approval card shows and the run receives.
+An alias's judge reads only the call's arguments, so the line comes from trusted preparation before approval (`ToolFunction.prepare_approval`, applied where the model loop plans a gated call), which adds the line's revision and text to the stored arguments that the approval card shows and the run receives.
 The run types only while the line still has that revision and text, so keys approved for one line never land on another, and a path that skips the preparation and claims a line it does not have is refused.
-Without a line, as on paths that call the function directly, the judge cannot tell what an Enter runs, so the rules ask whenever they may.
+Without a line, as through the agent CLI, a script, or a scheduled call, which resume or run the call with the arguments it was sent with, the judge cannot tell what an Enter runs, so the rules ask whenever they may.
 `terminal_run` types only on an empty line at the shell's prompt, so its judgment is its command alone.
 
 - The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`; the line is what was typed since its last Enter or Ctrl-C.
