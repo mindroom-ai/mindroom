@@ -41,7 +41,6 @@ from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
-from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, TurnSinks
@@ -75,6 +74,7 @@ from tests.team_turn_helpers import (
     registered_probe,
     rendered,
 )
+from tests.tool_job_helpers import NewerMessageWaits
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterator, Sequence
@@ -845,16 +845,6 @@ async def test_a_turn_regenerated_after_an_edit_reads_the_thread_events_the_remo
 # ---------------------------------------------------------------------------
 
 
-class _PendingMessages:
-    """A newer human message waits for the turn."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),)
-
-
 def _notice(response_turn_id: str) -> Message:
     return Message(
         role="user",
@@ -897,7 +887,7 @@ async def test_a_team_turn_stores_its_own_notice_once_and_leaves_an_earlier_one_
     team.config.prompts["QUEUED_MESSAGE_NOTICE_TEXT"] = "Custom team queued notice."
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
 
-    with queued_message_signal_context(_PendingMessages()) as notice_context:
+    with queued_message_signal_context(NewerMessageWaits()) as notice_context:
         await team.respond()
 
     assert _leader(team).requests[-1].messages[-1].content == "Custom team queued notice."
@@ -961,7 +951,7 @@ async def test_a_team_run_that_failed_after_its_notice_stores_none(
     )
     _seed_history(team)
 
-    with queued_message_signal_context(_PendingMessages()) as notice_context:
+    with queued_message_signal_context(NewerMessageWaits()) as notice_context:
         text = await team.respond()
 
     assert "boom" in text
