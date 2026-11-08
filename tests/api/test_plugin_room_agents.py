@@ -28,7 +28,9 @@ from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, up
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
+from mindroom.room_agent_access import _WRITERS
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -267,7 +269,8 @@ class NotesTools(Toolkit):
 
 @register_tool_with_metadata(
     name="notes",
-    file_access=ToolFileAccess.AGENT,
+    file_access=ToolFileAccess.{file_access},
+    executes_code={executes_code},
     display_name="Notes",
     description="Notes in the workspace",
     category=ToolCategory.PRODUCTIVITY,
@@ -277,20 +280,44 @@ def notes_tools() -> type[NotesTools]:
 """
 
 
+@pytest.mark.parametrize(
+    ("file_access", "executes_code", "tool", "files"),
+    [
+        ("AGENT", False, "notes", "read"),
+        ("NONE", True, "notes", "write"),
+        ("NONE", True, {"notes": {"include_tools": []}}, "none"),
+        ("NONE", True, {"notes": {"include_tools": ["read_note"]}}, "write"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_plugin_toolkit_that_names_no_functions_reaches_by_its_file_access(tmp_path: Path) -> None:
-    """A plugin toolkit that takes local paths but declares no function names reads; only declared writers write."""
+async def test_a_plugin_toolkit_that_names_no_functions_counts_by_its_declarations(
+    tmp_path: Path,
+    file_access: str,
+    executes_code: bool,
+    tool: object,
+    files: str,
+) -> None:
+    """A plugin toolkit that declares no function names counts as offering what its build offers, unless filtered off."""
     plugin = tmp_path / "plugins" / "notes"
     plugin.mkdir(parents=True)
     (plugin / "mindroom.plugin.json").write_text('{"name": "notes", "tools_module": "tools.py"}')
-    (plugin / "tools.py").write_text(PLUGIN_TOOLS)
+    (plugin / "tools.py").write_text(PLUGIN_TOOLS.format(file_access=file_access, executes_code=executes_code))
     paths = test_runtime_paths(tmp_path)
-    helper = AgentConfig(display_name="Helper", tools=["notes"], access={"users": [ALICE]})
+    helper = AgentConfig(display_name="Helper", tools=[tool], access={"users": [ALICE]})
     config = bind_runtime_paths(Config(plugins=["./plugins/notes"], agents={"helper": helper}), paths)
     publish_test_plugins(config, paths)
     room = _Room(config, paths, ("helper",))
 
-    assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
+    assert _access(await room.agents(ALICE)) == [("helper", files, "none")]
+
+
+def test_each_named_writer_is_a_function_its_toolkit_declares() -> None:
+    """A renamed writing or code-running function would otherwise turn ``write`` into ``read`` without notice."""
+    tools = builtin_tool_registry()
+
+    assert {
+        name: functions <= set(tools.entries[name].function_names) for name, functions in _WRITERS.items()
+    } == dict.fromkeys(_WRITERS, True)
 
 
 @pytest.mark.asyncio

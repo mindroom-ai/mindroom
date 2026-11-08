@@ -162,23 +162,30 @@ class AgentWorkspace:
     root: Path
     """The workspace folder, which may not exist before the agent's first turn for this caller."""
     files: Literal["none", "read", "write"]
-    """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code."""
+    """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code
+    and power to post messages in the room."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell, ``type`` with a shell and power to post messages in the room."""
     config: Config = field(repr=False)
     """The config this answer was resolved under, the one the API served when the request arrived."""
 
 
-def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str]:
-    """Return the toolkit's functions its settings leave on: Agno's ``all`` or ``enable_<function>``, then filters."""
+def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str] | None:
+    """Return the toolkit's functions its settings leave on: Agno's ``all`` or ``enable_<function>``, then filters.
+
+    None when the toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them.
+    """
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
     include, exclude = (
         normalize_string_array_override(values.get(name), preserve_empty_list=True)
         for name in ("include_tools", "exclude_tools")
     )
+    available = metadata.function_names or include
+    if available is None:
+        return None
     return frozenset(
         function
-        for function in metadata.function_names
+        for function in available
         if (values.get("all") or values.get(f"enable_{function}", True))
         and tool_name_allowed(function, include=include, exclude=exclude)
     )
@@ -231,9 +238,10 @@ def _workspace(
             ),
             tool_config_overrides=entry.tool_config_overrides,
         )
-        # A toolkit that declares no function names, as a plugin or MCP server may, offers what it builds.
-        if (functions := _offered_functions(metadata, settings.values)) or not metadata.function_names:
-            path_toolkits[entry.name] = (metadata, functions)
+        # A toolkit whose functions only its build could tell offers what it builds.
+        functions = _offered_functions(metadata, settings.values)
+        if functions is None or functions:
+            path_toolkits[entry.name] = (metadata, functions or frozenset())
     writes = any(
         not functions.isdisjoint(_WRITERS[toolkit]) if toolkit in _WRITERS else metadata.executes_code
         for toolkit, (metadata, functions) in path_toolkits.items()
