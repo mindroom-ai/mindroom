@@ -516,14 +516,10 @@ def _redact_secret_assignments(value: str) -> str:
             continue
         value_start, value_end, match_end = value_span
         assignment_value = value[value_start:value_end].lower()
-        # A scheme or permission alone is not a credential, but in a shell word the credential would follow it.
-        if not shell_word and (
-            (
-                classification.normalized == "authorization"
-                and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
-            )
-            or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value))
-        ):
+        if (
+            classification.normalized == "authorization"
+            and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
+        ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
             search_start = match_end
             continue
 

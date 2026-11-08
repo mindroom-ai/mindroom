@@ -996,6 +996,11 @@ def test_a_bounded_redaction_leaves_out_a_word_longer_than_it_reads() -> None:
     assert redact_sensitive_text(text, max_length=100) == "... [truncated]"
 
 
+def test_a_bounded_redaction_of_long_text_shows_its_start() -> None:
+    """Text longer than redaction reads whole still shows its start when a length bound keeps the read short."""
+    assert redact_sensitive_text("word " * 20_000, max_length=30) == "word word word ... [truncated]"
+
+
 @pytest.mark.parametrize("max_length", [0, 1, 5, 14, 15, 16])
 def test_a_length_bound_shorter_than_the_truncation_marker_is_kept(max_length: int) -> None:
     """Every length bound holds, also one too short for the whole truncation marker."""
