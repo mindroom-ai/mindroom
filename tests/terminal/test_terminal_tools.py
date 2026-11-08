@@ -116,6 +116,17 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
         "42\n[Exit status 0.]"
     )
     assert "42" in await _call(functions["terminal_read"], session_id=session_id)
+    # With the terminal's echo off, readline still ends the line before the output, which stays whole.
+    assert await _call(functions["terminal_run"], session_id=session_id, command="stty -echo") == "[Exit status 0.]"
+    assert await _call(functions["terminal_run"], session_id=session_id, command="echo $((6*7))") == (
+        "42\n[Exit status 0.]"
+    )
+    await _call(functions["terminal_run"], session_id=session_id, command="stty echo")
+    # The echo of a command wider than the terminal is redrawn across rows, and is no output either.
+    wide = "echo " + "a" * 150 + " $((2+3))"
+    assert await _call(functions["terminal_run"], session_id=session_id, command=wide) == (
+        "a" * 150 + " 5\n[Exit status 0.]"
+    )
     assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
     for command in ("ls\x01", "\x03ls", "cd /tmp\nls"):
         refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
