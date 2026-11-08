@@ -47,6 +47,21 @@ def test_route_answers_a_signed_in_member_only(plugin: LoadedPlugin) -> None:
     assert alice.get(HELLO).status_code == 401
 
 
+def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:
+    """A room its members joined as a direct message is one, and so is any room of two; each load asks afresh."""
+    carol = "@carol:example.org"
+    cases = [
+        ({ALICE: "Alice", BOB: "Bob", carol: None}, True, True),
+        ({ALICE: "Alice", BOB: "Bob", carol: None}, False, False),
+        ({ALICE: "Alice", BOB: "Bob"}, False, True),
+    ]
+    for index, (members, direct, expected) in enumerate(cases):
+        with load_plugin(EXAMPLE, tmp_path / str(index), config=CONFIG, settings=SETTINGS) as plugin:
+            plugin.add_room(ROOM, members=members, direct=direct)
+
+            assert plugin.client(ALICE).get(f"/api/plugins/greeter/rooms/{ROOM}/direct").json() == {"direct": expected}
+
+
 @pytest.mark.asyncio
 async def test_tool_call_answers_with_the_plugin_settings_and_the_gate_declines(plugin: LoadedPlugin) -> None:
     """An admitted sender's call returns the tool's value, which reads the settings; the gate hook declines a call."""

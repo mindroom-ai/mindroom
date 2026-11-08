@@ -17882,7 +17882,7 @@ my-plugin/
 ```
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, a lifespan, and skills.
-Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, the HTTP route helpers, and the [testing kit](#testing-plugins) stay in the modules their sections name.
 `mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
 
@@ -19119,6 +19119,68 @@ Agent workspaces can contain files worker code wrote, so read and write them wit
 To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths, ctx.execution_identity))` with `refresh_agent_memory_search` from `mindroom.memory`.
 [`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.
 
+## Testing plugins
+
+`mindroom.plugin_testing`, from plugin API 1.13, loads a plugin in its own tests as MindRoom starts it and drives its routes, tools, and hooks without a homeserver or a model.
+It patches nothing: client sessions, room membership, and each agent's [access](https://docs.mindroom.chat/authorization/#responder-access) decide as in a deployment, from the config the test gives, so a test that needs another sender grants them access there.
+It imports no test runner; with pytest, a fixture wraps `load_plugin`:
+
+```python
+from pathlib import Path
+
+import pytest
+
+from mindroom.plugin_testing import TurnRefused, load_plugin
+
+ROOM = "!lobby:example.org"
+ALICE = "@alice:example.org"
+CONFIG = {"agents": {"helper": {"display_name": "Helper", "tools": ["greeter"], "access": {"users": [ALICE]}}}}
+
+
+@pytest.fixture
+def plugin(tmp_path):
+    with load_plugin(Path(__file__).parents[1], tmp_path, config=CONFIG, settings={"greeting": "Howdy"}) as loaded:
+        loaded.add_room(ROOM, members={ALICE: "Alice", "@bob:example.org": "Bob"})
+        yield loaded
+
+
+def test_route(plugin):
+    assert plugin.client(ALICE).get(f"/api/plugins/greeter/rooms/{ROOM}/hello").json() == {"hello": ALICE}
+    assert plugin.client("@carol:example.org").get(f"/api/plugins/greeter/rooms/{ROOM}/hello").status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tool(plugin):
+    result = await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="helper", sender=ALICE, room=ROOM)
+    assert (result.status, result.value) == ("ok", "Howdy, Ann!")
+
+
+@pytest.mark.asyncio
+async def test_hook(plugin):
+    room = plugin.add_room("!side:example.org", members={ALICE: "Alice"})
+    await plugin.fire("message:received", agent="helper", sender=ALICE, room=room.room_id, body="hi")
+    assert [sent.text for sent in room.sent] == ["Got: hi"]
+    with pytest.raises(TurnRefused):
+        await plugin.fire("message:received", agent="helper", sender="@bob:example.org", room=ROOM, body="hi")
+```
+
+| Call | What it does |
+| --- | --- |
+| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load raises, naming why, and the block's end restores the plugins loaded before it. |
+| `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room the router is joined to and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's; MindRoom also counts any room of two members as one. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
+| `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
+| `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |
+| `await call_tool(tool, function, arguments, *, agent, sender, room)` | Runs one call as `agent` runs it for `sender` in `room`, through the `tool:*` hooks and with `current_plugin_context`, and returns its `status` (`ok`, `failed`, `declined`, ...), `value`, and `failure_text`. It raises `LookupError` for a tool or function the agent lacks and `PermissionError` for a function that may need approval. |
+| `await fire(event, *, agent, sender, room, body="", **fields)` | Runs the hooks of a `message:*`, `system:enrich`, or custom event for `sender`'s message `body` in `room`, and returns what they returned to MindRoom: the enrichment items, the transformed draft, or the context. `fields` are the event context's own, such as `target_entity_name` and `target_member_names` for enrichment or `payload` and `source_plugin` for a custom event; for `message:before_response`, `message:final_response_transform`, `message:after_response`, and `message:cancelled` they are those of its draft, result, or info. |
+
+`call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
+A room never added is one no MindRoom bot is in, so routes answer 503 for it and turns there are refused.
+Whether a room is a direct message is read once per room in each `load_plugin` block.
+
+The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, the plugin's `lifespan`, or more than one plugin at once.
+It fires no other built-in event, hooks get no `matrix_admin` and cannot `put_room_state`, and a route cannot change a room's modes.
+A call to the Matrix client other than its member and state reads raises `AttributeError` naming the call.
+
 # Hooks
 
 Hooks are async functions in a [plugin](https://docs.mindroom.chat/plugins/) that run when MindRoom events happen.
@@ -19734,7 +19796,8 @@ Retention applies only to bots whose [`accept_invites`](https://docs.mindroom.ch
 
 ## Testing
 
-Hook functions are plain async functions, so a test can await one with a stub context:
+To run a plugin's hooks as MindRoom does, for a message an agent would answer, use [`mindroom.plugin_testing`](https://docs.mindroom.chat/plugins/#testing-plugins).
+Hook functions are also plain async functions, so a unit test can await one with a stub context:
 
 ```python
 from types import SimpleNamespace

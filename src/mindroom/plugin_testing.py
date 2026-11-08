@@ -34,6 +34,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.hooks import (
+    BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
@@ -63,8 +64,8 @@ from mindroom.hooks import (
     emit_transform,
     validate_event_name,
 )
-from mindroom.hooks.types import BUILTIN_EVENT_NAMES
 from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import MatrixState, update_matrix_state
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
@@ -137,6 +138,7 @@ class Room:
     power_levels: dict[str, Any] | None = None
     """The content of the room's ``m.room.power_levels``; None for a room without one."""
     direct: bool = False
+    """Whether its members joined it as a direct message; MindRoom counts any room of two members as one too."""
     history_visibility: str = "shared"
     key: str | None = None
     """The room key an agent's ``rooms`` or an ``access`` rule names this room by."""
@@ -148,7 +150,10 @@ def _state_events(room: Room) -> list[dict[str, Any]]:
     events = [
         ("m.room.history_visibility", "", {"history_visibility": room.history_visibility}),
         *((("m.room.power_levels", "", room.power_levels),) if room.power_levels is not None else ()),
-        *(("m.room.member", user, {"membership": "join", "displayname": name}) for user, name in room.members.items()),
+        *(
+            ("m.room.member", user, {"membership": "join", "displayname": name, "is_direct": room.direct})
+            for user, name in room.members.items()
+        ),
     ]
     return [
         {"type": kind, "state_key": key, "content": content, "origin_server_ts": 0} for kind, key, content in events
@@ -194,6 +199,8 @@ class LoadedPlugin:
         self._event_ids = count(1)
         self._tokens: dict[str, list[str]] = {}
         self._memberships = AgentReplyMembershipIndex()
+        # Agents keep whether a room is direct for minutes, by their user ID and the room's.
+        self._direct_user = f"@plugin-testing-{uuid4().hex}:localhost"
         self._client = cast(
             "nio.AsyncClient",
             _StandIn(
@@ -466,7 +473,21 @@ class LoadedPlugin:
         return nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
 
     async def _room_direct(self, room_id: str) -> bool:
-        return self._rooms[room_id].direct
+        """Answer as running agents do, through a client of this load's own, whose answers no other load shares."""
+        room = nio.MatrixRoom(room_id, self._direct_user)
+        for user, name in self._rooms[room_id].members.items():
+            room.add_member(user, name, None)
+        client = _StandIn(
+            "Matrix client",
+            user_id=self._direct_user,
+            rooms={room_id: room},
+            list_direct_rooms=self._no_direct_rooms,
+            room_get_state=self._room_get_state,
+        )
+        return await is_dm_room(cast("nio.AsyncClient", client), room_id)
+
+    async def _no_direct_rooms(self) -> nio.DirectRoomsErrorResponse:
+        return nio.DirectRoomsErrorResponse("No m.direct account data", "M_NOT_FOUND")
 
 
 @contextmanager
