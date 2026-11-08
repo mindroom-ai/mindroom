@@ -7808,11 +7808,16 @@ class TestApprovalContinuations:
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
 
+    @pytest.mark.parametrize("fenced", [False, True], ids=["claimed", "fenced"])
     async def test_a_resume_that_reported_nothing_finishes_once_its_span_withheld_the_answer(
         self,
         alice: PrincipalStore,
+        fenced: bool,
     ) -> None:
-        """With no FINAL, only a claimed run whose resume span ended withholding its answer finishes as reporting nothing."""
+        """With no FINAL, only a claimed run whose resume span ended withholding its answer finishes as reporting nothing.
+
+        A run whose approval already fails keeps failing.
+        """
         await self.admit_sources(alice)
         assert await paused_for_approval(alice, self.continuation()) is not None
         claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
@@ -7828,6 +7833,18 @@ class TestApprovalContinuations:
             lambda reply: rl.suppress(reply, resume, reason="suppressed", now_ns=1),
         )
         assert withheld is not None
+        if fenced:
+            failure = ApprovalFailure(ApprovalFailureKind.INTERRUPTED)
+            assert await alice.approvals.request_approval_failure(
+                "approval-1",
+                failure,
+                expected_state="claimed",
+                expected_generation=claimed.generation,
+                expected_runtime_generation="runtime-a",
+            )
+            assert await alice.approvals.finish_approval_continuation("approval-1", reported_nothing=True) is None
+            assert await alice.is_pending("$source-1")
+            return
 
         assert await alice.approvals.finish_approval_continuation("approval-1", reported_nothing=True) is not None
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
