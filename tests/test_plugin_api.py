@@ -444,7 +444,12 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
-    "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)"},
+    "mindroom.plugin_http.RoomReader": {
+        "power": "(self)",
+        "is_direct": "(self)",
+        "modes": "(self)",
+        "set_modes": "(self, *, thread, reply)",
+    },
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
         "is_admin": "(self, user_id)",
@@ -520,6 +525,7 @@ _MANIFEST = {
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "ClientUser",
+    "RoomModes",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -537,6 +543,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
@@ -549,7 +556,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 8), "5fecb1a60894f5f5a8f0491a68f6a3cca9f763923e3421450c8a01a73df10a95")
+_PINNED_VERSION = ((1, 9), "6cbaadae725dba244b9c1e7f835eb6b0881721d2daadcd86bb7e004de1a02b94")
 
 
 def _is_enum(obj: object) -> bool:
