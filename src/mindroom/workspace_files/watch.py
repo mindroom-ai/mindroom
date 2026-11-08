@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _INTERVAL_SECONDS = 0.15
+_STEP_MS = 50
+# A watch sends a change at most its debounce and a step after it happens, and drops what it holds when stopped, so a
+# replaced watch runs on this long beside its successor.
+_HANDOVER_SECONDS = _INTERVAL_SECONDS + 2 * _STEP_MS / 1000
 # How long a watcher waits before looking again for a workspace not made yet, and after a failure.
 _ABSENT_RETRY_SECONDS = 1.0
 _FAILURE_RETRY_SECONDS = 30.0
@@ -184,6 +188,7 @@ async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown:
             *folders,
             watch_filter=None,
             debounce=int(_INTERVAL_SECONDS * 1000),
+            step=_STEP_MS,
             stop_event=stop,
             recursive=False,
             ignore_permission_denied=True,
@@ -215,9 +220,9 @@ async def _run(watch: _Watch) -> None:
             following = asyncio.create_task(_follow(watch, folders, stop_watching, grown))
             running.add(following)
             following.add_done_callback(running.discard)
-            # A watch takes in its folders before it first waits, so the one before it stops only once it watches.
+            # The new watch takes in its folders as its task starts; the old one sends what it still holds first.
+            asyncio.get_running_loop().call_later(_HANDOVER_SECONDS, previous.set)
             await asyncio.sleep(0)
-            previous.set()
             watch.following.set()
             if watched is not None:
                 # What a new folder, or a root that was missing, held before its watch began.

@@ -309,14 +309,46 @@ def test_the_folder_cap_leaves_out_the_deepest_folders_and_hidden_ones_are_never
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool's deep cache in the agent's HOME can't take the watches the project's own top folders need."""
+    """A tool's deep cache in the agent's HOME can't take the watches the project's own top folders need.
+
+    Ignored folders, those holding credentials, and links are never watched.
+    """
     root = tmp_path / "workspace"
     for top in ("a", "b", "c"):
         (root / top / "deep" / "deeper").mkdir(parents=True)
     (root / ".ssh").mkdir()
     (root / ".config" / "gh").mkdir(parents=True)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (root / "out").symlink_to(tmp_path / "outside")
     monkeypatch.setattr(watch, "_MAX_FOLDERS", 5)
 
     folders = {Path(folder).relative_to(root).as_posix() for folder in watch._folders(root)}
 
     assert folders == {".", "a", "b", "c", ".config"}
+
+
+@pytest.mark.asyncio
+async def test_a_change_just_before_the_new_watch_begins_is_still_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old watch, which holds a change it hasn't sent yet, keeps running until it has sent it."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "old.md").write_text("x")
+    real_folders = watch._folders
+
+    def folders_then_a_change(path: Path) -> list[str]:
+        folders = real_folders(path)
+        if "new" in {Path(folder).name for folder in folders}:
+            (root / "old.md").write_text("changed as the walk ends")
+        return folders
+
+    monkeypatch.setattr(watch, "_folders", folders_then_a_change)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "new").mkdir()
+        await _until(next_changes, "new")
+
+        assert "old.md" in await _until(next_changes, "old.md")
