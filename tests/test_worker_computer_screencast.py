@@ -387,6 +387,25 @@ async def test_viewer_connecting_while_the_page_loads_is_told_so(page: Page, sit
         assert await sent.message("loading") == _LOADED
 
 
+@pytest.mark.asyncio
+async def test_viewer_connecting_while_a_navigation_waits_for_its_server_is_told_the_page_loads(
+    page: Page,
+    site: _Site,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page cannot answer before the navigation commits, and the navigation Chromium shows pending still counts."""
+    monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.2)
+    navigation = asyncio.create_task(page.goto(site.url("/held"), timeout=_TIMEOUT * 1000))
+    await asyncio.wait_for(site.held.wait(), _TIMEOUT)
+    sent = _Viewer()
+    viewer = sent.screencast(lambda: page, lambda: False)
+    async with _watching(viewer):
+        assert await sent.message("loading") == _LOADING
+        site.release.set()
+        await navigation
+        assert await sent.message("loading") == _LOADED
+
+
 class _FakeSession:
     """A CDP session whose frames the test delivers by hand."""
 

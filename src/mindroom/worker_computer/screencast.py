@@ -213,13 +213,21 @@ class ScreencastViewer:
 
     async def _read_loading(self, cdp: CDPSession) -> None:
         """Start the page's loading events and read whether it loads now, unless an event has said so meanwhile."""
-        # The page answers these only between navigations and while its script is not frozen, so they give up like input.
-        with suppress(TimeoutError):
+        try:
+            # The page answers these only between navigations and while its script is not frozen, so they give up like
+            # input.
             async with asyncio.timeout(_INPUT_SECONDS):
                 await cdp.send("Page.enable")
                 state = await cdp.send("Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True})
-                if self._loading is None:
-                    self._loading = state["result"].get("value") != "complete"
+            loading = state["result"].get("value") != "complete"
+        except TimeoutError:
+            # Until a navigation it was asked to make commits, as the agent's browser asks, Chromium shows its address
+            # instead of the page's; a frozen page shows its own.
+            target = (await cdp.send("Target.getTargetInfo"))["targetInfo"]
+            history = await cdp.send("Page.getNavigationHistory")
+            loading = target["url"] != history["entries"][history["currentIndex"]]["url"]
+        if self._loading is None:
+            self._loading = loading
 
     def _on_loading(self, cdp: CDPSession, params: dict[str, Any], *, loading: bool) -> None:
         if cdp is self._cdp and params["frameId"] == self._main_frame:
