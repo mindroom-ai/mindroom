@@ -1,13 +1,17 @@
-"""A dedicated worker's runner relays the primary's requests and WebSockets to apps on its loopback, and nothing else."""
+"""A dedicated worker's runner relays the primary's requests and WebSockets to the apps its worker runs, and nothing else."""
 
 from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import shlex
+import signal
 import socket
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
+from subprocess import DEVNULL, PIPE
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -20,6 +24,7 @@ from mindroom.api import sandbox_runner_app
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.previews import listeners
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,9 +59,14 @@ class _Runner:
 
 
 @asynccontextmanager
-async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_Runner]:
-    """Serve the sandbox runner app over real TCP, as a dedicated worker's runner unless told otherwise."""
-    env = {"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant:shared:coder"} if dedicated else {}
+async def _runner(
+    tmp_path: Path,
+    *,
+    dedicated: bool = True,
+    env: dict[str, str] | None = None,
+) -> AsyncIterator[_Runner]:
+    """Serve the sandbox runner app over real TCP with ``env``, as a dedicated worker's runner unless told otherwise."""
+    env = {**({"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant:shared:coder"} if dedicated else {}), **(env or {})}
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     initialize_sandbox_runner_app(sandbox_runner_app.app, paths, config=Config(), runner_token=_TOKEN)
     listener = socket.socket()
@@ -156,10 +166,11 @@ async def _socket(request: web.Request) -> web.WebSocketResponse:  # noqa: C901 
 async def _app(
     host: str = "127.0.0.1",
     *,
+    port: int = 0,
     released: asyncio.Event | None = None,
     close_codes: asyncio.Queue[int | None] | None = None,
 ) -> AsyncIterator[int]:
-    """Serve the test app on ``host`` and yield its port."""
+    """Serve the test app on ``host`` at ``port``, or any free one, and yield its port."""
 
     async def stream(request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse()
@@ -176,8 +187,9 @@ async def _app(
     app.router.add_get("/stream", stream)
     app.router.add_route("*", "/{tail:.*}", _echo)
     listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        listener.bind((host, 0))
+        listener.bind((host, port))
     except OSError:
         listener.close()
         raise
@@ -336,13 +348,167 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
 
 @pytest.mark.asyncio
 async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A closed port, the runner's own, a server only on another address, and no port at all are marked refusals."""
+    """A closed port, a server only on another address, and no port at all are marked refusals."""
     async with _app("127.0.0.2") as elsewhere, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for port in (unused_tcp_port, runner.port, elsewhere, 0, 70000):
+        for port in (unused_tcp_port, elsewhere, 0, 70000):
             async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
                 assert response.status == 502
                 assert response.headers[_REFUSED] == "1"
                 assert await response.json() == {"detail": f"No app listens on port {port} at this worker's loopback."}
+
+
+async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: int, status: int, detail: str) -> None:
+    """Requests and WebSockets to ``port`` are marked refusals, and the port list leaves it out."""
+    async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+        assert response.status == status
+        assert response.headers[_REFUSED] == "1"
+        assert await response.json() == {"detail": detail}
+    with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+        await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
+    assert refused.value.status == 403
+    async with client.get(runner.root, headers=_AUTH) as response:
+        assert response.status == 200
+        assert port not in await response.json()
+
+
+async def _wait_listening(port: int) -> None:
+    async with asyncio.timeout(10):
+        while True:
+            with suppress(OSError):
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.close()
+                await writer.wait_closed()
+                return
+            await asyncio.sleep(0.05)
+
+
+@asynccontextmanager
+async def _python_server(root: Path, port: int, *, detached: bool) -> AsyncIterator[None]:
+    """Run Python's HTTP server for ``root`` on ``port``, as the runner's child or left behind by the shell that started it."""
+    command = [sys.executable, "-m", "http.server", "--bind", "127.0.0.1", "--directory", str(root), str(port)]
+    if detached:
+        shell = await asyncio.create_subprocess_shell(f"{shlex.join(command)} >/dev/null 2>&1 & echo $!", stdout=PIPE)
+        pid = int((await shell.communicate())[0])
+    else:
+        server = await asyncio.create_subprocess_exec(*command, stdout=DEVNULL, stderr=DEVNULL)
+        pid = server.pid
+    try:
+        await _wait_listening(port)
+        yield
+    finally:
+        os.kill(pid, signal.SIGTERM)
+        if not detached:
+            await server.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detached", [False, True], ids=["child", "left-behind"])
+async def test_relay_reaches_a_server_the_worker_started(tmp_path: Path, unused_tcp_port: int, detached: bool) -> None:
+    """A server a command of the runner started is listed and relayed, and so is one that outlived the command."""
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("hello from the worker")
+    async with (
+        _python_server(site, unused_tcp_port, detached=detached),
+        _runner(tmp_path) as runner,
+        aiohttp.ClientSession() as client,
+    ):
+        async with client.get(f"{runner.root}/{unused_tcp_port}/", headers=_AUTH) as response:
+            assert response.status == 200
+            assert await response.text() == "hello from the worker"
+        async with client.get(runner.root, headers=_AUTH) as response:
+            assert unused_tcp_port in await response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting",
+    ["MINDROOM_PORT", "MINDROOM_SANDBOX_RUNNER_PORT", "MINDROOM_SCRIPT_GATEWAY_PORT", "MINDROOM_EGRESS_BROKER_PORT"],
+)
+async def test_relay_refuses_a_port_mindrooms_settings_give_its_own_server(tmp_path: Path, setting: str) -> None:
+    """A worker's app on the port a MindRoom setting gives the API, a runner, or another of its servers is refused."""
+    async with _app() as port, _runner(tmp_path, env={setting: str(port)}) as runner, aiohttp.ClientSession() as client:
+        await _assert_refused(
+            client,
+            runner,
+            port,
+            403,
+            f"Port {port} is one of MindRoom's own, which the relay never reaches.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_the_runners_port_and_mindrooms_default_ports(tmp_path: Path) -> None:
+    """The runner's own port and the default ports of the API and a runner are refused, whoever listens there."""
+    async with _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        for port in (runner.port, 8765, 8766):
+            await _assert_refused(
+                client,
+                runner,
+                port,
+                403,
+                f"Port {port} is one of MindRoom's own, which the relay never reaches.",
+            )
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_a_server_no_process_of_the_worker_holds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An app the runner sees no process of its own holding, as a pod sidecar in its own PID namespace, is refused."""
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text("0::/\n")
+    monkeypatch.setattr(listeners, "_PROC", proc)
+    async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        await _assert_refused(client, runner, port, 403, f"The server on port {port} is not one this worker runs.")
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_every_port_when_proc_cannot_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without ``/proc`` to tell whose server listens on a port, the relay refuses it and says why."""
+    monkeypatch.setattr(listeners, "_PROC", tmp_path / "missing")
+    async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        await _assert_refused(
+            client,
+            runner,
+            port,
+            403,
+            "This runner can't tell which processes hold its ports, so it relays to none.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_relay_reads_a_ports_holders_again_only_once_another_socket_listens_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A port found to be the worker's is relayed without reading its holders again, until its listening socket changes."""
+    async with _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        async with _app() as port:
+            async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+                assert response.status == 200
+            monkeypatch.setattr(listeners, "_PROC", tmp_path / "missing")
+            async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+                assert response.status == 200
+        async with _app(port=port), client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+            assert response.status == 403
+
+
+@pytest.mark.asyncio
+async def test_relay_follows_no_websocket_redirect_to_a_port_it_refuses(tmp_path: Path) -> None:
+    """A WebSocket handshake an app redirects to one of MindRoom's own ports, served or not, is refused."""
+    async with (
+        _app() as port,
+        _app() as own,
+        _runner(tmp_path, env={"MINDROOM_PORT": str(own)}) as runner,
+        aiohttp.ClientSession() as client,
+    ):
+        there = f"http://127.0.0.1:{own}/socket"
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)
+        assert refused.value.status == 403
 
 
 @pytest.mark.asyncio
