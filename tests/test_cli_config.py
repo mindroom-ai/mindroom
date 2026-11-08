@@ -30,7 +30,7 @@ import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
-from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
@@ -165,20 +165,198 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_format_config_search_locations_numbers_paths_and_statuses(
-    tmp_path: Path,
+@pytest.fixture
+def narrow_markup_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a folder whose path Rich would read as markup and that passes 80 columns, with the CLI at 80 columns."""
+    directory = tmp_path / "[work]" / ("a-folder-name-that-pushes-the-path-past-eighty-columns-" * 2)
+    directory.mkdir(parents=True)
+    for console in (config_cli.console, config_cli._err_console):
+        monkeypatch.setattr(console, "_width", 80)
+    return directory
+
+
+def test_config_search_locations_print_numbers_paths_and_statuses(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each search location prints its number, its whole path, and whether it exists, on one line."""
+    monkeypatch.chdir(narrow_markup_dir)
+    existing = narrow_markup_dir / "config.yaml"
+    existing.write_text("agents: {}\n", encoding="utf-8")
+    missing = narrow_markup_dir / "missing.yaml"
+
+    config_cli.print_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)}, title="Search locations:")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == f"  1. {missing.resolve()} (not found)"
+    assert lines[2] == f"  2. {existing.resolve()} (exists)"
+
+
+def test_config_init_prints_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config search-location rendering should include numbers and existence status."""
-    monkeypatch.chdir(tmp_path)
-    existing = tmp_path / "config.yaml"
-    existing.write_text("agents: {}\n", encoding="utf-8")
-    missing = tmp_path / "missing.yaml"
+    """A path with a bracketed folder, longer than the terminal is wide, prints whole on each `config init` line."""
+    # An owner exported in the shell would win over the one this test saves in `.env`.
+    monkeypatch.delenv(OWNER_MATRIX_USER_ID_ENV, raising=False)
+    target = narrow_markup_dir / "config.yaml"
+    env_path = narrow_markup_dir / ".env"
+    init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
 
-    lines = _format_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)})
+    created = runner.invoke(app, init).output.splitlines()
+    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:fire:\n", encoding="utf-8")
+    kept = runner.invoke(app, init).output.splitlines()
+    overwritten = runner.invoke(app, [*init, "--force"]).output.splitlines()
 
-    assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
-    assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
+    assert f"Env file created: {env_path}" in created
+    assert f"Config created: {target}" in created
+    assert f"  Edit {env_path}  Set your API keys (Matrix homeserver is prefilled)" in created
+    assert f"Config file already exists: {target}" in kept
+    assert f"Config unchanged: {target}" in kept
+    assert f"Env file updated: {env_path}" in kept
+    assert f"Generated MINDROOM_API_KEY in {env_path}; restart MindRoom if it is already running to apply it." in kept
+    assert (
+        f"Warning: {OWNER_MATRIX_USER_ID_ENV} in {env_path} is not a valid Matrix user ID "
+        "('@Alice:fire:'), so the owner placeholders in config.yaml were left for you to replace."
+    ) in kept
+    assert f"Env file overwritten: {env_path}" in overwritten
+
+
+def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`config show`, `path`, `validate`, `resolve`, and `edit` print a markup-like, long config path whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    def lines(*args: str, env: dict[str, str] | None = None) -> list[str]:
+        return runner.invoke(app, ["config", *args, "--path", str(target)], env=env).output.splitlines()
+
+    assert f"No config file found at: {target}" in lines("show")
+    assert f"Validating configuration: {target}" in (validate := lines("validate"))
+    assert f"Error: Configuration file not found: {target}" in validate
+    assert f"Error: Configuration file not found: {target}" in lines("resolve")
+    target.write_text("agents: !include missing.yaml\n", encoding="utf-8")
+    assert f"Config file: {target}" in lines("show")
+    assert f"Resolved config path: {target} (exists)" in lines("path")
+    assert f"Error: Invalid configuration in {target}" in (invalid := lines("validate"))
+    assert f"  * config: !include: included file 'missing.yaml' does not exist (in {target}, line 1)" in invalid
+    edit = lines("edit", env={"EDITOR": "[missing]-editor"})
+    assert f"Opening {target} with [missing]-editor..." in edit
+    assert "Editor '[missing]-editor' not found." in edit
+
+
+def test_config_validate_prints_configured_names_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validate summary, missing-key warning, and automation issue keep long names and emoji codes as written."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    agent = "an_agent_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    team = "a_team_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    model = "a:fire:model_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    target = narrow_markup_dir / "config.yaml"
+    config_text = (
+        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5-5\n'
+        f'agents:\n  {agent}:\n    display_name: Assistant\n    model: "{model}"\n'
+        f"teams:\n  {team}:\n    display_name: Team\n    role: Helps\n    agents: [{agent}]\n"
+        f'    model: "{model}"\n'
+        f'router:\n  model: "{model}"\n'
+    )
+    target.write_text(config_text, encoding="utf-8")
+
+    valid = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+    target.write_text(
+        config_text.replace(
+            "    display_name: Assistant\n",
+            "    display_name: Assistant\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+        ),
+        encoding="utf-8",
+    )
+    rejected = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+
+    assert f"  Agents: 1 ({agent})" in valid
+    assert f"  Teams:  1 ({team})" in valid
+    assert f"  Models: 1 ({model})" in valid
+    assert f"  * anthropic: Set ANTHROPIC_API_KEY (models: {model})" in valid
+    assert f"  agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin" in rejected
+
+
+def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The first-run welcome, skipped key, typed key, and provider setup lines keep a markup-like, long path whole."""
+    runtime_paths = constants_module.resolve_primary_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={},
+    )
+    env_path = runtime_paths.env_path
+
+    config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
+    with patch.object(config_cli, "secret", return_value="sk-typed"):
+        config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=True)
+    config_cli.create_first_run_config(runtime_paths, provider="bedrock_claude", interactive=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"Welcome to MindRoom! Let's create your config at {runtime_paths.config_path} for MindRoom Chat (mindroom.chat)."
+    ) in lines
+    assert (
+        "Skipped. Connect your provider in the dashboard once MindRoom is running, "
+        f"or add OPENAI_API_KEY to {env_path} and restart `mindroom run`."
+    ) in lines
+    assert f"Env file updated: {env_path} (OPENAI_API_KEY)" in lines
+    assert f"  Set your AWS Bedrock region and credentials in {env_path} and restart `mindroom run`" in lines
+
+
+def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The open-dashboard warning keeps an IPv6 address Rich would read as markup, and the key lines a long path."""
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    env_path = runtime_paths.env_path
+
+    config_cli.warn_dashboard_without_key("[fe80::1]:8765", env_path, ", or pass --api-host 127.0.0.1.")
+    with patch.object(config_cli, "write_private_env_text", side_effect=OSError("read-only [mount]")):
+        config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+    config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Warning: The dashboard API listens on [fe80::1]:8765 without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom."
+    ) in lines
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in lines
+    assert (
+        "Warning: Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+        f"and {env_path} could not be updated: read-only [mount]"
+    ) in lines
+    assert (
+        f"Generated MINDROOM_API_KEY in {env_path} because dedicated workers can reach the dashboard API; "
+        "the dashboard login page asks for this key."
+    ) in lines
+
+
+def test_run_prints_the_dashboard_key_remedy_with_the_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` on an open dashboard names the `.env` to set the key in, whole, even under a bracketed folder."""
+    for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+
+    with patch("mindroom.orchestrator.main", AsyncMock()):
+        result = _invoke_with_runtime(["run"], cfg)
+
+    assert result.exit_code == 0, result.output
+    env_path = (narrow_markup_dir / ".env").resolve()
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in result.output.splitlines()
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
@@ -825,10 +1003,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        # Rich folds long paths mid-token, so compare without any whitespace.
-        output = "".join(result.output.split())
         expected = f"{OWNER_MATRIX_USER_ID_ENV} in {tmp_path / '.env'} is not a valid Matrix user ID ('@Alice:selfhosted.example')"
-        assert "".join(expected.split()) in output
+        assert expected in result.output
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
 
     def test_init_names_the_environment_as_the_source_of_an_unusable_owner(
@@ -2008,20 +2184,22 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
-    def test_validate_prints_room_names_as_written(self, tmp_path: Path) -> None:
-        """The summary prints configured room names verbatim, even ones that look like Rich markup."""
+    def test_validate_prints_room_names_as_written(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The summary prints configured room names verbatim on one line, even ones that look like Rich markup."""
+        monkeypatch.setattr(config_cli.console, "_width", 80)
+        long_room = "a-room-name-long-enough-to-push-the-summary-line-past-eighty-columns"
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
-            'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[/fast]", "[bold]lobby"]\n'
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            f'    rooms: ["[/fast]", "[bold]lobby", ":fire:", "{long_room}"]\n'
             "router:\n  model: default\n",
         )
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0, result.output
-        output = normalize_console_output(result.output)
-        assert "Rooms: 2 ([/fast], [bold]lobby)" in output
+        assert f"  Rooms:  4 (:fire:, [/fast], [bold]lobby, {long_room})" in result.output.splitlines()
 
     def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
         """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""
@@ -4025,6 +4203,12 @@ def _patch_homeserver_fail(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestDoctor:
     """Tests for `mindroom doctor`."""
+
+    @pytest.fixture(autouse=True)
+    def _no_exported_anthropic_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear an Anthropic endpoint, token, or key exported in the shell; an endpoint makes doctor skip the key check."""
+        for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
 
     @pytest.fixture(autouse=True)
     def _healthy_embedder_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
