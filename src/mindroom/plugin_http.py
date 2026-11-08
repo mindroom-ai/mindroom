@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
@@ -21,15 +21,19 @@ from mindroom.api.client_sessions import (
     presented_session,
 )
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.entity_directory import entity_directory
+from mindroom.hooks.types import format_hook_source
+from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
-from mindroom.room_messenger import post_notice, post_relay
-from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 
     from mindroom.api.client_sessions import ClientSession
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 
@@ -228,6 +232,10 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     )
 
 
+# Matrix's own content keys are those without a namespace, such as `body` and `msgtype`, and those under these.
+_MATRIX_KEY_PREFIXES = ("m.", "org.matrix.")
+
+
 @dataclass(frozen=True)
 class RoomMessenger:
     """Posts to one room as the router for a route whose caller is joined to it, never from or as any person's account.
@@ -250,17 +258,16 @@ class RoomMessenger:
     ) -> str:
         """Post ``text`` as the router's ``m.notice``, which mentions no one and wakes no agent; return its event ID.
 
-        ``content`` adds the plugin's own keys, and one under ``com.mindroom.`` or ``io.mindroom.``, at any depth,
-        answers 400 before anything is sent. It answers 503 when the router is not running or the send fails.
+        It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
+        the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
+        such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.`` or another loaded
+        plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
+        or when the send fails.
         """
-        return await post_notice(
-            self._request.app,
-            self._plugin_name,
-            self._room_id,
-            text,
-            thread_id=thread_id,
-            content=content,
-        )
+        router = self._router()
+        extra = self._content(router, content)
+        extra["msgtype"] = "m.notice"
+        return await self._send(router, text, thread_id, extra, ())
 
     async def relay(
         self,
@@ -278,22 +285,77 @@ class RoomMessenger:
         that the caller is joined (403) and may send ``m.room.message`` (403), answering 503 when either cannot be read.
         ``content`` and the other answers are as for ``notice()``. It returns the message's event ID.
         """
+        if not mentions:
+            raise HTTPException(400, "A relay mentions at least one agent or team.")
         room = await require_room_reader(self._request, self._room_id)
         if not (await room.power()).may_send(room.user.user_id, "m.room.message"):
             raise HTTPException(403, "Not allowed to send messages in this room.")
         # The session may have ended while the room was read.
         await require_client_user(self._request)
-        return await post_relay(
-            self._request.app,
-            self._plugin_name,
+        router = self._router()
+        extra = self._content(router, content)
+        directory = entity_directory(router.config, router.runtime_paths)
+        for mentioned in mentions:
+            entity = directory.get(mentioned)
+            if entity is None or entity.kind == "router" or mentioned not in room.members:
+                raise HTTPException(400, f"A relay mentions only agents and teams in this room, not {mentioned}.")
+        extra[ORIGINAL_SENDER_KEY] = room.user.user_id
+        return await self._send(router, f"Sent for {room.user.user_id}: {text}", thread_id, extra, mentions)
+
+    def _router(self) -> AgentBot:
+        """Return the router bot running now, so a restarted router posts with its new client, once it is in the room."""
+        embedded = ensure_app_state(self._request.app).embedded
+        router = None if embedded is None else embedded.agent_bot(ROUTER_AGENT_NAME)
+        client = None if router is None or not router.running else router.client
+        if router is None or client is None:
+            raise HTTPException(503, "MindRoom's router is not running; try again.")
+        if self._room_id not in client.rooms:
+            raise HTTPException(503, "MindRoom's router is not in this room.")
+        return router
+
+    def _content(self, router: AgentBot, content: Mapping[str, object] | None) -> dict[str, Any]:
+        """Return a copy of ``content``, answering 400 unless it holds only namespaced keys of the plugin's own.
+
+        A Matrix key such as ``body``, ``m.relates_to`` or ``m.new_content`` would change what the message says, where
+        it goes, or which message it edits; a MindRoom key would claim metadata such as its requester, and another
+        plugin's key a card that plugin's clients trust.
+        """
+        extra = dict(content or {})
+        if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
+            raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
+        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
+        others = (
+            namespace
+            for plugin in plugins
+            if plugin.name != self._plugin_name
+            for namespace in plugin.reserved_namespaces
+        )
+        if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
+            msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
+            raise HTTPException(400, msg)
+        return extra
+
+    async def _send(
+        self,
+        router: AgentBot,
+        text: str,
+        thread_id: str | None,
+        extra: dict[str, Any],
+        mentions: Sequence[str],
+    ) -> str:
+        # One hop into the synthetic chain, as a hook's own send outside a message is, so hooks reacting to it cannot loop.
+        extra[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 1
+        event_id = await router.hook_context.send_message(
             self._room_id,
             text,
-            thread_id=thread_id,
-            content=content,
-            user_id=room.user.user_id,
-            members=room.members,
-            mentions=mentions,
+            thread_id,
+            format_hook_source(self._plugin_name, "http"),
+            extra,
+            mentions=list(mentions),
         )
+        if event_id is None:
+            raise HTTPException(503, "The message could not be sent; try again.")
+        return event_id
 
 
 async def require_room_messenger(request: Request, room_id: Annotated[str, Path()]) -> RoomMessenger:

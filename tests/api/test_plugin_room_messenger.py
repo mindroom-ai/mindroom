@@ -6,6 +6,7 @@ it checks the user again just before it sends. Nothing is ever posted from the u
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -47,6 +48,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     make_conversation_reader_mock,
+    publish_test_plugins,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -63,13 +65,23 @@ ROUTER = "@mindroom_router:localhost"
 OPEN = "@mindroom_open:localhost"
 ALICES = "@mindroom_alices:localhost"
 ELSEWHERE = "@mindroom_elsewhere:localhost"
+CREW = "@mindroom_crew:localhost"
 DAVE = "@dave:example.org"
+MEMBERS = (ALICE, CAROL, BOB, ROUTER, OPEN, ALICES, CREW)
 # Alice administers the room; posting a message takes level 50, which Carol has and Bob lacks.
 POWER = {"users": {ALICE: 100, CAROL: 50, ROUTER: 100}, "events": {"m.room.message": 50}}
 
 
 def _config(tmp_path: Path) -> Config:
-    """Agents ``open``, which answers anyone, and ``alices``, which answers only Alice, in the room; one outside it."""
+    """Return the room's agents and team, an agent outside it, and two loaded plugins that each reserve a namespace.
+
+    Agent ``open`` answers anyone, ``alices`` only Alice, and the team ``crew`` holds both; ``asker`` serves the routes.
+    """
+    for name in (PLUGIN, "cards"):
+        root = tmp_path / "plugins" / name
+        root.mkdir(parents=True)
+        manifest = {"name": name, "reserved_namespaces": [f"com.example.{name}."]}
+        (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     config = bind_runtime_paths(
         Config(
             agents={
@@ -85,19 +97,27 @@ def _config(tmp_path: Path) -> Config:
                 ),
                 "elsewhere": AgentConfig(display_name="Elsewhere", rooms=["!other:example.org"]),
             },
+            teams={"crew": TeamConfig(display_name="Crew", role="Both", agents=["open", "alices"], rooms=[ROOM])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
+            plugins=[f"./plugins/{PLUGIN}", "./plugins/cards"],
         ),
         test_runtime_paths(tmp_path),
     )
     persist_entity_accounts(config, runtime_paths_for(config))
+    publish_test_plugins(config, runtime_paths_for(config))
     return config
 
 
-def _reader_client(members: tuple[str, ...], power_levels: dict[str, object]) -> SimpleNamespace:
+def _reader_client(
+    members: tuple[str, ...],
+    power_levels: dict[str, object],
+    *,
+    joined: bool = True,
+) -> SimpleNamespace:
     """The router's client as room reads see it: joined to the room with ``members`` and ``power_levels``."""
     return SimpleNamespace(
         user_id=ROUTER,
-        rooms={ROOM: nio.MatrixRoom(ROOM, ROUTER)},
+        rooms={ROOM: nio.MatrixRoom(ROOM, ROUTER)} if joined else {},
         joined_members=AsyncMock(return_value=_joined(ROOM, dict.fromkeys(members))),
         room_get_state=AsyncMock(return_value=_state(power_levels=power_levels)),
     )
@@ -154,7 +174,7 @@ class _World:
 def world(tmp_path: Path) -> _World:
     """The room, its router and agents, and the API app whose routes post there."""
     config = _config(tmp_path)
-    client = _reader_client((ALICE, CAROL, BOB, ROUTER, OPEN, ALICES), POWER)
+    client = _reader_client(MEMBERS, POWER)
     # Agent ``open``'s bot reads the room too, so reads still answer while the router is down.
     bots = {ROUTER_AGENT_NAME: _router(config, client), "open": SimpleNamespace(client=client, running=True)}
     app = FastAPI()
@@ -242,7 +262,7 @@ async def test_notice_is_the_routers_and_wakes_no_agent(world: _World) -> None:
     messenger = await world.messenger(CAROL)
 
     with _transport() as transport:
-        event_id = await messenger.notice("Build 12 finished", content={"com.example.card": {"build": 12}})
+        event_id = await messenger.notice("Build 12 finished", content={"com.example.asker.card": {"build": 12}})
 
     assert event_id == "$sent"
     content = _sent(transport, world.client)
@@ -254,7 +274,7 @@ async def test_notice_is_the_routers_and_wakes_no_agent(world: _World) -> None:
     assert content[HOOK_SOURCE_KEY] == f"{PLUGIN}:http"
     assert content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 1
     assert ORIGINAL_SENDER_KEY not in content
-    assert content["com.example.card"] == {"build": 12}
+    assert content["com.example.asker.card"] == {"build": 12}
     assert world.config.get_room_reply_mode(runtime_paths_for(world.config), ROOM) == "auto"
     assert _event_class(OPEN, content) is EventClass.CONTEXT_ONLY
     assert _answers(world.config, OPEN, content)[0] == ROUTER
@@ -267,7 +287,11 @@ async def test_relay_runs_as_its_user_for_exactly_the_agent_it_mentions(world: _
     messenger = await world.messenger(CAROL)
 
     with _transport() as transport:
-        event_id = await messenger.relay("@open what changed?", mentions=[OPEN], content={"com.example.ask": {"n": 1}})
+        event_id = await messenger.relay(
+            "@open what changed?",
+            mentions=[OPEN],
+            content={"com.example.asker.ask": {"n": 1}},
+        )
 
     assert event_id == "$sent"
     content = _sent(transport, world.client)
@@ -279,7 +303,7 @@ async def test_relay_runs_as_its_user_for_exactly_the_agent_it_mentions(world: _
     assert content[SOURCE_KIND_KEY] == "hook"
     assert content[HOOK_SOURCE_KEY] == f"{PLUGIN}:http"
     assert content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 1
-    assert content["com.example.ask"] == {"n": 1}
+    assert content["com.example.asker.ask"] == {"n": 1}
     assert _event_class(OPEN, content) is EventClass.ACTIONABLE
     mentioned, _, _ = check_agent_mentioned(
         {"content": content},
@@ -313,6 +337,17 @@ async def test_relay_mentions_only_agents_and_teams_in_the_room(world: _World, m
 
     assert refused.value.status_code == 400
     transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relay_may_wake_a_team_in_the_room(world: _World) -> None:
+    """A team joined to the room is mentioned like an agent."""
+    messenger = await world.messenger(CAROL)
+
+    with _transport() as transport:
+        await messenger.relay("@crew what changed?", mentions=[CREW])
+
+    assert _sent(transport, world.client)["m.mentions"] == {"user_ids": [CREW]}
 
 
 def _expire(world: _World) -> None:
@@ -417,11 +452,34 @@ def _post(messenger: RoomMessenger, kind: str, content: dict[str, Any] | None = 
         {"io.mindroom.exact_mentions": False},
         {"com.example.card": {"m.new_content": {ORIGINAL_SENDER_KEY: ALICE}}},
         {"com.example.cards": [{"io.mindroom.wake_mentioned": False}]},
+        {"body": f"Sent for {ALICE}: hello"},
+        {"msgtype": "m.text"},
+        {"m.relates_to": {"rel_type": "m.replace", "event_id": "$alices_relay"}},
+        {"m.new_content": {"msgtype": "m.text", "body": "forged"}},
+        {"org.matrix.msc1767.text": "forged"},
+        {"com.example.cards.card": {"approved": True}},
+        {"com.example.asker.card": {"com.example.cards.card": {"approved": True}}},
     ],
-    ids=["original-sender", "io-key", "nested", "in-a-list"],
+    ids=[
+        "original-sender",
+        "io-key",
+        "nested",
+        "in-a-list",
+        "body",
+        "msgtype",
+        "edit",
+        "new-content",
+        "unstable",
+        "another-plugins-key",
+        "another-plugins-key-nested",
+    ],
 )
-async def test_content_never_sets_mindroom_keys(world: _World, kind: str, content: dict[str, Any]) -> None:
-    """A key under `com.mindroom.` or `io.mindroom.`, at any depth, is refused before anything is sent."""
+async def test_content_holds_only_the_plugins_own_keys(world: _World, kind: str, content: dict[str, Any]) -> None:
+    """A Matrix key, or a key MindRoom or another plugin reserves at any depth, is refused before anything is sent.
+
+    So content a client passes through cannot say the message is someone else's, turn it into an edit of another, or
+    forge another plugin's card.
+    """
     messenger = await world.messenger(CAROL)
 
     with _transport() as transport, pytest.raises(HTTPException) as refused:
@@ -448,11 +506,19 @@ def _remove_router(world: _World) -> None:
     del world.bots[ROUTER_AGENT_NAME]
 
 
+def _router_out_of_the_room(world: _World) -> None:
+    world.bots[ROUTER_AGENT_NAME] = _router(world.config, _reader_client(MEMBERS, POWER, joined=False))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["notice", "relay"])
-@pytest.mark.parametrize("change", [_stop_router, _remove_router], ids=["router-stopped", "router-gone"])
+@pytest.mark.parametrize(
+    "change",
+    [_stop_router, _remove_router, _router_out_of_the_room],
+    ids=["router-stopped", "router-gone", "router-not-in-the-room"],
+)
 async def test_messages_need_a_running_router(world: _World, kind: str, change: Callable[[_World], None]) -> None:
-    """With no running router, a notice or a relay answers 503 and sends nothing."""
+    """With no running router in the room, a notice or a relay answers 503 and sends nothing."""
     messenger = await world.messenger(CAROL)
     change(world)
 
@@ -480,7 +546,7 @@ async def test_failed_send_answers_503(world: _World, kind: str) -> None:
 async def test_messages_go_through_the_router_running_when_they_are_sent(world: _World) -> None:
     """A router restarted after the route's check, as by a reload, sends with its new client; nothing keeps the old."""
     messenger = await world.messenger(CAROL)
-    new_client = _reader_client((ALICE, CAROL, BOB, ROUTER, OPEN, ALICES), POWER)
+    new_client = _reader_client(MEMBERS, POWER)
     world.bots[ROUTER_AGENT_NAME] = _router(world.config, new_client)
 
     with _transport() as transport:
