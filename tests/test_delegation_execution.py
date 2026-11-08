@@ -38,6 +38,7 @@ from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -2007,6 +2008,7 @@ async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
 
     assert report.written == ["written"]
     assert len(code.requests) == 2
+    assert code.requests[1].messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     parent = _parent_record(config, paths, _leader_identity(), "parent-run")
     result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
     assert isinstance(result, str)

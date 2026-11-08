@@ -1383,7 +1383,7 @@ class AgentBot:
             if joined:
                 self._request_call_reconciliation(room_id)
         if joined and admission.previous_membership != "join" and self._router is not None:
-            self._router.joined(room_id)
+            self._router.mark_joined_for_room_state(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:

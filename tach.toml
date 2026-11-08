@@ -4020,6 +4020,7 @@ visibility = [
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
+    "mindroom.orchestration.plugin_http_runtime",
     "mindroom.orchestration.rooms",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
@@ -4033,6 +4034,7 @@ visibility = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_reconciliation",
+    "mindroom.plugin_http",
     "mindroom.thread_tags",
 ]
 
@@ -8273,6 +8275,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.matrix.room_power",
     "mindroom.plugin_context",
     "mindroom.tool_system.plugins",
 ]
@@ -8299,6 +8302,8 @@ path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.constants",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.rooms",
 ]
 visibility = ["mindroom.orchestrator"]
 

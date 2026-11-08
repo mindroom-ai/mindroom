@@ -20,7 +20,7 @@ from mindroom.matrix.event_types import (
     MINDROOM_ACCOUNTS_EVENT_TYPE,
     MINDROOM_SERVER_EVENT_TYPE,
 )
-from mindroom.matrix.room_power import has_privileged_creators, user_power_level
+from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
@@ -34,7 +34,6 @@ logger = get_logger(__name__)
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _ROOM_ENCRYPTION_EVENT_TYPE = "m.room.encryption"
 _ROOM_ENCRYPTION_CONTENT = {"algorithm": "m.megolm.v1.aes-sha2"}
-_ROOM_ADMIN_POWER_LEVEL = 100
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
@@ -132,9 +131,9 @@ def _create_room_initial_state(
     if power_users:
         users.update(dict.fromkeys(power_users, _POWER_USER_POWER_LEVEL))
     if admin_users:
-        users.update(dict.fromkeys(admin_users, _ROOM_ADMIN_POWER_LEVEL))
+        users.update(dict.fromkeys(admin_users, ROOM_ADMIN_POWER_LEVEL))
     if client.user_id:
-        users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
+        users[client.user_id] = ROOM_ADMIN_POWER_LEVEL
     users = {user_id: level for user_id, level in users.items() if user_id not in creators}
     if users:
         power_level_content["users"] = users
@@ -369,8 +368,8 @@ def _with_room_admin_power_levels(
     next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
     for user_id in sorted(set(user_ids) - creators):
         current_level = next_users.get(user_id)
-        if not isinstance(current_level, int) or current_level < _ROOM_ADMIN_POWER_LEVEL:
-            next_users[user_id] = _ROOM_ADMIN_POWER_LEVEL
+        if not isinstance(current_level, int) or current_level < ROOM_ADMIN_POWER_LEVEL:
+            next_users[user_id] = ROOM_ADMIN_POWER_LEVEL
     next_content["users"] = next_users
     return next_content
 
@@ -412,7 +411,7 @@ async def room_admin_power_user(  # noqa: PLR0911 - each unsafe Matrix state is 
     # lacks listed admin power, and in candidate order, so the first qualifying user is still the one returned.
     creators: frozenset[str] | None = None
     for user_id in concrete_user_ids:
-        if user_power_level(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL:
+        if user_power_level(current_response.content, user_id) >= ROOM_ADMIN_POWER_LEVEL:
             return user_id
         if creators is None:
             creators = await read_room_creators(client, room_id) or frozenset()
@@ -458,7 +457,7 @@ async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix 
             "Room admins already have sufficient power",
             room_id=room_id,
             user_ids=sorted(concrete_user_ids),
-            power_level=_ROOM_ADMIN_POWER_LEVEL,
+            power_level=ROOM_ADMIN_POWER_LEVEL,
         )
         return True
 
@@ -484,7 +483,7 @@ async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix 
             "Updated room power levels for admins",
             room_id=room_id,
             user_ids=sorted(concrete_user_ids),
-            power_level=_ROOM_ADMIN_POWER_LEVEL,
+            power_level=ROOM_ADMIN_POWER_LEVEL,
         )
         return True
 

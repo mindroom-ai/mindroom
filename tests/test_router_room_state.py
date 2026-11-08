@@ -681,7 +681,7 @@ async def test_retained_ad_hoc_room_is_reconciled(room_state: RoomState, trigger
         await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
     else:
         duties = _router_duties(room_state)
-        duties.joined(ROOM_ID)
+        duties.mark_joined_for_room_state(ROOM_ID)
         await duties.publish_joined_room_state()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
@@ -895,6 +895,10 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
     await bot._on_ingestion_frame_completion()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     assert _accounts(room_state) == sorted([router_id, ids["agent1"].full_id])
+    # The frame publishes a join once; later frames reconcile nothing until another join.
+    client.room_get_state_event.reset_mock()
+    await bot._on_ingestion_frame_completion()
+    client.room_get_state_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -913,7 +917,7 @@ async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state
         await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
     else:
         duties = _router_duties(room_state)
-        duties.joined(ROOM_ID)
+        duties.mark_joined_for_room_state(ROOM_ID)
         await duties.publish_joined_room_state()
     assert _accounts(room_state) == sorted(
         ["@alice.mind:localhost", *(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "team1"))],
@@ -988,3 +992,38 @@ async def test_accounts_failure_is_nonfatal_and_retried(room_state: RoomState, f
     mock.side_effect = original
     await duties.member_event(client.rooms[ROOM_ID], _membership_event(agent2, "join", "leave"))
     assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier_triggers", [1, 2])
+async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_room(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    earlier_triggers: int,
+) -> None:
+    """The reconcile timeout covers the wait for the room's lock, so the router's sync frame stalls at most 10 seconds."""
+    config, paths, _, _, client = room_state
+
+    async def unanswered(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Future()
+
+    client.room_get_state_event.side_effect = unanswered
+    client.joined_members.side_effect = unanswered
+    loop = asyncio.get_running_loop()
+    now = 0
+    monkeypatch.setattr(loop, "time", lambda: now)
+    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    triggers = [asyncio.create_task(setup.publish_room_state()) for _ in range(earlier_triggers)]
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    frame = asyncio.create_task(duties.publish_joined_room_state())
+    while True:
+        # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        if frame.done() or now == 60:
+            break
+        now += 1
+    assert frame.done()
+    assert now == 10
+    assert all(trigger.done() for trigger in triggers)
