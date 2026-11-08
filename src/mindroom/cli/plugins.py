@@ -87,8 +87,11 @@ def plugin_check(
 
 
 def _print_literal(markup: str, text: object) -> None:
-    """Print fixed Rich markup followed by text shown as is, with no markup or emoji codes read from the text."""
-    console.print(markup, console.highlighter(str(text)), sep="")
+    """Print fixed Rich markup followed by text shown as is, with no markup or emoji codes read from the text.
+
+    The line is not wrapped at the terminal width, so a path or error in it stays whole in logs read at any width.
+    """
+    console.print(markup, console.highlighter(str(text)), sep="", soft_wrap=True)
 
 
 def _internal_imports_json(outside_imports: list[OutsideImport]) -> list[dict[str, str | int]]:
