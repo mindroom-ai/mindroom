@@ -1131,7 +1131,7 @@ They read the Matrix accounts MindRoom keeps in the primary's storage, so a tool
 | `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
 | `is_platform_administrator(user_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) for one |
 
-A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, with presets expanded, and those its settings add, such as `delegate` for `delegate_to`.
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
 The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
 A tool name grants nothing, so never decide what a caller may do from one.
 

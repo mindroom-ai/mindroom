@@ -486,7 +486,7 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
 def test_administrator_route_admits_only_an_administrator_of_the_config_served_now(tmp_path: Path) -> None:
     """Only a signed-in administrator passes, and a reload that removes them from ``administrators`` refuses them."""
     _write_plugin(tmp_path, ROUTES)
-    _, runtime_paths = _config(tmp_path)
+    without_alice, runtime_paths = _config(tmp_path)
     config = bind_runtime_paths(Config(plugins=["./plugins/demo"], administrators=[ALICE]), runtime_paths)
     publish_test_plugins(config, runtime_paths)
     app = _app(config, runtime_paths)
@@ -502,7 +502,6 @@ def test_administrator_route_admits_only_an_administrator_of_the_config_served_n
     assert admin(_signed_in(app, "@bob:example.org")) == (403, {"detail": "Not a platform administrator."})
 
     state = config_lifecycle.require_api_state(app)
-    without_alice = bind_runtime_paths(Config(plugins=["./plugins/demo"]), runtime_paths)
     state.snapshot = config_lifecycle.ApiSnapshot(2, runtime_paths, runtime_config=without_alice)
 
     assert admin(alice) == (403, {"detail": "Not a platform administrator."})

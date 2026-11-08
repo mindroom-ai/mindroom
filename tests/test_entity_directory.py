@@ -21,11 +21,12 @@ ALICE_BRIDGED = "@telegram_alice:localhost"
 def _config(runtime_paths: RuntimePaths, **data: object) -> Config:
     """Return a config with two agents, which take the default tools, and a team, without preparing any account.
 
-    The coder delegates to the writer, which gives it the delegate toolkit without a tool entry.
+    The writer may change its own config, which gives it the self_config toolkit without a tool entry, and the coder
+    delegates to the writer and also names the delegate toolkit its delegation adds.
     """
     agents = {
-        "coder": {"display_name": "Coder", "tools": ["calculator"], "delegate_to": ["writer"]},
-        "writer": {"display_name": "Writer"},
+        "coder": {"display_name": "Coder", "tools": ["calculator", "delegate"], "delegate_to": ["writer"]},
+        "writer": {"display_name": "Writer", "allow_self_config": True},
     }
     return Config.validate_with_runtime(
         {
@@ -89,13 +90,14 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
 
     assert entity_directory(config, runtime_paths) == {
         "@mindroom_router:localhost": ManagedEntity("router", "router", "RouterAgent", ()),
-        "@renamed_coder:localhost": ManagedEntity("coder", "agent", "Coder", ("calculator", "scheduler", "delegate")),
-        "@mindroom_writer:localhost": ManagedEntity("writer", "agent", "Writer", ("scheduler",)),
+        "@renamed_coder:localhost": ManagedEntity("coder", "agent", "Coder", ("calculator", "delegate", "scheduler")),
+        "@mindroom_writer:localhost": ManagedEntity("writer", "agent", "Writer", ("scheduler", "self_config")),
         "@mindroom_crew:localhost": ManagedEntity("crew", "team", "Crew", ()),
     }
 
     agents = {"coder": {"display_name": "Code Bot", "tools": ["calculator"]}, "writer": {"display_name": "Writer"}}
-    changed = _config(runtime_paths, agents={**agents, "editor": {"display_name": "Editor", "tools": ["file"]}})
+    editor = {"display_name": "Editor", "tools": ["file", "openclaw_compat"]}
+    changed = _config(runtime_paths, agents={**agents, "editor": editor})
     directory = entity_directory(changed, runtime_paths)
     assert directory["@renamed_coder:localhost"].display_name == "Code Bot"
     # The editor's account is not prepared yet, so it is left out rather than failing the whole directory.
@@ -103,9 +105,9 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
 
     persist_entity_accounts(changed, runtime_paths)
 
-    assert entity_directory(changed, runtime_paths)["@mindroom_editor:localhost"] == ManagedEntity(
-        "editor",
-        "agent",
-        "Editor",
-        ("file", "scheduler"),
-    )
+    entity = entity_directory(changed, runtime_paths)["@mindroom_editor:localhost"]
+    assert (entity.name, entity.kind, entity.display_name) == ("editor", "agent", "Editor")
+    # A preset is no toolkit, so the editor lists the toolkits it expands to instead.
+    assert entity.tool_names[:3] == ("file", "scheduler", "shell")
+    assert "browser" in entity.tool_names
+    assert "openclaw_compat" not in entity.tool_names
