@@ -31,9 +31,8 @@ if TYPE_CHECKING:
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = ["ClientUser", "client_stream", "plugin_context", "require_client_user", "require_room_member"]
 
-# A stream in a room rechecks its user's membership this long after each check, and gives a check this long.
+# A stream in a room rechecks its user's membership this long after each check.
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
-_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS = 15.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 
@@ -136,10 +135,7 @@ async def _membership_end(websocket: WebSocket, user_id: str, room_id: str) -> t
     while True:
         await asyncio.sleep(_MEMBERSHIP_RECHECK_SECONDS)
         try:
-            async with asyncio.timeout(_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS):
-                await _require_joined(websocket, user_id, room_id)
-        except TimeoutError:
-            return status.WS_1013_TRY_AGAIN_LATER, "Room membership lookup timed out; try again."
+            await _require_joined(websocket, user_id, room_id)
         except HTTPException as error:
             gone = error.status_code == status.HTTP_403_FORBIDDEN
             return status.WS_1008_POLICY_VIOLATION if gone else status.WS_1013_TRY_AGAIN_LATER, error.detail

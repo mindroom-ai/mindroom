@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from types import ModuleType
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -31,7 +32,7 @@ from tests.conftest import bind_runtime_paths, publish_test_plugins
 from tests.test_plugin_routes import _write_plugin
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
 ROOM = "!room:example.org"
@@ -186,6 +187,30 @@ def _offers(token: str) -> list[str]:
     return ["mindroom-session", f"mindroom-session.{token}"]
 
 
+def _revoke(client: TestClient, token: str) -> None:
+    """Sign out as a client does, so the revocation runs on the app's event loop."""
+    assert client.delete("/api/client-sessions", headers={"Authorization": f"Bearer {token}"}).status_code == 204
+
+
+@asynccontextmanager
+async def _serving(app: FastAPI) -> AsyncIterator[int]:
+    """Serve ``app`` on a free local port with the websocket transport `mindroom run` uses, and yield the port."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, ws="websockets-sansio", log_level="critical"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                if serving.done():
+                    await serving
+                await asyncio.sleep(0.01)
+        yield listener.getsockname()[1]
+    finally:
+        server.should_exit = True
+        await serving
+
+
 def _denial(client: TestClient, path: str, protocols: list[str], headers: dict[str, str]) -> WebSocketDenialResponse:
     with pytest.raises(WebSocketDenialResponse) as denied, client.websocket_connect(path, protocols, headers=headers):
         pass
@@ -300,7 +325,7 @@ def test_revoking_the_session_closes_the_stream_at_once_with_4401(app: FastAPI, 
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         started = time.monotonic()
-        assert client.delete("/api/client-sessions", headers={"Authorization": f"Bearer {token}"}).status_code == 204
+        _revoke(client, token)
         with pytest.raises(WebSocketDisconnect) as closed:
             websocket.receive_text()
 
@@ -329,7 +354,7 @@ def test_a_closed_stream_cancels_a_block_waiting_on_something_else(app: FastAPI,
 
     with client.websocket_connect("/api/plugins/demo/waits", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
         assert ws.receive_text() == ALICE
-        _store(app).revoke(token)
+        _revoke(client, token)
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
 
@@ -357,16 +382,15 @@ def test_leaving_the_room_closes_the_stream_with_1008(
     assert (closed.value.code, closed.value.reason) == (1008, "Not a member of this room.")
 
 
-@pytest.mark.parametrize("failure", ["error", "timeout", "unbound"])
+@pytest.mark.parametrize("failure", ["error", "unbound"])
 def test_a_failed_recheck_closes_the_stream_with_1013(
     app: FastAPI,
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    """A recheck that fails, takes too long, or finds membership unavailable ends the stream with try-again-later."""
+    """A recheck that fails or finds membership unavailable ends the stream with try-again-later."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.05)
-    monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS", 0.05)
     token = _store(app).create(ALICE).token
     membership = _membership(app)
 
@@ -375,8 +399,6 @@ def test_a_failed_recheck_closes_the_stream_with_1013(
         assert websocket.receive_text() == f"{ALICE}: hi"
         if failure == "error":
             membership.error = HTTPException(503, "Room membership lookup failed; try again.")
-        elif failure == "timeout":
-            membership.hang = True
         else:
             ensure_app_state(app).room_members = None
         with pytest.raises(WebSocketDisconnect) as closed:
@@ -402,7 +424,7 @@ def test_a_stream_without_a_room_never_rechecks_membership(
         time.sleep(1.5)
         ws.send_text("still here")
         assert ws.receive_text() == f"{ALICE}: still here"
-        store.revoke(token)
+        _revoke(client, token)
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
 
@@ -428,7 +450,7 @@ def test_revoking_the_session_during_a_membership_recheck_closes_the_stream_at_o
         while membership.calls == calls:
             time.sleep(0.01)
         started = time.monotonic()
-        _store(app).revoke(token)
+        _revoke(client, token)
         with pytest.raises(WebSocketDisconnect) as closed:
             websocket.receive_text()
 
@@ -504,19 +526,8 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(tm
     """Under the websocket transport `mindroom run` uses, the handshake and every refusal are parseable HTTP."""
     app = _published_app(tmp_path)
     token = _store(app).create(ALICE).token
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, ws="websockets-sansio", log_level="critical"))
-    serving = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
-        async with asyncio.timeout(10):
-            while not server.started:
-                if serving.done():
-                    await serving
-                await asyncio.sleep(0.01)
+    async with _serving(app) as port:
         offers = ", ".join(_offers(token))
-
         lines, _ = await _handshake(port, _echo_path(), CLIENT_ORIGIN, offers)
         assert lines[0].split()[1] == "101"
         assert "sec-websocket-protocol: mindroom-session" in [line.lower() for line in lines]
@@ -531,9 +542,6 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(tm
             lines, body = await _handshake(port, path, origin, protocols)
             _assert_well_formed_denial(lines, body, status)
             assert token.encode() not in body
-    finally:
-        server.should_exit = True
-        await serving
 
 
 @pytest.mark.asyncio
@@ -542,30 +550,15 @@ async def test_a_stream_whose_client_left_ends_cleanly_on_the_embedded_servers_t
     app = _published_app(tmp_path)
     store = _store(app)
     token = store.create(ALICE).token
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, ws="websockets-sansio", log_level="critical"))
-    serving = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
+    async with _serving(app) as port, aiohttp.ClientSession() as session:
+        async with session.ws_connect(
+            f"http://127.0.0.1:{port}/api/plugins/demo/waits",
+            protocols=_offers(token),
+            origin=CLIENT_ORIGIN,
+        ) as websocket:
+            assert websocket.protocol == "mindroom-session"
+            assert await websocket.receive_str() == ALICE
+        store.revoke(token)
         async with asyncio.timeout(10):
-            while not server.started:
-                if serving.done():
-                    await serving
-                await asyncio.sleep(0.01)
-            async with (
-                aiohttp.ClientSession() as session,
-                session.ws_connect(
-                    f"http://127.0.0.1:{port}/api/plugins/demo/waits",
-                    protocols=_offers(token),
-                    origin=CLIENT_ORIGIN,
-                ) as websocket,
-            ):
-                assert websocket.protocol == "mindroom-session"
-                assert await websocket.receive_str() == ALICE
-            store.revoke(token)
             while sys.modules[PROBE_MODULE].after_block != [ALICE]:  # noqa: ASYNC110 - the plugin route signals no event
                 await asyncio.sleep(0.01)
-    finally:
-        server.should_exit = True
-        await serving
