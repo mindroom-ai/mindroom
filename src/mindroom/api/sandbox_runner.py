@@ -109,6 +109,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     visible_workspace_roots,
 )
+from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -1270,9 +1271,17 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
         config_yaml=_subprocess_config_yaml(call.route.config, prepared_request.request.tool_name),
     )
-    # A job's call runs as long as its tool does; any other call keeps the runner's limit.
+    # A job's call runs as long as its tool does; any other call keeps the runner's limit, or its own when longer.
     timeout_seconds = (
-        None if prepared_request.request.run_as_job else sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+        None
+        if prepared_request.request.run_as_job
+        else max(
+            sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
+            trafilatura_request_budget_seconds(
+                prepared_request.request.tool_name,
+                prepared_request.request.function_name,
+            ),
+        )
     )
     if prepared_request.request.tool_name == "shell":
         try:

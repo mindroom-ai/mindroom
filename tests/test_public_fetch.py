@@ -292,6 +292,24 @@ async def test_a_server_that_trickles_bytes_fails_at_the_deadline(
 
 
 @pytest.mark.asyncio
+async def test_a_page_read_in_time_is_returned_when_closing_the_connection_outlasts_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline bounds the request, so a page read before it is returned however long closing the client takes."""
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.2)
+    serve(monkeypatch, lambda _request: _page(200, b"page"))
+
+    async def close_slowly(_transport: httpx.AsyncHTTPTransport, *_exc_info: object) -> None:
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "__aexit__", close_slowly)
+
+    result = await fetch_public_url("https://example.com/", max_bytes=1024)
+
+    assert result.content == b"page"
+
+
+@pytest.mark.asyncio
 async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each address gets its own connect timeout, so a dead first address leaves the deadline for the next one."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 1.0)
