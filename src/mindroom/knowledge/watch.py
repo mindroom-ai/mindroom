@@ -153,8 +153,8 @@ def _has_utf8_name(name: str) -> bool:
 def _watched_folders(root: Path, unnamed: set[str]) -> list[Path]:
     """Return the base folder and the folders below it, reached without a link, up to the cap.
 
-    Watchfiles takes only paths that are valid UTF-8, so the folders whose names are not are added to ``unnamed``
-    instead, as printable paths, together with everything below them.
+    Watchfiles takes only paths that are valid UTF-8, so a folder whose name is not is left out with everything below
+    it, and its printable path is added to ``unnamed``.
     """
     folders: list[Path] = []
     with pinned_canonical_directory(root) as root_fd:
@@ -175,7 +175,7 @@ def _is_new_watched_folder(change: Change, path: str) -> bool:
     if change != Change.added or Path(path).name in _IGNORED_FOLDER_NAMES:
         return False
     try:
-        # A folder that cannot be entered, for example after losing its search permission, is not walked either.
+        # A path below a folder that lost its search permission cannot be checked, and the walk cannot reach it either.
         return stat.S_ISDIR(os.lstat(path).st_mode)
     except OSError:
         return False

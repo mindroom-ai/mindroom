@@ -205,17 +205,20 @@ async def test_watch_refreshes_for_a_file_written_into_a_new_folder_at_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("folder", ["notes", "drafts~"], ids=["plain", "name-watchfiles-filters"])
 async def test_watch_refreshes_when_a_folder_leaves_the_base(
     tmp_path: Path,
     docs: Path,
     recorded_watch: _RecordedWatch,
+    folder: str,
 ) -> None:
     """Moving a folder out of the base schedules a refresh, since the files it holds leave the base with it."""
-    (docs / "notes" / "doc.md").write_text("indexed", encoding="utf-8")
+    (docs / folder).mkdir(exist_ok=True)
+    (docs / folder / "doc.md").write_text("indexed", encoding="utf-8")
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
         await _wait_until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
-        (docs / "notes").rename(tmp_path / "moved")
+        (docs / folder).rename(tmp_path / "moved")
         await _wait_until(lambda: scheduler.schedule_refresh.called, "moving a folder out of the base did not refresh")
 
     assert scheduler.schedule_refresh.call_args.args == ("docs",)
@@ -299,6 +302,32 @@ async def test_watch_keeps_watching_when_a_folder_disappears_before_its_watch_st
         await _wait_until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
         await _wait_until(lambda: scheduler.schedule_refresh.called, "the watcher did not refresh after looking again")
         await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
+
+
+@pytest.mark.asyncio
+async def test_watch_stops_and_logs_when_watching_fails_for_another_reason(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a name watchfiles cannot decode makes a running watch walk the base again; other failures stop the watcher."""
+
+    async def _failing_awatch(*paths: Path, **_kwargs: object) -> AsyncIterator[set[tuple[Change, str]]]:
+        recorded_watch.starts.append((frozenset(map(str, paths)), False))
+        yield set()
+        message = "unhandled errors in a TaskGroup"
+        raise ExceptionGroup(message, [RuntimeError("watcher closed")])
+
+    monkeypatch.setattr(knowledge_watch, "awatch", _failing_awatch)
+    with capture_logs() as logs:
+        async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+            await _wait_until(
+                lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
+                "the watcher did not stop after the failure",
+            )
+
+    assert len(recorded_watch.starts) == 1
 
 
 @pytest.mark.asyncio
