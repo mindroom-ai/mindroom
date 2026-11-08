@@ -843,14 +843,13 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str] | None:
         and transport.status == 200
     ):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
-        return direct_room_ids
-    if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
+    elif isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
         # No m.direct account data is a stable empty state for this user.
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
-        return set()
-
-    return None
+        direct_room_ids = set()
+    else:
+        return None
+    _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
+    return direct_room_ids
 
 
 def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:

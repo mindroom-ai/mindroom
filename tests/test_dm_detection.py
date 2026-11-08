@@ -12,11 +12,16 @@ from mindroom.matrix import rooms
 from mindroom.matrix.rooms import is_dm_room
 
 
-def _direct_rooms(rooms: dict[str, list[str]], status: int = 200) -> nio.DirectRoomsResponse:
+def _direct_rooms(rooms_by_user: dict[str, list[str]], status: int = 200) -> nio.DirectRoomsResponse:
     """Build the m.direct response nio returns for an HTTP reply with *status*."""
-    response = nio.DirectRoomsResponse(rooms)
+    response = nio.DirectRoomsResponse(rooms_by_user)
     response.transport_response = MagicMock(spec=aiohttp.ClientResponse, status=status)
     return response
+
+
+def _non_dm_state() -> nio.RoomGetStateResponse:
+    """Build a room state reply whose member event carries no is_direct flag."""
+    return nio.RoomGetStateResponse([{"type": "m.room.member", "content": {"membership": "join"}}], "!room:server")
 
 
 @pytest.mark.asyncio
@@ -141,11 +146,7 @@ class TestDMDetection:
         non_dm_client = AsyncMock()
         non_dm_client.user_id = "@agent_b:server"
         non_dm_client.list_direct_rooms.return_value = _direct_rooms({"@user:server": []})
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        non_dm_client.room_get_state.return_value = non_dm_state_response
+        non_dm_client.room_get_state.return_value = _non_dm_state()
 
         dm_result = await is_dm_room(dm_client, room_id)
         non_dm_result = await is_dm_room(non_dm_client, room_id)
@@ -160,11 +161,7 @@ class TestDMDetection:
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
 
         error_response = MagicMock(spec=nio.RoomGetStateError)
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.side_effect = [error_response, non_dm_state_response]
+        client.room_get_state.side_effect = [error_response, _non_dm_state()]
 
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
@@ -179,11 +176,7 @@ class TestDMDetection:
         client.user_id = "@agent:server"
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
 
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.return_value = non_dm_state_response
+        client.room_get_state.return_value = _non_dm_state()
 
         first_result = await is_dm_room(client, "!room1:server")
         second_result = await is_dm_room(client, "!room2:server")
@@ -215,11 +208,7 @@ class TestDMDetection:
             _direct_rooms({"@user:server": ["!room:server"]}),
         ]
 
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.return_value = non_dm_state_response
+        client.room_get_state.return_value = _non_dm_state()
 
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
@@ -237,11 +226,7 @@ class TestDMDetection:
             _direct_rooms({"@user:server": []}),
         ]
 
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.return_value = non_dm_state_response
+        client.room_get_state.return_value = _non_dm_state()
 
         monkeypatch.setattr(rooms, "_DM_ROOM_TTL", 0)
         monkeypatch.setattr(rooms, "_DIRECT_ROOMS_TTL", 0)
