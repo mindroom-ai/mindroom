@@ -375,8 +375,8 @@ async def test_client_rooms_keeps_the_joined_candidates_in_order() -> None:
     }
     client.joined_members.side_effect = answers.__getitem__
     app = _bound(client)
-    candidates = iter([THIRD_ROOM, OTHER_ROOM, "!nobot:example.org", ROOM])
-    assert await client_rooms(_request(app), candidates) == [OTHER_ROOM, ROOM]
+    candidates = iter([ROOM, THIRD_ROOM, "!nobot:example.org", OTHER_ROOM])
+    assert await client_rooms(_request(app), candidates) == [ROOM, OTHER_ROOM]
     assert await client_rooms(_request(app, BOB), [OTHER_ROOM, ROOM, THIRD_ROOM]) == [ROOM]
     with pytest.raises(HTTPException) as caught:
         await client_rooms(Request({"type": "http", "app": app, "headers": []}), [ROOM])
