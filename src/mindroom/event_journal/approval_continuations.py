@@ -762,22 +762,40 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     return None if delivered is None else continuation
 
 
-def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
-    """Return whether the reply a continuation paused is gone."""
+def _paused_reply_state(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> ReplyState | None:
+    """Return the state of the reply a continuation paused, or None when its records are gone."""
     assert continuation.span_id is not None, "a stored continuation names the span whose pause created it"
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
-    return reply is not None and reply.state is ReplyState.GONE
+    return None if reply is None else reply.state
+
+
+def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
+    """Return whether the reply a continuation paused is gone."""
+    return _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
-    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows."""
+    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows.
+
+    Its end names the continuation and the state that end left the reply in, which says how the paused turn ended.
+    """
+    continuation = get(transaction, principal_id, approval_id=approval_id)
+    ended = (
+        None
+        if continuation is None
+        else approval_signals.EndedApproval(continuation, _paused_reply_state(transaction, principal_id, continuation))
+    )
     approval_calls.delete_reply_calls(transaction, approval_id=approval_id)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
-    approval_signals.ended(transaction, principal_id, approval_id)
+    approval_signals.ended(transaction, principal_id, approval_id, ended)
 
 
 def may_release(

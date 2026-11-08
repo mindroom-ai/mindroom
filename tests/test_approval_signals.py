@@ -158,7 +158,7 @@ async def test_a_listener_on_another_loop_hears_a_pause_and_its_end_in_commit_or
     listener.start()
     assert await asyncio.to_thread(subscribed.wait, _TIMEOUT_SECONDS)
     await store.backend.write(lambda transaction: approval_signals.paused(transaction, _PAUSED))
-    await store.backend.write(lambda transaction: approval_signals.ended(transaction, _PRINCIPAL, "approval-1"))
+    await store.backend.write(lambda transaction: approval_signals.ended(transaction, _PRINCIPAL, "approval-1", None))
     await asyncio.to_thread(listener.join, _TIMEOUT_SECONDS)
 
     assert heard == ["paused approval-1", "ended approval-1"]
@@ -202,8 +202,8 @@ async def test_following_reports_the_replies_paused_now_and_nothing_after_it_sto
     assert heard == [_PAUSED]
 
     def end_one_and_one_unknown(transaction: Transaction) -> None:
-        approval_signals.ended(transaction, _PRINCIPAL, "approval-1")
-        approval_signals.ended(transaction, _PRINCIPAL, "never-paused")
+        approval_signals.ended(transaction, _PRINCIPAL, "approval-1", None)
+        approval_signals.ended(transaction, _PRINCIPAL, "never-paused", None)
 
     await store.backend.write(end_one_and_one_unknown)
     assert heard == [_PAUSED, "approval-1"]

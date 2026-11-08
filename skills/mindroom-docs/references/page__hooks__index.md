@@ -242,8 +242,8 @@ Custom events default to 1000 ms.
   A reply that [pauses for a tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
   A call that asks for approval from its [background job](https://docs.mindroom.chat/tools/agent-orchestration/#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
   A request that runs nothing, such as an empty message, starts no turn.
-  An agent's hooks stop with its `agent:stopped`, so a turn still running when its agent stops for a restart or shutdown fires no `turn:ended`.
-  A turn paused for approval keeps its `turn_id` across a restart; one whose approval is dropped because its agent left the room or was removed from the config fires no `turn:ended`.
+  An agent's hooks stop with its `agent:stopped`, so a turn still running when its agent stops for a restart or shutdown, or when MindRoom crashes, fires no `turn:ended`.
+  A turn paused for approval keeps its `turn_id` across a restart and ends when its approval does, also when its agent leaves the room (`cancelled`) or is removed from the config (`failed`).
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.

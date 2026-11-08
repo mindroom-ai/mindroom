@@ -885,11 +885,12 @@ class ResponseLifecycle:
         )
 
     @asynccontextmanager
-    async def turn(self) -> AsyncIterator[None]:
-        """Run one settlement of the turn, then emit exactly one ``turn:paused`` or ``turn:ended``.
+    async def turn(self, *, approval_owns_end: Callable[[], Awaitable[bool]]) -> AsyncIterator[None]:
+        """Run one settlement of the turn, then emit its ``turn:paused``, or its ``turn:ended`` unless an approval owns it.
 
         How the block's finalization settled the turn decides the event; a block that raised before any finalization
-        ends the turn cancelled for a cancellation and failed for an error.
+        ends the turn cancelled for a cancellation and failed for an error. A turn with an approval, paused or resumed,
+        ends when that approval ends, whose settlement emits ``turn:ended``.
         """
         cancelled = False
         try:
@@ -901,7 +902,7 @@ class ResponseLifecycle:
             end = self._turn_end or (TurnOutcome.CANCELLED if cancelled else TurnOutcome.FAILED)
             if end == "paused":
                 await self.deps.response_hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
-            else:
+            elif not await approval_owns_end():
                 await self.end_turn(end)
 
     async def end_turn(self, outcome: TurnOutcome) -> None:

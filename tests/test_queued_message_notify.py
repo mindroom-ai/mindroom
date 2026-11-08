@@ -140,7 +140,7 @@ class _NoopResponseLifecycle:
     async def start_turn(self, **_kwargs: object) -> None:
         return None
 
-    def turn(self) -> nullcontext[None]:
+    def turn(self, **_kwargs: object) -> nullcontext[None]:
         return nullcontext()
 
 

@@ -2821,7 +2821,12 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle = cast(
             "Any",
-            SimpleNamespace(identity=identity, finalize=finalize, turn=nullcontext, start_turn=AsyncMock()),
+            SimpleNamespace(
+                identity=identity,
+                finalize=finalize,
+                turn=lambda **_kwargs: nullcontext(),
+                start_turn=AsyncMock(),
+            ),
         )
         # The response runs in the reply span the locked generation claims for it.
         async with runner.deps.replies.span_scope():

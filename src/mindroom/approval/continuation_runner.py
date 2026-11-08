@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import ResponseIdentity
+    from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
@@ -209,6 +210,15 @@ class _ShownPause:
     handle: SpanHandle
     reply_pause: Presentation
     reply_stage: rl.WriteStage | None = None
+
+
+# How a paused reply's state, once its approval ended, ends its turn; one released to replay is not ended.
+_TURN_OUTCOMES: dict[rl.ReplyState | None, TurnOutcome] = {
+    rl.ReplyState.COMPLETED: TurnOutcome.COMPLETED,
+    rl.ReplyState.CANCELLED: TurnOutcome.CANCELLED,
+    rl.ReplyState.GONE: TurnOutcome.CANCELLED,
+    rl.ReplyState.FAILED: TurnOutcome.FAILED,
+}
 
 
 @dataclass
@@ -1263,7 +1273,7 @@ class ApprovalContinuationRunner:
                 approval_state=owned.state,
             )
             if not isinstance(step, Resume):
-                await self._run_paused_step(owned, step, target=target)
+                await self._run_step(owned, step, target=target)
                 return
             if not is_sender_allowed_for_entity_replies_in_room(
                 owned.requester_id,
@@ -1278,7 +1288,7 @@ class ApprovalContinuationRunner:
                 self.deps.runtime.agent_reply_memberships,
                 require_resolved_membership=True,
             ):
-                await self._run_paused_step(owned, Settle(_UNAUTHORIZED), target=target)
+                await self._run_step(owned, Settle(_UNAUTHORIZED), target=target)
                 return
             # Each claimed generation runs in its own resume span.
             async with self.deps.replies.span_scope() as resume_slot:
@@ -1299,23 +1309,6 @@ class ApprovalContinuationRunner:
                 await self._run_step(current, step, target=target)
                 return
             owned = current
-
-    async def _run_paused_step(self, paused: ApprovalContinuation, step: Step, *, target: MessageTarget) -> None:
-        """Run one step of a paused reply's approval; a settlement that ends a reply no resume claimed ends its turn.
-
-        Only a reply whose span paused left its turn paused: a claimed continuation's resume, or a response that waited
-        in place for the decision, ends the turn itself.
-        """
-        if not await self._run_step(paused, step, target=target) or not isinstance(step, Settle):
-            return
-        if paused.claim_span_id is not None or paused.span_id is None:
-            return
-        span = await self.deps.replies.store.replies.span(paused.span_id)
-        if span is not None and span.outcome is rl.SpanOutcome.PAUSED:
-            request = self.approval_response_request(paused, target=target)
-            lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(paused))
-            failed = step.failure.kind is ApprovalFailureKind.ERROR
-            await lifecycle.end_turn(TurnOutcome.FAILED if failed else TurnOutcome.CANCELLED)
 
     async def _run_owned_approval_continuation(
         self,
@@ -1407,6 +1400,19 @@ class ApprovalContinuationRunner:
         )
         slot.handle = handle
         return claimed
+
+    async def end_paused_turn(self, ended: EndedApproval) -> None:
+        """End the turn of a paused reply whose approval ended, as the state its end left the reply in says.
+
+        A reply its approval released to replay ended nothing: its sources answer again.
+        """
+        outcome = _TURN_OUTCOMES.get(ended.reply_state)
+        if outcome is None:
+            return
+        continuation = ended.continuation
+        request = self.approval_response_request(continuation, target=continuation_target(continuation))
+        lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(continuation))
+        await lifecycle.end_turn(outcome)
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Finish one paused reply whose entity is gone through its final answer, under its original bot principal."""

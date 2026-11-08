@@ -136,6 +136,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
+    from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -1609,6 +1610,10 @@ class AgentBot:
             self._sending_device_id = None
             await self._close_owned_matrix_after_start_failure()
             raise
+
+    async def end_paused_turn(self, ended: EndedApproval) -> None:
+        """End the turn of a paused reply whose approval ended."""
+        await self._approval_runner.end_paused_turn(ended)
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""

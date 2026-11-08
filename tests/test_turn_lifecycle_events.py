@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -10,7 +11,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.event_journal import DepartureSource
+from mindroom.event_journal.approval_signals import EndedApproval
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome, Owed
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -28,13 +34,21 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.llm.provider import TextDelta
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.plugin_api import TurnOutcome
 from mindroom.post_response_effects import ResponseOutcome
 from mindroom.response_turn import CompletedApprovalRun
-from tests.approval_continuation_helpers import dispatch_approval
+from tests.approval_continuation_helpers import approval_continuation, dispatch_approval
 from tests.bot_helpers import _hook_plugin
-from tests.conftest import publish_hook_plugin, unwrap_extracted_collaborator
+from tests.conftest import (
+    bind_runtime_paths,
+    publish_hook_plugin,
+    runtime_paths_for,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
+from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _plain_request, _target
 from tests.test_cancelled_response_hook import _lifecycle_with, _no_effects, _response_hook_service
 from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_tool is a pytest fixture
@@ -61,6 +75,7 @@ from tests.test_reply_records_approvals import (
 from tests.test_reply_records_turns import _stop
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -104,6 +119,22 @@ def _record_turn_events(bot: AgentBot, seen: _Seen, events: tuple[str, ...] = _T
 
 def _events(seen: _Seen) -> list[tuple[str, str | None]]:
     return [(event, outcome) for event, _turn, outcome in seen]
+
+
+@asynccontextmanager
+async def _approval_turns(tmp_path: Path, seen: _Seen, *, requires_human: bool) -> AsyncIterator[AgentBot]:
+    """Start an approval bot whose turn events record into ``seen``; its paused turns end as the runtime ends them."""
+    async with _approval_bot(tmp_path, requires_human=requires_human) as bot:
+        _record_turn_events(bot, seen)
+        # As the runtime does: the approval's end ends the paused turn, through the bot of its entity.
+        stop = bot._journal_store.approval_signals.follow_ended_approvals(
+            lambda ended: create_background_task(bot.end_paused_turn(ended), owner=bot),
+        )
+        try:
+            yield bot
+            assert await wait_for_background_tasks(timeout=5, owner=bot)
+        finally:
+            stop()
 
 
 @pytest.mark.usefixtures("echo_tool")
@@ -268,8 +299,7 @@ async def test_a_reply_that_pauses_for_approval_ends_no_turn(tmp_path: Path, mon
 async def test_an_approved_reply_pauses_resumes_and_ends_as_one_turn(tmp_path: Path) -> None:
     """The pause, the resume the approval runs, and the end carry the turn ID of the request that started the turn."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=False) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         request = _plain_request(_target())
         await _respond(bot, request=request, resume=AsyncMock(return_value=CompletedApprovalRun("Approved.", {})))
 
@@ -284,8 +314,7 @@ async def test_an_approved_reply_pauses_resumes_and_ends_as_one_turn(tmp_path: P
 async def test_each_pause_of_a_chained_approval_resumes_the_same_turn(tmp_path: Path) -> None:
     """A resume that pauses again pauses the turn again; the last resume ends it."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=False) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         resume = AsyncMock(side_effect=[_paused(run_id="run-2"), CompletedApprovalRun("Both read.", {})])
         await _respond(bot, resume=resume)
 
@@ -303,8 +332,7 @@ async def test_each_pause_of_a_chained_approval_resumes_the_same_turn(tmp_path: 
 async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> None:
     """The failed resume ends the turn; the approval's settlement afterwards does not end it again."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=False) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         await _respond(bot, resume=AsyncMock(side_effect=RuntimeError("tool exploded")))
 
     assert _events(seen) == [
@@ -318,8 +346,7 @@ async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> 
 async def test_a_stop_during_a_resume_ends_the_turn_cancelled_once(tmp_path: Path) -> None:
     """The stopped resume ends the turn; the settlement its Stop wakes does not end it again."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=False) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         resuming = asyncio.Event()
         response = asyncio.create_task(_respond(bot, resume=_resume_until_cancelled(resuming)))
         await asyncio.wait_for(resuming.wait(), timeout=5)
@@ -340,8 +367,7 @@ async def test_a_stop_during_a_resume_ends_the_turn_cancelled_once(tmp_path: Pat
 async def test_a_stop_on_a_paused_reply_ends_its_turn_cancelled(tmp_path: Path) -> None:
     """A paused turn whose approval a Stop settles without resuming ends cancelled, under its own turn ID."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
         request = _plain_request(_target())
         await _respond(bot, request=request)
         with _journal_wakes(bot) as wakes:
@@ -358,8 +384,7 @@ async def test_a_stop_on_a_paused_reply_ends_its_turn_cancelled(tmp_path: Path) 
 async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(tmp_path: Path) -> None:
     """A run that waits in place for an approval keeps its turn running; the settlement after it ends the turn no more."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
         runner = unwrap_extracted_collaborator(bot._response_runner)
         async with _responding_in_place(bot) as response:
             request_task_cancel(response, cancel_source="sync_restart")
@@ -372,14 +397,59 @@ async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(t
         await dispatch_approval(runner.approvals, failing, target=_target())
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
+
+
+@pytest.mark.parametrize(("cancel_source", "outcome"), [("user_stop", "cancelled"), ("sync_restart", "failed")])
+async def test_a_resume_cut_short_before_its_run_starts_ends_the_turn_once(
+    tmp_path: Path,
+    cancel_source: str,
+    outcome: str,
+) -> None:
+    """A Stop or a restart that lands while a claimed resume prepares, before its run starts, ends the paused turn."""
+    seen: _Seen = []
+    preparing = asyncio.Event()
+
+    async def prepare_until_cancelled(*_args: object, **_kwargs: object) -> None:
+        # As an agent with mid-turn judging refreshes the thread before its resume runs.
+        preparing.set()
+        await asyncio.Event().wait()
+
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with patch.object(runner.locked, "refresh_mid_turn_context_for_approval", new=prepare_until_cancelled):
+            response = asyncio.create_task(_respond(bot))
+            await asyncio.wait_for(preparing.wait(), timeout=5)
+            request_task_cancel(response, cancel_source=cancel_source)
+            await asyncio.wait({response}, timeout=5)
+        # The cut-short resume fenced its claimed approval; the source worker settles it.
+        failing = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
+        assert failing is not None
+        assert failing.state == "failing"
+        await dispatch_approval(runner.approvals, failing, target=_target())
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, outcome)]
+
+
+async def test_a_paused_turn_ends_cancelled_when_its_agent_leaves_the_room(tmp_path: Path) -> None:
+    """Leaving the room drops the approval a turn waits for, and with it ends the turn."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
+        request = _plain_request(_target())
+        await _respond(bot, request=request)
+        await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
+
+    assert seen == [
+        (EVENT_TURN_STARTED, request.turn_id, None),
+        (EVENT_TURN_PAUSED, request.turn_id, None),
+        (EVENT_TURN_ENDED, request.turn_id, "cancelled"),
+    ]
 
 
 async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(tmp_path: Path) -> None:
     """An approval that can no longer resume for its requester fails the paused turn."""
     seen: _Seen = []
-    async with _approval_bot(tmp_path, requires_human=False) as bot:
-        _record_turn_events(bot, seen)
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         with patch(
             "mindroom.approval.continuation_runner.is_sender_allowed_for_entity_replies_in_room",
             return_value=False,
@@ -387,6 +457,25 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
             await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Never resumed.", {})))
 
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, "failed")]
+
+
+async def test_a_paused_turn_ends_through_its_entity_s_bot_or_the_router_s_once_the_entity_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A removed agent has no bot, so the router ends its paused turns."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
+    general, router = AsyncMock(), AsyncMock()
+    orchestrator.fleet.add("general", general)
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router)
+
+    for entity_name in ("general", "removed"):
+        orchestrator._end_paused_turn(EndedApproval(approval_continuation(entity_name=entity_name), None))
+    assert await wait_for_background_tasks(timeout=5, owner=orchestrator)
+
+    general.end_paused_turn.assert_awaited_once()
+    router.end_paused_turn.assert_awaited_once()
+    assert router.end_paused_turn.await_args.args[0].continuation.entity_name == "removed"
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
@@ -427,6 +516,34 @@ async def test_a_hook_scoped_to_agents_or_rooms_sees_only_their_turns(tmp_path: 
     assert seen == ["this_agent", "this_room"]
 
 
+async def _no_approval() -> bool:
+    return False
+
+
+async def _an_approval() -> bool:
+    return True
+
+
+@pytest.mark.parametrize(
+    ("ending", "events"),
+    [(Completed(), []), (Owed(), []), (AwaitingApproval(), [(EVENT_TURN_PAUSED, None)])],
+    ids=["completed", "owed", "paused"],
+)
+async def test_a_settlement_leaves_the_end_of_a_turn_an_approval_owns_to_that_approval(
+    tmp_path: Path,
+    ending: Completed | Owed | AwaitingApproval,
+    events: list[tuple[str, str | None]],
+) -> None:
+    """A resumed run, or one that waited in place, reports a pause but never the end its approval's settlement emits."""
+    seen: _Seen = []
+    lifecycle = _lifecycle(tmp_path, _recorders(seen))
+
+    async with lifecycle.turn(approval_owns_end=_an_approval):
+        await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending))
+
+    assert _events(seen) == events
+
+
 async def _finalize(
     lifecycle: ResponseLifecycle,
     outcome: FinalDeliveryOutcome,
@@ -454,7 +571,7 @@ async def test_a_settlement_that_raises_before_finalizing_still_ends_its_turn(
     lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
     with pytest.raises(type(raised)):
-        async with lifecycle.turn():
+        async with lifecycle.turn(approval_owns_end=_no_approval):
             raise raised
 
     assert _events(seen) == [(EVENT_TURN_ENDED, outcome)]
@@ -466,7 +583,7 @@ async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_
     lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
     async def finalized_twice_then_cancelled() -> None:
-        async with lifecycle.turn():
+        async with lifecycle.turn(approval_owns_end=_no_approval):
             await lifecycle.start_turn(resumed=True)
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Cancelled("user_stop")))
@@ -500,7 +617,7 @@ async def test_a_cancelled_observer_of_a_pause_or_end_leaves_the_others_to_see_i
         seen.append(ctx.event_name)
 
     lifecycle = _lifecycle(tmp_path, [cancelled_observer, later_observer])
-    async with lifecycle.turn():
+    async with lifecycle.turn(approval_owns_end=_no_approval):
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending))
 
     assert seen == [event_name]
@@ -519,7 +636,7 @@ async def test_an_answer_the_outbox_owes_completes_its_turn_whatever_its_run_rep
     seen: _Seen = []
     lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
-    async with lifecycle.turn():
+    async with lifecycle.turn(approval_owns_end=_no_approval):
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending), ResponseOutcome(run_succeeded=False))
 
     assert _events(seen) == [(EVENT_TURN_ENDED, outcome)]
@@ -531,7 +648,7 @@ async def test_a_turn_settling_as_mindroom_shuts_down_still_reports_how_it_settl
     seen: _Seen = []
     lifecycle = _lifecycle(tmp_path, _recorders(seen), shutdown=True)
 
-    async with lifecycle.turn():
+    async with lifecycle.turn(approval_owns_end=_no_approval):
         await lifecycle.start_turn(resumed=False)
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=AwaitingApproval()))
 

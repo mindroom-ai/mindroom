@@ -464,13 +464,13 @@ class LockedTurns:
     ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
-        The turn's start and its one pause or end bracket this run, so its plugins see every way it ends.
+        The turn's start and its pause or end bracket this run; a turn an approval owns ends when that approval ends.
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
         cancelled: asyncio.CancelledError | None = None
         resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
-        async with lifecycle.turn():
+        async with lifecycle.turn(approval_owns_end=partial(self._approval_owns_turn, request)):
             async with session_started_on_creation(
                 reply_session,
                 correlation_id=lifecycle.identity.correlation_id,
@@ -509,6 +509,13 @@ class LockedTurns:
             )
             if cancelled is not None:
                 raise cancelled
+
+    async def _approval_owns_turn(self, request: ResponseRequest) -> bool:
+        """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end."""
+        continuation = await self.deps.approval_store.approval_continuation_for_source(
+            request.response_envelope.source_event_id,
+        )
+        return continuation is not None and continuation.turn_id == request.turn_id
 
     async def _end_span_after_outcome(
         self,

@@ -65,7 +65,7 @@ from mindroom.event_journal import (
     sqlite_backend,
     turn_rows,
 )
-from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
+from mindroom.event_journal.approval_signals import ApprovalSignals, EndedApproval, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
@@ -79,7 +79,7 @@ from mindroom.event_journal.schema import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.interactive_models import InteractivePrompt
-from mindroom.reply_lifecycle import ApprovalFailureKind
+from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
@@ -7957,7 +7957,9 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """Permanent-unavailability cleanup requires its durable terminal notice, and answers nothing."""
+        """Permanent-unavailability cleanup requires its durable terminal notice, answers nothing, and ends the turn."""
+        ended: list[EndedApproval] = []
+        stop = journal_store.approval_signals.follow_ended_approvals(ended.append)
         await self.admit_sources(alice)
         pending = TurnRecord.create(["$source-1", "$source-2"], completed=False)
         await journal_store.backend.write(
@@ -8020,6 +8022,12 @@ class TestApprovalContinuations:
         record = await journal_store.backend.read(lambda tx: turn_rows.get_turn_record(tx, "agent", "$source-1"))
         assert record is not None
         assert not record.completed
+        # The approval's end names the paused turn and the state the discard left its reply in.
+        await asyncio.sleep(0)
+        stop()
+        assert [(approval.continuation.turn_id, approval.reply_state) for approval in ended] == [
+            ("turn-paused", ReplyState.FAILED),
+        ]
 
     async def test_unavailable_cleanup_and_router_departure_share_membership_first_lock_order(
         self,
