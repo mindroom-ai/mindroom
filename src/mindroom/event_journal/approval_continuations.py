@@ -379,7 +379,7 @@ def _from_rows(
         correlation_id=cast("str | None", stored["correlation_id"]),
         # LEGACY_COMPAT: Approval continuations stored without their paused turn's ID.
         # Legacy format: the stored context of an approval continuation had no turn_id key.
-        # Last legacy release: every release before this change ships, v2026.11.200 the newest when written, stores
+        # Last legacy release: every release before this change ships, v2026.11.203 the newest when written, stores
         #   continuations without it; replacement: unreleased, the first release with this change stores the paused
         #   turn's ID in every continuation.
         # Handling: absence reads as the approval's ID, so each resume and the settlement of a reply paused before the

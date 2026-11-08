@@ -240,7 +240,7 @@ Custom events default to 1000 ms.
 - **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
   They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
-  A plugin that uses them states `"mindroom_plugin_api": "1.9"` in its manifest, so an older MindRoom skips it with a clear reason.
+  A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
   Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
   `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
   A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
