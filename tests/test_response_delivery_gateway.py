@@ -344,7 +344,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     def _hooks() -> MagicMock:
         """Return hooks that pass the draft through unchanged, which every `_gateway()` starts with.
 
-        A full turn's lifecycle also awaits `_emit_after_response` on the gateway's hooks.
+        A full turn's lifecycle also awaits `_emit_after_response` and `_emit_turn_event` on the gateway's hooks.
         """
         return MagicMock(
             apply_before_response=AsyncMock(
@@ -357,6 +357,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             ),
             _emit_after_response=AsyncMock(),
+            _emit_turn_event=AsyncMock(),
         )
 
     @staticmethod

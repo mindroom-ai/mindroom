@@ -118,7 +118,9 @@ async def test_an_approval_hold_keeps_its_conversation_busy_without_taking_its_l
         idle = asyncio.create_task(coordinator.wait_for_thread_idle(held.room_id, held.resolved_thread_id))
         await asyncio.sleep(0)
         assert not idle.done()
-        await store.backend.write(lambda transaction: approval_signals.ended(transaction, _PRINCIPAL, "approval-1"))
+        await store.backend.write(
+            lambda transaction: approval_signals.ended(transaction, _PRINCIPAL, "approval-1", None),
+        )
         await asyncio.wait_for(idle, timeout=1)
         assert not coordinator.has_active_response_for_target(held)
     finally:

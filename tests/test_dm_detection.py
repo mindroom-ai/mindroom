@@ -4,11 +4,24 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import nio
 import pytest
 
 from mindroom.matrix import rooms
 from mindroom.matrix.rooms import is_dm_room
+
+
+def _direct_rooms(rooms_by_user: dict[str, list[str]], status: int = 200) -> nio.DirectRoomsResponse:
+    """Build the m.direct response nio returns for an HTTP reply with *status*."""
+    response = nio.DirectRoomsResponse(rooms_by_user)
+    response.transport_response = MagicMock(spec=aiohttp.ClientResponse, status=status)
+    return response
+
+
+def _non_dm_state() -> nio.RoomGetStateResponse:
+    """Build a room state reply whose member event carries no is_direct flag."""
+    return nio.RoomGetStateResponse([{"type": "m.room.member", "content": {"membership": "join"}}], "!room:server")
 
 
 @pytest.mark.asyncio
@@ -58,7 +71,7 @@ class TestDMDetection:
         """Test that rooms in m.direct account data are detected as DMs."""
         client = AsyncMock()
         client.user_id = "@agent:server"
-        client.list_direct_rooms.return_value = nio.DirectRoomsResponse(
+        client.list_direct_rooms.return_value = _direct_rooms(
             {"@user:server": ["!room:server"]},
         )
 
@@ -126,18 +139,14 @@ class TestDMDetection:
 
         dm_client = AsyncMock()
         dm_client.user_id = "@agent_a:server"
-        dm_client.list_direct_rooms.return_value = nio.DirectRoomsResponse(
+        dm_client.list_direct_rooms.return_value = _direct_rooms(
             {"@user:server": [room_id]},
         )
 
         non_dm_client = AsyncMock()
         non_dm_client.user_id = "@agent_b:server"
-        non_dm_client.list_direct_rooms.return_value = nio.DirectRoomsResponse({"@user:server": []})
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        non_dm_client.room_get_state.return_value = non_dm_state_response
+        non_dm_client.list_direct_rooms.return_value = _direct_rooms({"@user:server": []})
+        non_dm_client.room_get_state.return_value = _non_dm_state()
 
         dm_result = await is_dm_room(dm_client, room_id)
         non_dm_result = await is_dm_room(non_dm_client, room_id)
@@ -152,11 +161,7 @@ class TestDMDetection:
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
 
         error_response = MagicMock(spec=nio.RoomGetStateError)
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.side_effect = [error_response, non_dm_state_response]
+        client.room_get_state.side_effect = [error_response, _non_dm_state()]
 
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
@@ -171,33 +176,57 @@ class TestDMDetection:
         client.user_id = "@agent:server"
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
 
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.return_value = non_dm_state_response
+        client.room_get_state.return_value = _non_dm_state()
 
         first_result = await is_dm_room(client, "!room1:server")
         second_result = await is_dm_room(client, "!room2:server")
+        repeated_result = await is_dm_room(client, "!room1:server")
 
         assert first_result is False
         assert second_result is False
+        assert repeated_result is False
         assert client.list_direct_rooms.call_count == 1
+        assert client.room_get_state.call_count == 2
+
+    @pytest.mark.parametrize(
+        "failed_read",
+        [
+            pytest.param(nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"), id="error-response"),
+            # nio parses a non-JSON error body, such as a proxy's 502 page, as an empty m.direct list.
+            pytest.param(_direct_rooms({}, status=502), id="non-json-error-body"),
+        ],
+    )
+    async def test_does_not_cache_false_when_m_direct_request_errors(
+        self,
+        failed_read: nio.DirectRoomsResponse | nio.DirectRoomsErrorResponse,
+    ) -> None:
+        """Test a failed m.direct read leaves the answer uncached so the next call reads m.direct again."""
+        client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.list_direct_rooms.side_effect = [
+            failed_read,
+            _direct_rooms({"@user:server": ["!room:server"]}),
+        ]
+
+        client.room_get_state.return_value = _non_dm_state()
+
+        first_result = await is_dm_room(client, "!room:server")
+        second_result = await is_dm_room(client, "!room:server")
+
+        assert first_result is False
+        assert second_result is True
+        assert client.list_direct_rooms.call_count == 2
 
     async def test_dm_cache_expires_and_rechecks_m_direct(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test stale DM cache entries are refreshed after TTL."""
         client = AsyncMock()
         client.user_id = "@agent:server"
         client.list_direct_rooms.side_effect = [
-            nio.DirectRoomsResponse({"@user:server": ["!room:server"]}),
-            nio.DirectRoomsResponse({"@user:server": []}),
+            _direct_rooms({"@user:server": ["!room:server"]}),
+            _direct_rooms({"@user:server": []}),
         ]
 
-        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
-        non_dm_state_response.events = [
-            {"type": "m.room.member", "content": {"membership": "join"}},
-        ]
-        client.room_get_state.return_value = non_dm_state_response
+        client.room_get_state.return_value = _non_dm_state()
 
         monkeypatch.setattr(rooms, "_DM_ROOM_TTL", 0)
         monkeypatch.setattr(rooms, "_DIRECT_ROOMS_TTL", 0)

@@ -145,7 +145,7 @@ calls:
 ### Cascaded
 
 Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, tools, requester identity, and history.
-`tool:*` hooks run on the agent's tool calls, but `message:*` and `system:enrich` hooks do not run for call transcripts.
+`tool:*` hooks run on the agent's tool calls, but `message:*`, `system:enrich`, and `turn:*` hooks do not run for call transcripts.
 The profile's `model` changes only the LLM; speech services, prompts, history, memory, and tools stay the same.
 Turn ends are detected locally, and the caller can interrupt the agent by speaking.
 

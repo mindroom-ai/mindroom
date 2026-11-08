@@ -81,7 +81,7 @@ from mindroom.final_delivery import (
     TurnProgress,
     approval_failure,
 )
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import MessageEnvelope, TurnOutcome
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.presence import should_use_streaming
@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import ResponseIdentity
+    from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
@@ -209,6 +210,15 @@ class _ShownPause:
     handle: SpanHandle
     reply_pause: Presentation
     reply_stage: rl.WriteStage | None = None
+
+
+# How a paused reply's state, once its approval ended, ends its turn; one released to replay is not ended.
+_TURN_OUTCOMES: dict[rl.ReplyState | None, TurnOutcome] = {
+    rl.ReplyState.COMPLETED: TurnOutcome.COMPLETED,
+    rl.ReplyState.CANCELLED: TurnOutcome.CANCELLED,
+    rl.ReplyState.GONE: TurnOutcome.CANCELLED,
+    rl.ReplyState.FAILED: TurnOutcome.FAILED,
+}
 
 
 @dataclass
@@ -379,6 +389,7 @@ class ApprovalContinuationRunner:
                 message_received_depth=request.response_envelope.message_received_depth,
                 dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
                 correlation_id=correlation_id_for_request(request),
+                turn_id=request.turn_id,
                 history_scope=history_scope,
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
@@ -907,8 +918,9 @@ class ApprovalContinuationRunner:
         progress = TurnProgress(delivery_started=True)
         lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
         post_effect_continuation = claimed
-        awaiting = FinalDeliveryOutcome(
-            ending=AwaitingApproval(),
+        # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
+        owed = FinalDeliveryOutcome(
+            ending=Owed(),
             event_id=claimed.response_event_id,
             is_visible_response=True,
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
@@ -928,14 +940,14 @@ class ApprovalContinuationRunner:
                 if delivery is None:
                     raise
                 if delivery.acknowledged_event_id is None:
-                    return awaiting
+                    return owed
                 return await self._approval_outcome_from_delivery(delivery)
             if (
                 not isinstance(outcome.ending, Completed | AwaitingApproval | Owed)
                 and (await self._read_final(claimed))[0]
             ):
                 # A FINAL the resume froze before it failed is the approval's to finish once Matrix has it.
-                return replace(awaiting, final_visible_body=outcome.final_visible_body)
+                return replace(owed, final_visible_body=outcome.final_visible_body)
             return outcome
 
         await self.locked.run_and_settle_locked_response(
@@ -1040,9 +1052,9 @@ class ApprovalContinuationRunner:
         *,
         target: MessageTarget,
     ) -> ResponseRequest:
-        """Rebuild the original response's envelope, sources, and correlation for resumed hooks and post-effects.
+        """Rebuild the original response's envelope, sources, correlation, and turn for resumed hooks and post-effects.
 
-        The resumed reply runs as a turn of its own, with a new turn ID.
+        The resumed reply continues the paused turn, under its turn ID.
         It carries no contact: a contact turn offers no function that asks for approval, so it never pauses.
         """
         envelope = MessageEnvelope(
@@ -1066,6 +1078,7 @@ class ApprovalContinuationRunner:
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
             correlation_id=continuation.correlation_id,
+            turn_id=continuation.turn_id,
             participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
 
@@ -1387,6 +1400,23 @@ class ApprovalContinuationRunner:
         )
         slot.handle = handle
         return claimed
+
+    async def end_paused_turn(self, ended: EndedApproval) -> None:
+        """End the turn of a paused reply whose approval ended, as the state its end left the reply in says.
+
+        A reply its approval released to replay ended nothing: its sources answer again. A completed reply can hide how
+        its run ended, such as an error that became its text, so how the run ended, when it settled here, says more.
+        """
+        continuation = ended.continuation
+        settled = self.locked.take_turn_end(continuation.turn_id)
+        outcome = _TURN_OUTCOMES.get(ended.reply_state)
+        if outcome is None:
+            return
+        if outcome is TurnOutcome.COMPLETED and settled is not None:
+            outcome = settled
+        request = self.approval_response_request(continuation, target=continuation_target(continuation))
+        lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(continuation))
+        await lifecycle.end_turn(outcome)
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Finish one paused reply whose entity is gone through its final answer, under its original bot principal."""

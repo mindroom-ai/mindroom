@@ -7,7 +7,8 @@ through ``LockedTurns``, which knows neither, so the dependency between them run
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -50,7 +51,7 @@ from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from datetime import datetime
 
     import nio
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.hooks import TurnOutcome
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -134,6 +136,17 @@ class LockedTurns:
     """Settle one locked reply turn and build what its settlement runs, for every owner of a reply turn."""
 
     deps: ReplyTurnDeps
+    # Each turn whose run is inside its bracket here (None), or settled here leaving its end to its approval (how the
+    # run ended). The approval's end takes the entry, so a run whose entry was taken while live ends nothing.
+    _turn_ends: dict[str, TurnOutcome | None] = field(default_factory=dict, init=False, repr=False)
+
+    def take_turn_end(self, turn_id: str) -> TurnOutcome | None:
+        """Take a turn's end for its ended approval; return how the turn's run ended if it settled here.
+
+        Leaving a room ends an approval while its run may still be live; taking the end keeps that run from ending the
+        turn again.
+        """
+        return self._turn_ends.pop(turn_id, None)
 
     def client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -464,47 +477,80 @@ class LockedTurns:
     ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
+        The turn's start and its pause or end bracket this run; a turn an approval owns ends when that approval ends.
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
         cancelled: asyncio.CancelledError | None = None
-        async with session_started_on_creation(
-            reply_session,
-            correlation_id=lifecycle.identity.correlation_id,
+        resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
+        async with (
+            self._live_turn(request.turn_id),
+            lifecycle.turn(approval_owns_end=partial(self._approval_owns_turn, request)),
         ):
-            try:
-                outcome = await self._attempt_outcome(
-                    request,
+            async with session_started_on_creation(
+                reply_session,
+                correlation_id=lifecycle.identity.correlation_id,
+            ):
+                try:
+                    await lifecycle.start_turn(resumed=resumed)
+                    outcome = await self._attempt_outcome(
+                        request,
+                        target=target,
+                        response_function=response_function,
+                        approval_suspension_handler=approval_suspension_handler,
+                        participation=participation,
+                        response_kind=lifecycle.identity.response_kind,
+                    )
+                except asyncio.CancelledError as error:
+                    if current_task_is_process_shutdown():
+                        raise
+                    # The turn still settles as cancelled; the cancellation then propagates.
+                    cancelled = error
+                    outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
+            handle = current_span()
+            if handle is not None and not handle.exited:
+                outcome = await self._end_span_after_outcome(
+                    handle,
+                    outcome,
                     target=target,
-                    response_function=response_function,
-                    approval_suspension_handler=approval_suspension_handler,
-                    participation=participation,
-                    response_kind=lifecycle.identity.response_kind,
+                    delivery_started=progress.delivery_started,
+                    contact_turn=request.contact is not None,
                 )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                # The turn still settles as cancelled; the cancellation then propagates.
-                cancelled = error
-                outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
-        handle = current_span()
-        if handle is not None and not handle.exited:
-            outcome = await self._end_span_after_outcome(
-                handle,
+            progress.ending = outcome.ending
+            await self._finalize_locked_outcome(
+                lifecycle,
                 outcome,
-                target=target,
-                delivery_started=progress.delivery_started,
-                contact_turn=request.contact is not None,
+                post_response_outcome=build_post_response_outcome(outcome),
+                post_response_deps=post_response_deps,
             )
-        progress.ending = outcome.ending
-        await self._finalize_locked_outcome(
-            lifecycle,
-            outcome,
-            post_response_outcome=build_post_response_outcome(outcome),
-            post_response_deps=post_response_deps,
+            if cancelled is not None:
+                raise cancelled
+
+    @asynccontextmanager
+    async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:
+        """Keep the turn's end open for its approval to take while its run is live here."""
+        self._turn_ends[turn_id] = None
+        try:
+            yield
+        finally:
+            if turn_id in self._turn_ends and self._turn_ends[turn_id] is None:
+                del self._turn_ends[turn_id]
+
+    async def _approval_owns_turn(self, request: ResponseRequest, end: TurnOutcome) -> bool:
+        """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end.
+
+        A run starts only once no approval owns its source, or resumes the approval that does, so any approval of its
+        source is its turn's. The run leaves that approval how it ended, which an error that completed its reply hides
+        from the reply's state; an approval that ended while the run was live already took the end.
+        """
+        continuation = await self.deps.approval_store.approval_continuation_for_source(
+            request.response_envelope.source_event_id,
         )
-        if cancelled is not None:
-            raise cancelled
+        if request.turn_id not in self._turn_ends:
+            return True
+        if continuation is not None:
+            self._turn_ends[request.turn_id] = end
+        return continuation is not None
 
     async def _end_span_after_outcome(
         self,
