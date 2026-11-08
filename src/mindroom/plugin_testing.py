@@ -225,7 +225,11 @@ class LoadedPlugin:
         state.api_state = ApiState(threading.Lock(), ApiSnapshot(1, runtime_paths, runtime_config=config))
         state.embedded = cast(
             "EmbeddedRuntime",
-            _StandIn("MindRoom runtime", agent_bot={ROUTER_AGENT_NAME: router}.get),
+            _StandIn(
+                "MindRoom runtime",
+                agent_bot={ROUTER_AGENT_NAME: router}.get,
+                agent_reply_memberships=self._memberships,
+            ),
         )
         bind_room_members(self._app, cast("Mapping[str, AgentBot]", {ROUTER_AGENT_NAME: router}))
         state.room_direct = self._room_direct
@@ -312,13 +316,12 @@ class LoadedPlugin:
                 middleware=(policy,),
             )
 
-        identity = context.execution_identity
         gateway = AgentToolContext(
             agent,
             sender,
             self.config,
             self.runtime_paths,
-            identity,
+            context.execution_identity,
             context.resolve_worker_target(),
         )
         with tool_runtime_context(context):
@@ -466,8 +469,7 @@ class LoadedPlugin:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         room = self._rooms.get(room_id)
-        events = _state_events(room) if room is not None else []
-        for event in events:
+        for event in _state_events(room) if room is not None else []:
             if (event["type"], event["state_key"]) == (event_type, state_key):
                 return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
         return nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")

@@ -76,19 +76,21 @@ def test_a_route_posts_as_the_router_and_streams_to_a_member(tmp_path: Path) -> 
 
 
 def test_a_route_reads_the_room_as_set_up(tmp_path: Path) -> None:
-    """A route reads the room's power levels and history visibility as the test set them."""
+    """A route reads the room's power levels, history visibility and the agents its caller may use, as set up."""
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
+        directory = entity_directory(plugin.config, plugin.runtime_paths)
+        (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
         plugin.add_room(
             ROOM,
-            members={ALICE: "Alice", BOB: "Bob", CAROL: None},
+            members={ALICE: "Alice", BOB: "Bob", helper: "Helper"},
             power_levels={"users": {ALICE: 100}},
             history_visibility="joined",
         )
 
         about = {user: plugin.client(user).get(f"{ROUTES}/about").json() for user in (ALICE, BOB)}
 
-    assert about[ALICE] == {"direct": False, "admin": True, "history": "joined"}
-    assert about[BOB]["admin"] is False
+    assert about[ALICE] == {"direct": False, "admin": True, "history": "joined", "agents": ["helper"]}
+    assert (about[BOB]["admin"], about[BOB]["agents"]) == (False, [])
 
 
 def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:

@@ -25,10 +25,15 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
 
 @router.get("/rooms/{room_id}/about")
 async def about(room: Annotated[RoomReader, Depends(require_room_reader)]) -> dict[str, object]:
-    """Tell the member whether the room is direct, whether they are its admin, and its history visibility."""
+    """Tell the member whether the room is direct, whether they are its admin, its history visibility and its agents."""
     power = await room.power()
     history = await room.history()
-    return {"direct": await room.is_direct(), "admin": power.is_admin(room.user.user_id), "history": history.visibility}
+    return {
+        "direct": await room.is_direct(),
+        "admin": power.is_admin(room.user.user_id),
+        "history": history.visibility,
+        "agents": [agent.name for agent in await room.agents()],
+    }
 
 
 @router.post("/rooms/{room_id}/notice")

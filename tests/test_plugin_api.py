@@ -455,6 +455,8 @@ _MEMBERS = {
     "mindroom.plugin_http.RoomReader": {
         "power": "(self)",
         "is_direct": "(self)",
+        "agents": "(self)",
+        "agent": "(self, agent_user_id)",
         "modes": "(self)",
         "set_modes": "(self, *, thread, reply)",
         "history": "(self)",
@@ -550,6 +552,7 @@ _MANIFEST = {
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
+    "AgentWorkspace",
     "ClientUser",
     "RoomHistory",
     "RoomMessenger",
@@ -573,6 +576,7 @@ _ELSEWHERE_SIGNATURES = {
     ),
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
+    "mindroom.plugin_http.AgentWorkspace": "(name, user_id, display_name, private, root, files, terminal, config)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomHistory": "(visibility)",
     "mindroom.plugin_http.RoomMessenger": "(user)",
@@ -594,7 +598,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 13), "0cce201498e3c9e542162757568ebf8fb89a932d38a51fde5a4fd3a3d9311653")
+_PINNED_VERSION = ((1, 14), "6810ad3456312977c00c7013fa24e15c91de914724c9e1514f947edc50e7965e")
 
 
 def _is_enum(obj: object) -> bool:
