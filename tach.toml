@@ -3236,6 +3236,7 @@ depends_on = [
     "mindroom.orchestration.storage_preparation",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.plugin_lifecycle",
     "mindroom.response_activity",
     "mindroom.response_admission",
     "mindroom.scheduling.runtime",
@@ -5437,6 +5438,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.path_confinement",
     "mindroom.plugin_context",
+    "mindroom.plugin_lifecycle",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.authoring",
@@ -8307,6 +8309,13 @@ path = "mindroom.plugin_context"
 depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.plugin_lifecycle"
+depends_on = [
+    "mindroom.plugin_context",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]

@@ -119,6 +119,8 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 [plugin] = plugins.loaded_plugins
                 if plugin.routes_error is not None:
                     raise plugin.routes_error
+                if plugin.lifespan_error is not None:
+                    raise plugin.lifespan_error
                 tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
                     factory = plugin.tools[tool_name].factory
@@ -158,7 +160,13 @@ def _root_tests(plugin_root: Path) -> set[Path]:
     except Exception:
         # `check_plugin` fails on this manifest, and the scan still lists the imports of every other file.
         return candidates
-    named_modules = {base.tools_module_path, base.hooks_module_path, base.oauth_module_path, base.routes_module_path}
+    named_modules = {
+        base.tools_module_path,
+        base.hooks_module_path,
+        base.oauth_module_path,
+        base.routes_module_path,
+        base.lifecycle_module_path,
+    }
     return {path for path in candidates if path.resolve() not in named_modules}
 
 
