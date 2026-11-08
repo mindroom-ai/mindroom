@@ -64,7 +64,7 @@ async def read_room_history(client: nio.AsyncClient, room_id: str, user_id: str)
         return None
     visibility = state.get(("m.room.history_visibility", ""), {}).get("content", {}).get("history_visibility", "shared")
     joined_at, invited_at = await _membership_start(client, room_id, member)
-    # A value that is not a string counts as `joined`, as does any value Matrix does not define.
+    # A value that is not a string counts as `joined`.
     return RoomHistory(visibility if isinstance(visibility, str) else "joined", joined_at, invited_at)
 
 

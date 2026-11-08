@@ -23,13 +23,12 @@ from tests.api.test_plugin_room_readers import (
     BOB,
     CAROL,
     ROOM,
-    ROUTER,
     _answer,
     _bound,
-    _joined,
     _never_answers,
-    _request,
+    _reader,
 )
+from tests.api.test_plugin_room_readers import _client as _router_client
 
 DAVE = "@dave:example.org"
 NOT_A_MEMBER = (403, "Not a member of this room.")
@@ -96,18 +95,13 @@ def _client(visibility: object, *chains: list[dict[str, object]]) -> SimpleNames
         for chain in (ALICE_JOINED, *chains)
         if chain[-1]["content"]["membership"] == "join"  # type: ignore[index]
     }
-    return SimpleNamespace(
-        user_id=ROUTER,
-        rooms={ROOM: nio.MatrixRoom(ROOM, ROUTER)},
-        joined_members=AsyncMock(return_value=_joined(ROOM, joined)),
-        room_get_state=AsyncMock(return_value=_room_state(visibility, *chains)),
-        room_get_event=AsyncMock(side_effect=room_get_event),
-    )
+    client = _router_client(joined, state=_room_state(visibility, *chains))
+    client.room_get_event = AsyncMock(side_effect=room_get_event)
+    return client
 
 
 async def _history(client: SimpleNamespace, user_id: str = BOB) -> RoomHistory:
-    reader = await require_room_reader(_request(_bound(client), user_id), ROOM)
-    return await reader.history()
+    return await (await _reader(client, user_id)).history()
 
 
 @pytest.mark.asyncio
@@ -138,7 +132,7 @@ async def test_only_joined_callers_reach_the_history_and_nothing_else_is_read_fi
 async def test_a_caller_no_longer_joined_when_the_history_is_read_gets_403(visibility: str, now: str) -> None:
     """A caller found joined who left, was banned, or left and was invited again before the history read gets 403."""
     client = _client(visibility, _chain(BOB, ("join", JOINED_AT, {})))
-    reader = await require_room_reader(_request(_bound(client), BOB), ROOM)
+    reader = await _reader(client, BOB)
     later = [] if now == "leave" else [(now, 5_000, {})]
     client.room_get_state.return_value = _room_state(
         visibility,
@@ -248,48 +242,31 @@ async def test_since_takes_the_stricter_of_now_and_recorded_under(
     assert history.since(recorded_under) == since
 
 
-async def _state_answers_an_error(client: SimpleNamespace) -> None:
-    client.room_get_state.return_value = nio.RoomGetStateError("M_FORBIDDEN", "M_FORBIDDEN")
-
-
-async def _state_raises(client: SimpleNamespace) -> None:
-    client.room_get_state.side_effect = nio.exceptions.ProtocolError("connection reset")
-
-
-async def _state_never_answers(client: SimpleNamespace) -> None:
-    client.room_get_state = _never_answers
-
-
-async def _event_answers_an_error(client: SimpleNamespace) -> None:
-    client.room_get_event.side_effect = lambda *_: nio.RoomGetEventError("Internal error", "M_UNKNOWN")
-
-
-async def _event_raises(client: SimpleNamespace) -> None:
-    client.room_get_event.side_effect = nio.exceptions.ProtocolError("connection reset")
-
-
-async def _event_never_answers(client: SimpleNamespace) -> None:
-    client.room_get_event = _never_answers
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fail",
+    ("read", "error"),
     [
-        _state_answers_an_error,
-        _state_raises,
-        _state_never_answers,
-        _event_answers_an_error,
-        _event_raises,
-        _event_never_answers,
+        ("room_get_state", nio.RoomGetStateError("M_FORBIDDEN", "M_FORBIDDEN")),
+        ("room_get_event", nio.RoomGetEventError("Internal error", "M_UNKNOWN")),
     ],
 )
-async def test_a_failed_history_read_answers_503(monkeypatch: pytest.MonkeyPatch, fail: object) -> None:
+@pytest.mark.parametrize("outcome", ["answers an error", "raises", "never answers"])
+async def test_a_failed_history_read_answers_503(
+    monkeypatch: pytest.MonkeyPatch,
+    read: str,
+    error: nio.ErrorResponse,
+    outcome: str,
+) -> None:
     """A state or event read that answers an error, raises, or outlasts the lookup timeout is 503, never a start."""
     monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
     client = _client("joined", _chain(BOB, *BOB_INVITED_JOINED_RENAMED))
-    reader = await require_room_reader(_request(_bound(client), BOB), ROOM)
-    await fail(client)  # type: ignore[operator]
+    reader = await _reader(client, BOB)
+    if outcome == "never answers":
+        setattr(client, read, _never_answers)
+    else:
+        getattr(client, read).side_effect = (
+            nio.exceptions.ProtocolError("connection reset") if outcome == "raises" else lambda *_: error
+        )
     assert await _answer(reader.history()) == READ_FAILED
 
 
@@ -297,7 +274,7 @@ async def test_a_failed_history_read_answers_503(monkeypatch: pytest.MonkeyPatch
 async def test_a_history_read_asks_a_bot_still_in_the_room() -> None:
     """Once no running bot is in the room any more the read is 503, and asks no bot about a room it left."""
     client = _client("joined", _chain(BOB, ("join", JOINED_AT, {})))
-    reader = await require_room_reader(_request(_bound(client), BOB), ROOM)
+    reader = await _reader(client, BOB)
     del client.rooms[ROOM]
     assert await _answer(reader.history()) == (503, "No running MindRoom bot is in this room.")
     client.room_get_state.assert_not_awaited()
@@ -306,16 +283,15 @@ async def test_a_history_read_asks_a_bot_still_in_the_room() -> None:
 @pytest.mark.asyncio
 async def test_a_changed_visibility_or_membership_shows_on_the_next_read() -> None:
     """No answer outlives its read: a new visibility, or a new join after leaving, shows on the next call."""
-    client = _client("joined", _chain(BOB, ("join", JOINED_AT, {})))
-    reader = await require_room_reader(_request(_bound(client), BOB), ROOM)
-    assert (await reader.history()).since() == JOINED_AT
-    client.room_get_state.return_value = _room_state("shared", _chain(BOB, ("join", JOINED_AT, {})))
-    assert (await reader.history()).since() is None
     rejoined = _chain(BOB, ("join", JOINED_AT, {}), ("leave", 4_000, {}), ("join", 5_000, {}))
+    client = _client("joined", rejoined)
+    reader = await _reader(client, BOB)
+    # Bob has only joined once so far.
+    client.room_get_state.return_value = _room_state("joined", rejoined[:1])
+    assert (await reader.history()).since() == JOINED_AT
+    client.room_get_state.return_value = _room_state("shared", rejoined[:1])
+    assert (await reader.history()).since() is None
     client.room_get_state.return_value = _room_state("joined", rejoined)
-    client.room_get_event.side_effect = lambda _room, event_id: nio.RoomGetEventResponse.from_dict(
-        next(event for event in rejoined if event["event_id"] == event_id),
-    )
     assert (await reader.history()).since() == 5_000
 
 
@@ -323,20 +299,13 @@ def test_a_route_shows_each_member_the_notes_their_view_allows() -> None:
     """A notes route keeps each note's visibility, and shows a later joiner only what the stricter one allows."""
     client = _client("joined", _chain(BOB, ("join", JOINED_AT, {})))
     app = _bound(client)
-    notes: list[dict[str, object]] = [
-        {"text": "before Bob", "at": 2_500, "visibility": "joined"},
-        {"text": "after Bob", "at": 3_500, "visibility": "joined"},
-        {"text": "shared before Bob", "at": 2_600, "visibility": "shared"},
-    ]
+    # Each note's text, the time it was kept, and the room's visibility then.
+    notes = [("before Bob", 2_500, "joined"), ("after Bob", 3_500, "joined"), ("shared before Bob", 2_600, "shared")]
 
     @app.get("/rooms/{room_id}/notes")
     async def read_notes(reader: Annotated[RoomReader, Depends(require_room_reader)]) -> list[str]:
         history = await reader.history()
-        return [
-            str(note["text"])
-            for note in notes
-            if (since := history.since(str(note["visibility"]))) is None or int(str(note["at"])) > since
-        ]
+        return [text for text, at, visibility in notes if (since := history.since(visibility)) is None or at > since]
 
     http = TestClient(app)
     room = quote(ROOM, safe="")
