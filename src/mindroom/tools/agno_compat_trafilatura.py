@@ -18,6 +18,7 @@ from trafilatura.downloads import USER_AGENT, Response
 from trafilatura.settings import DEFAULT_CONFIG
 
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, run_fetch_sync
+from mindroom.trafilatura_call_limit import CALL_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
     from trafilatura.spider import CrawlParameters
 
 _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
-_CALL_SECONDS = 180.0
 # Agno downloads the crawled pages again to extract them after the crawl, so the crawler stops visiting pages at this
 # share of the time limit; a default crawl of 10 pages pauses 5 seconds after each one and fits in it.
 _CRAWL_SHARE = 0.5
@@ -62,7 +62,7 @@ _call: ContextVar[_Call | None] = ContextVar("trafilatura_call", default=None)
 def _seconds_left(share: float = 1.0) -> float | None:
     """Return what is left of `share` of the current call's time limit, or None outside a batch extract or crawl."""
     call = _call.get()
-    return None if call is None else call.started + share * _CALL_SECONDS - time.monotonic()
+    return None if call is None else call.started + share * CALL_SECONDS - time.monotonic()
 
 
 async def _fetch(url: str, seconds: float | None) -> PublicFetchResult:

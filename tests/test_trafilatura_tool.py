@@ -349,7 +349,7 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
 
 def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A download that keeps trickling ends at the call's time limit, and no later download starts."""
-    monkeypatch.setattr(compat, "_CALL_SECONDS", 0.3)
+    monkeypatch.setattr(compat, "CALL_SECONDS", 0.3)
     # Each download's own deadline stays well past the call's limit, and short enough to fail in seconds without it.
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 10)
     requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
@@ -369,7 +369,7 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A long robots.txt crawl delay ends the crawl's visits at half the time limit, and the other half extracts."""
-    monkeypatch.setattr(compat, "_CALL_SECONDS", 2.0)
+    monkeypatch.setattr(compat, "CALL_SECONDS", 2.0)
     homepage = "https://example.com/"
     serve_routes(
         monkeypatch,
