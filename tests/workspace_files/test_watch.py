@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import watchfiles
 
 from mindroom.workspace_files import watch
 from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
 
 async def _until(next_changes: Callable[[], Awaitable[list[str]]], path: str) -> set[str]:
@@ -230,5 +233,51 @@ def test_a_path_reached_through_a_link_out_is_never_reported(tmp_path: Path) -> 
     (tmp_path / "outside").mkdir()
     (root / "out").symlink_to(tmp_path / "outside")
 
-    assert watch._reported(root, str(root / "out" / "secret.txt")) is None
-    assert watch._reported(root, str(root / "inside.txt")) == "inside.txt"
+    assert watch._reported(root, watchfiles.Change.added, str(root / "out" / "secret.txt")) is None
+    assert watch._reported(root, watchfiles.Change.added, str(root / "inside.txt")) == "inside.txt"
+
+
+@pytest.mark.asyncio
+async def test_nothing_goes_unreported_while_a_new_folder_is_taken_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the tree is walked again for a new folder, the old watch still reports, and the new folder's content shows."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "old.md").write_text("x")
+    walked = threading.Event()
+    real_folders = watch._folders
+
+    def slow_folders(path: Path) -> list[str]:
+        folders = real_folders(path)
+        if "new" in {Path(folder).name for folder in folders}:
+            walked.set()
+            time.sleep(0.5)
+        return folders
+
+    monkeypatch.setattr(watch, "_folders", slow_folders)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "new").mkdir()
+        await _until(next_changes, "new")
+        assert await asyncio.to_thread(walked.wait, 5)
+        (root / "old.md").write_text("changed while walking")
+        (root / "new" / "inner.md").write_text("written before its folder is watched")
+
+        seen = await _until(next_changes, "old.md")
+        seen |= await _until(next_changes, "new/inner.md")
+
+    assert {"old.md", "new/inner.md"} <= seen
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_stored_below_a_folder_named_like_a_cache_is_followed(tmp_path: Path) -> None:
+    """Only names inside the workspace are filtered, not the folders MindRoom's storage sits in."""
+    root = tmp_path / ".cache" / "node_modules" / "workspace"
+    root.mkdir(parents=True)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "notes.md").write_text("x")
+
+        assert "notes.md" in await _until(next_changes, "notes.md")

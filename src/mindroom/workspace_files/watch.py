@@ -4,7 +4,8 @@ A follower gets the sorted workspace-relative paths that changed, at most every 
 editors, caches and atomic saves churn (``watchfiles``' default filter, ``.cache`` and MindRoom's temporary save
 names) and the credentials ``operations.is_hidden`` names. Code the agent runs can plant links, and ``watchfiles``
 would follow them out of the workspace, so the watcher watches each folder reached from the root without a link on its
-own, walks the tree again when a folder appears, and reports only paths that stay inside.
+own, walks the tree again when a folder appears while the old watch still runs, and reports only paths that stay
+inside.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.workspace_files.operations import is_hidden
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 
 logger = get_logger(__name__)
 
@@ -110,10 +111,13 @@ def _folders(root: Path) -> list[str]:
     return folders
 
 
-def _reported(root: Path, raw: str) -> str | None:
-    """Return a changed path relative to the root, or None when it is the root, hidden, or reached through a link out."""
+def _reported(root: Path, change: watchfiles.Change, raw: str) -> str | None:
+    """Return a changed path relative to the root, or None for the root, what is left out, or a path through a link out.
+
+    The filter sees only the relative path, never the folders the root sits in.
+    """
     relative = PurePosixPath(Path(raw).relative_to(root))
-    if not relative.parts or is_hidden(relative):
+    if not relative.parts or not _FILTER(change, str(relative)) or is_hidden(relative):
         return None
     try:
         resolve_path_within_root(root, str(relative), symlinks="internal")
@@ -124,7 +128,7 @@ def _reported(root: Path, raw: str) -> str | None:
 
 def _batch(root: Path, changes: set[tuple[watchfiles.Change, str]]) -> tuple[set[str], bool]:
     """Return a batch's reported paths, and whether a folder appeared, so the tree needs walking again."""
-    paths = {path for _, raw in changes if (path := _reported(root, raw)) is not None}
+    paths = {path for change, raw in changes if (path := _reported(root, change, raw)) is not None}
     grown = any(
         change is watchfiles.Change.added and Path(raw).is_dir() and not Path(raw).is_symlink()
         for change, raw in changes
@@ -138,27 +142,74 @@ async def _wait(watch: _Watch, seconds: float) -> None:
             await watch.stop.wait()
 
 
+def _send(watch: _Watch, paths: set[str]) -> None:
+    if paths:
+        for follower in watch.followers:
+            follower.add(paths)
+
+
+def _held(root: Path, folders: Collection[str]) -> set[str]:
+    """Return the reported paths of what ``folders`` hold now."""
+    paths: set[str] = set()
+    for folder in folders:
+        with suppress(OSError):
+            paths |= {
+                path
+                for entry in Path(folder).iterdir()
+                if (path := _reported(root, watchfiles.Change.added, str(entry))) is not None
+            }
+    return paths
+
+
+async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown: asyncio.Event) -> None:
+    """Report what changes in ``folders`` until ``stop``, setting ``grown`` once a folder appears in one of them."""
+    try:
+        async for changes in watchfiles.awatch(
+            *folders,
+            watch_filter=None,
+            debounce=int(_INTERVAL_SECONDS * 1000),
+            stop_event=stop,
+            recursive=False,
+            ignore_permission_denied=True,
+        ):
+            paths, appeared = await asyncio.to_thread(_batch, watch.root, changes)
+            _send(watch, paths)
+            if appeared:
+                grown.set()
+    except Exception:
+        logger.exception("Workspace watcher failed; retrying", root=str(watch.root))
+
+
 async def _run(watch: _Watch) -> None:
-    while not watch.stop.is_set():
-        folders = await asyncio.to_thread(_folders, watch.root)
-        if not folders:
-            await _wait(watch, _ABSENT_RETRY_SECONDS)
-            continue
-        try:
-            async for changes in watchfiles.awatch(
-                *folders,
-                watch_filter=_FILTER,
-                debounce=int(_INTERVAL_SECONDS * 1000),
-                stop_event=watch.stop,
-                recursive=False,
-                ignore_permission_denied=True,
-            ):
-                paths, grown = await asyncio.to_thread(_batch, watch.root, changes)
-                if paths:
-                    for follower in watch.followers:
-                        follower.add(paths)
-                if grown:
-                    break
-        except Exception:
-            logger.exception("Workspace watcher failed; retrying", root=str(watch.root))
-            await _wait(watch, _FAILURE_RETRY_SECONDS)
+    watched: list[str] = []
+    stop_watching = asyncio.Event()
+    # A replaced watch keeps running until it sees its stop, so it is held until then.
+    running: set[asyncio.Task[None]] = set()
+    try:
+        while not watch.stop.is_set():
+            folders = await asyncio.to_thread(_folders, watch.root)
+            if not folders:
+                stop_watching.set()
+                watched = []
+                await _wait(watch, _ABSENT_RETRY_SECONDS)
+                continue
+            previous, stop_watching, grown = stop_watching, asyncio.Event(), asyncio.Event()
+            following = asyncio.create_task(_follow(watch, folders, stop_watching, grown))
+            running.add(following)
+            following.add_done_callback(running.discard)
+            # A watch takes in its folders before it first waits, so the one before it stops only once it watches.
+            await asyncio.sleep(0)
+            previous.set()
+            if watched:
+                # What a new folder held before its watch began.
+                _send(watch, await asyncio.to_thread(_held, watch.root, set(folders).difference(watched)))
+            watched = folders
+            waits = [asyncio.create_task(grown.wait()), asyncio.create_task(watch.stop.wait())]
+            await asyncio.wait([following, *waits], return_when=asyncio.FIRST_COMPLETED)
+            for waiting in waits:
+                waiting.cancel()
+            if following.done() and not watch.stop.is_set():
+                watched = []
+                await _wait(watch, _FAILURE_RETRY_SECONDS)
+    finally:
+        stop_watching.set()
