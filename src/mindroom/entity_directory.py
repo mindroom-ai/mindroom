@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 class ManagedEntity:
     """The router, or one configured agent or team, behind one of MindRoom's own Matrix accounts.
 
-    ``tool_names`` are the toolkits an agent's config names, presets expanded; the router and a team have none.
+    ``tool_names`` are the toolkits an agent's config gives it: those its tool entries and the defaults it takes name,
+    presets expanded, then those its settings add, such as ``delegate``; the router and a team have none.
     """
 
     name: str
@@ -43,5 +44,5 @@ def _managed_entity(config: Config, name: str) -> ManagedEntity:
         return ManagedEntity(name, "router", display_name, ())
     if name in config.teams:
         return ManagedEntity(name, "team", display_name, ())
-    tool_names = agent_tool_facts(config, name, policy=agent_policy(config, name)).tool_names
-    return ManagedEntity(name, "agent", display_name, tool_names)
+    facts = agent_tool_facts(config, name, policy=agent_policy(config, name))
+    return ManagedEntity(name, "agent", display_name, tuple(dict.fromkeys((*facts.tool_names, *facts.injected))))

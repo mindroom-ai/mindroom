@@ -19,9 +19,12 @@ ALICE_BRIDGED = "@telegram_alice:localhost"
 
 
 def _config(runtime_paths: RuntimePaths, **data: object) -> Config:
-    """Return a config with two agents, which take the default tools, and a team, without preparing any account."""
+    """Return a config with two agents, which take the default tools, and a team, without preparing any account.
+
+    The coder delegates to the writer, which gives it the delegate toolkit without a tool entry.
+    """
     agents = {
-        "coder": {"display_name": "Coder", "tools": ["calculator"]},
+        "coder": {"display_name": "Coder", "tools": ["calculator"], "delegate_to": ["writer"]},
         "writer": {"display_name": "Writer"},
     }
     return Config.validate_with_runtime(
@@ -86,7 +89,7 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
 
     assert entity_directory(config, runtime_paths) == {
         "@mindroom_router:localhost": ManagedEntity("router", "router", "RouterAgent", ()),
-        "@renamed_coder:localhost": ManagedEntity("coder", "agent", "Coder", ("calculator", "scheduler")),
+        "@renamed_coder:localhost": ManagedEntity("coder", "agent", "Coder", ("calculator", "scheduler", "delegate")),
         "@mindroom_writer:localhost": ManagedEntity("writer", "agent", "Writer", ("scheduler",)),
         "@mindroom_crew:localhost": ManagedEntity("crew", "team", "Crew", ()),
     }
