@@ -908,8 +908,9 @@ class ApprovalContinuationRunner:
         progress = TurnProgress(delivery_started=True)
         lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
         post_effect_continuation = claimed
-        awaiting = FinalDeliveryOutcome(
-            ending=AwaitingApproval(),
+        # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
+        owed = FinalDeliveryOutcome(
+            ending=Owed(),
             event_id=claimed.response_event_id,
             is_visible_response=True,
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
@@ -929,14 +930,14 @@ class ApprovalContinuationRunner:
                 if delivery is None:
                     raise
                 if delivery.acknowledged_event_id is None:
-                    return awaiting
+                    return owed
                 return await self._approval_outcome_from_delivery(delivery)
             if (
                 not isinstance(outcome.ending, Completed | AwaitingApproval | Owed)
                 and (await self._read_final(claimed))[0]
             ):
                 # A FINAL the resume froze before it failed is the approval's to finish once Matrix has it.
-                return replace(awaiting, final_visible_body=outcome.final_visible_body)
+                return replace(owed, final_visible_body=outcome.final_visible_body)
             return outcome
 
         await self.locked.run_and_settle_locked_response(

@@ -36,6 +36,7 @@ from mindroom.final_delivery import (
     Failed,
     FailureCause,
     FinalDeliveryOutcome,
+    Owed,
     TurnEnding,
     TurnProgress,
 )
@@ -812,9 +813,10 @@ async def test_resumed_cancelled_after_a_queued_answer_waits_for_it(tmp_path: Pa
         task = asyncio.create_task(_resume(bot, queue_then_wait))
         await started.wait()
         request_task_cancel(task, cancel_source="user_stop")
-        # Its answer is owed, which holds the reply as a pause does.
+        # Its answer is owed, which holds the reply as a pause does, and ends its turn as an answered one.
         assert await task is True
     assert await _outcome(bot, observer) == Outcome(continuation="claimed", finalized=1, reply=ReplyState.COMPLETED)
+    assert observer.lifecycle.finalize.await_args.args[0].ending == Owed()
 
 
 async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path) -> None:
