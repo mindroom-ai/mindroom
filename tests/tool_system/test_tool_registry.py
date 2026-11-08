@@ -329,3 +329,141 @@ def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
     assert installed_helpers is plugins_module._PUBLISHED.modules["demo_pkg.helpers"]
     assert not skipped
     assert "helper_tool" in tools
+
+
+def _helpers_source(*tool_names: str) -> str:
+    """Return a helper module registering ``tool_names``, whose ``helper_tools`` a tools module imports."""
+    return "".join(_tool_plugin_source(name) for name in tool_names) + "helper_tools = demo_plugin_tools\n"
+
+
+def _validate_package_plugin_tools(tmp_path: Path, tool_names: list[str]) -> Config:
+    """Validate a config whose agent uses ``tool_names`` from the package plugin ``demo_pkg``, as a dashboard save does."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "plugins": ["demo_pkg"],
+        "agents": {"code": {"display_name": "Code", "tools": tool_names}},
+    }
+    return Config.validate_with_runtime(
+        data,
+        runtime_paths_for(_bind_runtime_paths(Config(), tmp_path / "config.yaml")),
+    )
+
+
+def _edit_helpers(plugin_root: Path, *tool_names: str) -> None:
+    """Rewrite the plugin's helper module to register ``tool_names``, and edit its tools module, as a plugin edit does."""
+    (plugin_root / "helpers.py").write_text(_helpers_source(*tool_names), encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(f"{tools_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+    _bump_mtime(tools_path)
+
+
+@pytest.mark.parametrize(
+    ("files", "tools_source"),
+    [
+        ({}, "from demo_pkg.helpers import helper_tools\n"),
+        ({}, "from demo_pkg import helpers\n"),
+        ({}, "import demo_pkg.helpers\n"),
+        ({"__init__.py": "from demo_pkg.helpers import helper_tools\n"}, "from demo_pkg import helper_tools\n"),
+        ({"relay.py": "import demo_pkg.helpers\n"}, "from . import relay\n"),
+        ({"__init__.py": None}, "from demo_pkg.helpers import helper_tools\n"),
+        (
+            {
+                "data.txt": "data",
+                "__init__.py": "from importlib.resources import files\n"
+                "DATA = files(__package__).joinpath('data.txt').read_text()\n"
+                "from demo_pkg.helpers import helper_tools\n",
+            },
+            "from demo_pkg import helper_tools\n",
+        ),
+    ],
+    ids=[
+        "module",
+        "package-fromlist",
+        "package-attribute",
+        "package-reexport",
+        "sibling",
+        "namespace-package",
+        "package-data",
+    ],
+)
+def test_an_edited_package_plugin_validates_with_the_tool_its_helper_module_adds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: dict[str, str | None],
+    tools_source: str,
+) -> None:
+    """Before the edited plugin reloads, validation sees each tool its helper module registers, and publishes none."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    for name, source in files.items():
+        if source is None:
+            (plugin_root / name).unlink()
+        else:
+            (plugin_root / name).write_text(source, encoding="utf-8")
+    (plugin_root / "tools.py").write_text(tools_source, encoding="utf-8")
+
+    # Binding the config imports a namespace package, so the block starts before it.
+    with _forgetting_modules("demo_pkg"):
+        config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+        runtime_paths = runtime_paths_for(config)
+        _publish(config, runtime_paths)
+        live_helpers = sys.modules["demo_pkg.helpers"]
+        _edit_helpers(plugin_root, "helper_tool", "added_tool")
+
+        validated = _validate_package_plugin_tools(tmp_path, ["helper_tool", "added_tool"])
+
+        assert validated.agents["code"].tool_names == ["helper_tool", "added_tool"]
+        assert sys.modules["demo_pkg.helpers"] is live_helpers
+        assert "added_tool" not in config_plugins(config, runtime_paths).tools
+
+
+def test_an_edited_package_plugin_validates_without_the_tool_its_helper_module_drops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before the edited plugin reloads, validation refuses a tool its helper module no longer registers."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    (plugin_root / "helpers.py").write_text(_helpers_source("helper_tool", "dropped_tool"), encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        _publish(config, runtime_paths)
+        assert "dropped_tool" in config_plugins(config, runtime_paths).tools
+        _edit_helpers(plugin_root, "helper_tool")
+
+        validated = _validate_package_plugin_tools(tmp_path, ["helper_tool"])
+        with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'dropped_tool'"):
+            _validate_package_plugin_tools(tmp_path, ["dropped_tool"])
+
+    assert validated.agents["code"].tool_names == ["helper_tool"]
+
+
+def test_a_nested_package_plugin_importing_its_helper_through_the_outer_package_still_validates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``import pack.demo.helpers`` in the edited plugin ``python:pack.demo`` binds the outer package, as it does live."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "pack" / "demo"
+    plugin_root.mkdir(parents=True)
+    (site_packages / "pack" / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helpers.py").write_text(_helpers_source("helper_tool"), encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("import pack.demo.helpers\nhelper_tools = pack.demo.helpers.helper_tools\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    with _forgetting_modules("pack"):
+        config = _bind_runtime_paths(Config(plugins=["python:pack.demo"]), tmp_path / "config.yaml")
+        runtime_paths = runtime_paths_for(config)
+        _publish(config, runtime_paths)
+        tools_path.write_text(f"{tools_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+        _bump_mtime(tools_path)
+
+        _, skipped = candidate_tool_registry(config, runtime_paths)
+
+    assert not skipped
