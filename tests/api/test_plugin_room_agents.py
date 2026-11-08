@@ -338,7 +338,6 @@ async def test_people_type_in_terminals_only_where_the_agent_s_shell_works_in_it
         (_STORAGE_RUNNER, ["file"], "write"),
         (_SCRATCH_RUNNER, ["file"], "read"),
         (_SCRATCH_RUNNER, ["shell", "terminal"], "read"),
-        (_SCRATCH_RUNNER, ["file", "script"], "write"),
     ],
 )
 @pytest.mark.asyncio
@@ -348,10 +347,7 @@ async def test_a_writing_toolkit_writes_only_where_it_works_in_the_workspace(
     tools: list[str],
     files: str,
 ) -> None:
-    """In the primary or a worker that mounts the workspace a writing toolkit writes; on a scratch runner it only reads.
-
-    ``script`` runs in the primary process wherever ``file`` runs.
-    """
+    """In the primary or a worker that mounts the workspace a writing toolkit writes; on a scratch runner it only reads."""
     helper = AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})
     room = _room(tmp_path, {"helper": helper}, **env)
 

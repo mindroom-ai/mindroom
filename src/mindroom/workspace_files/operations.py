@@ -194,8 +194,10 @@ def _find(root: Path, path: PurePosixPath) -> _Found:
         raise HTTPException(409, "The workspace was moved or replaced by a link.") from None
     try:
         target = resolve_base_dir_path(base, str(path), restrict_to_base_dir=True)
-    except (OSError, ValueError):
+    except ValueError:
         raise HTTPException(403, "That path leads outside the workspace.") from None
+    except OSError as error:
+        raise HTTPException(403, f"That path can't be followed: {error.strerror}.") from None
     found = _Found(base, target.relative_to(base))
     if is_hidden(found.relative):
         raise _absent()
