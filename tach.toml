@@ -8232,13 +8232,18 @@ path = "mindroom.previews.relay"
 depends_on = []
 
 [[modules]]
+path = "mindroom.worker_computer.agent_browser"
+depends_on = ["mindroom.worker_computer.runtime"]
+
+[[modules]]
 path = "mindroom.worker_computer.screencast"
-depends_on = ["mindroom.worker_computer.protocol"]
+depends_on = ["mindroom.worker_computer.agent_browser", "mindroom.worker_computer.protocol"]
 
 [[modules]]
 path = "mindroom.api.worker_computer"
 depends_on = [
     "mindroom.api.sandbox_runner",
+    "mindroom.worker_computer.agent_browser",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",

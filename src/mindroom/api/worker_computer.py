@@ -1,4 +1,4 @@
-"""Runner-authenticated computer routes, filtered private RFB transport, and the browser page screencast."""
+"""Runner-authenticated computer routes, filtered private RFB transport, page screencast, and agent's browser bridge."""
 
 import asyncio
 import secrets
@@ -18,6 +18,7 @@ from mindroom.worker_computer.rfb import RfbClientFilter, RfbProtocolError
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 
 if TYPE_CHECKING:
+    from mindroom.worker_computer.agent_browser import AgentBrowserBridge
     from mindroom.worker_computer.screencast import ScreencastViewer
 
 logger = get_logger(__name__)
@@ -259,3 +260,78 @@ async def screencast(websocket: WebSocket, session_id: str, generation: str) -> 
         logger.warning("Worker computer screencast failed", error_type=type(error).__name__)
     finally:
         await _end_stream(websocket, computer, session_id, lease, tasks, close_viewer)
+
+
+# The header in which a worker service presents its instance secret.
+_SERVICE_SECRET_HEADER = "x-mindroom-service-secret"  # noqa: S105 - a header name
+
+
+async def _admit_service(websocket: WebSocket) -> WorkerComputerRuntime | None:
+    """Admit only a worker service of this worker, by its instance secret, once the Computer runs, or refuse."""
+    supplied = websocket.headers.get(_SERVICE_SECRET_HEADER, "").encode()
+    try:
+        services = websocket.app.state.worker_services
+    except AttributeError:
+        services = {}
+    if supplied and any(secrets.compare_digest(supplied, service.secret.encode()) for service in services.values()):
+        with suppress(HTTPException, OSError, RuntimeError, TimeoutError):
+            computer = _app_computer(websocket.app)
+            # Opening a bridge starts a stopped Computer, as creating a Computer session does.
+            await computer.ensure_started()
+            return computer
+    await websocket.close(code=1008)
+    return None
+
+
+async def _service_to_bridge(websocket: WebSocket, bridge: "AgentBrowserBridge") -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise WebSocketDisconnect(code=1003)
+        bridge.receive(text)
+
+
+@router.websocket("/agent-browser")
+async def agent_browser(websocket: WebSocket) -> None:
+    """Give one worker service its own CDP session on the agent's page; it acts only under the control lease."""
+    computer = await _admit_service(websocket)
+    if computer is None:
+        return
+    # Playwright loads only once a service reaches the agent's browser, which already runs it.
+    from mindroom.worker_computer.agent_browser import AgentBrowserBridge  # noqa: PLC0415
+
+    bridge = AgentBrowserBridge(computer, websocket.send_text)
+    tasks: list[asyncio.Task[None]] = []
+
+    async def cleanup() -> None:
+        try:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await bridge.close()
+        finally:
+            with suppress(RuntimeError, OSError):
+                await websocket.close()
+
+    try:
+        await websocket.accept()
+        tasks = [
+            asyncio.create_task(_service_to_bridge(websocket, bridge), name="service"),
+            asyncio.create_task(bridge.follow(), name="page"),
+            asyncio.create_task(bridge.send(), name="answers"),
+        ]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except (WebSocketDisconnect, OSError):
+        pass
+    except Exception as error:
+        logger.warning("Agent browser bridge failed", error_type=type(error).__name__)
+    finally:
+        try:
+            await run_coroutine_until_complete(cleanup())
+        except Exception as error:
+            logger.warning("Agent browser bridge cleanup failed", error_type=type(error).__name__)

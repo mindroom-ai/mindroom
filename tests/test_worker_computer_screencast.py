@@ -343,7 +343,7 @@ async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_vie
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Input to a page that never answers gives up, so the viewer keeps reading, and still detaches when it leaves."""
-    monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.worker_computer.agent_browser._INPUT_SECONDS", 0.05)
     fake = _FakePage()
     sent = _Viewer()
     viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, sent.send_text, sent.send_bytes)
