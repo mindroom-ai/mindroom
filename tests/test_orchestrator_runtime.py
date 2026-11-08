@@ -1055,6 +1055,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert app_state.agent_cli_registry is runtime.agent_cli_registry
                 assert api_main.app.state.script_tool_broker is runtime.script_runtime.broker
                 assert lent.script_worker_keepalive == runtime.script_runtime.touch_live_workers
+                assert lent.call_transcripts == runtime._call_transcripts_runtime.service
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import CredentialServiceName  # noqa: TC001
@@ -60,6 +60,23 @@ class CascadedCallProfile(BaseModel):
 CallProfile = Annotated[RealtimeCallProfile | LiveCallProfile | CascadedCallProfile, Field(discriminator="backend")]
 
 
+class CallTranscriptsConfig(BaseModel):
+    """Transcripts of calls between people, with notes when the call ends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Transcribe calls between people")
+    notes_model: str | None = Field(
+        default=None,
+        description="Configured LLM alias that writes each call's notes (none writes no notes)",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
+    languages: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] = Field(
+        default_factory=list,
+        description="Language codes hinted to speech-to-text (the first is sent)",
+    )
+
+
 class CallsConfig(BaseModel):
     """MatrixRTC settings, named call profiles, and agent assignments."""
 
@@ -81,6 +98,10 @@ class CallsConfig(BaseModel):
     livekit_service_url: str | None = Field(
         default=None,
         description="Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
+    )
+    transcripts: CallTranscriptsConfig = Field(
+        default_factory=CallTranscriptsConfig,
+        description="Transcripts of calls between people in rooms with the router",
     )
 
     def resolve_agent_config(self, agent_name: str) -> CallProfile:

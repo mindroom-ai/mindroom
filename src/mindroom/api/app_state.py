@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.call_transcripts.service import CallTranscriptService
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -56,6 +57,8 @@ class EmbeddedRuntime:
     agent_cli_registry: TurnToolRegistry
     script_broker: ScriptToolBroker
     script_worker_keepalive: Callable[[WorkerBackend], None]
+    # The call transcript service while `calls.transcripts.enabled` is on, the same one each time; None while off.
+    call_transcripts: Callable[[], CallTranscriptService | None]
 
 
 @dataclass(frozen=True)
