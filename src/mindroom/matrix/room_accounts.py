@@ -28,8 +28,10 @@ async def reconcile_room_accounts(
     config: Config,
     runtime_paths: RuntimePaths,
     room_id: str,
-) -> None:
-    """Write the router's list of the room's joined MindRoom accounts when it changed; failures leave it to the next trigger.
+) -> bool:
+    """Write the router's list of the room's joined MindRoom accounts when it changed and return whether it is current.
+
+    Failures leave it to the next trigger.
 
     The state key is the router's user ID, which Matrix lets only the router write.
     """
@@ -40,12 +42,12 @@ async def reconcile_room_accounts(
             async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
                 members = await get_room_members(client, room_id)
                 if members is None:
-                    return
+                    return False
                 accounts = members & prepared_entity_names_by_user_id(config, runtime_paths).keys()
                 content = {"accounts": sorted(accounts)}
                 current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)
                 if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                    return
+                    return True
                 response = await client.room_put_state(
                     room_id,
                     MINDROOM_ACCOUNTS_EVENT_TYPE,
@@ -54,5 +56,8 @@ async def reconcile_room_accounts(
                 )
                 if not isinstance(response, nio.RoomPutStateResponse):
                     logger.warning("room_accounts_publish_failed", room_id=room_id, error=str(response))
+                    return False
+                return True
     except Exception:
         logger.warning("room_accounts_publish_failed", room_id=room_id, exc_info=True)
+        return False
