@@ -469,16 +469,14 @@ class LockedTurns:
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
         cancelled: asyncio.CancelledError | None = None
-        handle = current_span()
+        resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
         async with lifecycle.turn():
             async with session_started_on_creation(
                 reply_session,
                 correlation_id=lifecycle.identity.correlation_id,
             ):
                 try:
-                    await lifecycle.start_turn(
-                        resumed=handle is not None and handle.span.kind is rl.SpanKind.APPROVAL_RESUME,
-                    )
+                    await lifecycle.start_turn(resumed=resumed)
                     outcome = await self._attempt_outcome(
                         request,
                         target=target,

@@ -6239,6 +6239,28 @@ class TestApprovalContinuations:
         assert saved.continuation_count == advanced.continuation_count
 
     @staticmethod
+    async def stored_context(store: PrincipalStore) -> dict[str, Any]:
+        """Return the context continuation ``approval-1`` stores beside its routing facts."""
+        row = await store._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        return json.loads(str(row["context_json"]))
+
+    @staticmethod
+    async def store_context(store: PrincipalStore, context: dict[str, Any]) -> None:
+        """Replace the context continuation ``approval-1`` stores, as an earlier release could have written it."""
+        await store._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), "approval-1"),
+            ),
+        )
+
+    @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
         """Return one exact paused-run owner."""
         return approval_continuation(
@@ -6526,18 +6548,11 @@ class TestApprovalContinuations:
 
         await paused_for_approval(alice, continuation)
         restored = await alice.approvals.approval_continuation("approval-1")
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
+        stored = await self.stored_context(alice)
 
         assert restored == continuation
         assert restored is not None
         assert restored.show_tool_calls is False
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
     async def test_continuation_origin_without_the_acts_for_requester_flag_loads_with_it_unset(
@@ -6551,21 +6566,9 @@ class TestApprovalContinuations:
         await paused_for_approval(alice, continuation)
         assert await alice.approvals.approval_continuation("approval-1") == continuation
 
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
+        stored = await self.stored_context(alice)
         del stored["origin"]["acts_for_requester"]
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(stored), "approval-1"),
-            ),
-        )
+        await self.store_context(alice, stored)
         restored = await alice.approvals.approval_continuation("approval-1")
         assert restored is not None
         assert restored.origin == replace(continuation.origin, acts_for_requester=False)
@@ -6573,25 +6576,13 @@ class TestApprovalContinuations:
     async def test_continuation_without_a_turn_id_loads_with_its_approval_id(self, alice: PrincipalStore) -> None:
         """A continuation keeps its paused turn's ID; one stored before continuations kept it reads its approval's ID."""
         await self.admit_sources(alice)
-        continuation = replace(self.continuation(), turn_id="turn-paused")
+        continuation = self.continuation()
         await paused_for_approval(alice, continuation)
         assert await alice.approvals.approval_continuation("approval-1") == continuation
 
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
+        stored = await self.stored_context(alice)
         del stored["turn_id"]
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(stored), "approval-1"),
-            ),
-        )
+        await self.store_context(alice, stored)
         assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id="approval-1")
 
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
@@ -6606,21 +6597,9 @@ class TestApprovalContinuations:
         assert restored is not None
         assert restored.execution_identity == continuation.execution_identity
 
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
+        stored = await self.stored_context(alice)
         stored["execution_identity"]["agent_name"] = ""
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(stored), "approval-1"),
-            ),
-        )
+        await self.store_context(alice, stored)
         with pytest.raises(
             TypeError,
             match=r"^Approval continuation execution_identity\.agent_name must be a non-empty string$",

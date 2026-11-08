@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.cancellation import request_task_cancel
-from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome, Owed
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -28,15 +28,14 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.llm.provider import TextDelta
-from mindroom.logging_config import get_logger
-from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.post_response_effects import ResponseOutcome
 from mindroom.response_turn import CompletedApprovalRun
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.approval_continuation_helpers import dispatch_approval
-from tests.conftest import patch_response_runner_module, publish_hook_plugin, unwrap_extracted_collaborator
+from tests.bot_helpers import _hook_plugin
+from tests.conftest import publish_hook_plugin, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
-from tests.response_runner_helpers import _noop_typing, _plain_request, _target
-from tests.test_cancelled_response_hook import _lifecycle_with, _response_hook_service
+from tests.response_runner_helpers import _plain_request, _target
+from tests.test_cancelled_response_hook import _lifecycle_with, _no_effects, _response_hook_service
 from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_tool is a pytest fixture
     _ECHO_TOOL,
     _explode,
@@ -54,11 +53,11 @@ from tests.test_reply_records_approvals import (
     _journal_wakes,
     _paused,
     _respond,
+    _responding_in_place,
     _resume_until_cancelled,
     _run_approval_wakes,
 )
-from tests.test_reply_records_turns import _model_stream, _stop
-from tests.test_tool_hooks import _plugin
+from tests.test_reply_records_turns import _stop
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,14 +86,19 @@ def _recorders(seen: _Seen, events: tuple[str, ...] = _TURN_EVENTS) -> list[obje
     return [recorder(event_name) for event_name in events]
 
 
-def _record_turn_events(bot: AgentBot, seen: _Seen, events: tuple[str, ...] = _TURN_EVENTS) -> None:
-    """Publish a plugin whose hooks record ``events`` into ``seen`` beside the bot's other plugins."""
+def _publish_hooks(bot: AgentBot, hooks: list[object]) -> None:
+    """Publish a plugin whose hooks are ``hooks`` beside the bot's other plugins."""
     bot.orchestrator.hook_registry_state.registry = publish_hook_plugin(
         bot.config,
         bot.runtime_paths,
         "turn-events",
-        _recorders(seen, events),
+        hooks,
     ).hooks
+
+
+def _record_turn_events(bot: AgentBot, seen: _Seen, events: tuple[str, ...] = _TURN_EVENTS) -> None:
+    """Publish a plugin whose hooks record ``events`` into ``seen`` beside the bot's other plugins."""
+    _publish_hooks(bot, _recorders(seen, events))
 
 
 def _events(seen: _Seen) -> list[tuple[str, str | None]]:
@@ -182,12 +186,7 @@ async def test_a_cancellation_while_turn_started_hooks_run_settles_the_turn_canc
     async def cancelling_start(_ctx: TurnLifecycleContext) -> None:
         raise asyncio.CancelledError
 
-    turn.bot.orchestrator.hook_registry_state.registry = publish_hook_plugin(
-        turn.bot.config,
-        turn.bot.runtime_paths,
-        "turn-events",
-        [cancelling_start, *_recorders(seen, (EVENT_TURN_ENDED, EVENT_MESSAGE_CANCELLED))],
-    ).hooks
+    _publish_hooks(turn.bot, [cancelling_start, *_recorders(seen, (EVENT_TURN_ENDED, EVENT_MESSAGE_CANCELLED))])
 
     with pytest.raises(asyncio.CancelledError):
         await turn.runner.generate_response(_plain_request(_target()))
@@ -361,33 +360,7 @@ async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(t
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         _record_turn_events(bot, seen)
         runner = unwrap_extracted_collaborator(bot._response_runner)
-
-        async def wait_in_place(*_args: object, **_kwargs: object) -> str:
-            context = get_tool_runtime_context()
-            assert context is not None
-            assert context.cli_approval_handler is not None
-            cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
-            await context.cli_approval_handler(replace(_paused(), cli_call=cli_call))
-            return "Never answered."
-
-        published = asyncio.Event()
-        publish_generation = runner.approvals._publish_generation
-
-        async def publish_then_wait(*args: object, **kwargs: object) -> object:
-            result = await publish_generation(*args, **kwargs)
-            published.set()
-            return result
-
-        with (
-            patch_response_runner_module(
-                stream_agent_response=_model_stream(AsyncMock(side_effect=wait_in_place)),
-                should_use_streaming=AsyncMock(return_value=False),
-                typing_indicator=_noop_typing,
-            ),
-            patch.object(runner.approvals, "_publish_generation", new=publish_then_wait),
-        ):
-            response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
-            await asyncio.wait_for(published.wait(), timeout=5)
+        async with _responding_in_place(bot) as response:
             request_task_cancel(response, cancel_source="sync_restart")
             await asyncio.wait({response}, timeout=5)
             assert response.done()
@@ -416,7 +389,7 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
-    """Hooks on the reply's start and resume answer sooner than those on its pause and end."""
+    """The turn events are built in, the `turn` namespace is reserved, and start and resume hooks time out sooner."""
     assert set(_TURN_EVENTS) <= BUILTIN_EVENT_NAMES
     assert [validate_event_name(event_name) for event_name in _TURN_EVENTS] == list(_TURN_EVENTS)
     assert [default_timeout_ms_for_event(event_name) for event_name in _TURN_EVENTS] == [2000, 3000, 2000, 3000]
@@ -424,14 +397,8 @@ async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events()
         validate_event_name("turn:custom")
 
 
-def _lifecycle(
-    tmp_path: Path,
-    seen: _Seen,
-    *,
-    shutdown: bool = False,
-    hooks: list[object] | None = None,
-) -> ResponseLifecycle:
-    registry = HookRegistry.from_plugins([_plugin("turn", _recorders(seen) if hooks is None else hooks)])
+def _lifecycle(tmp_path: Path, hooks: list[object], *, shutdown: bool = False) -> ResponseLifecycle:
+    registry = HookRegistry.from_plugins([_hook_plugin("turn", hooks)])
     _config, service = _response_hook_service(tmp_path, registry)
     return _lifecycle_with(service, process_shutdown_requested=lambda: shutdown)
 
@@ -454,16 +421,20 @@ async def test_a_hook_scoped_to_agents_or_rooms_sees_only_their_turns(tmp_path: 
         recorder("other_room", rooms=["!other:localhost"]),
     ]
 
-    await _lifecycle(tmp_path, [], hooks=hooks).start_turn(resumed=False)
+    await _lifecycle(tmp_path, hooks).start_turn(resumed=False)
 
     assert seen == ["this_agent", "this_room"]
 
 
-async def _finalize(lifecycle: ResponseLifecycle, outcome: FinalDeliveryOutcome) -> None:
+async def _finalize(
+    lifecycle: ResponseLifecycle,
+    outcome: FinalDeliveryOutcome,
+    post_response_outcome: ResponseOutcome | None = None,
+) -> None:
     await lifecycle.finalize(
         outcome,
-        build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.turn_lifecycle")),
+        build_post_response_outcome=lambda _outcome: post_response_outcome or ResponseOutcome(),
+        post_response_deps=_no_effects,
     )
 
 
@@ -479,7 +450,7 @@ async def test_a_settlement_that_raises_before_finalizing_still_ends_its_turn(
 ) -> None:
     """A settlement that raises before its finalization ends the turn by what it raised, and the error propagates."""
     seen: _Seen = []
-    lifecycle = _lifecycle(tmp_path, seen)
+    lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
     with pytest.raises(type(raised)):
         async with lifecycle.turn():
@@ -491,7 +462,7 @@ async def test_a_settlement_that_raises_before_finalizing_still_ends_its_turn(
 async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_settled(tmp_path: Path) -> None:
     """A turn finalized twice, as a cancellation during finalization does, ends once with the second settlement."""
     seen: _Seen = []
-    lifecycle = _lifecycle(tmp_path, seen)
+    lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
     async def finalized_twice_then_cancelled() -> None:
         async with lifecycle.turn():
@@ -527,17 +498,32 @@ async def test_a_cancelled_observer_of_a_pause_or_end_leaves_the_others_to_see_i
     async def later_observer(ctx: TurnLifecycleContext) -> None:
         seen.append(ctx.event_name)
 
-    lifecycle = _lifecycle(tmp_path, [], hooks=[cancelled_observer, later_observer])
+    lifecycle = _lifecycle(tmp_path, [cancelled_observer, later_observer])
     async with lifecycle.turn():
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending))
 
     assert seen == [event_name]
 
 
+@pytest.mark.parametrize("ending", [Completed(), Owed()], ids=["completed", "owed"])
+async def test_a_run_whose_error_became_its_answer_ends_its_turn_failed(
+    tmp_path: Path,
+    ending: Completed | Owed,
+) -> None:
+    """An answer that only reports the run's error fails the turn, whether Matrix took it or the outbox still owes it."""
+    seen: _Seen = []
+    lifecycle = _lifecycle(tmp_path, _recorders(seen))
+
+    async with lifecycle.turn():
+        await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending), ResponseOutcome(run_succeeded=False))
+
+    assert _events(seen) == [(EVENT_TURN_ENDED, "failed")]
+
+
 async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) -> None:
     """Orderly shutdown stops a settling turn's pause and end events, as it stops its other best-effort hooks."""
     seen: _Seen = []
-    lifecycle = _lifecycle(tmp_path, seen, shutdown=True)
+    lifecycle = _lifecycle(tmp_path, _recorders(seen), shutdown=True)
 
     async with lifecycle.turn():
         await lifecycle.start_turn(resumed=False)

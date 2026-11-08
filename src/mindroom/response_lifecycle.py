@@ -802,8 +802,8 @@ class ResponseHookService:
 def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
     """Return how a settled turn ends for its hooks: paused for approval, or the outcome ``turn:ended`` reports.
 
-    A run that failed but answered with its error completed its reply, not its turn; an answer withheld on purpose, or
-    one the outbox still owes, completed it.
+    A run that failed but answered with its error completed its reply, not its turn, whether Matrix took that answer or
+    the outbox still owes it; an answer withheld on purpose completed it.
     """
     match ending:
         case AwaitingApproval():
@@ -812,7 +812,7 @@ def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | L
             return "cancelled"
         case Failed():
             return "failed"
-        case Completed() if not run_succeeded:
+        case Completed() | Owed() if not run_succeeded:
             return "failed"
         case _:
             return "completed"
@@ -937,14 +937,12 @@ class ResponseLifecycle:
         post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
-        self._turn_end = _turn_end_for(
-            final_delivery_outcome.ending,
-            run_succeeded=build_post_response_outcome(final_delivery_outcome).run_succeeded,
-        )
+        post_response_outcome = build_post_response_outcome(final_delivery_outcome)
+        self._turn_end = _turn_end_for(final_delivery_outcome.ending, run_succeeded=post_response_outcome.run_succeeded)
         if isinstance(final_delivery_outcome.ending, AwaitingApproval | Owed):
             await self._finalize_suspended(
                 final_delivery_outcome,
-                post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+                post_response_outcome=post_response_outcome,
                 post_response_deps=post_response_deps,
             )
             return final_delivery_outcome
@@ -972,7 +970,7 @@ class ResponseLifecycle:
             self._raise_if_process_shutdown()
         await self._apply_effects_safely(
             final_delivery_outcome=final_delivery_outcome,
-            post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
+            post_response_outcome=post_response_outcome,
             post_response_deps=post_response_deps,
         )
         if self.pipeline_timing is not None:
@@ -1008,13 +1006,13 @@ class ResponseLifecycle:
         self,
         *,
         final_delivery_outcome: FinalDeliveryOutcome,
-        post_response_outcome: Callable[[], ResponseOutcome],
+        post_response_outcome: ResponseOutcome,
         post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
         self._raise_if_process_shutdown()
         with self._tolerated_after_visible_delivery(final_delivery_outcome.final_visible_event_id):
-            await apply_post_response_effects(final_delivery_outcome, post_response_outcome(), post_response_deps())
+            await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps())
             self._raise_if_process_shutdown()
 
     @contextmanager

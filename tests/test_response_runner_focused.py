@@ -1689,7 +1689,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         event_id="$final-edit",
         delivered_projections=(),
     )
-    lifecycle = MagicMock(start_turn=AsyncMock(), finalize=AsyncMock())
+    lifecycle = MagicMock(finalize=AsyncMock())
 
     with patch.object(LockedTurns, "build_lifecycle", return_value=lifecycle):
         await dispatch_approval(
@@ -4374,11 +4374,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
     with (
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=acknowledge_frozen_final)),
         patch.object(runner.approvals, "_continue_entity_call", new=AsyncMock()) as continue_entity,
-        patch.object(
-            LockedTurns,
-            "build_lifecycle",
-            return_value=MagicMock(start_turn=AsyncMock(), finalize=AsyncMock()),
-        ) as build_lifecycle,
+        patch.object(LockedTurns, "build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle,
     ):
         await dispatch_approval(
             runner.approvals,
@@ -4434,7 +4430,7 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         event_id="$final",
         delivered_projections=(),
     )
-    lifecycle = MagicMock(start_turn=AsyncMock(), finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
 
     with patch.object(LockedTurns, "build_lifecycle", return_value=lifecycle):
         await dispatch_approval(
@@ -4479,11 +4475,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         delivered_projections=(),
     )
 
-    with patch.object(
-        LockedTurns,
-        "build_lifecycle",
-        return_value=MagicMock(start_turn=AsyncMock(), finalize=AsyncMock()),
-    ) as build_lifecycle:
+    with patch.object(LockedTurns, "build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
         assert await runner.approvals.recover_approval_final(continuation.approval_id)
 
     build_lifecycle.assert_not_called()
@@ -4616,7 +4608,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         )
         raise asyncio.CancelledError
 
-    lifecycle = MagicMock(start_turn=AsyncMock(), finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
     with (
         patch.object(runner.approvals, "_run_claimed_approval_lifecycle", side_effect=acknowledge_then_cancel),
         patch.object(LockedTurns, "build_lifecycle", return_value=lifecycle),
@@ -4884,7 +4876,7 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
                 cli_approval_handler=None,
             )
 
-    # The resumed reply is a turn of its own, whose tools run under its request's turn ID.
+    # The resumed reply's tools run under the turn ID its request carries, the paused turn's.
     assert observed == [("correlation-original", request.turn_id)]
     assert forwarded_progress == [progress]
     assert receipts == [
