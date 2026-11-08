@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state
+from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state, run_text
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
@@ -25,7 +25,6 @@ from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,  # noqa: TC001  # resolved by tool contract introspection
 )
-from mindroom.tools.terminal import run_text
 
 if TYPE_CHECKING:
     from typing import Any
@@ -39,7 +38,10 @@ _MAX_TIMEOUT_SECONDS = 600.0
 # How long a viewer waits for the scrollback, which the runner sends first, and for more output to read.
 _SCROLLBACK_SECONDS = 1.0
 _OUTPUT_SECONDS = 0.5
+# The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
+_MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
+_PROMPT_MARK_START = b"\x1b]133;D;"
 _LINE_CHANGED = (
     "Error: the terminal's line changed after these keys were checked (someone or another call typed in it); nothing "
     "was typed. Read the terminal, then send them again."
@@ -61,7 +63,7 @@ def _plain_text(data: bytes) -> str:
     for pattern in (_OSC, _CSI, _OTHER_ESCAPE):
         text = pattern.sub("", text)
     lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n")]
-    return _CONTROL.sub("", "\n".join(lines))[-_MAX_TEXT_CHARS:]
+    return _CONTROL.sub("", "\n".join(lines))
 
 
 async def _scrollback(stream: TerminalStream) -> None:
@@ -71,23 +73,33 @@ async def _scrollback(stream: TerminalStream) -> None:
             await stream.receive()
 
 
-async def _output(stream: TerminalStream, seconds: float, *, prompt_after: int | None = None) -> tuple[bytes, bool]:
-    """Return what ``stream`` prints within ``seconds``, and whether that ended at the shell's exit or next prompt.
+async def _output(
+    stream: TerminalStream,
+    seconds: float,
+    *,
+    prompt_after: int | None = None,
+) -> tuple[bytes, bool, bool]:
+    """Return what ``stream`` prints within ``seconds``, whether older output was dropped, and whether it ended.
 
-    Given ``prompt_after``, it ends at the first prompt mark numbered above it, before which it cuts the output.
+    It keeps the newest ``_MAX_OUTPUT_BYTES``, and ends at the shell's exit or, given ``prompt_after``, at the first
+    prompt mark numbered above it, before which it cuts the output.
     """
-    chunks: list[bytes] = []
+    kept = bytearray()
+    cut = False
     try:
         async with asyncio.timeout(seconds):
             while True:
                 event = await stream.receive()
                 if event.type == "exit":
-                    return b"".join(chunks), True
-                chunks.append(event.data)
+                    return bytes(kept), cut, True
+                kept += event.data
+                if len(kept) > _MAX_OUTPUT_BYTES:
+                    del kept[: len(kept) - _MAX_OUTPUT_BYTES]
+                    cut = True
                 if prompt_after is not None and stream.prompt is not None and stream.prompt[0] > prompt_after:
-                    return b"".join(chunks).rsplit(b"\x1b]133;D;", 1)[0], True
+                    return bytes(kept).rsplit(_PROMPT_MARK_START, 1)[0], cut, True
     except (TimeoutError, TerminalDetachedError):
-        return b"".join(chunks), False
+        return bytes(kept), cut, False
 
 
 def _refused(error: TerminalError, session_id: str | None = None) -> str:
@@ -182,21 +194,25 @@ class TerminalTools(Toolkit):
 
         """
         text = run_text(command)
-        if entered_command("", text) is None:
-            return "Error: a command is plain text; type keys such as <ctrl-c> or <tab> with terminal_send."
+        # One line, so the run ends at the prompt after it; text, so its judgment is what it runs.
+        if "\n" in text or "\r" in text[:-1] or entered_command("", text) is None:
+            return (
+                "Error: a command is one line of plain text; join commands with && or ;, and type keys such as "
+                "<ctrl-c> or <tab> with terminal_send."
+            )
         timeout = max(0.1, min(float(timeout_s), _MAX_TIMEOUT_SECONDS))
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
                 await _scrollback(stream)
-                before = stream.line.prompts
-                await stream.send_input(text, empty_line=True)
-                output, finished = await _output(stream, timeout, prompt_after=before)
+                before = await stream.send_input(text, empty_line=True)
+                output, cut, finished = await _output(stream, timeout, prompt_after=before)
         except TerminalError as error:
             return _NOT_AT_PROMPT if error.status_code == 409 else _refused(error, session_id)
         except TerminalDetachedError:
             return _DETACHED
-        # The first line is the shell's echo of the command.
-        shown = _plain_text(output).partition("\n")[2].strip("\n")
+        shown = _plain_text(output)
+        # The first line is the shell's echo of the command, unless it was dropped with older output.
+        shown = (shown if cut else shown.partition("\n")[2]).strip("\n")[-_MAX_TEXT_CHARS:]
         if not finished:
             status = f"Still running after {timeout:g} s."
         elif stream.prompt is not None and stream.prompt[0] > before:
@@ -224,12 +240,12 @@ class TerminalTools(Toolkit):
             async with self._workspace_terminals.attach(session_id) as stream:
                 await _scrollback(stream)
                 await stream.send_input(keys_to_text(keys), judged=line)
-                output, _ = await _output(stream, _OUTPUT_SECONDS)
+                output, _, _ = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _LINE_CHANGED if error.status_code == 409 else _refused(error, session_id)
         except TerminalDetachedError:
             return _DETACHED
-        shown = _plain_text(output).strip()
+        shown = _plain_text(output).strip()[-_MAX_TEXT_CHARS:]
         return f"Sent. New output:\n{shown}" if shown else "Sent."
 
     async def terminal_read(self, session_id: str) -> str:
@@ -244,10 +260,10 @@ class TerminalTools(Toolkit):
         """
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
-                output, exited = await _output(stream, _OUTPUT_SECONDS)
+                output, _, exited = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _refused(error, session_id)
-        shown = _plain_text(output).strip("\n")
+        shown = _plain_text(output).strip("\n")[-_MAX_TEXT_CHARS:]
         return f"{shown}\n[The terminal's shell has exited.]" if exited else shown or "[No output yet.]"
 
     async def terminal_list(self) -> str:

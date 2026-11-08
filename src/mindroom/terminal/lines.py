@@ -64,19 +64,25 @@ def keys_to_text(keys: str) -> str:
     return _KEY.sub(key, keys)
 
 
+def run_text(command: str) -> str:
+    """Return what ``terminal_run`` types for ``command``: the command line and Enter."""
+    return command.strip("\n") + "\r"
+
+
 def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | None:
     """Return the ``run_shell_command`` call that typing ``text`` onto a line holding ``typed`` amounts to.
 
     Its ``args`` is what the Enters in ``text`` run, as one script, the line's earlier text included: an empty list
-    when ``text`` enters nothing, and None when the line or the keys can't tell. Ctrl-C first empties the line.
+    when ``text`` enters nothing, and None when the line or the keys can't tell. Ctrl-C first empties a known line;
+    on an unknown one, such as while a command runs, it may reach a program that keeps the keys after it.
     """
     rest = text.lstrip(_INTERRUPT)
     if not rest:
         return []
-    if rest != text:
-        typed = ""
     if typed is None or _EDITING.search(rest):
         return None
+    if rest != text:
+        typed = ""
     end = max(rest.rfind("\r"), rest.rfind("\n"))
     if end == -1:
         return []
@@ -101,6 +107,9 @@ class TerminalLine:
         self._busy = not opened
         # Something typed while busy waits for the next prompt, whose line it then holds.
         self._ahead = not opened
+        # The prompts the shell prints before it reads a command typed now: its first, and one after each Enter or
+        # Ctrl-C at the prompt; a command typed onto the line ends at the prompt after them.
+        self._owed = 1 if opened else 0
         self.prompts = 0
         self.status: int | None = None
         # Held across each send, so input reaches the shell in the order it is recorded.
@@ -119,6 +128,11 @@ class TerminalLine:
         """Whether the shell waits at its prompt with nothing typed."""
         return not self._busy and self.typed == ""
 
+    @property
+    def awaited(self) -> int:
+        """The number of the last prompt mark the shell prints before it reads a command typed now."""
+        return self.prompts + self._owed
+
     def type(self, text: str) -> None:
         """Record ``text`` as sent to the terminal."""
         self.revision += 1
@@ -128,8 +142,10 @@ class TerminalLine:
                 self._ahead = char != _INTERRUPT
             elif char == _INTERRUPT:
                 self.typed = ""
+                self._owed += 1
             elif char in "\r\n":
                 self._busy, self._ahead = True, False
+                self._owed += 1
             elif self.typed is not None:
                 self.typed = None if _EDITING.match(char) else self.typed + char
         if self.typed is not None and len(self.typed) > _MAX_LINE_CHARS:
@@ -144,8 +160,10 @@ class TerminalLine:
         """Record the shell's prompt mark ``number``, after a command that exited with ``status``."""
         if number <= self.prompts:
             return
+        self._owed = max(0, self._owed - (number - self.prompts))
         self.prompts, self.status = number, status
-        if self._busy:
+        # A prompt the shell owed from before the Enter, such as after a Ctrl-C, ends no command.
+        if self._busy and not self._owed:
             self.typed = None if self._ahead else ""
             self._busy = self._ahead = False
 

@@ -212,9 +212,9 @@ async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str
 
 
 async def _close(websocket: WebSocket, code: int, reason: str) -> None:
-    # The client may be gone already.
+    # The client may be gone already, and a close frame holds at most 123 bytes of reason.
     with suppress(RuntimeError, WebSocketDisconnect):
-        await websocket.close(code, reason)
+        await websocket.close(code, reason.encode()[:123].decode(errors="ignore"))
 
 
 class _Viewer:

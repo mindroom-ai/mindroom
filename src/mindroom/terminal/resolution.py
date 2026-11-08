@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agents import build_agent_toolkit
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.terminal.client import WorkerTerminals
@@ -52,7 +53,7 @@ def agent_terminals(
         tool_config_overrides=entry.tool_config_overrides,
         execution_identity=identity,
     )
-    if shell is None or toolkit_function(shell, "run_shell_command") is None:
+    if shell is None or toolkit_function(shell, SHELL_FUNCTION) is None:
         return None
     stand_ins = toolkit_worker_stand_ins(shell)
     return None if stand_ins is None else WorkerTerminals(stand_ins)

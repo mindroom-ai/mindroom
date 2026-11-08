@@ -112,9 +112,12 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     )
     assert "42" in await _call(functions["terminal_read"], session_id=session_id)
     assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
-    assert (await _call(functions["terminal_run"], session_id=session_id, command="ls\x01")).startswith(
-        "Error: a command is plain text;",
-    )
+    for command in ("ls\x01", "cd /tmp\nls"):
+        refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
+        assert refused.startswith("Error: a command is one line of plain text;")
+    # A line longer than any answer keeps its newest part.
+    long_line = await _call(functions["terminal_run"], session_id=session_id, command="printf 'x%.0s' $(seq 300000)")
+    assert long_line == "x" * 16_000 + "\n[Exit status 0.]"
     assert await _call(functions["terminal_read"], session_id="nope") == (
         "Error: there is no terminal 'nope'; terminal_list shows yours."
     )
@@ -151,6 +154,8 @@ async def test_the_shell_s_rules_judge_what_the_agent_types_as_the_command_it_ru
     functions = _functions(config, paths)
     run, send = functions["terminal_run"], functions["terminal_send"]
     assert (functions["terminal_open"].gate, run.gate, send.gate) == (ToolGate.POLICY,) * 3
+    # Only the preparation before approval fills the line: the model can't send one.
+    assert ("line" in send.parameters["properties"], send.parameters["additionalProperties"]) == (False, False)
     assert functions["terminal_read"].gate is None
     session_id = await _open(functions)
 

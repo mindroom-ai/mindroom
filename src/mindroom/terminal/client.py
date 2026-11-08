@@ -96,8 +96,8 @@ class TerminalStream:
                 return TerminalEvent("exit", code=_Exit.model_validate_json(message.data).code)
         raise TerminalDetachedError
 
-    async def send_input(self, data: str, *, judged: LineState | None = None, empty_line: bool = False) -> None:
-        """Type ``data``, after the input before it, and record it on the terminal's line.
+    async def send_input(self, data: str, *, judged: LineState | None = None, empty_line: bool = False) -> int:
+        """Type ``data``, after the input before it, record it on the terminal's line, and return the line's ``awaited``.
 
         Given ``judged``, only while the line is still the one it describes, and with ``empty_line`` only while the
         shell waits at its prompt with nothing typed; otherwise it types nothing and raises ``TerminalError`` (409).
@@ -105,12 +105,14 @@ class TerminalStream:
         async with self.line.lock:
             if (judged is not None and not self.line.unchanged(judged)) or (empty_line and not self.line.empty):
                 raise TerminalError(409, "The terminal's line is not the one these keys were checked against.")
+            awaited = self.line.awaited
             self.line.type(data)
             try:
                 await self._send({"type": "input", "data": data})
             except BaseException:
                 self.line.lost()
                 raise
+        return awaited
 
     async def resize(self, cols: int, rows: int) -> None:
         """Change the terminal's size."""

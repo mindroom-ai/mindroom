@@ -38,10 +38,12 @@ Without a line, as on paths that call the function directly, the judge cannot te
   Records are keyed by the worker, agent and workspace the shell stand-ins name, because preparation runs synchronously in the model loop and cannot look the worker up.
 - The shell's prompt command prints an OSC 133 `D` mark with the last exit status and a prompt counter before each prompt, and the primary reads the marks from any stream attached to the terminal.
   The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
-- After an Enter the line is unknown until the next prompt mark, because a running command or a continuation reads what is typed meanwhile; typing before that prompt leaves it unknown there, and Ctrl-C, which drops unread typing, empties it.
+- After an Enter the line is unknown until the shell's next prompt, because a running command or a continuation reads what is typed meanwhile; typing before that prompt leaves it unknown there, and Ctrl-C, which drops unread typing, empties it.
+  The line counts the prompts the shell owes, one after each Enter or Ctrl-C at the prompt, so a prompt owed from before a command, such as the one after a Ctrl-C, never ends that command.
+  Ctrl-C empties a known line before the keys after it are judged, but not an unknown one, since it may reach a program that keeps the keys.
 - Keys that edit the line, recall history, complete, or move the cursor make it unknown, and so does a send that may not have arrived and a terminal the primary did not see open, such as after a primary restart.
 - The shell expands no `!` history and reads no key bindings (`INPUTRC`) or history file (`HISTFILE`), since worker code can write those in the workspace and change what a judged line runs.
-- Limitations: rules judge text, so state a terminal keeps, such as aliases, functions, and variables typed earlier, is invisible to them, as with any shell command string; a program in the terminal can print prompt marks, but it already runs code there; after a primary restart a replayed mark can make the line look like a prompt while a program that ignores Ctrl-C reads the keys.
+- Limitations: rules judge text, so state a terminal keeps, such as aliases, functions, and variables typed earlier, is invisible to them, as with any shell command string; output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the line's record, so keys meant for that program are judged as shell text, or make the record ignore later prompts, so `terminal_run` refuses until the terminal is replaced; after a primary restart a replayed mark can make the line look like a prompt while a program that ignores Ctrl-C reads the keys.
 
 ## Chat client routes
 

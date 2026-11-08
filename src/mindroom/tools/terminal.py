@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.terminal.lines import entered_command, keys_to_text
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.terminal.lines import entered_command, keys_to_text, run_text
 from mindroom.tool_system.declarations import (
     ApprovalAlias,
     SetupType,
@@ -28,13 +29,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.custom_tools.terminal import TerminalTools
-
-_SHELL_FUNCTION = "run_shell_command"
-
-
-def run_text(command: str) -> str:
-    """Return what ``terminal_run`` types for ``command``: the command line and Enter."""
-    return command.strip("\n") + "\r"
 
 
 def _judge_open(_arguments: Mapping[str, object]) -> None:
@@ -79,9 +73,9 @@ def _judge_send(arguments: Mapping[str, object]) -> list[dict[str, object]] | No
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#terminal",
     function_names=("terminal_open", "terminal_run", "terminal_send", "terminal_read", "terminal_list"),
     approval_aliases={
-        "terminal_open": ApprovalAlias(judged_as=_SHELL_FUNCTION, judge=_judge_open),
-        "terminal_run": ApprovalAlias(judged_as=_SHELL_FUNCTION, judge=_judge_run),
-        "terminal_send": ApprovalAlias(judged_as=_SHELL_FUNCTION, judge=_judge_send),
+        "terminal_open": ApprovalAlias(judged_as=SHELL_FUNCTION, judge=_judge_open),
+        "terminal_run": ApprovalAlias(judged_as=SHELL_FUNCTION, judge=_judge_run),
+        "terminal_send": ApprovalAlias(judged_as=SHELL_FUNCTION, judge=_judge_send),
     },
 )
 def terminal_tools() -> type[TerminalTools]:
