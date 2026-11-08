@@ -614,9 +614,15 @@ class CallTranscriptService:
     async def _settle_step(self, call: StoredCall) -> None:
         """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made.
 
-        A due message the router may not post is given up, as when it left the room, before any notes or upload.
+        Nothing is sent while the router may not post: a due message is given up, as when it left the room, before any
+        notes or upload, and the other writes wait.
         """
-        if call.row_event_id is None:
+        if await self._room.router_may_post(call.room_id) is False:
+            if self._transcript_due(call, self._clock()):
+                await self._finish(call, given_up="router-may-not-post")
+            else:
+                await self._postpone(call, reason="router-may-not-post")
+        elif call.row_event_id is None:
             event_id = await self._room.post_row(call.room_id, call.id)
             if event_id is None:
                 await self._postpone(call, reason="row-not-posted")
@@ -628,8 +634,6 @@ class CallTranscriptService:
                 await self._postpone(call, reason="row-not-edited")
             else:
                 await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
-        elif await self._room.router_may_post(call.room_id) is False:
-            await self._finish(call, given_up="router-may-not-post")
         else:
             await self._post_transcript(call, call.row_event_id)
 

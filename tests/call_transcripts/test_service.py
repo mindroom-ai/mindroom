@@ -76,7 +76,7 @@ class FakeRoom:
     readable: bool = True
     ready: bool = True
     router_in_room: bool = True
-    router_posts: bool = True
+    router_posts: bool = True  # While False, the homeserver refuses the router's rows, edits and messages.
     failed_transcript_posts: int = 0
     lost_row_answers: int = 0
     failing_edits: bool = False
@@ -131,7 +131,7 @@ class FakeRoom:
         return self.gated_rooms is None or room_id in self.gated_rooms
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post a row while the router is ready, after ``row_gate`` opens; posting it again finds the one posted.
+        """Post a row while the router is ready and may post, after ``row_gate`` opens; posting again finds the one posted.
 
         The first ``lost_row_answers`` posts reach the room, but their answers are lost.
         """
@@ -140,7 +140,7 @@ class FakeRoom:
         await asyncio.sleep(0)
         if self.row_gate is not None and self._gated(room_id):
             await self.row_gate.wait()
-        if not self.ready:
+        if not self.ready or not self.router_posts:
             return None
         if (room_id, call_id) not in self.rows:
             self.rows.append((room_id, call_id))
@@ -150,7 +150,7 @@ class FakeRoom:
         return f"$row-{self.rows.index((room_id, call_id)) + 1}"
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
-        """Post the message while the router is ready, after ``transcript_gate`` opens and the failures asked for.
+        """Post the message while the router is ready and may post, after ``transcript_gate`` opens and failures asked for.
 
         Crash for ``crashing_rooms``.
         """
@@ -161,7 +161,7 @@ class FakeRoom:
         if message.room_id in self.crashing_rooms:
             msg = "A bug in the room side."
             raise RuntimeError(msg)
-        if not self.ready:
+        if not self.ready or not self.router_posts:
             return None
         if self.failed_transcript_posts:
             self.failed_transcript_posts -= 1
@@ -170,7 +170,7 @@ class FakeRoom:
         return f"$transcript-{len(self.transcripts)}"
 
     async def edit_row(self, row: EndedRow) -> str | None:
-        """Edit the row while the router is ready, after ``edit_gate`` opens; the first ``crashing_edits`` crash."""
+        """Edit the row while the router is ready and may post, after ``edit_gate`` opens; the first ``crashing_edits`` crash."""
         self.edit_started.set()
         await asyncio.sleep(0)
         if self.crashing_edits:
@@ -179,7 +179,7 @@ class FakeRoom:
             raise RuntimeError(msg)
         if self.edit_gate is not None and self._gated(row.room_id):
             await self.edit_gate.wait()
-        if not self.ready or self.failing_edits:
+        if not self.ready or not self.router_posts or self.failing_edits:
             return None
         self.row_edits.append(row)
         return f"$edit-{len(self.row_edits)}"
@@ -1387,6 +1387,57 @@ async def test_the_message_of_a_call_in_a_room_the_router_may_not_post_in_is_giv
     stored = world.store.call(call_id)
     assert stored is not None
     assert (stored.transcript_done_at, stored.transcript_event_id) == (world.clock.now, None)
+
+
+@pytest.mark.asyncio
+async def test_a_router_that_may_never_post_sends_nothing_and_gives_up_the_message_once_due(world: World) -> None:
+    """Without permission to post, no row is tried while the call runs, and the message is given up once it falls due."""
+    world.room.router_posts = False
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(5)
+    await world.say(call.id, ANN)
+    await world.service.leave(call.id, ANN)
+    await world.settled()
+    assert world.store.lines(call.id) != []
+
+    with capture_logs() as logs:
+        for _ in range(4):
+            world.clock.advance(15)
+            await world.tick()
+
+    assert (world.room.row_attempts, world.room.edit_started.is_set()) == (0, False)
+    assert (world.room.rows, world.room.row_edits, world.room.transcripts, world.notes.transcripts) == ([], [], [], [])
+    assert world.store.lines(call.id) == []
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 65, None)
+    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["router-may-not-post"]
+
+
+@pytest.mark.asyncio
+async def test_a_router_that_may_no_longer_post_by_the_end_sends_no_edit_and_gives_up_the_message(world: World) -> None:
+    """Permission lost during the call: the end's edit is not tried, and the message is given up once it falls due."""
+    call = await world.service.join(ROOM, ANN)
+    await world.settled()
+    assert world.room.rows == [(ROOM, call.id)]
+    world.clock.advance(5)
+    await world.say(call.id, ANN)
+    world.room.router_posts = False
+    await world.service.leave(call.id, ANN)
+    await world.settled()
+
+    with capture_logs() as logs:
+        for _ in range(4):
+            world.clock.advance(15)
+            await world.tick()
+
+    assert (world.room.edit_started.is_set(), world.room.row_edits, world.room.transcripts) == (False, [], [])
+    assert world.notes.transcripts == []
+    assert world.store.lines(call.id) == []
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert (stored.transcript_done_at, stored.transcript_event_id, stored.row_edit) == (START + 65, None, None)
+    assert [log["reason"] for log in logs if log["event"] == "call_transcript_given_up"] == ["router-may-not-post"]
 
 
 @pytest.mark.asyncio

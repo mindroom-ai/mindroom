@@ -38,7 +38,8 @@ def _config(*, enabled: bool) -> Config:
 def _router(*, running: bool = True, synced: bool = True) -> MagicMock:
     """A router bot whose client is in ``ROOM`` and finds Ann joined to it."""
     client = MagicMock(spec=nio.AsyncClient)
-    client.rooms = {ROOM: nio.MatrixRoom(ROOM, "@mindroom_router:example.org")}
+    client.user_id = "@mindroom_router:example.org"
+    client.rooms = {ROOM: nio.MatrixRoom(ROOM, client.user_id)}
 
     async def state(room_id: str) -> nio.RoomGetStateResponse:
         joined = {"type": "m.room.member", "state_key": ANN, "sender": ANN, "content": {"membership": "join"}}
