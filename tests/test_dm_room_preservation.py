@@ -189,8 +189,9 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
-        """Orphaned bot cleanup leaves DM rooms untouched."""
+    @pytest.mark.parametrize("is_dm", [True, None], ids=["dm", "dm-status-unknown"])
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path, is_dm: bool | None) -> None:
+        """Orphaned bot cleanup leaves DM rooms, and rooms whose DM status is unknown, untouched."""
         client = AsyncMock()
         config = _config_with_runtime_paths(
             tmp_path,
@@ -202,7 +203,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         with (
-            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=True),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=is_dm),
             patch("mindroom.matrix.room_cleanup.get_room_members") as get_room_members,
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
@@ -233,6 +234,7 @@ class TestDMPreservationDuringCleanup:
         members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
 
         with (
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=False),
             patch(
                 "mindroom.matrix.room_cleanup.get_room_members",
                 return_value=members,

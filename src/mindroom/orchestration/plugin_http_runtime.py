@@ -122,7 +122,10 @@ async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSn
 
 
 async def _room_direct(bots: Mapping[str, AgentBot], room_id: str) -> bool:
-    return await _read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
+    direct = await _read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
+    if direct is None:
+        raise HTTPException(503, _DIRECT_LOOKUP_FAILED)
+    return direct
 
 
 async def _room_history(bots: Mapping[str, AgentBot], room_id: str, user_id: str) -> RoomHistory | None:

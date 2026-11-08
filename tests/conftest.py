@@ -1533,6 +1533,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
+    client.list_direct_rooms = AsyncMock(return_value=nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND"))
     serve_media_from_download(client)
 
     return client
