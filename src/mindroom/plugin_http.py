@@ -452,16 +452,16 @@ class RoomMessenger:
         extra = dict(content or {})
         if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
             raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
-        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
+        plugins = config_plugins(router.config, router.runtime_paths)
         # A namespace this plugin reserves is its own even when another plugin reserves it too, as plugins of one
         # family sharing a namespace do; a narrower one another plugin reserves inside it stays that plugin's.
         own = {
             namespace
-            for plugin in plugins
+            for plugin in plugins.loaded_plugins
             if plugin.name == self._plugin_name
             for namespace in plugin.reserved_namespaces
         }
-        others = (namespace for plugin in plugins for namespace in plugin.reserved_namespaces if namespace not in own)
+        others = (namespace for namespace in plugins.reserved_namespaces if namespace not in own)
         if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
             msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
             raise HTTPException(400, msg)

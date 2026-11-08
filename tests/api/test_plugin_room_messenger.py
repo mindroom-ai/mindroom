@@ -151,11 +151,11 @@ class _World:
     bots: dict[str, SimpleNamespace]
     tokens: list[str]
 
-    def request(self, user_id: str, plugin: str = PLUGIN) -> Request:
-        """A request to a route of ``plugin``, signed in with a client session of ``user_id``."""
+    async def messenger(self, user_id: str, plugin: str = PLUGIN) -> RoomMessenger:
+        """The messenger a route of ``plugin`` gets, signed in with a client session of ``user_id``."""
         token = client_session_store(self.app).create(user_id).token
         self.tokens.append(token)
-        return Request(
+        request = Request(
             {
                 "type": "http",
                 "app": self.app,
@@ -163,9 +163,7 @@ class _World:
                 PLUGIN_NAME_SCOPE_KEY: plugin,
             },
         )
-
-    async def messenger(self, user_id: str, plugin: str = PLUGIN) -> RoomMessenger:
-        return await require_room_messenger(self.request(user_id, plugin), ROOM)
+        return await require_room_messenger(request, ROOM)
 
 
 def _world(config: Config) -> _World:
@@ -528,17 +526,17 @@ async def test_plugins_sharing_a_namespace_each_post_their_keys_in_it(tmp_path: 
     [
         (PLUGIN, "com.example.twin.card"),
         (PLUGIN, "com.example.shared.narrow.card"),
-        ("twin", "com.example.shared.narrow.card"),
+        ("narrow", "com.example.shared.narrow.card"),
     ],
-    ids=["only-another-plugins", "narrower-inside-own", "narrower-inside-own-twin"],
+    ids=["only-another-plugins", "narrower-inside-own", "own-inside-broader"],
 )
 async def test_sharing_a_namespace_leaves_the_others_refused(tmp_path: Path, kind: str, plugin: str, key: str) -> None:
-    """A namespace only another plugin reserves stays refused, even one narrower than the poster's own and inside it."""
+    """A namespace only another plugin reserves stays refused, whether inside the poster's own or around it."""
     world = _world(_config(tmp_path, _SHARED))
     messenger = await world.messenger(CAROL, plugin)
 
     with _transport() as transport, pytest.raises(HTTPException) as refused:
-        await _post(messenger, kind, {"com.example.shared.card": {}, key: {}})
+        await _post(messenger, kind, {key: {}})
 
     assert refused.value.status_code == 400
     assert refused.value.detail == f"content must not set keys MindRoom or another plugin reserves ({key})."
