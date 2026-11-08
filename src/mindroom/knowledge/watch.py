@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Each new folder makes the watcher walk the base again, which takes time in proportion to its folders.
-_MAX_WATCHED_FOLDERS = 10_000
+# Each new folder makes the watcher watch every folder anew, which holds the event loop for a moment per folder.
+_MAX_WATCHED_FOLDERS = 2_000
 # Watchfiles drops every change below these folders, so watching them would only use up watches.
 _IGNORED_FOLDER_NAMES = frozenset(DefaultFilter.ignore_dirs)
 _DEFAULT_FILTER = DefaultFilter()
