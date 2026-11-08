@@ -282,7 +282,7 @@ def _print_local_stack_summary(
         console.print("\nRun MindRoom backend against this stack:")
         print_literal("  ", f"MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
     console.print("\nStop commands:")
-    console.print(f"  docker rm -f {cinny_container_name}")
+    print_literal("  ", f"docker rm -f {cinny_container_name}")
     if not skip_synapse:
         print_literal("  ", f"cd {synapse_dir} && docker compose down")
 

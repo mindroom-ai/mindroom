@@ -390,6 +390,24 @@ def test_run_prints_errors_and_the_homeserver_whole_on_one_line(
     assert f"  2. MATRIX_HOMESERVER is set correctly (current: {homeserver})" in unreachable
 
 
+def test_run_prints_a_long_dashboard_address_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """The Dashboard and API URLs for a host name longer than the terminal is wide print whole on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    host = f"mindroom.{'a-long-subdomain-label-' * 3}example.org"
+
+    with (
+        patch("mindroom.orchestrator.main", AsyncMock()),
+        patch("mindroom.frontend_assets.ensure_frontend_dist_dir", return_value=narrow_markup_dir),
+    ):
+        result = _invoke_with_runtime(["run", "--api-host", host], cfg)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert f"Dashboard: http://{host}:8765" in lines
+    assert f"API: http://{host}:8765/api" in lines
+
+
 def test_avatar_commands_print_their_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
     """`avatars generate` and `avatars sync` print a failure that names a markup-like, long path as written."""
     cfg = narrow_markup_dir / "config.yaml"
@@ -6226,10 +6244,15 @@ class TestLocalStackSetup:
         storage_path = narrow_markup_dir / "mindroom_data"
         homeserver = f"http://localhost:8008{narrow_markup_dir}"
         server_name = f"[work].{'a-server-name-label-' * 4}example"
+        container = f"mindroom-chat-{'a-long-container-name-' * 3}"
         self._fake_docker(monkeypatch)
         setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir), "--homeserver-url", homeserver]
 
-        persisted = _invoke_with_runtime([*setup, "--server-name", server_name], cfg, storage_path=storage_path)
+        persisted = _invoke_with_runtime(
+            [*setup, "--server-name", server_name, "--cinny-container-name", container],
+            cfg,
+            storage_path=storage_path,
+        )
         printed = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=storage_path)
 
         assert persisted.exit_code == 0, persisted.output
@@ -6240,6 +6263,7 @@ class TestLocalStackSetup:
         assert f"  Synapse: {homeserver}" in lines
         assert f"  Server:  {server_name}" in lines
         assert f"  Env:     {narrow_markup_dir / '.env'}" in lines
+        assert f"  docker rm -f {container}" in lines
         assert f"  cd {synapse_dir} && docker compose down" in lines
         assert f"  MATRIX_HOMESERVER={homeserver} uv run mindroom run" in printed.output.splitlines()
 

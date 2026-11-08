@@ -349,8 +349,8 @@ async def _run(
             console.print("Dashboard: unavailable (frontend assets missing)")
             console.print("  Install Bun or provide MINDROOM_FRONTEND_DIST when running from a source checkout.")
         else:
-            console.print(f"Dashboard: http://{display_host}:{api_port}")
-        console.print(f"API: http://{display_host}:{api_port}/api")
+            print_literal("Dashboard: ", f"http://{display_host}:{api_port}")
+        print_literal("API: ", f"http://{display_host}:{api_port}/api")
         _warn_if_dashboard_is_open_beyond_loopback(runtime_paths, api_host, api_port)
     console.print("Press Ctrl+C to stop\n")
 
