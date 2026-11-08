@@ -410,15 +410,18 @@ class _FakeSession:
         self.acknowledged: asyncio.Queue[int] = asyncio.Queue()
         # A frame Chromium had in flight when the viewer detached, delivered during the detach.
         self.frame_on_detach: bytes | None = None
-        # A page its script froze, whose input calls never return.
+        # A page its script froze, whose input, Page.enable and evaluation never return.
         self.frozen = False
+        self.ready_state = "complete"
+        # Whether the page reports that it stopped loading before it answers what its readyState was.
+        self.stops_loading_before_answering = False
 
     def on(self, event: str, handler: object) -> None:
         self.handlers[event] = handler
 
     async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.sent.append((method, params))
-        if self.frozen and method.startswith("Input."):
+        if self.frozen and (method.startswith("Input.") or method in {"Page.enable", "Runtime.evaluate"}):
             await asyncio.Event().wait()
         if method == "Page.startScreencast":
             self.screencasting.set()
@@ -430,7 +433,9 @@ class _FakeSession:
         if method == "Page.getNavigationHistory":
             return {"currentIndex": 0, "entries": [{"id": 1, "url": "https://example.org/", "title": "Example"}]}
         if method == "Runtime.evaluate":
-            return {"result": {"type": "string", "value": "complete"}}
+            if self.stops_loading_before_answering:
+                self.handlers["Page.frameStoppedLoading"]({"frameId": "page"})
+            return {"result": {"type": "string", "value": self.ready_state}}
         return {}
 
     async def detach(self) -> None:
@@ -526,6 +531,46 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
         assert ("detach", None) in old.session.sent
         await new.session.frame(1, b"new")
         assert await sent.frame() == b"new"
+
+
+@pytest.mark.asyncio
+async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frozen page shows as not loading, a report newer than a page's answer wins, and a left page's report is ignored."""
+    monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
+    frozen, finishing, loading = _FakePage(), _FakePage(), _FakePage()
+    frozen.session.frozen = True
+    finishing.session.ready_state = "interactive"
+    finishing.session.stops_loading_before_answering = True
+    loading.session.ready_state = "loading"
+    shown: _FakePage | None = frozen
+    sent = _Viewer()
+    viewer = ScreencastViewer(
+        lambda: cast("Page | None", shown),
+        lambda: False,
+        lambda: True,
+        sent.send_text,
+        sent.send_bytes,
+        poll_seconds=0.01,
+    )
+
+    async def framed(fake: _FakePage) -> list[dict[str, Any]]:
+        """Wait for a frame of the shown page, which follows what the viewer was told about it, and return loading."""
+        await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
+        await fake.session.frame(1, b"frame")
+        assert await sent.frame() == b"frame"
+        return [message for message in sent.messages if message["type"] == "loading"]
+
+    async with _watching(viewer):
+        assert await sent.message("loading") == _LOADED
+        shown = finishing
+        assert await framed(finishing) == []
+        shown = loading
+        assert await framed(loading) == [_LOADING]
+        await sent.message("loading")
+        frozen.session.handlers["Page.frameStoppedLoading"]({"frameId": "page"})
+        assert await framed(loading) == []
+        shown = None
+        assert await sent.message("loading") == _LOADED
 
 
 @pytest.mark.asyncio
