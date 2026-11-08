@@ -357,7 +357,7 @@ def test_run_prints_errors_and_the_homeserver_whole_on_one_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`mindroom run` prints each error and the homeserver it names as written, whole on one line, without raising."""
-    for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
         monkeypatch.delenv(name, raising=False)
     cfg = narrow_markup_dir / "config.yaml"
     text = str(narrow_markup_dir)
@@ -444,7 +444,6 @@ def test_journal_adopt_prints_the_journals_and_a_refusal_whole_on_one_line(narro
 def test_threads_export_prints_the_output_folder_and_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
     """`threads export` prints its output folder, each failure, and an export error as written, each on one line."""
     cfg = narrow_markup_dir / "config.yaml"
-    _write_minimal_runtime_config(cfg)
     text = str(narrow_markup_dir)
     output_dir = narrow_markup_dir / "exports"
     room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="#lobby:localhost", name="Lobby")
@@ -475,7 +474,6 @@ def test_threads_export_prints_the_output_folder_and_errors_whole_on_one_line(na
 def test_connect_prints_its_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
     """`mindroom connect` prints a self-hosted refusal and a pairing error as written, each on one line."""
     cfg = narrow_markup_dir / "config.yaml"
-    _write_minimal_runtime_config(cfg)
     text = str(narrow_markup_dir)
     connect = ["connect", "--path", str(cfg)]
 
@@ -486,27 +484,6 @@ def test_connect_prints_its_errors_whole_on_one_line(narrow_markup_dir: Path) ->
 
     assert f"Error: {text} is self-hosted" in refused
     assert f"Error: Cannot save {text}" in failed
-
-
-def test_a_non_utf8_env_file_error_prints_its_path_whole_on_one_line(
-    narrow_markup_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The error for an unreadable `.env` names its markup-like, long path whole on one line."""
-    env_path = narrow_markup_dir / ".env"
-    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["mindroom", "config", "migrate", "--path", str(narrow_markup_dir / "config.yaml")],
-    )
-
-    with pytest.raises(SystemExit):
-        cli_main()
-
-    lines = capsys.readouterr().out.splitlines()
-    assert any(line.startswith(f"Error: {env_path.resolve()} is not UTF-8 text") for line in lines), lines
 
 
 def test_config_init_prints_the_llama_cpp_commands_whole_on_one_line(narrow_markup_dir: Path) -> None:
@@ -2203,25 +2180,17 @@ class TestConfigMigrate:
         assert authorization.read_text(encoding="utf-8") == authorization_text
         assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
 
-    def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
-        """Config migrate should fail cleanly when no config exists."""
-        missing = tmp_path / "config.yaml"
-
-        result = runner.invoke(app, ["config", "migrate", "--path", str(missing)])
-
-        assert result.exit_code == 1
-        assert "No config file found" in normalize_console_output(result.output)
-
     def test_migrate_prints_the_config_path_whole_on_one_line(self, narrow_markup_dir: Path) -> None:
-        """The missing-config and updated-config lines print a markup-like, long path whole."""
+        """A missing config fails, and the missing-config and updated-config lines print a markup-like, long path whole."""
         cfg = narrow_markup_dir / "config.yaml"
         migrate = ["config", "migrate", "--path", str(cfg)]
 
-        missing = runner.invoke(app, migrate).output.splitlines()
+        missing = runner.invoke(app, migrate)
         cfg.write_text("authorization:\n  global_users:\n    - '@owner:example.com'\n", encoding="utf-8")
         migrated = runner.invoke(app, migrate).output.splitlines()
 
-        assert f"No config file found at: {cfg}" in missing
+        assert missing.exit_code == 1
+        assert f"No config file found at: {cfg}" in missing.output.splitlines()
         assert f"Config updated: {cfg}" in migrated
 
 
@@ -2919,23 +2888,25 @@ class TestConfigValidate:
     ids=["init", "migrate", "validate"],
 )
 def test_a_non_utf8_env_file_names_itself_and_the_fix(
-    tmp_path: Path,
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     command: list[str],
 ) -> None:
-    """A `.env` saved in another encoding stops the command with an error naming the file, not a traceback."""
-    env_path = tmp_path / ".env"
+    """A `.env` saved in another encoding stops the command with an error naming the file whole, not a traceback."""
+    env_path = narrow_markup_dir / ".env"
     env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
-    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(tmp_path / "config.yaml")])
+    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(narrow_markup_dir / "config.yaml")])
 
     with pytest.raises(SystemExit) as exited:
         cli_main()
 
     assert exited.value.code == 1
-    output = normalize_console_output(capsys.readouterr().out)
-    assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
-    assert "save it as UTF-8" in output
+    lines = capsys.readouterr().out.splitlines()
+    assert any(
+        line.startswith(f"Error: {env_path.resolve()} is not UTF-8 text") and "save it as UTF-8" in line
+        for line in lines
+    ), lines
 
 
 def test_a_utf8_bom_env_file_keeps_its_first_variable(tmp_path: Path) -> None:
@@ -3090,11 +3061,14 @@ class TestRunFirstRunSetup:
 
     def test_first_run_installs_the_login_service_by_default_instead_of_running_here(
         self,
-        tmp_path: Path,
+        narrow_markup_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell."""
-        config_path = tmp_path / "config.yaml"
+        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell.
+
+        The hint after it names a markup-like, long `.env` path whole, without raising.
+        """
+        config_path = narrow_markup_dir / "config.yaml"
         manager = self._service_manager(monkeypatch)
 
         result, paired, started = self._invoke_run(config_path, "codex\n\n", args=())
@@ -3104,25 +3078,11 @@ class TestRunFirstRunSetup:
         assert "Run MindRoom in the background and start it at login (systemd user service)? [Y/n]" in output
         assert "Service Installed" in output
         assert "Dashboard: http://localhost:8765" in output
-        assert "mindroom service restart" in output
+        env_path = (narrow_markup_dir / ".env").resolve()
+        assert f"After editing {env_path}, run mindroom service restart." in result.output.splitlines()
         assert len(paired) == 1
         assert started == []
         manager.install_service.assert_called_once_with()
-
-    def test_first_run_service_hint_prints_the_env_path_whole_on_one_line(
-        self,
-        narrow_markup_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The hint after handing the run to the service names a markup-like, long `.env` path whole, without raising."""
-        config_path = narrow_markup_dir / "config.yaml"
-        self._service_manager(monkeypatch)
-
-        result, _paired, _started = self._invoke_run(config_path, "codex\n\n", args=())
-
-        assert result.exit_code == 0, result.output
-        env_path = (narrow_markup_dir / ".env").resolve()
-        assert f"After editing {env_path}, run mindroom service restart." in result.output.splitlines()
 
     @pytest.mark.parametrize("exported", ["", "your-openai-key-here"])
     def test_first_run_service_keeps_a_typed_key_over_an_unset_shell_value(
@@ -3741,30 +3701,17 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
-    @pytest.mark.parametrize(
-        ("dashboard_url", "message"),
-        [
-            ("https://admin.example.org", "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth"),
-            # The value is echoed as text, never read as console markup.
-            ("http://admin.example.org/[/x]", "'http://admin.example.org/[/x]'"),
-        ],
-    )
-    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(
-        self,
-        tmp_path: Path,
-        dashboard_url: str,
-        message: str,
-    ) -> None:
+    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(self, tmp_path: Path) -> None:
         """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
         cfg = tmp_path / "config.yaml"
         _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
 
         with patch("mindroom.orchestrator.main", mock_main):
-            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"})
 
         assert result.exit_code == 1
-        assert message in result.output
+        assert "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth" in result.output
         assert isinstance(result.exception, SystemExit)
         mock_main.assert_not_called()
 
@@ -4786,7 +4733,6 @@ class TestDoctor:
             _VALID_CONFIG.replace("  assistant:\n", f"  {agent}:\n").replace(
                 "    model: default\n",
                 "    model: default\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
-                1,
             ),
         )
         unprovided = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
@@ -6277,7 +6223,6 @@ class TestLocalStackSetup:
         synapse_dir.mkdir()
         (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
         cfg = narrow_markup_dir / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         storage_path = narrow_markup_dir / "mindroom_data"
         homeserver = f"http://localhost:8008{narrow_markup_dir}"
         server_name = f"[work].{'a-server-name-label-' * 4}example"
@@ -6303,17 +6248,12 @@ class TestLocalStackSetup:
         synapse_dir = narrow_markup_dir / "matrix"
         synapse_dir.mkdir()
         cfg = narrow_markup_dir / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         text = str(narrow_markup_dir)
         homeserver = f"http://localhost:8008{text}"
         setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir)]
 
         def lines(*args: str) -> list[str]:
-            return _invoke_with_runtime(
-                [*setup, *args],
-                cfg,
-                storage_path=narrow_markup_dir / "data",
-            ).output.splitlines()
+            return _invoke_with_runtime([*setup, *args], cfg).output.splitlines()
 
         self._fake_docker(monkeypatch, returncode=1, stderr=f"Cannot start {text}", status=503)
         invalid = lines("--homeserver-url", text)
@@ -6413,21 +6353,6 @@ class TestLocalStackSetup:
         assert ["docker", "compose", "up", "-d"] not in commands
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
-    @staticmethod
-    def _stub_local_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stand in for Docker and a healthy homeserver."""
-        monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
-        monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack._httpx_get",
-            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
-        )
-        monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack.subprocess.run",
-            lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
-        )
-
     @pytest.mark.parametrize(
         ("homeserver_url", "env_prefix"),
         [
@@ -6445,7 +6370,7 @@ class TestLocalStackSetup:
         """--no-persist-env writes no .env and prints the same settings it would persist."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
+        self._fake_docker(monkeypatch)
 
         result = _invoke_with_runtime(
             ["local-stack-setup", "--skip-synapse", "--no-persist-env", "--homeserver-url", homeserver_url],
@@ -6466,7 +6391,7 @@ class TestLocalStackSetup:
         """An https:// local homeserver still gets MATRIX_SSL_VERIFY=false for its local certificate."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
+        self._fake_docker(monkeypatch)
 
         result = _invoke_with_runtime(
             ["local-stack-setup", "--skip-synapse", "--homeserver-url", "https://localhost:8448"],

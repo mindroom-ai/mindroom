@@ -259,7 +259,6 @@ def run(
                     confirm_approver=_approver_confirmation(),
                 )
     except (OSError, TypeError, ValueError) as exc:
-        # Pairing errors can carry text the provisioning service chose, such as an approver or error detail.
         print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
     ask_service = service is None and first_run and interactive and plain_run

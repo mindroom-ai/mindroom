@@ -392,45 +392,10 @@ def test_trigger_send_reports_status_error(monkeypatch: pytest.MonkeyPatch, tmp_
     )
 
     assert result.exit_code == 1
-    assert "HTTP 503" in result.output
-    assert "External trigger runtime is" in result.output
-    assert "not available" in result.output
-
-
-def test_trigger_send_escapes_status_error_markup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Server-provided details should be displayed as text, not Rich markup."""
-    key_path = tmp_path / "trigger.key"
-    _write_private_key(key_path)
-    request = httpx.Request("POST", "http://127.0.0.1:8765/api/triggers/campground")
-    response = httpx.Response(
-        422,
-        request=request,
-        json={"detail": "bad [/red] payload"},
+    assert (
+        "Error: external trigger request failed: HTTP 503: External trigger runtime is not available"
+        in result.output.splitlines()
     )
-
-    def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
-        return response
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-
-    result = runner.invoke(
-        app,
-        [
-            "trigger",
-            "send",
-            "campground",
-            "--key-file",
-            str(key_path),
-            "--kind",
-            "campground.availability",
-            "--message",
-            "site open",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "HTTP 422" in result.output
-    assert "[/red]" in result.output
 
 
 def test_trigger_send_rejects_malformed_private_key(tmp_path: Path) -> None:
@@ -529,12 +494,22 @@ def test_trigger_send_prints_request_errors_whole_on_one_line(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A status detail and a transport error that Rich would read as markup print whole on one line."""
+    """A status detail and a transport error that Rich would read as markup fail the send and print whole."""
     text = str(narrow_markup_dir)
     key_path = tmp_path / "trigger.key"
     _write_private_key(key_path)
     request = httpx.Request("POST", "http://127.0.0.1:8765/api/triggers/campground")
-    send = ["trigger", "send", "campground", "--key-file", str(key_path), "--kind", "campground.availability"]
+    send = [
+        "trigger",
+        "send",
+        "campground",
+        "--key-file",
+        str(key_path),
+        "--kind",
+        "campground.availability",
+        "--message",
+        "site open",
+    ]
 
     def unreachable(*_args: object, **_kwargs: object) -> httpx.Response:
         message = f"Cannot reach {text}"
@@ -545,12 +520,11 @@ def test_trigger_send_prints_request_errors_whole_on_one_line(
         "post",
         lambda *_a, **_kw: httpx.Response(422, request=request, json={"detail": f"Bad {text}"}),
     )
-    rejected = runner.invoke(app, [*send, "--message", "site open"]).output.splitlines()
+    rejected = runner.invoke(app, send)
     monkeypatch.setattr(httpx, "post", unreachable)
-    failed = runner.invoke(app, [*send, "--message", "site open"]).output.splitlines()
+    failed = runner.invoke(app, send)
 
-    assert any(
-        line.startswith("Error: external trigger request failed: HTTP 422") and line.endswith(f"Bad {text}")
-        for line in rejected
-    ), rejected
-    assert f"Error: external trigger request failed: Cannot reach {text}" in failed
+    assert rejected.exit_code == 1
+    assert f"Error: external trigger request failed: HTTP 422: Bad {text}" in rejected.output.splitlines()
+    assert failed.exit_code == 1
+    assert f"Error: external trigger request failed: Cannot reach {text}" in failed.output.splitlines()

@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 import typer
 from rich.console import Console
 
-from mindroom.cli.config import print_literal
+from mindroom import constants
+from mindroom.cli.config import activate_cli_runtime, print_literal
 from mindroom.cli.help_format import PanelOrderedGroup
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
@@ -151,9 +152,6 @@ def desktop_native_app(
 
 def _activate_desktop_runtime(config_path: Path | None, *, storage_path: Path | None) -> RuntimePaths:
     """Resolve local Desktop state without making it depend on the working directory."""
-    from mindroom import constants  # noqa: PLC0415
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
-
     process_env = constants.exported_process_env()
     has_explicit_config = any(
         value is not None and str(value).strip()
@@ -280,7 +278,7 @@ def desktop_login(
             login_token = receive_sso_login_token(
                 resolved_homeserver,
                 open_browser=open_browser,
-                announce=lambda message: _console.print(message, markup=False),
+                announce=lambda message: print_literal("", message, console=_console),
                 idp_id=sso_idp,
             )
         asyncio.run(
@@ -704,7 +702,7 @@ def _edited_local_access(
 
 def _print_plain(text: str) -> None:
     """Print local values such as paths without Rich markup or line wrapping."""
-    _console.print(text, markup=False, highlight=False, soft_wrap=True)
+    _console.print(text, markup=False, emoji=False, highlight=False, soft_wrap=True)
 
 
 @desktop_app.command("run", rich_help_panel="Set up and run")

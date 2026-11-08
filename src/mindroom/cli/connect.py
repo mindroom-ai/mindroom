@@ -440,14 +440,12 @@ def _print_exports(
     )
     console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(result.namespace)}", markup=False, soft_wrap=True)
     if result.owner_user_id:
-        console.print(
-            f"  export MINDROOM_OWNER_USER_ID={shlex.quote(result.owner_user_id)}",
-            markup=False,
-            soft_wrap=True,
-        )
-        console.print(
-            f"\nOwner user ID from pairing: {result.owner_user_id} (not persisted in --no-persist-env mode).",
-            markup=False,
+        print_literal("  ", f"export MINDROOM_OWNER_USER_ID={shlex.quote(result.owner_user_id)}", console=console)
+        print_literal(
+            "\nOwner user ID from pairing: ",
+            result.owner_user_id,
+            " (not persisted in --no-persist-env mode).",
+            console=console,
         )
         console.print(
             "Update your config.yaml owner placeholder(s) manually if you rely on membership access settings.",
@@ -641,7 +639,7 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
             f"Could not update owner placeholder(s) in {config_path}: {exc}",
             console=console,
         )
-        console.print(f"  Replace them with {owner_user_id} manually.", markup=False)
+        print_literal("  Replace them with ", owner_user_id, " manually.", console=console)
         return
     if replaced:
         print_literal("  Updated owner placeholder(s) in: ", config_path, console=console)

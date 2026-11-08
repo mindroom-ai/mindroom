@@ -575,7 +575,6 @@ def test_doctor_prints_ollama_model_names_hosts_and_errors_whole_on_one_line(
     runtime_paths = _runtime_with_env(narrow_markup_dir, {})
     results = iter([(True, ""), (False, "HTTP 401"), (None, f"Cannot reach {_LONG_HOST}")])
     monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: next(results))
-    monkeypatch.delenv("OLLAMA_HOST", raising=False)
     hosted = Config(
         models={_LONG_MODEL_NAME: ModelConfig(provider="ollama", id="gemma4", host=_LONG_HOST)},
         router=RouterConfig(model=_LONG_MODEL_NAME),
@@ -639,7 +638,6 @@ def test_doctor_prints_the_default_memory_ollama_whole_on_one_line(
 ) -> None:
     """The memory LLM's fallback Ollama server and its error print whole on one line."""
     runtime_paths = _runtime_with_env(narrow_markup_dir, {"OLLAMA_HOST": _LONG_HOST})
-    monkeypatch.delenv("OLLAMA_HOST", raising=False)
     monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: (None, f"Cannot reach {_LONG_HOST}"))
     config = Config(memory={"backend": "mem0"}, router=RouterConfig(model="default"))
 

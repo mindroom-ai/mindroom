@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import typer
@@ -95,7 +95,7 @@ _SETUP_ARGS = [
 def cli_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamespace:
     """Activate a CLI runtime rooted at `tmp_path`."""
     paths = SimpleNamespace(storage_root=tmp_path)
-    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: paths)
+    monkeypatch.setattr(desktop_cli, "activate_cli_runtime", lambda *_args, **_kwargs: paths)
     return paths
 
 
@@ -103,7 +103,8 @@ def _stub_run_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, cloudf
     """Stub what `desktop run` needs before the bridge starts, and return the dependency installer."""
     ensure_dependencies = MagicMock()
     monkeypatch.setattr(
-        "mindroom.cli.config.activate_cli_runtime",
+        desktop_cli,
+        "activate_cli_runtime",
         lambda *_args, **_kwargs: SimpleNamespace(storage_root=tmp_path),
     )
     monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
@@ -169,7 +170,7 @@ def test_desktop_runtime_default_is_the_user_level_config(
     if chdir:
         monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("mindroom.constants.exported_process_env", lambda: dict(environment))
-    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", activate)
+    monkeypatch.setattr(desktop_cli, "activate_cli_runtime", activate)
 
     desktop_cli._activate_desktop_runtime(None, storage_path=None)
 
@@ -969,10 +970,9 @@ async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending
 
 
 @pytest.fixture
-def narrow_runtime(monkeypatch: pytest.MonkeyPatch, narrow_markup_dir: Path) -> Path:
-    """Activate a CLI runtime rooted at a folder whose path Rich would read as markup, with the CLI at 80 columns."""
-    paths = SimpleNamespace(storage_root=narrow_markup_dir)
-    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: paths)
+def narrow_runtime(cli_runtime: SimpleNamespace, narrow_markup_dir: Path) -> Path:
+    """Root the CLI runtime at a folder whose path Rich would read as markup, with the CLI at 80 columns."""
+    cli_runtime.storage_root = narrow_markup_dir
     return narrow_markup_dir
 
 
@@ -1012,25 +1012,20 @@ def test_desktop_pair_setup_and_access_print_their_errors_whole_on_one_line(
     """Pairing, setup, a saved session for another account, and an access update print each error whole."""
     text = str(narrow_runtime)
     session_path = narrow_runtime / "desktop_bridge" / "matrix_session.json"
-    session_path.parent.mkdir()
+    own_session = DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "token")
+    save_desktop_session(session_path, own_session)
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(side_effect=ValueError(f"Cannot pair {text}")))
+    paired = runner.invoke(desktop_app, ["pair", *_PAIRING_ARGS]).stderr.splitlines()
     session_path.write_text("{", encoding="utf-8")
-    saved = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False)
-    with patch("mindroom.desktop.session.load_desktop_session", return_value=saved):
-        monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(side_effect=ValueError(f"Cannot pair {text}")))
-        paired = runner.invoke(desktop_app, ["pair", *_PAIRING_ARGS]).stderr.splitlines()
     unreadable = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     other_homeserver = f"https://matrix.example.org{text}"
-    save_desktop_session(session_path, DesktopMatrixSession(other_homeserver, "@alice:example.org", "DESKTOP", "token"))
+    save_desktop_session(session_path, replace(own_session, homeserver=other_homeserver))
     mismatched = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
-    save_desktop_session(
-        session_path,
-        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "token"),
-    )
+    save_desktop_session(session_path, own_session)
     monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock(side_effect=ValueError(f"Cannot save {text}")))
     unsaved = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     monkeypatch.setattr(
-        desktop_cli,
-        "_saved_enabled_config",
+        "mindroom.desktop.native_config.load_native_config",
         MagicMock(side_effect=NativeConfigError("invalid_config", f"Bad {text}")),
     )
     access = runner.invoke(desktop_app, ["access", "--shell"]).stderr.splitlines()
@@ -1065,3 +1060,32 @@ def test_desktop_run_prints_its_errors_whole_on_one_line(
     errors = capsys.readouterr().err.splitlines()
     assert f"Error: Browser executable does not exist: {narrow_markup_dir / 'browser'}" in errors
     assert f"Error: Browser user-data directory does not exist: {narrow_markup_dir / 'profile'}" in errors
+
+
+@pytest.mark.usefixtures("narrow_runtime")
+def test_desktop_login_prints_the_sso_url_whole_on_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a browser, the SSO URL to open is longer than the terminal is wide and still copies whole."""
+    url = f"https://matrix.example.org/_matrix/client/v3/login/sso/redirect?redirectUrl={'http%3A%2F%2F127.0.0.1' * 4}"
+
+    def receive_token(*_args: object, announce: Callable[[str], None], **_kwargs: object) -> str:
+        announce(f"Waiting for Matrix SSO. Press Ctrl-C to cancel.\nOpen this URL in a browser:\n{url}")
+        return "short-lived-token"
+
+    monkeypatch.setattr(
+        "mindroom.desktop.session.resolve_desktop_login_method",
+        AsyncMock(return_value=DesktopLoginMethod.SSO),
+    )
+    monkeypatch.setattr("mindroom.desktop.sso.receive_sso_login_token", receive_token)
+    monkeypatch.setattr(desktop_cli, "_login_and_save", AsyncMock())
+
+    result = runner.invoke(desktop_app, ["login", "--homeserver", "https://matrix.example.org"])
+
+    assert result.exit_code == 0, result.output
+    assert url in result.stdout.splitlines()
+
+
+def test_desktop_plain_lines_keep_emoji_codes_as_written(capsys: pytest.CaptureFixture[str]) -> None:
+    """Saved folders and requesters print as written, even when a name looks like an emoji code."""
+    desktop_cli._print_plain("  Read-only folders: /home/me/:rocket:-notes")
+
+    assert capsys.readouterr().out == "  Read-only folders: /home/me/:rocket:-notes\n"

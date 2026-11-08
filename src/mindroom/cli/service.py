@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
-    from mindroom.services.config import InstallResult, ServiceActionResult, ServiceManager
+    from mindroom.services.config import InstallResult, ServiceActionResult, ServiceManager, UninstallResult
 
 _console = Console()
 _err_console = Console(stderr=True)
@@ -103,7 +103,7 @@ def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
     return True
 
 
-def _print_service_action_result(result: ServiceActionResult) -> None:
+def _print_service_action_result(result: ServiceActionResult | UninstallResult) -> None:
     """Print a service lifecycle result and exit non-zero on failure."""
     if not result.success:
         print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
@@ -312,11 +312,7 @@ def uninstall_service(
             _console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(0)
 
-    result = manager.uninstall_service()
-    if not result.success:
-        print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
-        raise typer.Exit(1)
-    _console.print(f"[green]{result.message}[/green]")
+    _print_service_action_result(manager.uninstall_service())
     if platform.system() == "Darwin":
         _console.print("[dim]Log files are preserved at ~/Library/Logs/mindroom/[/dim]")
 

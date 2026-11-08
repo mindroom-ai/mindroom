@@ -1511,14 +1511,15 @@ def test_pair_local_install_does_not_ask_about_an_unidentified_approver(tmp_path
 
 
 def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line(narrow_markup_dir: Path) -> None:
-    """A retry warning, the saved paths, owner notes, and an approver with an emoji code print whole on one line."""
+    """A retry warning, saved paths, owner notes, and accounts with an emoji code print as written, whole on one line."""
     text = str(narrow_markup_dir)
-    config_path = narrow_markup_dir / "config.yaml"
-    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    runtime_paths = _approval_install(narrow_markup_dir)
+    config_path = runtime_paths.config_path
     rejected_owner = "alice:fire:-an-account-name-long-enough-to-pass-eighty-columns"
+    # A server name that is also an emoji code, such as `office`, is part of a valid Matrix user ID.
+    lan_owner = "@alice:office:8448"
 
-    def pair(owner_user_id: str, *first: httpx.Response) -> list[str]:
+    def pair(owner_user_id: str, *first: httpx.Response, persist_env: bool = True) -> list[str]:
         out = io.StringIO()
         responses = [
             *first,
@@ -1529,6 +1530,7 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
             runtime_paths,
             console=Console(file=out, width=80),
             provisioning_url="https://provisioning.example",
+            persist_env=persist_env,
             post_request=_fake_transport(responses, []),
             sleep=lambda _seconds: None,
         )
@@ -1537,13 +1539,12 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
     first = pair("@alice:mindroom.chat", httpx.Response(503, json={"detail": f"Unavailable at {text}"}))
     repaired = pair("@bob:mindroom.chat")
     rejected = pair(rejected_owner)
+    printed = pair(lan_owner, persist_env=False)
     config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
     config_path.chmod(0o400)
-    read_only = pair("@alice:mindroom.chat")
+    read_only = pair(lan_owner)
 
-    assert any(
-        line.startswith("Warning: ") and line.endswith(f"Unavailable at {text} (retrying in 3s)") for line in first
-    )
+    assert f"Warning: Pairing failed (503): Unavailable at {text} (retrying in 3s)" in first
     assert f"  Saved credentials to: {narrow_markup_dir / '.env'}" in first
     assert f"  Updated owner placeholder(s) in: {config_path}" in first
     assert (
@@ -1552,6 +1553,9 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
         "room_defaults.invite_users, and room_defaults.admins."
     ) in repaired
     assert f"Approved by '{rejected_owner}', which is not a valid Matrix user ID." in rejected
+    assert f"  export MINDROOM_OWNER_USER_ID={lan_owner}" in printed
+    assert f"Owner user ID from pairing: {lan_owner} (not persisted in --no-persist-env mode)." in printed
     assert any(
         line.startswith(f"Warning: Could not update owner placeholder(s) in {config_path}: ") for line in read_only
     )
+    assert f"  Replace them with {lan_owner} manually." in read_only
