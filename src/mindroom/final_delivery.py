@@ -23,7 +23,7 @@ _VisibleDeliveryKind = Literal["sent", "edited"]
 
 
 class Suppression(StrEnum):
-    """Why a turn answered nothing on purpose; the value is its ``message:cancelled`` reason."""
+    """Why a turn answered nothing without an error note; the value is its ``message:cancelled`` reason."""
 
     # Fires no hook: the turn chose not to take part.
     PARTICIPATION_DECLINED = "participation_declined"
@@ -60,7 +60,7 @@ class Completed:
 
 @dataclass(frozen=True, slots=True)
 class Suppressed:
-    """The turn answered nothing on purpose."""
+    """The turn answered nothing without an error note, on purpose or after a failed participation check."""
 
     reason: Suppression
 

@@ -233,7 +233,7 @@ async def test_a_delivery_error_fails_a_participation_turn_and_shows_only_after_
         msg = "delivery broke"
         raise RuntimeError(msg)
 
-    with patch.object(turn.runner, "_deliver_turn", new=AsyncMock(side_effect=deliver)):
+    with patch.object(turn.runner, "_deliver_turn", new=deliver):
         await turn.runner.generate_response(replace(_plain_request(_target()), participation=ParticipationConfig()))
 
     shown = [(EVENT_MESSAGE_CANCELLED, None)] if approved else []
