@@ -31,10 +31,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _INTERVAL_SECONDS = 0.15
-_STEP_MS = 50
-# A watch sends a change at most its debounce and a step after it happens, and drops what it holds when stopped, so a
-# replaced watch runs on this long beside its successor.
-_HANDOVER_SECONDS = _INTERVAL_SECONDS + 2 * _STEP_MS / 1000
+# A watch hands back what it holds at least this often, also when nothing changed, so a replaced one can leave.
+_QUIET_RETURN_MS = 1000
 # How long a watcher waits before looking again for a workspace not made yet, and after a failure.
 _ABSENT_RETRY_SECONDS = 1.0
 _FAILURE_RETRY_SECONDS = 30.0
@@ -189,15 +187,21 @@ def _held(root: Path, folders: Collection[str]) -> set[str]:
     return paths
 
 
-async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown: asyncio.Event) -> None:
-    """Report what changes in ``folders`` until ``stop``, setting ``grown`` once a folder appears in one of them."""
+async def _follow(watch: _Watch, folders: list[str], retire: asyncio.Event, grown: asyncio.Event) -> None:
+    """Report what changes in ``folders``, setting ``grown`` once a folder appears in one of them.
+
+    watchfiles drops what a watch holds when it is stopped, so a watch a newer one replaces is never stopped: once
+    ``retire`` is set, it leaves after the first batch it gathered wholly after that, which holds all it saw before.
+    """
+    retiring = False
     try:
         async for changes in watchfiles.awatch(
             *folders,
             watch_filter=None,
             debounce=int(_INTERVAL_SECONDS * 1000),
-            step=_STEP_MS,
-            stop_event=stop,
+            stop_event=watch.stop,
+            rust_timeout=_QUIET_RETURN_MS,
+            yield_on_timeout=True,
             recursive=False,
             ignore_permission_denied=True,
         ):
@@ -205,6 +209,9 @@ async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown:
             _send(watch, paths)
             if appeared:
                 grown.set()
+            if retiring:
+                return
+            retiring = retire.is_set()
     except Exception:
         logger.exception("Workspace watcher failed; retrying", root=str(watch.root))
 
@@ -212,29 +219,29 @@ async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown:
 async def _run(watch: _Watch) -> None:
     # The folders watched last, empty while the root is missing, None before the first watch or after a failure.
     watched: list[str] | None = None
-    stop_watching = asyncio.Event()
+    retire = asyncio.Event()
     # Set by any watch, old or new, once a folder appears after the walk began, or by the walk that checks the watch,
     # so the tree is walked again.
     grown = asyncio.Event()
-    # A replaced watch keeps running until it sees its stop, so it is held until then.
+    # A replaced watch runs on until it has sent what it holds, so it is held until then.
     running: set[asyncio.Task[None]] = set()
     try:
         while not watch.stop.is_set():
             grown.clear()
             folders = await asyncio.to_thread(_folders, watch.root)
             if not folders:
-                stop_watching.set()
+                retire.set()
                 watched = []
                 watch.following.set()
                 await _wait(watch, _ABSENT_RETRY_SECONDS)
                 continue
-            previous, stop_watching = stop_watching, asyncio.Event()
-            following = asyncio.create_task(_follow(watch, folders, stop_watching, grown))
+            previous, retire = retire, asyncio.Event()
+            following = asyncio.create_task(_follow(watch, folders, retire, grown))
             running.add(following)
             following.add_done_callback(running.discard)
-            # The new watch takes in its folders as its task starts; the old one sends what it still holds first.
-            asyncio.get_running_loop().call_later(_HANDOVER_SECONDS, previous.set)
+            # The new watch takes in its folders as its task starts; only then may the old one leave.
             await asyncio.sleep(0)
+            previous.set()
             watch.following.set()
             if watched is not None:
                 # What a new folder, or a root that was missing, held before its watch began.
@@ -251,5 +258,5 @@ async def _run(watch: _Watch) -> None:
                 watched = None
                 await _wait(watch, _FAILURE_RETRY_SECONDS)
     finally:
-        stop_watching.set()
+        retire.set()
         watch.following.set()

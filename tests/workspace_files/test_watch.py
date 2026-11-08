@@ -340,9 +340,12 @@ async def test_a_change_just_before_the_new_watch_begins_is_still_reported(
     (root / "old.md").write_text("x")
     real_folders = watch._folders
 
+    changed = threading.Event()
+
     def folders_then_a_change(path: Path) -> list[str]:
         folders = real_folders(path)
-        if "new" in {Path(folder).name for folder in folders}:
+        if "new" in {Path(folder).name for folder in folders} and not changed.is_set():
+            changed.set()
             (root / "old.md").write_text("changed as the walk ends")
         return folders
 
