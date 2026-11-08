@@ -14,22 +14,24 @@ import re
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
 from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,  # noqa: TC001  # resolved by tool contract introspection
+)
 from mindroom.tools.terminal import run_text
 
 if TYPE_CHECKING:
     from typing import Any
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.terminal.client import TerminalStream, WorkerTerminals
     from mindroom.tool_system.tool_function import ToolFunction
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _COLS, _ROWS = 120, 32
 _DEFAULT_TIMEOUT_SECONDS = 30.0

@@ -27131,6 +27131,11 @@
       }
     ]
   },
+  "terminal": {
+    "instructions": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch live and type in too. Use them for work people should see or that keeps state between commands: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt; terminal_read shows recent output; terminal_list shows them all.",
+    "guidance": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch live and type in too. Use them for work people should see or that keeps state between commands: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt; terminal_read shows recent output; terminal_list shows them all.",
+    "functions": []
+  },
   "thread_model": {
     "instructions": null,
     "guidance": null,

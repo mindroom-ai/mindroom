@@ -73,8 +73,8 @@ def _judge_send(arguments: Mapping[str, object]) -> list[dict[str, object]] | No
     icon_color="text-green-500",
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
-        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#terminal",
     function_names=("terminal_open", "terminal_run", "terminal_send", "terminal_read", "terminal_list"),

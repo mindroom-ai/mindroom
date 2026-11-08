@@ -42,7 +42,13 @@ def agent_terminals(
         agent_tools=agent_tools,
         placement=placement,
         runtime_paths=runtime_paths,
-        agent_runtime=resolve_agent_runtime(agent_name, config, runtime_paths, identity, create=create),
+        agent_runtime=resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+            create=create,
+        ),
         tool_config_overrides=entry.tool_config_overrides,
         execution_identity=identity,
     )
