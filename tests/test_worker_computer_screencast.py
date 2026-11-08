@@ -18,6 +18,7 @@ import pytest_asyncio
 from aiohttp import web
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 from starlette.websockets import WebSocketDisconnect
 
@@ -462,8 +463,13 @@ class _FakePage:
     def __init__(self) -> None:
         self.session = _FakeSession()
         self.context = self
+        # A page that closed before the viewer could attach to it.
+        self.closed = False
 
     async def new_cdp_session(self, _page: object) -> _FakeSession:
+        if self.closed:
+            msg = "Target page, context or browser has been closed"
+            raise PlaywrightError(msg)
         return self.session
 
 
@@ -531,13 +537,18 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
 
 @pytest.mark.asyncio
 async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A frozen page shows as not loading, a report newer than a page's answer wins, and a left page's report is ignored."""
+    """The viewer is told the loading state of the page it shows, and of no other.
+
+    A frozen page shows as not loading, a report newer than a page's answer wins, a left page's report is ignored, and
+    neither a page that closed before the viewer attached nor no page loads.
+    """
     monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
-    frozen, finishing, loading = _FakePage(), _FakePage(), _FakePage()
+    frozen, finishing, loading, closed, loading_again = (_FakePage() for _ in range(5))
     frozen.session.frozen = True
     finishing.session.ready_state = "interactive"
     finishing.session.stops_loading_before_answering = True
-    loading.session.ready_state = "loading"
+    loading.session.ready_state = loading_again.session.ready_state = "loading"
+    closed.closed = True
     shown: _FakePage | None = frozen
     sent = _Viewer()
     viewer = sent.screencast(lambda: cast("Page | None", shown), lambda: True, poll_seconds=0.01)
@@ -558,6 +569,11 @@ async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkey
         await sent.message("loading")
         frozen.session.handlers["Page.frameStoppedLoading"]({"frameId": "page"})
         assert await framed(loading) == []
+        shown = closed
+        assert await sent.message("loading") == _LOADED
+        shown = loading_again
+        assert await framed(loading_again) == [_LOADING]
+        await sent.message("loading")
         shown = None
         assert await sent.message("loading") == _LOADED
 
