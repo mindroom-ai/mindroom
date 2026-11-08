@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -36,8 +37,8 @@ class PluginLifecycle:
     process_state: dict[str, Any]
     _runtime_paths: RuntimePaths = field(repr=False)
     _current_config: Callable[[], Config] = field(repr=False)
-    # Set before the stop code runs: a newer copy of the plugin started (``reload``), the plugin no longer loads
-    # (``disabled``), or MindRoom stops (``shutdown``).
+    # Set before the stop code runs: a newer lifespan of the plugin started and can take over ``process_state``
+    # (``reload``), none did (``disabled``), or MindRoom stops (``shutdown``).
     stop_reason: _StopReason | None = None
 
     def context(self) -> PluginContext:
@@ -76,9 +77,11 @@ async def _start(
     """Run ``lifespan`` up to its ``yield``, or log why it did not get there and return None."""
     started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     stopping = asyncio.Event()
+    # A context of its own, so the reload's turn, and its log fields, do not outlive it in the plugin's tasks.
     task = asyncio.create_task(
         _run(lifespan, lifecycle, started, stopping),
         name=f"plugin_lifespan:{lifecycle.plugin_name}",
+        context=contextvars.Context(),
     )
     await asyncio.wait({started, task}, timeout=_LIFESPAN_DEADLINE_SECONDS, return_when=asyncio.FIRST_COMPLETED)
     if started.done():
@@ -161,9 +164,8 @@ class PluginLifespans:
             await _close_websockets(
                 plugin.routes_app for plugin in previous.plugins.values() if plugin.routes_app is not None
             )
-            names = {plugin.name for plugin in plugins}
             for name, running in replaced.items():
-                await _stop(running, "reload" if name in names else "disabled")
+                await _stop(running, "reload" if name in self._running else "disabled")
 
     async def stop(self) -> None:
         """Stop every running lifespan as MindRoom shuts down, and start none after."""

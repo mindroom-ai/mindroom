@@ -986,11 +986,15 @@ def _clear_configured_plugin_roots_cache() -> None:
 
 
 def _cancel_module_tasks(modules: Iterable[ModuleType]) -> int:
-    """Best-effort cancel the unfinished tasks the given plugin modules hold, each task once."""
+    """Best-effort cancel the unfinished tasks the given plugin modules hold, each task once.
+
+    A task a plugin keeps in its process state outlives reloads, whichever module global also holds it.
+    """
+    kept = {id(task) for state in tuple(_PROCESS_STATE.values()) for task in _iter_module_tasks(state)}
     cancelled: dict[int, asyncio.Task[Any]] = {}
     for module in modules:
         for task in _module_tasks(module):
-            if task.done() or id(task) in cancelled:
+            if task.done() or id(task) in cancelled or id(task) in kept:
                 continue
             cancelled[id(task)] = task
             _cancel_task(task)
@@ -1016,12 +1020,10 @@ def _module_tasks(module: ModuleType) -> tuple[asyncio.Task[Any], ...]:
 
 
 def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
-    """Return task globals or one-level container-held tasks from one module value, never those of a process state."""
+    """Return task globals or one-level container-held tasks from one module value."""
     if isinstance(value, asyncio.Task):
         return (value,)
     if isinstance(value, dict):
-        if any(value is state for state in tuple(_PROCESS_STATE.values())):
-            return ()
         values = tuple(value.values())
     elif isinstance(value, tuple | list | set):
         values = tuple(value)

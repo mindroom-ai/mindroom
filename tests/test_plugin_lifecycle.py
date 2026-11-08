@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import re
 import socket
 import sys
@@ -207,6 +208,60 @@ async def test_a_lifespan_runs_only_once_the_primary_publishes_its_plugin(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["start-raises", "lifecycle-module-removed"])
+async def test_an_old_lifespan_no_new_one_took_over_from_stops_as_disabled(tmp_path: Path, change: str) -> None:
+    """A reload whose new copy of the plugin runs no lifespan stops the old one as disabled, so it lets go of everything.
+
+    A later reload or disable then has nothing left running that it could no longer stop.
+    """
+    probe = _probe()
+    probe.phase = "start"
+    _write(tmp_path, probe, "demo")
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _config(runtime_paths, "demo")
+    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    await _publish(lifespans, config, runtime_paths)
+
+    if change == "start-raises":
+        _write(tmp_path, probe, "demo", 2, lifecycle=RAISING)
+    else:
+        _write_plugin(tmp_path, None, name="demo")
+    await _publish(lifespans, config, runtime_paths)
+    await lifespans.stop()
+
+    assert probe.events[1:] == [("stop", "demo", 1, "disabled")]
+
+
+@pytest.mark.asyncio
+async def test_a_lifespan_runs_outside_the_context_of_the_reload_that_started_it(tmp_path: Path) -> None:
+    """Context variables of the turn that reloads plugins, such as its log fields, never reach a lifespan."""
+    lifecycle = """
+import sys
+from contextlib import asynccontextmanager
+
+_probe = sys.modules[{probe!r}]
+
+
+@asynccontextmanager
+async def lifespan(lifecycle):
+    _probe.events.append(_probe.turn.get())
+    yield
+"""
+    probe = _probe()
+    probe.turn = contextvars.ContextVar("turn", default=None)
+    _write(tmp_path, probe, "demo", lifecycle=lifecycle)
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _config(runtime_paths, "demo")
+    lifespans = PluginLifespans(runtime_paths, lambda: config)
+
+    probe.turn.set("!reload-plugins")
+    await _publish(lifespans, config, runtime_paths)
+    await lifespans.stop()
+
+    assert probe.events == [None]
+
+
+@pytest.mark.asyncio
 async def test_a_publication_its_caller_abandons_still_ends_in_the_shutdown_stop(tmp_path: Path) -> None:
     """A reload cancelled while a lifespan starts, as by shutdown, finishes, and shutdown then stops that lifespan."""
     lifecycle = """
@@ -303,20 +358,23 @@ async def test_the_runtime_runs_each_plugins_lifespan_from_startup_through_reloa
 
 @pytest.mark.asyncio
 async def test_a_reload_cancels_no_task_the_plugin_keeps_in_its_process_state(tmp_path: Path) -> None:
-    """A task in process_state outlives a reload even when a module global holds the state; other module tasks end."""
+    """A task in process_state outlives a reload even when module globals also hold it or the state; others end."""
     lifecycle = """
 import asyncio
 from contextlib import asynccontextmanager
 
 STATE = {{}}
+TICKER = None
 OTHER = {{}}
 
 
 @asynccontextmanager
 async def lifespan(lifecycle):
-    global STATE
+    global STATE, TICKER
     STATE = lifecycle.process_state
-    STATE.setdefault("ticker", asyncio.create_task(asyncio.Event().wait()))
+    if "ticker" not in STATE:
+        STATE["ticker"] = asyncio.create_task(asyncio.Event().wait())
+    TICKER = STATE["ticker"]
     OTHER["task"] = asyncio.create_task(asyncio.Event().wait())
     yield
 """
