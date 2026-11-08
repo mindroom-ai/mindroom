@@ -1094,6 +1094,8 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `members` | A read-only mapping from each joined user's ID to their display name in the room, or `None` when they have none, from the lookup that checked the caller |
 | `await power()` | A `RoomPower` read from the room's power levels at that moment |
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do, for a room admin only |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
@@ -1104,9 +1106,35 @@ Each call to `power()` reads again, and `members` is read anew for each request,
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
+`set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
+Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running.` while the router is stopped.
+A thread mode change updates the room's `io.mindroom.thread_mode` state, which clients choose the room's view by, before `set_modes()` returns.
+
+```python
+from dataclasses import asdict
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class ModesChange(BaseModel):
+    thread: Literal["thread", "room"] | None = None
+    reply: Literal["auto", "mentions"] | None = None
+
+
+@router.put("/rooms/{room_id}/modes")
+async def change_modes(
+    change: ModesChange,
+    reader: Annotated[RoomReader, Depends(require_room_reader)],
+) -> dict[str, str | None]:
+    # A field the request leaves out stays as it is; one sent as null clears that override.
+    await reader.set_modes(**change.model_dump(exclude_unset=True))
+    return asdict(reader.modes())
+```
+
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `modes()` or `set_modes()` states `"1.8"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:

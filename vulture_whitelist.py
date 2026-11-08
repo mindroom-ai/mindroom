@@ -445,3 +445,5 @@ _.send_input  # Terminal client API for the primary's terminal surfaces (src/min
 _.is_on  # Trafilatura's crawl loop reads it to stop (src/mindroom/tools/agno_compat_trafilatura.py)
 _.may_send  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
 _.is_direct  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
+_.set_modes  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
+_.reply_in_effect  # Plugin route API, read by plugins (src/mindroom/plugin_http.py)
