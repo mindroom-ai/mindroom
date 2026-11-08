@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 
 import yaml
 from rich.console import Group
-from rich.markup import escape
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
@@ -29,6 +28,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.provisioning_env import provisioning_url_from_env
 
+from .config import print_literal
 from .env_file import env_path_for_config, upsert_env_values
 from .interactive import section
 
@@ -496,7 +496,7 @@ def pair_local_install(
             sleep=sleep,
             renew_expired=renew_expired,
             stop_waiting=stop_waiting,
-            warn=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
+            warn=lambda message: print_literal("[yellow]Warning:[/yellow] ", message, console=console),
         )
     if result is None:
         console.print("This machine was paired by another MindRoom process; continuing.")
@@ -530,7 +530,7 @@ def pair_local_install(
                 "Save the exports above; they are not shown again."
             )
             raise ValueError(msg) from exc
-        console.print(f"  Saved credentials to: {env_path}")
+        print_literal("  Saved credentials to: ", env_path, console=console)
         if result.owner_user_id:
             _replace_owner_placeholders_or_warn(console, runtime_paths.config_path, result.owner_user_id)
     else:
@@ -618,7 +618,7 @@ def _confirm_approver_or_raise(
         # A named account stays named even when it cannot be saved; repr keeps control characters visible.
         approver = repr(result.rejected_owner_user_id)
         description = f"{approver}, which is not a valid Matrix user ID"
-    console.print(f"\n[bold]Approved by {escape(description)}.[/bold]")
+    print_literal("\n[bold]Approved by[/bold] ", description, ".", console=console)
     # Nobody can recognize an unnamed account, so it gets the same revoke hint as an unattended run.
     if confirm_approver is None or approver is None:
         console.print(f"If this is not your account, revoke this connection in {_LOCAL_MINDROOM_SETTINGS}.")
@@ -636,20 +636,23 @@ def _replace_owner_placeholders_or_warn(console: Console, config_path: Path, own
     try:
         replaced = replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id)
     except (OSError, ValueError) as exc:
-        console.print(
-            f"[yellow]Warning:[/yellow] Could not update owner placeholder(s) in {config_path}: {escape(str(exc))}",
+        print_literal(
+            "[yellow]Warning:[/yellow] ",
+            f"Could not update owner placeholder(s) in {config_path}: {exc}",
+            console=console,
         )
         console.print(f"  Replace them with {owner_user_id} manually.", markup=False)
         return
     if replaced:
-        console.print(f"  Updated owner placeholder(s) in: {config_path}")
+        print_literal("  Updated owner placeholder(s) in: ", config_path, console=console)
     elif _should_note_missing_administrator(config_path, owner_user_id):
         # A re-pair with another account finds no placeholder left, so the earlier account stays in charge.
-        console.print(
-            f"  Note: {owner_user_id} is not listed in administrators in {config_path}. "
+        print_literal(
+            "  Note: ",
+            f"{owner_user_id} is not listed in administrators in {config_path}. "
             "If this account should manage MindRoom, add it to administrators, "
             "room_defaults.invite_users, and room_defaults.admins.",
-            markup=False,
+            console=console,
         )
 
 

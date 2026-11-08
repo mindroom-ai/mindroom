@@ -12,7 +12,6 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
-from rich.markup import escape
 
 from mindroom.constants import RuntimeEnvFileError, ensure_writable_config_path, runtime_matrix_homeserver
 from mindroom.origins import with_api_port
@@ -32,6 +31,7 @@ from .config import (
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
+    print_literal,
     warn_dashboard_without_key,
 )
 from .config_bundle import (
@@ -231,7 +231,7 @@ def run(
         try:
             create_first_run_config(runtime_paths, provider=provider, interactive=interactive)
         except (OSError, ValueError) as exc:
-            console.print(f"[red]Error:[/red] {exc}")
+            print_literal("[red]Error:[/red] ", exc)
             raise typer.Exit(1) from None
         # Pick up the new config and .env before pairing and startup.
         runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
@@ -260,12 +260,12 @@ def run(
                 )
     except (OSError, TypeError, ValueError) as exc:
         # Pairing errors can carry text the provisioning service chose, such as an approver or error detail.
-        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
     ask_service = service is None and first_run and interactive and plain_run
     if (service or ask_service) and start_login_service(runtime_paths, service_manager):
         console.print(f"Dashboard: http://localhost:{api_port}")
-        console.print(f"After editing {runtime_paths.env_path}, run [cyan]mindroom service restart[/cyan].")
+        print_literal("After editing ", runtime_paths.env_path, ", run [cyan]mindroom service restart[/cyan].")
         # The service runs MindRoom now; starting it here as well would run it twice.
         return
 
@@ -293,7 +293,7 @@ def _protect_dashboard_from_workers(
         dashboard_has_credential = dashboard_requires_credential(runtime_paths)
     except ValueError as exc:
         # Refuse dashboard auth settings MindRoom cannot serve, such as a dashboard URL without trusted upstream auth.
-        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
     if ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=dashboard_has_credential):
         return activate_cli_runtime(path=config_path, storage_path=storage_path)
@@ -368,7 +368,7 @@ async def _run(
     except KeyboardInterrupt:
         console.print("\nStopped")
     except (PermanentStartupError, EventJournalLostError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
     except OSError as exc:
         _exit_if_connection_error(exc, runtime_paths)
@@ -404,7 +404,7 @@ def avatars_generate(
 
         asyncio.run(run_avatar_generation(runtime_paths, force=force))
     except AvatarGenerationError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
 
 
@@ -430,7 +430,7 @@ def avatars_sync(
 
         asyncio.run(set_room_avatars_in_matrix(runtime_paths, force=force))
     except AvatarSyncError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
     except OSError as exc:
         _exit_if_connection_error(exc, runtime_paths)
@@ -544,10 +544,11 @@ async def _journal_adopt(
     # under the binding lock, where nothing else can be publishing.
     previous = current_binding_description(runtime_paths.storage_root)
     if previous is not None and not yes:
-        console.print(f"This install is bound to [bold]{previous}[/bold].")
-        console.print(
-            f"Adopting [bold]{description}[/bold] gives up the deduplication, delivery, and recovery "
-            "history held in the bound journal.",
+        print_literal("This install is bound to ", previous, ".")
+        print_literal(
+            "Adopting ",
+            description,
+            " gives up the deduplication, delivery, and recovery history held in the bound journal.",
         )
         console.print("Stop MindRoom first: a runtime that is still up keeps writing to the journal it started on.")
         if not typer.confirm("Adopt the configured event journal?"):
@@ -563,9 +564,9 @@ async def _journal_adopt(
     except EventJournalBindingError as exc:
         # The previous binding is still in place, which is the point: a failed
         # adoption must leave the install exactly as usable as it was.
-        console.print(f"[red]Not adopted:[/red] {exc}")
+        print_literal("[red]Not adopted:[/red] ", exc)
         raise typer.Exit(1) from exc
-    console.print(f"[green]Bound[/green] this install to {description} (generation {generation}).")
+    print_literal("[green]Bound[/green] this install to ", description, f" (generation {generation}).")
 
 
 @journal_app.command("adopt")
@@ -597,18 +598,19 @@ def _journal_adopt_command(
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:
     """Print one export-pass summary."""
     unchanged_note = f" ({stats.threads_unchanged} unchanged)" if stats.threads_unchanged else ""
-    console.print(
-        f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
-        f"from {stats.rooms_exported} room(s) to {stats.output_dir}{unchanged_note}",
+    print_literal(
+        f"Exported {stats.threads_exported}/{stats.threads_seen} threads from {stats.rooms_exported} room(s) to ",
+        stats.output_dir,
+        unchanged_note,
     )
     if stats.truncated_rooms:
         console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
     for failure in stats.failed_items:
         if failure.room_key is None:
-            console.print(f"[red]Failed target:[/red] {failure.error}")
+            print_literal("[red]Failed target:[/red] ", failure.error)
             continue
         target = failure.thread_id or failure.room_id
-        console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
+        print_literal("[red]Failed:[/red] ", f"{failure.room_key} {target}: {failure.error}")
 
 
 async def _threads_export(
@@ -646,10 +648,10 @@ async def _threads_export(
             )
         except ValueError as exc:
             # A refused URL stays refused, so watching would only repeat the error.
-            console.print(f"[red]Error:[/red] {exc}")
+            print_literal("[red]Error:[/red] ", exc)
             raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
-            console.print(f"[red]Error:[/red] {exc}")
+            print_literal("[red]Error:[/red] ", exc)
             if not watch:
                 raise typer.Exit(1) from None
         else:
@@ -725,7 +727,7 @@ def connect(
     try:
         runtime_paths = activate_cli_runtime(path)
         if provisioning_url is None and (refusal := cli_connect.self_hosted_pairing_error(runtime_paths)):
-            console.print(f"[red]Error:[/red] {escape(refusal)}")
+            print_literal("[red]Error:[/red] ", refusal)
             raise typer.Exit(1)
         if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
             "MINDROOM_LOCAL_CLIENT_SECRET",
@@ -769,7 +771,7 @@ def connect(
                 # Preserve the result through shutdown; Python resets callable handlers during finalization.
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except (TypeError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        print_literal("[red]Error:[/red] ", exc)
         raise typer.Exit(1) from None
 
 
@@ -873,11 +875,13 @@ def _exit_if_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None
     if not (isinstance(exc, ConnectionError) or "connect" in str(exc).lower() or "refused" in str(exc).lower()):
         return
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
-    console.print(f"  Details: {exc}\n")
+    print_literal("  Details: ", exc, "\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
-    console.print(
-        f"  2. MATRIX_HOMESERVER is set correctly (current: {runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
+    print_literal(
+        "  2. MATRIX_HOMESERVER is set correctly (current: ",
+        runtime_matrix_homeserver(runtime_paths=runtime_paths),
+        ")",
     )
     console.print("  3. The server is reachable from this machine")
     raise typer.Exit(1) from None
@@ -892,7 +896,7 @@ def main() -> None:
         app()
     except RuntimeEnvFileError as exc:
         # Commands that report runtime errors their own way catch it first; any other command names the file here.
-        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        print_literal("[red]Error:[/red] ", exc)
         sys.exit(1)
 
 

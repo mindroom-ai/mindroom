@@ -522,3 +522,35 @@ def test_trigger_send_includes_thread_key_when_given(monkeypatch: pytest.MonkeyP
         "thread_key": "site-42",
         "data": {},
     }
+
+
+def test_trigger_send_prints_request_errors_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A status detail and a transport error that Rich would read as markup print whole on one line."""
+    text = str(narrow_markup_dir)
+    key_path = tmp_path / "trigger.key"
+    _write_private_key(key_path)
+    request = httpx.Request("POST", "http://127.0.0.1:8765/api/triggers/campground")
+    send = ["trigger", "send", "campground", "--key-file", str(key_path), "--kind", "campground.availability"]
+
+    def unreachable(*_args: object, **_kwargs: object) -> httpx.Response:
+        message = f"Cannot reach {text}"
+        raise httpx.ConnectError(message)
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_a, **_kw: httpx.Response(422, request=request, json={"detail": f"Bad {text}"}),
+    )
+    rejected = runner.invoke(app, [*send, "--message", "site open"]).output.splitlines()
+    monkeypatch.setattr(httpx, "post", unreachable)
+    failed = runner.invoke(app, [*send, "--message", "site open"]).output.splitlines()
+
+    assert any(
+        line.startswith("Error: external trigger request failed: HTTP 422") and line.endswith(f"Bad {text}")
+        for line in rejected
+    ), rejected
+    assert f"Error: external trigger request failed: Cannot reach {text}" in failed

@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import typer
@@ -26,6 +26,7 @@ from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
+    NativeConfigError,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -34,7 +35,7 @@ from mindroom.desktop.native_config import (
     save_native_config,
 )
 from mindroom.desktop.provider import DesktopProviderError
-from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError, save_desktop_session
 from mindroom.desktop.shell import DesktopShellError
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 from tests.desktop_helpers import (
@@ -965,3 +966,102 @@ async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending
 
     assert lifecycle == ["approvals_stopped", "bridge_stop"]
     assert "Shell access revoked; pending and running shell commands were stopped." in capsys.readouterr().out
+
+
+@pytest.fixture
+def narrow_runtime(monkeypatch: pytest.MonkeyPatch, narrow_markup_dir: Path) -> Path:
+    """Activate a CLI runtime rooted at a folder whose path Rich would read as markup, with the CLI at 80 columns."""
+    paths = SimpleNamespace(storage_root=narrow_markup_dir)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: paths)
+    return narrow_markup_dir
+
+
+def test_desktop_login_prints_the_session_and_errors_whole_on_one_line(
+    narrow_runtime: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Login prints its session path, an IPv6 user ID, and each error as written, whole on one line."""
+    text = str(narrow_runtime)
+    session_path = narrow_runtime / "desktop_bridge" / "matrix_session.json"
+    session = DesktopMatrixSession("https://matrix.example.org", "@laptop:[fe80::1]", "LAPTOP", "saved-token")
+    save_desktop_session(session_path, session)
+    monkeypatch.setattr(
+        desktop_cli,
+        "_login_and_save",
+        AsyncMock(side_effect=DesktopSessionError(f"Cannot save {text}")),
+    )
+    monkeypatch.setenv("MINDROOM_DESKTOP_MATRIX_PASSWORD", "test-password")
+    login = ["login", "--user-id", "@laptop:example.org", "--homeserver", "https://matrix.example.org"]
+
+    existing = runner.invoke(desktop_app, login).output.splitlines()
+    failed = runner.invoke(desktop_app, [*login, "--login-method", "password", "--replace"]).output.splitlines()
+    desktop_cli._print_device_identity(session, fingerprint="fingerprint", session_path=session_path)
+
+    assert f"Error: Session already exists at {session_path}. Use --replace explicitly." in existing
+    assert f"Desktop login failed: Cannot save {text}" in failed
+    identity = capsys.readouterr().out.splitlines()
+    assert f"  Session: {session_path}" in identity
+    assert "  User: @laptop:[fe80::1]" in identity
+
+
+def test_desktop_pair_setup_and_access_print_their_errors_whole_on_one_line(
+    narrow_runtime: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing, setup, a saved session for another account, and an access update print each error whole."""
+    text = str(narrow_runtime)
+    session_path = narrow_runtime / "desktop_bridge" / "matrix_session.json"
+    session_path.parent.mkdir()
+    session_path.write_text("{", encoding="utf-8")
+    saved = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False)
+    with patch("mindroom.desktop.session.load_desktop_session", return_value=saved):
+        monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(side_effect=ValueError(f"Cannot pair {text}")))
+        paired = runner.invoke(desktop_app, ["pair", *_PAIRING_ARGS]).output.splitlines()
+    unreadable = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+    other_homeserver = f"https://matrix.example.org{text}"
+    save_desktop_session(session_path, DesktopMatrixSession(other_homeserver, "@alice:example.org", "DESKTOP", "token"))
+    mismatched = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+    save_desktop_session(
+        session_path,
+        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "token"),
+    )
+    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock(side_effect=ValueError(f"Cannot save {text}")))
+    unsaved = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+    monkeypatch.setattr(
+        desktop_cli,
+        "_saved_enabled_config",
+        MagicMock(side_effect=NativeConfigError("invalid_config", f"Bad {text}")),
+    )
+    access = runner.invoke(desktop_app, ["access", "--shell"]).output.splitlines()
+
+    assert f"Desktop pairing failed: Cannot pair {text}" in paired
+    assert any(line.startswith("Desktop setup failed: ") and str(session_path) in line for line in unreadable)
+    assert (
+        f"Desktop setup failed: The saved session at {session_path} belongs to @alice:example.org on "
+        f"{other_homeserver}, not @alice:example.org on https://matrix.example.org. Pass --storage-path for a "
+        "separate setup, or run 'mindroom desktop login --replace' to replace the saved session."
+    ) in mismatched
+    assert f"Desktop setup failed: Cannot save {text}" in unsaved
+    assert f"Desktop access update failed: Bad {text}" in access
+
+
+def test_desktop_run_prints_its_errors_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed bridge and missing browser profile paths print their error and path whole on one line."""
+    text = str(narrow_markup_dir)
+    _stub_run_command(monkeypatch, narrow_markup_dir)
+    monkeypatch.setattr(desktop_cli, "_run_bridge", AsyncMock(side_effect=ValueError(f"Cannot read {text}")))
+
+    failed = runner.invoke(desktop_app, _RUN_ARGS).output.splitlines()
+    for executable, profile in ((narrow_markup_dir / "browser", None), (None, narrow_markup_dir / "profile")):
+        with pytest.raises(typer.Exit):
+            desktop_cli._validate_browser_options(enabled=True, executable_path=executable, user_data_dir=profile)
+
+    assert f"Desktop bridge failed: Cannot read {text}" in failed
+    errors = capsys.readouterr().err.splitlines()
+    assert f"Error: Browser executable does not exist: {narrow_markup_dir / 'browser'}" in errors
+    assert f"Error: Browser user-data directory does not exist: {narrow_markup_dir / 'profile'}" in errors

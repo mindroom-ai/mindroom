@@ -15,7 +15,7 @@ import typer
 
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import activate_cli_runtime, console
+from .config import activate_cli_runtime, console, print_literal
 from .env_file import env_path_for_config, upsert_env_values
 
 if TYPE_CHECKING:
@@ -99,7 +99,7 @@ def local_stack_setup(
         inferred_server_name,
         runtime_paths,
     )
-    console.print(f"MindRoom Chat config written: [dim]{cinny_config_path}[/dim]")
+    print_literal("MindRoom Chat config written: ", cinny_config_path)
 
     cinny_url = f"http://localhost:{cinny_port}"
     _start_cinny_container(
@@ -126,7 +126,7 @@ def _infer_server_name(homeserver_url: str) -> str:
     """Infer Matrix server_name from a homeserver URL."""
     parsed = urlparse(homeserver_url)
     if not parsed.scheme or not parsed.hostname:
-        console.print(f"[red]Error:[/red] Invalid homeserver URL: {homeserver_url}")
+        print_literal("[red]Error:[/red] Invalid homeserver URL: ", homeserver_url)
         raise typer.Exit(1)
     return parsed.hostname
 
@@ -190,10 +190,10 @@ def _start_synapse_stack(synapse_dir: Path) -> None:
     """Start Synapse via docker compose in the provided directory."""
     compose_file = synapse_dir / "docker-compose.yml"
     if not compose_file.exists():
-        console.print(f"[red]Error:[/red] Synapse compose file not found: {compose_file}")
+        print_literal("[red]Error:[/red] Synapse compose file not found: ", compose_file)
         raise typer.Exit(1)
 
-    console.print(f"Starting Synapse stack from [bold]{synapse_dir}[/bold]...")
+    print_literal("Starting Synapse stack from ", synapse_dir, "...")
     result = _run_command(["docker", "compose", "up", "-d"], cwd=synapse_dir)
     if result.returncode != 0:
         _print_command_failure(result, "Failed to start Synapse stack")
@@ -238,7 +238,7 @@ def _wait_for_service(
     """Wait up to 60 seconds for a service URL to answer with success, or with a response ``response_matches``."""
     import httpx  # noqa: PLC0415 - httpx loads only when the stack is probed, not during CLI help rendering
 
-    console.print(f"Waiting for {service_name}: [dim]{url}[/dim]")
+    print_literal(f"Waiting for {service_name}: ", url)
     deadline = time.monotonic() + 60
     matcher = response_matches or (lambda response: response.is_success)
     while time.monotonic() < deadline:
@@ -248,7 +248,7 @@ def _wait_for_service(
         except httpx.HTTPError:
             pass
         time.sleep(1)
-    console.print(f"[red]Error:[/red] {service_name} did not become healthy at {url}")
+    print_literal("[red]Error:[/red] ", f"{service_name} did not become healthy at {url}")
     raise typer.Exit(1)
 
 
@@ -265,26 +265,26 @@ def _print_local_stack_summary(
 ) -> None:
     """Print final setup instructions."""
     console.print("\n[green]Local stack is ready.[/green]")
-    console.print(f"  Synapse: {homeserver_url}")
+    print_literal("  Synapse: ", homeserver_url)
     console.print(f"  MindRoom Chat: {cinny_url}")
-    console.print(f"  Server:  {server_name}")
+    print_literal("  Server:  ", server_name)
     if persist_env:
         env_path = _persist_local_matrix_env(
             homeserver_url,
             server_name,
             config_path=config_path,
         )
-        console.print(f"  Env:     {env_path}")
+        print_literal("  Env:     ", env_path)
         console.print("\nRun MindRoom backend:")
         console.print("  uv run mindroom run")
     else:
         ssl_override = " MATRIX_SSL_VERIFY=false" if _needs_ssl_verify_override(homeserver_url) else ""
         console.print("\nRun MindRoom backend against this stack:")
-        console.print(f"  MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
+        print_literal("  ", f"MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
     console.print("\nStop commands:")
     console.print(f"  docker rm -f {cinny_container_name}")
     if not skip_synapse:
-        console.print(f"  cd {synapse_dir} && docker compose down")
+        print_literal("  ", f"cd {synapse_dir} && docker compose down")
 
 
 def _run_command(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -295,4 +295,4 @@ def _run_command(cmd: list[str], *, cwd: Path | None = None) -> subprocess.Compl
 def _print_command_failure(result: subprocess.CompletedProcess[str], prefix: str) -> None:
     """Print a compact subprocess failure summary."""
     details = result.stderr.strip() or result.stdout.strip() or "no error details"
-    console.print(f"[red]Error:[/red] {prefix}: {details}")
+    print_literal("[red]Error:[/red] ", f"{prefix}: {details}")

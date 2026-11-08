@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import typer
 from rich.console import Console
 
+from mindroom.cli.config import print_literal
 from mindroom.cli.help_format import PanelOrderedGroup
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
@@ -246,7 +247,11 @@ def desktop_login(
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
     if session_path.exists() and not replace:
-        _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
+        print_literal(
+            "[red]Error:[/red] ",
+            f"Session already exists at {session_path}. Use --replace explicitly.",
+            console=_error_console,
+        )
         raise typer.Exit(1)
     try:
         resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
@@ -291,7 +296,7 @@ def desktop_login(
             ),
         )
     except (CloudflareAccessError, DesktopSessionError, DesktopSsoError) as exc:
-        _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
+        print_literal("[red]Desktop login failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
 
 
@@ -362,8 +367,8 @@ def _print_device_identity(
     session_path: Path,
 ) -> None:
     _console.print("[green]Desktop Matrix device ready.[/green]")
-    _console.print(f"  Session: {session_path}")
-    _console.print(f"  User: {session.user_id}")
+    print_literal("  Session: ", session_path, console=_console)
+    print_literal("  User: ", session.user_id, console=_console)
     _console.print(f"  Device: {session.device_id}")
     _console.print(f"  Ed25519: {fingerprint}")
     _console.print("\nUse the pairing command returned by `!desktop setup` in the direct agent chat.")
@@ -410,7 +415,7 @@ def desktop_pair(
             ),
         )
     except (CloudflareAccessError, DesktopSessionError, OlmToDeviceError, ValueError) as exc:
-        _error_console.print(f"[red]Desktop pairing failed:[/red] {exc}")
+        print_literal("[red]Desktop pairing failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
     _console.print(f"!desktop confirm {code} {verification}", markup=False)
@@ -539,7 +544,7 @@ def desktop_setup(
         )
         save_native_config(path, config, expected_revision=config.revision)
     except (DesktopCommandJournalError, DesktopSessionError, ValueError) as exc:
-        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        print_literal("[red]Desktop setup failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     _console.print("Setup saved for both the terminal and MindRoom app.")
     if not config.has_local_capability:
@@ -557,16 +562,18 @@ def _require_saved_session_matches(session_path: Path, *, user_id: str | None, h
     try:
         session = load_desktop_session(session_path)
     except DesktopSessionError as exc:
-        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        print_literal("[red]Desktop setup failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     homeserver_differs = homeserver.rstrip("/") != session.homeserver.rstrip("/")
     user_differs = user_id is not None and user_id != session.user_id
     if homeserver_differs or user_differs:
-        _error_console.print(
-            f"[red]Desktop setup failed:[/red] The saved session at {session_path} belongs to "
+        print_literal(
+            "[red]Desktop setup failed:[/red] ",
+            f"The saved session at {session_path} belongs to "
             f"{session.user_id} on {session.homeserver}, not {user_id or session.user_id} on "
             f"{homeserver}. Pass --storage-path for a separate setup, or run "
             "'mindroom desktop login --replace' to replace the saved session.",
+            console=_error_console,
         )
         raise typer.Exit(1)
 
@@ -642,7 +649,7 @@ def desktop_access(
             config = save_native_config(path, edited, expected_revision=config.revision)
             changed = True
     except NativeConfigError as exc:
-        _error_console.print(f"[red]Desktop access update failed:[/red] {exc}")
+        print_literal("[red]Desktop access update failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     _print_plain(f"Saved Desktop access (revision {config.revision}):")
     _print_plain(f"  Applications: {', '.join(config.allowed_app_ids) or 'none'}")
@@ -885,7 +892,7 @@ def desktop_run(
         DesktopSessionError,
         OlmToDeviceError,
     ) as exc:
-        _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
+        print_literal("[red]Desktop bridge failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
 
 
@@ -1000,10 +1007,14 @@ def _validate_browser_options(
         )
         raise typer.Exit(2)
     if executable_path is not None and not executable_path.expanduser().is_file():
-        _error_console.print(f"[red]Error:[/red] Browser executable does not exist: {executable_path}")
+        print_literal("[red]Error:[/red] Browser executable does not exist: ", executable_path, console=_error_console)
         raise typer.Exit(2)
     if user_data_dir is not None and not user_data_dir.expanduser().is_dir():
-        _error_console.print(f"[red]Error:[/red] Browser user-data directory does not exist: {user_data_dir}")
+        print_literal(
+            "[red]Error:[/red] Browser user-data directory does not exist: ",
+            user_data_dir,
+            console=_error_console,
+        )
         raise typer.Exit(2)
 
 

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import typer
 from dotenv import dotenv_values
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 from mindroom.constants import PROVIDER_ENV_KEYS, resolve_primary_runtime_paths
@@ -21,6 +22,7 @@ from .config import (
     DEFAULT_API_HOST,
     DEFAULT_API_PORT,
     activate_cli_runtime,
+    print_literal,
     warn_dashboard_without_key,
     worker_dashboard_api_key_needed,
 )
@@ -65,7 +67,7 @@ def _manager_or_exit() -> ServiceManager:
     try:
         return _get_service_manager()
     except RuntimeError as exc:
-        _err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        print_literal("[bold red]Error:[/bold red] ", exc, console=_err_console)
         raise typer.Exit(1) from None
 
 
@@ -82,7 +84,7 @@ def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
     """Ensure uv is installed before service installation and return whether it is."""
     uv_installed, uv_path = manager.check_uv_installed()
     if uv_installed:
-        _console.print(f"  [green]uv installed:[/green] {uv_path}")
+        print_literal("  [green]uv installed:[/green] ", uv_path, console=_console)
         return True
 
     _console.print("[yellow]uv is required to run the MindRoom service.[/yellow]")
@@ -95,7 +97,7 @@ def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
     _console.print("Installing uv...")
     success, message = manager.install_uv()
     if not success:
-        _err_console.print(f"[bold red]Error:[/bold red] {message}")
+        print_literal("[bold red]Error:[/bold red] ", message, console=_err_console)
         return False
     _console.print(f"  [green]{message}[/green]")
     return True
@@ -104,7 +106,7 @@ def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
 def _print_service_action_result(result: ServiceActionResult) -> None:
     """Print a service lifecycle result and exit non-zero on failure."""
     if not result.success:
-        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+        print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
         raise typer.Exit(1)
     _console.print(f"[green]{result.message}[/green]")
 
@@ -137,10 +139,10 @@ def install_service(
     try:
         result = _install_and_start_service(manager, activate_cli_runtime())
     except ValueError as exc:
-        _err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        print_literal("[bold red]Error:[/bold red] ", exc, console=_err_console)
         raise typer.Exit(1) from None
     if not result.success:
-        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+        print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
         raise typer.Exit(1)
     _print_installed_service(manager, result)
 
@@ -174,12 +176,12 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
             result = _install_and_start_service(manager, runtime_paths)
         except ValueError as exc:
             # Raised before anything is installed, so there is nothing to uninstall.
-            _err_console.print(f"[bold red]Error:[/bold red] {exc}")
+            print_literal("[bold red]Error:[/bold red] ", exc, console=_err_console)
         else:
             if result.success:
                 _print_installed_service(manager, result)
                 return True
-            _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+            print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
             if not replacing:
                 # A half-installed unit or plist would still start at the next login.
                 manager.uninstall_service()
@@ -203,7 +205,12 @@ def _install_and_start_service(manager: ServiceManager, runtime_paths: RuntimePa
     # Without a config there is no service to install, and no `.env` to save keys for.
     if runtime_paths.config_path.exists() and (shell_keys := _shell_service_keys(runtime_paths)):
         upsert_env_values(runtime_paths.env_path, shell_keys)
-        _console.print(f"Saved {', '.join(shell_keys)} from your shell to {runtime_paths.env_path} for the service.")
+        print_literal(
+            f"Saved {', '.join(shell_keys)} from your shell to ",
+            runtime_paths.env_path,
+            " for the service.",
+            console=_console,
+        )
     _install_service_runtime(manager)
     return manager.install_service()
 
@@ -254,9 +261,9 @@ def _ask_for_login_service() -> ServiceManager | None:
 
 def _print_installed_service(manager: ServiceManager, result: InstallResult) -> None:
     """Print where to check on a service that was just installed and started, and whether its dashboard is open."""
-    log_hint = f"View logs: [cyan]{manager.get_log_command()}[/cyan]"
+    log_hint = f"View logs: [cyan]{escape(manager.get_log_command())}[/cyan]"
     if result.log_dir is not None:
-        log_hint = f"View logs: [cyan]{result.log_dir}/[/cyan]"
+        log_hint = f"View logs: [cyan]{escape(str(result.log_dir))}/[/cyan]"
     _console.print(
         Panel(
             f"[green]{result.message}[/green]\n\n"
@@ -307,7 +314,7 @@ def uninstall_service(
 
     result = manager.uninstall_service()
     if not result.success:
-        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+        print_literal("[bold red]Error:[/bold red] ", result.message, console=_err_console)
         raise typer.Exit(1)
     _console.print(f"[green]{result.message}[/green]")
     if platform.system() == "Darwin":
@@ -385,13 +392,13 @@ def service_status(
             _console.print(f"[dim]Recent logs ({len(log_lines)} lines):[/dim]")
             for line in log_lines:
                 display_line = line[:120] + "..." if len(line) > 120 else line
-                _console.print(f"  [dim]{display_line}[/dim]")
+                print_literal("  ", display_line, console=_console)
         elif status.running:
             _console.print()
             _console.print("[dim]No recent logs available[/dim]")
 
     _console.print()
-    _console.print(f"[dim]Full logs: {manager.get_log_command()}[/dim]")
+    print_literal("[dim]Full logs:[/dim] ", manager.get_log_command(), console=_console)
 
 
 @service_app.command("logs")
@@ -403,7 +410,7 @@ def service_logs() -> None:
     except KeyboardInterrupt:
         raise typer.Exit(0) from None
     except (OSError, subprocess.SubprocessError) as exc:
-        _err_console.print(f"[bold red]Error:[/bold red] Failed to run log command: {exc}")
+        print_literal("[bold red]Error:[/bold red] Failed to run log command: ", exc, console=_err_console)
         raise typer.Exit(1) from None
     if result.returncode not in (0, -signal.SIGINT):
         raise typer.Exit(result.returncode)

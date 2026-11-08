@@ -1508,3 +1508,50 @@ def test_pair_local_install_does_not_ask_about_an_unidentified_approver(tmp_path
     assert "Approved by an account the provisioning service did not identify." in output
     assert "If this is not your account, revoke this connection in MindRoom Chat → Settings → Local MindRoom." in output
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+
+
+def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """A retry warning, the saved paths, owner notes, and an approver with an emoji code print whole on one line."""
+    text = str(narrow_markup_dir)
+    config_path = narrow_markup_dir / "config.yaml"
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    rejected_owner = "alice:fire:-an-account-name-long-enough-to-pass-eighty-columns"
+
+    def pair(owner_user_id: str, *first: httpx.Response) -> list[str]:
+        out = io.StringIO()
+        responses = [
+            *first,
+            httpx.Response(200, json=_START),
+            httpx.Response(200, json=_CONNECTED | {"owner_user_id": owner_user_id}),
+        ]
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=80),
+            provisioning_url="https://provisioning.example",
+            post_request=_fake_transport(responses, []),
+            sleep=lambda _seconds: None,
+        )
+        return out.getvalue().splitlines()
+
+    first = pair("@alice:mindroom.chat", httpx.Response(503, json={"detail": f"Unavailable at {text}"}))
+    repaired = pair("@bob:mindroom.chat")
+    rejected = pair(rejected_owner)
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
+    config_path.chmod(0o400)
+    read_only = pair("@alice:mindroom.chat")
+
+    assert any(
+        line.startswith("Warning: ") and line.endswith(f"Unavailable at {text} (retrying in 3s)") for line in first
+    )
+    assert f"  Saved credentials to: {narrow_markup_dir / '.env'}" in first
+    assert f"  Updated owner placeholder(s) in: {config_path}" in first
+    assert (
+        f"  Note: @bob:mindroom.chat is not listed in administrators in {config_path}. "
+        "If this account should manage MindRoom, add it to administrators, "
+        "room_defaults.invite_users, and room_defaults.admins."
+    ) in repaired
+    assert f"Approved by '{rejected_owner}', which is not a valid Matrix user ID." in rejected
+    assert any(
+        line.startswith(f"Warning: Could not update owner placeholder(s) in {config_path}: ") for line in read_only
+    )
