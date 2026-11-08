@@ -1395,6 +1395,39 @@ def test_a_reload_runs_a_sibling_imported_module_from_its_source_not_a_stale_byt
     assert cached_plugin_module(tools_path).VERSION == 2
 
 
+@pytest.mark.asyncio
+async def test_a_worker_refresh_ends_the_task_of_a_module_its_plugin_imported_after_loading(tmp_path: Path) -> None:
+    """A module a tool imports only when it runs is replaced on a reload with its task ended, so one task runs."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "client.py").write_text(
+        "import asyncio\n\nTASK = asyncio.get_running_loop().create_task(asyncio.Event().wait())\n",
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("def start():\n    from . import client\n\n    return client.TASK\n", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    plugins_module.refresh_plugins(config, runtime_paths)
+    first = cached_plugin_module(tools_path).start()
+    tools_path.write_text(f"{tools_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+    _bump_mtime(tools_path)
+    plugins_module.refresh_plugins(config, runtime_paths)
+    second = cached_plugin_module(tools_path).start()
+    await asyncio.sleep(0)
+
+    try:
+        assert first.cancelled()
+        assert not second.done()
+    finally:
+        second.cancel()
+
+
 def test_a_worker_serves_a_module_saved_while_its_plugin_loaded(tmp_path: Path) -> None:
     """A hooks module saved after the tools module imported it, while the load runs, is served at the next refresh."""
     plugin_root = tmp_path / "plugins" / "demo"

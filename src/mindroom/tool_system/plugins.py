@@ -510,7 +510,7 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
         try:
             _install_canonical_modules({}, {})
             plugin_imports._PLUGIN_CACHE.clear()
-            plugins, skipped = _load_plugins(config, runtime_paths, previous=None, primary_modules=True)
+            plugins, skipped, _ = _load_plugins(config, runtime_paths, previous=None, primary_modules=True)
             generation = _installed_generation(plugins, skipped)
             _raise_if_required_plugin_skipped(config, generation)
             _log_loaded_plugins(generation)
@@ -576,7 +576,7 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
 
     with _PLUGIN_LOCK:
         published = _PUBLISHED
-        plugins, skipped = _load_plugins(config, runtime_paths, previous=published, primary_modules=False)
+        plugins, skipped, replaced = _load_plugins(config, runtime_paths, previous=published, primary_modules=False)
         failed_roots = {plugin.root for plugin in skipped} & set(published.plugins)
         changed = {root: plugin for root, plugin in plugins.items() if published.plugins.get(root) is not plugin}
         if changed or failed_roots:
@@ -589,6 +589,8 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
             if changed:
                 _log_loaded_plugins(generation)
             publish_plugins(generation)
+            # Publishing ends the tasks of the modules the last generation held, not of those imported since.
+            _cancel_module_tasks(replaced.values())
     return config_plugins(config, runtime_paths)
 
 
@@ -722,11 +724,12 @@ def _load_plugins(
     *,
     previous: PluginGeneration | None,
     primary_modules: bool,
-) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
+) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...], dict[str, ModuleType]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
 
-    Their routes and lifecycle modules are imported only with ``primary_modules``. A structural error raises with the
-    canonical modules as they were before the load and stops what it executed.
+    Their routes and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
+    plugins loading afresh replaced. A structural error raises with the canonical modules as they were before the load
+    and stops what it executed.
     """
     installed_modules = _canonical_plugin_modules()
     installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
@@ -745,9 +748,10 @@ def _load_each_plugin(
     *,
     previous: PluginGeneration | None,
     primary_modules: bool,
-) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
+) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...], dict[str, ModuleType]]:
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
     plugins: dict[Path, _LoadedPlugin] = {}
+    replaced: dict[str, ModuleType] = {}
     for plugin_base, plugin_entry in plugin_bases:
         loaded = previous.plugins.get(plugin_base.root) if previous is not None else None
         if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
@@ -764,6 +768,7 @@ def _load_each_plugin(
             skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
             continue
         plugins[plugin_base.root] = plugin
+        replaced.update(installed_modules)
     plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
     for plugin in plugins.values():
         _add_plugin_tools(plugin_tools, plugin.name, plugin.tools)
@@ -772,7 +777,7 @@ def _load_each_plugin(
         {name: metadata for name, (_, metadata) in plugin_tools.items()},
         _mcp_tool_entries(config.mcp_servers),
     )
-    return plugins, tuple(skipped)
+    return plugins, tuple(skipped), replaced
 
 
 def _dispose_failed_plugin(
