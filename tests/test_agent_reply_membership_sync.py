@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
@@ -437,3 +438,49 @@ async def test_the_routers_stop_cancels_its_slow_refresh() -> None:
     await started.wait()
     assert not await wait_for_background_tasks(timeout=0, owner=router)
     assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_a_sync_frame_never_waits_on_a_refresh_only_an_access_check_needed() -> None:
+    """An access check may refresh grants the index holds current; a frame that needs no refresh goes on at once."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = False
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refreshes = 0
+
+    async def held_refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        started.set()
+        await release.wait()
+
+    check = asyncio.create_task(membership_sync.refresh_for_access_check(config, held_refresh, True))
+    await started.wait()
+    async with asyncio.timeout(1):
+        await membership_sync.refresh_if_needed(config, held_refresh)
+
+    assert not check.done()
+    release.set()
+    await check
+    assert refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_backoff_stays_bounded_however_many_refreshes_fail() -> None:
+    """Access checks may retry a grant room that never resolves far more often than the router's frames do."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+
+    async def unresolved() -> None:
+        pass
+
+    with capture_logs() as logs:
+        for _ in range(1100):
+            await membership_sync.refresh_for_access_check(config, unresolved, False)
+
+    assert [log for log in logs if log["log_level"] == "error"] == []

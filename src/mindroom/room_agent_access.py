@@ -106,8 +106,8 @@ def _may_converse(
 
 
 @contextmanager
-def _leaving_out(agent_name: str, room_id: str, *, listing: bool) -> Iterator[None]:
-    """In a ``listing``, leave an agent out, logging why, when resolving it fails; otherwise raise.
+def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[None]:
+    """With ``leave_out``, leave an agent out of a listing, logging why, when resolving it fails; otherwise raise.
 
     These failures belong to one agent: its account is not prepared, its grant rooms are unresolved, or its contacts
     or stored tool settings are corrupt.
@@ -115,7 +115,7 @@ def _leaving_out(agent_name: str, room_id: str, *, listing: bool) -> Iterator[No
     try:
         yield
     except (HTTPException, MissingManagedEntityAccountError, ValueError, TypeError) as error:
-        if not listing:
+        if not leave_out:
             raise
         logger.warning(
             "room_agent_left_out",
@@ -189,7 +189,7 @@ async def _admitted_agents(
     """
     joined_agents: list[tuple[str, str]] = []
     for name in config.agents:
-        with _leaving_out(name, room_id, listing=True):
+        with _leaving_out(name, room_id, leave_out=True):
             user_id = current_entity_id(name, runtime_paths).full_id
             if user_id in joined:
                 joined_agents.append((name, user_id))
@@ -200,7 +200,7 @@ async def _admitted_agents(
     rooms_known = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
-        with _leaving_out(name, room_id, listing=rooms_known):
+        with _leaving_out(name, room_id, leave_out=rooms_known):
             if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
                 admitted.append((name, user_id))
     return admitted
@@ -390,7 +390,7 @@ async def room_agent_workspaces(
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
     opened: list[tuple[str, str]] = []
     for name, agent_id in admitted:
-        with _leaving_out(name, room_id, listing=listing):
+        with _leaving_out(name, room_id, leave_out=listing):
             # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
             if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
                 opened.append((name, agent_id))
@@ -401,7 +401,7 @@ async def room_agent_workspaces(
     may_send = (await power()).may_send(user_id, "m.room.message")
     workspaces: list[AgentWorkspace] = []
     for name, agent_id in opened:
-        with _leaving_out(name, room_id, listing=listing):
+        with _leaving_out(name, room_id, leave_out=listing):
             workspaces.append(
                 _workspace(
                     name,

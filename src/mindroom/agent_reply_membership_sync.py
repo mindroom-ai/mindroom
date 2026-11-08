@@ -154,13 +154,13 @@ class AgentReplyMembershipSync:
         stale: bool,
         after_backoff: bool,
     ) -> asyncio.Task[None] | None:
-        """Return the refresh in flight, else start one when grants are ``stale`` or need it, and it is due."""
+        """When grants are ``stale`` or need it, return the refresh in flight, else start one if ``after_backoff`` allows."""
+        # A sync gap cannot invalidate explicit-user grants. Do not turn a
+        # no-op rebuild into downstream room and call reconciliation scans.
+        if not (stale or self._memberships.needs_refresh(config)):
+            return None
         if self._refresh_task is None or self._refresh_task.done():
-            # A sync gap cannot invalidate explicit-user grants. Do not turn a
-            # no-op rebuild into downstream room and call reconciliation scans.
-            if not (stale or self._memberships.needs_refresh(config)) or (
-                after_backoff and time.monotonic() < self._refresh_retry_at
-            ):
+            if after_backoff and time.monotonic() < self._refresh_retry_at:
                 return None
             self._refresh_task = create_background_task(
                 self._refresh(config, refresh),
@@ -181,8 +181,9 @@ class AgentReplyMembershipSync:
             self._refresh_retry_at = 0.0
             return
         self._refresh_attempt += 1
+        # Access checks retry far more often than frames, so the exponent stops growing well past the cap.
         backoff_seconds = min(
-            _REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._refresh_attempt - 1)),
+            _REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** min(self._refresh_attempt - 1, 16)),
             _REFRESH_BACKOFF_MAX_SECONDS,
         )
         self._refresh_retry_at = time.monotonic() + backoff_seconds

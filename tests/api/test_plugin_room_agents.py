@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -609,7 +609,6 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
     before = room.client.joined_members.return_value
     after = joined_members_response(ROOM, ALICE, BOB, CAROL, dave, *room.ids.values())
     reading = asyncio.Event()
-    looked_up = asyncio.Event()
     release = asyncio.Event()
 
     async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
@@ -618,9 +617,20 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
             reading.set()
             await release.wait()
             return before
-        looked_up.set()
         return after
 
+    checks: list[bool] = []
+    joining = asyncio.Event()
+
+    async def refresh_for_check(stale: bool) -> None:
+        checks.append(stale)
+        joining.set()
+        await room.runtime.refresh_agent_reply_memberships_when_needed(stale)
+
+    bind_embedded_runtime(
+        room.app,
+        replace(room.runtime.embedded_runtime(), refresh_agent_reply_memberships_when_needed=refresh_for_check),
+    )
     room.runtime.agent_reply_membership_sync.invalidate(room.runtime.config, reason="test")
     room.client.joined_members.side_effect = joined_members
     frame = asyncio.create_task(
@@ -631,14 +641,13 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
     )
     await reading.wait()
     listing = asyncio.create_task(room.agents(dave))
-    await looked_up.wait()
-    # Dave's check, which reads the room's roster itself, then waits on the refresh in flight.
-    for _ in range(20):
-        await asyncio.sleep(0)
+    # Dave's check reads the room's roster itself, then waits on the refresh in flight.
+    await joining.wait()
     release.set()
 
     assert [workspace.name for workspace in await listing] == ["helper"]
     await frame
+    assert checks == [False, True]
     assert room.refreshes() == 3
 
 
