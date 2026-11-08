@@ -58,7 +58,7 @@ _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _INFO = TypeAdapter(TerminalInfo)
 _INFOS = TypeAdapter(list[TerminalInfo])
 # At most 4 bytes a character, so within the 64 KiB the runner takes at once.
-_MAX_INPUT_CHARS = 16384
+MAX_INPUT_CHARS = 16384
 
 
 class TerminalDetachedError(Exception):
@@ -157,8 +157,8 @@ class TerminalStream:
         With ``empty_line``, only while the shell waits at its prompt with nothing typed; otherwise it types nothing and
         raises ``TerminalError`` (409).
         """
-        if len(data) > _MAX_INPUT_CHARS:
-            raise TerminalError(413, f"Type at most {_MAX_INPUT_CHARS} characters at once; send a long text in parts.")
+        if len(data) > MAX_INPUT_CHARS:
+            raise TerminalError(413, f"Type at most {MAX_INPUT_CHARS} characters at once; send a long text in parts.")
         async with self.line.lock:
             websocket = await _inputs[self.line].open(self._connect, self.line)
             if empty_line and not self.line.empty:
@@ -339,4 +339,4 @@ class WorkerTerminals:
                 logger.warning("Terminal keepalive failed to look up the agent's worker", exc_info=True)
 
 
-__all__ = ["TerminalDetachedError", "TerminalStream", "WorkerTerminals"]
+__all__ = ["MAX_INPUT_CHARS", "TerminalDetachedError", "TerminalStream", "WorkerTerminals"]

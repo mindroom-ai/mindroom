@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import RoomReader, client_stream, require_room_reader, stream_room_reader
 from mindroom.room_agent_access import room_execution_identity
-from mindroom.terminal.client import TerminalDetachedError
+from mindroom.terminal.client import MAX_INPUT_CHARS, TerminalDetachedError
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 
@@ -67,8 +67,7 @@ class _OpenTerminal(BaseModel):
 
 class _Input(BaseModel):
     type: Literal["input"]
-    # At most 4 bytes a character, so within what the runner takes at once.
-    data: str = Field(max_length=16384)
+    data: str = Field(max_length=MAX_INPUT_CHARS)
 
 
 class _Resize(BaseModel):
