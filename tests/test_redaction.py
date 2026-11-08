@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import random
 import re
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -777,17 +776,15 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
 def test_redact_sensitive_text_rejects_oversized_unbounded_runs_quickly() -> None:
     """Hard input budget must reject oversized text without scanning its contents."""
     blob = "Ab3" * 40_000
-    start = time.perf_counter()
-    assert redact_sensitive_text(blob) == REDACTION_FAILED
-    assert time.perf_counter() - start < 5.0
+    with cpu_budget(5.0):
+        assert redact_sensitive_text(blob) == REDACTION_FAILED
 
 
 def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> None:
     """Assignment lookahead must not repeatedly rescan long whitespace and key-like runs."""
     value = "password=visible" + " " * 12_000 + "Ab3" * 4_000
-    start = time.perf_counter()
-    assert redact_sensitive_text(value) == f"password={REDACTED}"
-    assert time.perf_counter() - start < 5.0
+    with cpu_budget(5.0):
+        assert redact_sensitive_text(value) == f"password={REDACTED}"
 
 
 @pytest.mark.parametrize(
@@ -1311,11 +1308,9 @@ def test_review_copy_never_renames_a_key_review_left_alone() -> None:
 def test_review_copy_stays_linear_when_many_keys_collide() -> None:
     """Thousands of keys that collide after review get short positional suffixes, not ever-longer ones."""
     colliding = {"k" + chr(0xD800 + index % 2_048) + chr(0xD800 + index // 2_048): index for index in range(8_000)}
-    started = time.perf_counter()
+    with cpu_budget(1.0):
+        redacted, _ = _review_copy(colliding)
 
-    redacted, _ = _review_copy(colliding)
-
-    assert time.perf_counter() - started < 1.0
     assert len(redacted) == len(colliding)
     assert max(len(key) for key in redacted) <= len("k\ufffd\ufffd\ufffd7999")
 
@@ -1406,9 +1401,8 @@ def test_review_copy_is_the_original_with_tokens_renamed() -> None:
 
 def test_review_copy_stays_linear_on_long_token_like_runs() -> None:
     """Long runs of token characters must not make matching quadratic."""
-    started = time.perf_counter()
-    _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
-    assert time.perf_counter() - started < 1.0
+    with cpu_budget(1.0):
+        _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
 
 
 def test_review_copy_names_non_finite_numbers() -> None:

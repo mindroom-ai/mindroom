@@ -138,7 +138,8 @@ def _open_cold_store_after_absence_barrier(storage_path: str, barrier: Barrier) 
         exists = original_exists(path)
         if path == database_path and not exists and not observed_absence:
             observed_absence = True
-            barrier.wait(timeout=5)
+            # Waits for the other creator however long a busy machine takes to start it.
+            barrier.wait()
         return exists
 
     async def open_store() -> None:
@@ -312,10 +313,12 @@ def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -
     """Two processes may create the same new credential scope without a losing-creator error."""
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(2)
+    # A creator left waiting at the barrier by a failed one ends with the test worker instead of outliving it.
     creators = [
         process_context.Process(
             target=_open_cold_store_after_absence_barrier,
             args=(str(tmp_path), barrier),
+            daemon=True,
         )
         for _ in range(2)
     ]
@@ -323,10 +326,7 @@ def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -
     for creator in creators:
         creator.start()
     for creator in creators:
-        creator.join(timeout=10)
-        if creator.is_alive():
-            creator.terminate()
-            creator.join()
+        creator.join()
 
     assert [creator.exitcode for creator in creators] == [0, 0]
 
