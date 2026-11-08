@@ -379,7 +379,8 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert "Force-killed" in await _kill(socket_path, cancelled_handle, force=True)
             assert "FINISHED" in await _wait_for_finished(socket_path, cancelled_handle)
             # The resistant process ignores SIGTERM once it has written its ready file, however long it takes to start.
-            while not ready_path.exists():  # noqa: ASYNC110 - the process signals only through its ready file
+            while not ready_path.exists():
+                assert "RUNNING" in await _check(socket_path, resistant_handle), "it ended before it was ready"
                 await asyncio.sleep(0.05)
             assert "Terminated" in await _kill(socket_path, resistant_handle)
             await asyncio.sleep(0.1)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import multiprocessing
+import multiprocessing.connection
 import os
 import shutil
 import sqlite3
@@ -313,7 +314,7 @@ def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -
     """Two processes may create the same new credential scope without a losing-creator error."""
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(2)
-    # A creator left waiting at the barrier by a failed one ends with the test worker instead of outliving it.
+    # A creator stuck for another reason ends with the test worker instead of outliving it.
     creators = [
         process_context.Process(
             target=_open_cold_store_after_absence_barrier,
@@ -325,8 +326,14 @@ def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -
 
     for creator in creators:
         creator.start()
-    for creator in creators:
-        creator.join()
+    running = {creator.sentinel: creator for creator in creators}
+    while running:
+        for sentinel in multiprocessing.connection.wait(list(running)):
+            creator = running.pop(sentinel)
+            creator.join()
+            if creator.exitcode != 0:
+                # A creator that failed before the barrier would leave the other waiting there for good.
+                barrier.abort()
 
     assert [creator.exitcode for creator in creators] == [0, 0]
 
