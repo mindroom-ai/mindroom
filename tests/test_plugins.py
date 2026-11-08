@@ -6,6 +6,7 @@ import asyncio
 import gc
 import json
 import os
+import py_compile
 import re
 import sys
 import uuid
@@ -1316,6 +1317,40 @@ def test_validation_executes_a_module_another_plugin_module_imported_once(tmp_pa
     _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
 
     assert runs.read_text(encoding="utf-8").splitlines() == ["run"]
+
+
+@_PRIMARY_AND_WORKER
+def test_a_reload_runs_a_sibling_imported_module_from_its_source_not_a_stale_bytecode_cache(
+    tmp_path: Path,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """A same-size edit that keeps the hooks module's mtime runs at the next reload, though its bytecode cache stays valid."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("VERSION = 1\n", encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("from .hooks import VERSION\n", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+    load(config, runtime_paths)
+    assert cached_plugin_module(hooks_path).VERSION == 1
+
+    # The cache an import of the first version writes, then a same-size edit within its mtime.
+    mtime = hooks_path.stat().st_mtime
+    py_compile.compile(str(hooks_path), invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+    hooks_path.write_text("VERSION = 2\n", encoding="utf-8")
+    os.utime(hooks_path, (mtime, mtime))
+    tools_path.write_text("from .hooks import VERSION\n# edited\n", encoding="utf-8")
+    _bump_mtime(tools_path)
+    load(config, runtime_paths)
+
+    assert cached_plugin_module(hooks_path).VERSION == 2
+    assert cached_plugin_module(tools_path).VERSION == 2
 
 
 def test_a_worker_serves_a_module_saved_while_its_plugin_loaded(tmp_path: Path) -> None:

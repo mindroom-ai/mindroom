@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from importlib import machinery, util
 from pathlib import Path
-from types import ModuleType
+from types import CodeType, ModuleType
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -96,6 +96,22 @@ class SkippedPlugin:
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 # Keyed by module name, because nested plugin roots can import one file under several owners.
 _MODULE_IMPORT_CACHE: dict[str, _ModuleCacheEntry] = {}
+
+
+class _SourceFileLoader(machinery.SourceFileLoader):
+    """Compile a plugin module from its source, never a bytecode cache a same-size edit within a second leaves valid."""
+
+    def get_code(self, fullname: str) -> CodeType:
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+# A plugin package directory's file loaders: the default ones, with source compiled as the plugin loader does.
+_PLUGIN_FILE_LOADERS = (
+    (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
+    (_SourceFileLoader, machinery.SOURCE_SUFFIXES),
+    (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES),
+)
 
 
 def _warn_once(message: str, *, path: Path) -> None:
@@ -480,6 +496,7 @@ def _install_plugin_package_chain(
     prefix: str,
 ) -> None:
     for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path, prefix):
+        sys.path_importer_cache[str(package_root)] = machinery.FileFinder(str(package_root), *_PLUGIN_FILE_LOADERS)
         if package_name in sys.modules:
             continue
         package = ModuleType(package_name)
