@@ -3220,8 +3220,12 @@ The check runs between completed tool batches and never interrupts a running too
 With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](https://docs.mindroom.chat/tools/agent-orchestration/#when-a-call-becomes-a-job).
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
-A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
-The wrap-up notice asks the agent to hand off without new tool calls; it does not cancel running tools or show the agent the queued text, tool calls the agent makes in answer to it end the response without running, and stopping a response and tool approval work as usual.
+A decision to continue covers only the messages the judge saw, so a later message gets its own decision.
+A wrap-up notice once sent is not taken back.
+The wrap-up notice asks the agent to hand off without new tool calls.
+It does not cancel running tools or show the agent the queued text.
+Tool calls the agent makes in answer to it end the response without running.
+Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
@@ -15171,7 +15175,10 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
-With about 80 or more running jobs of one agent in a room, the bar lists only that agent's newest jobs there; `!jobs` lists them all, and **Stop all** still stops every job of the room or thread.
+The bar lists only the newest of an agent's running jobs in a room that fit in 27,000 bytes of room state.
+That is about 80 jobs with typical names.
+Long requester IDs, tool names, or subagent names leave room for fewer, such as 46 with a 255-byte requester ID and a 64-character tool name.
+`!jobs` lists them all, and **Stop all** still stops every job of the room or thread.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
 After **Stop** on a reply that is still running, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a call approved before the Stop finishes, like a command already executing.
