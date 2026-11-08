@@ -509,6 +509,9 @@ async def test_a_broken_lifespan_costs_the_plugin_only_its_lifespan(
         ]
         assert warning["plugin_name"] == "demo"
         assert error in warning["error"]
+    # Without a lifespan there is nothing to start.
+    lifespan_errors = [log["event"] for log in logs if log["event"].startswith("Plugin lifespan")]
+    assert lifespan_errors == (["Plugin lifespan failed to start"] if error is None else [])
 
 
 @pytest.mark.xfail(strict=True, reason="pending: plugin checks do not read the lifecycle module's error yet")
@@ -594,15 +597,21 @@ async def test_a_reload_closes_the_replaced_plugins_websockets_so_clients_reconn
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server", ["stalls", "refuses"])
+@pytest.mark.parametrize(
+    ("server", "sent_by_reload"),
+    [("stalls", ["websocket.close"]), ("refuses", ["websocket.close"]), ("ended", [])],
+    ids=["stalls", "refuses", "ended"],
+)
 async def test_a_websocket_that_cannot_close_holds_up_no_reload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     server: str,
+    sent_by_reload: list[str],
 ) -> None:
     """A replaced plugin's websocket whose close cannot go out is given up on, so the reload completes.
 
-    The server stalls a close while the client stops reading, and refuses one once the client left.
+    The server stalls a close while the client stops reading, and refuses one once the client left. A websocket that
+    ended before the reload gets no close at all.
     """
     monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.05)
     probe = _probe()
@@ -628,9 +637,14 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
             raise RuntimeError(msg)
 
     scope = {"type": "websocket", "path": "/live", "root_path": "", "headers": [], "query_string": b""}
+    if server == "ended":
+        received.put_nowait({"type": "websocket.disconnect", "code": 1000})
     connection = asyncio.create_task(plugin.routes_app(scope, received.get, send))
     try:
         await accepted.wait()
+        if server == "ended":
+            await connection
+        sent.clear()
         async with asyncio.timeout(5):
             await _publish(lifespans, config, runtime_paths)
     finally:
@@ -638,5 +652,5 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
         await asyncio.gather(connection, return_exceptions=True)
         await lifespans.stop()
 
-    assert sent == ["websocket.accept", "websocket.send", "websocket.close"]
+    assert sent == sent_by_reload
     assert ("stop", "demo", 1, "reload") in probe.events
