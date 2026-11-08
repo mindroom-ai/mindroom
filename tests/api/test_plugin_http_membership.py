@@ -123,6 +123,32 @@ async def test_joined_members_raising_503() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("refusals", "status"), [(1, 200), (2, 200), (3, 503)])
+async def test_a_member_list_the_client_refuses_for_a_membership_change_is_read_again(
+    refusals: int,
+    status: int,
+) -> None:
+    """A join applied while the member list is read makes the client refuse it; the lookup reads it again, 3 times at most."""
+    client = _client("@alice:example.org")
+    answer = client.joined_members.return_value
+    client.joined_members.side_effect = [
+        *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+        answer,
+    ]
+    assert await _membership_status(_bound(client)) == status
+    assert client.joined_members.await_count == min(refusals + 1, 3)
+
+
+@pytest.mark.asyncio
+async def test_another_client_refusal_is_not_read_again() -> None:
+    """Any other refusal of the client answers 503 at once."""
+    client = _client("@alice:example.org")
+    client.joined_members.side_effect = nio.LocalProtocolError("durable sync session is closed")
+    assert await _membership_status(_bound(client)) == 503
+    client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
 async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Matrix call that hangs gives up after the lookup timeout with 503, never holding the request open."""
     monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
