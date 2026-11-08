@@ -443,3 +443,4 @@ _.desktop  # Toolkit function its passthrough_tool mark offers (src/mindroom/cus
 _.tool_search  # Toolkit function its @tool mark offers (src/mindroom/custom_tools/dynamic_tools.py)
 _.validate_workflow  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/dynamic_workflow.py)
 _.send_input  # Terminal client API for the primary's terminal surfaces (src/mindroom/terminal/client.py)
+_.is_on  # Trafilatura's crawl loop reads it to stop (src/mindroom/tools/agno_compat_trafilatura.py)

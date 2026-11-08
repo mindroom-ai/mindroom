@@ -17,11 +17,14 @@ from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from mindroom.tool_system.plugins import ConfigPlugins
 
 _MOUNT_PATH = "/api/plugins"
+# Uvicorn frames a websocket's denial response with its own of these and appends the app's, and clients reject the
+# duplicates as malformed HTTP.
+_DENIAL_FRAMING_HEADERS = frozenset({b"content-length", b"content-type"})
 
 
 def _published_plugins(app: FastAPI) -> ConfigPlugins | None:
@@ -48,6 +51,8 @@ class _PluginRoutesApp:
         root_path = scope.get("root_path", "")
         name = scope["path"].removeprefix(root_path).removeprefix("/").partition("/")[0]
         routes_app = self._routes_app(name)
+        if scope["type"] == "websocket":
+            send = _framed_by_server(send)
         if routes_app is None:
             # A websocket gets the same 404 as its handshake's denial response.
             await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
@@ -67,6 +72,20 @@ class _PluginRoutesApp:
         if plugins is None:
             return None
         return next((plugin.routes_app for plugin in plugins.loaded_plugins if plugin.name == name), None)
+
+
+def _framed_by_server(send: Send) -> Send:
+    """Leave a websocket denial's framing headers to the server, so the 404 and a route's refusals reach clients intact."""
+
+    async def framed(message: Message) -> None:
+        if message["type"] == "websocket.http.response.start":
+            headers = [
+                (key, value) for key, value in message.get("headers", ()) if key.lower() not in _DENIAL_FRAMING_HEADERS
+            ]
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return framed
 
 
 async def _list_plugins(request: Request) -> dict[str, object]:
