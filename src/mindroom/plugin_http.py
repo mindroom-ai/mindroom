@@ -23,6 +23,7 @@ from mindroom.api.client_sessions import (
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AgentWorkspace",
     "ClientUser",
+    "RoomHistory",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -68,6 +70,7 @@ _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 _ROUTER_NOT_RUNNING = "The router is not running in this room."
+_NOT_A_MEMBER = "Not a member of this room."
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,7 @@ class RoomReader:
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
     _room_id: str = field(repr=False)
     _router: Callable[[], AgentBot | None] = field(repr=False)
+    _room_history: Callable[[], Awaitable[RoomHistory | None]] = field(repr=False)
     _room_agents: Callable[[Callable[[], Awaitable[RoomPower]], str | None], Awaitable[list[AgentWorkspace]]] = field(
         repr=False,
     )
@@ -287,6 +291,17 @@ class RoomReader:
                 "The modes were saved, but the room's thread mode is not published yet; try again.",
             )
 
+    async def history(self) -> RoomHistory:
+        """Read the room's history visibility and where the caller's view of its history begins under it.
+
+        It reads the caller's membership again, answering 403 once they are no longer joined, and 503 when the read
+        fails or times out.
+        """
+        history = await self._room_history()
+        if history is None:
+            raise HTTPException(403, _NOT_A_MEMBER)
+        return history
+
     async def agents(self) -> list[AgentWorkspace]:
         """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
 
@@ -322,6 +337,7 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         partial(_bound(state.room_direct), room_id),
         room_id,
         lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
+        partial(_bound(state.room_history), room_id, user.user_id),
         partial(room_agent_workspaces, request, user.user_id, room_id, members),
     )
 
@@ -354,7 +370,7 @@ async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str
     """Return the room's joined users with their display names, once ``user_id`` is one of them."""
     members = await _bound(ensure_app_state(connection.app).room_members)(room_id)
     if user_id not in members:
-        raise HTTPException(403, "Not a member of this room.")
+        raise HTTPException(403, _NOT_A_MEMBER)
     return members
 
 

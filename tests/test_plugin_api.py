@@ -459,7 +459,9 @@ _MEMBERS = {
         "agent": "(self, agent_user_id)",
         "modes": "(self)",
         "set_modes": "(self, *, thread, reply)",
+        "history": "(self)",
     },
+    "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
         "is_admin": "(self, user_id)",
@@ -540,6 +542,7 @@ _MANIFEST = {
 _HTTP_EXPORTS = [
     "AgentWorkspace",
     "ClientUser",
+    "RoomHistory",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -559,6 +562,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.AgentWorkspace": "(name, user_id, display_name, private, root, files, terminal, config)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomHistory": "(visibility)",
     "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
@@ -572,7 +576,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 11), "c8c428d1324142acf9ea6e137fec491c9465395975190c4472a30ac8b3968ba8")
+_PINNED_VERSION = ((1, 12), "b74660524dcf127486ba2e1628a5a4f31dbfb5c485d03bc609420a67e7e8779d")
 
 
 def _is_enum(obj: object) -> bool:

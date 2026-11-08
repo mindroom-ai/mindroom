@@ -1079,7 +1079,7 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
-A route that shows a room's people, checks their power, or reads or changes the room's modes depends on `require_room_reader` instead.
+A route that shows a room's people, checks their power, reads or changes the room's modes, or shows what happened in the room depends on `require_room_reader` instead.
 It checks the caller exactly as `require_room_member` does, with the same answers, before it reads anything else of the room, and then returns a `RoomReader`:
 
 ```python
@@ -1106,14 +1106,36 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `modes()` | A `RoomModes` with the room's [thread mode](configuration/threads.md#thread_mode) override `thread` and [reply mode](configuration/threads.md#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
+| `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
 `may_send(user_id, event_type)` tells whether that level lets the user send message events of the type, which needs the type's level in the power levels' `events`, else their `events_default`, and in an encrypted room also the level of `m.room.encrypted`, the type messages go out as.
 `RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
-Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
-`power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
+
+`RoomHistory.visibility` is the room's `m.room.history_visibility`, `shared` when it has none.
+`since(recorded_under=None)` returns where the caller's view of the room's history begins, in milliseconds since the epoch, or `None` when they may see all of it: `None` under `shared` or `world_readable`, the invite their current membership came from (else their join) under `invited`, and their join under `joined` or any value Matrix does not define.
+A route that shows records it kept of a room, such as notes, keeps with each one the `visibility` the room had then and passes it as `recorded_under`, and the stricter of it and the visibility now applies, so making a room's history stricter also hides the records kept before, unlike its messages:
+
+```python
+@router.get("/rooms/{room_id}/notes")
+async def notes(room_id: str, reader: Annotated[RoomReader, Depends(require_room_reader)]) -> list[dict[str, object]]:
+    history = await reader.history()
+    return [
+        note
+        for note in NOTES.get(room_id, [])
+        if (since := history.since(note["visibility"])) is None or note["at_ms"] > since
+    ]
+```
+
+The start is that of the caller's current membership: a display name or avatar change keeps it, but leaving and joining again starts it anew.
+An invite sent from another homeserver carries that homeserver's clock, so under `invited` it counts no further than the join.
+The start falls later, so the caller sees less, never more, when MindRoom cannot read back to their join or invite: after about 20 profile changes, or past an event from before its bot joined the room.
+
+Each call to `power()` or `history()` reads again, and `members` is read anew for each request, so a changed name, power level, or history visibility shows on the next one.
+`power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
+`history()` reads the caller's membership again and answers 403 like `require_room_member` once they are no longer joined, and 503 with `Room history read failed; try again.` when its read fails or times out.
 `is_direct()` keeps its answer for a few minutes, but when the homeserver fails the lookup with an error it may count a direct room as not direct and does not keep that answer; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
@@ -1163,7 +1185,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, and one that uses `agents()` or `agent()` states `"1.11"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, and one that uses `agents()` or `agent()` states `"1.12"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
