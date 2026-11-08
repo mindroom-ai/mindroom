@@ -296,7 +296,7 @@ async def test_relay_runs_as_its_user_for_exactly_the_agent_it_mentions(world: _
     assert event_id == "$sent"
     content = _sent(transport, world.client)
     assert content["msgtype"] == "m.text"
-    assert content["body"] == f"Sent for {CAROL}: {OPEN} what changed?"
+    assert content["body"] == f"Sent for {CAROL}:\n\n{OPEN} what changed?"
     assert content[ORIGINAL_SENDER_KEY] == CAROL
     assert content["m.mentions"] == {"user_ids": [OPEN]}
     assert content[EXACT_MENTIONS_KEY] is True
@@ -337,6 +337,25 @@ async def test_relay_mentions_only_agents_and_teams_in_the_room(world: _World, m
 
     assert refused.value.status_code == 400
     transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relay_keeps_the_text_as_written_below_whom_it_is_sent_for(world: _World) -> None:
+    """Text that opens with a Markdown block still renders as that block, in the thread the route names."""
+    messenger = await world.messenger(CAROL)
+    # The router's conversation knows the thread by its root alone.
+    world.bots[ROUTER_AGENT_NAME].hook_context.conversation_reader.latest_thread_event_id.return_value = "$root"
+
+    with _transport() as transport:
+        await messenger.relay("```python\nprint(1)\n```\nWhy?", mentions=[OPEN], thread_id="$root")
+
+    content = _sent(transport, world.client)
+    first, code, rest = content["formatted_body"].partition('</p>\n<pre><code class="language-python">')
+    assert first.startswith("<p>Sent for ")
+    assert code
+    assert rest.endswith("</code></pre>\n<p>Why?</p>\n")
+    assert content["m.relates_to"]["rel_type"] == "m.thread"
+    assert content["m.relates_to"]["event_id"] == "$root"
 
 
 @pytest.mark.asyncio

@@ -300,7 +300,7 @@ class RoomMessenger:
             if entity is None or entity.kind == "router" or mentioned not in room.members:
                 raise HTTPException(400, f"A relay mentions only agents and teams in this room, not {mentioned}.")
         extra[ORIGINAL_SENDER_KEY] = room.user.user_id
-        return await self._send(router, f"Sent for {room.user.user_id}: {text}", thread_id, extra, mentions)
+        return await self._send(router, f"Sent for {room.user.user_id}:\n\n{text}", thread_id, extra, mentions)
 
     def _router(self) -> AgentBot:
         """Return the router bot running now, so a restarted router posts with its new client, once it is in the room."""

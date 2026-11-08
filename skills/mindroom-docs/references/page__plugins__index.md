@@ -1131,7 +1131,7 @@ async def ask(body: Ask, messenger: Annotated[RoomMessenger, Depends(require_roo
 |--------|-------|
 | `user` | The caller's `ClientUser` |
 | `await notice(text, *, thread_id=None, content=None)` | Posts `text` as the router's `m.notice`, which mentions no one, acts for no one, and no agent answers; it checks no power level, so the route decides who may have the router post |
-| `await relay(text, *, mentions, thread_id=None, content=None)` | Posts `text` as the router for the caller, prefixed with `Sent for <their Matrix ID>:`, mentioning exactly the agents and teams whose Matrix IDs `mentions` lists; each one answers the caller, and only if its access rules admit the caller |
+| `await relay(text, *, mentions, thread_id=None, content=None)` | Posts `text` as the router for the caller, below a line `Sent for <their Matrix ID>:`, mentioning exactly the agents and teams whose Matrix IDs `mentions` lists; each one answers the caller, and only if its access rules admit the caller |
 
 Both return the message's event ID, and post in the thread `thread_id` names, else in the room's timeline.
 `content` adds namespaced keys of the plugin's own to the message, such as a card under one of its [reserved namespaces](#reserved-namespaces).
