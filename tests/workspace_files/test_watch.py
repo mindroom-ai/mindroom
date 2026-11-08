@@ -343,3 +343,16 @@ async def test_files_written_into_folders_as_they_appear_are_all_reported(tmp_pa
             expected.add(f"pkg{index}/src/mod.py")
 
         assert expected <= await _until(next_changes, *expected)
+
+
+@pytest.mark.asyncio
+async def test_a_file_rewritten_in_place_with_the_same_size_is_reported(tmp_path: Path) -> None:
+    """An edit that keeps the file, its inode and its size still shows."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "notes.md").write_text("draft-1")
+    async with workspace_changes(root) as next_changes:
+        with (root / "notes.md").open("r+") as file:
+            file.write("draft-2")
+
+        assert "notes.md" in await _until(next_changes, "notes.md")
