@@ -79,8 +79,8 @@ ENTRY_KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFLNK: "link",
 }
 _NOT_A_FILE = "That path is not a regular file."
-# Saves and moves through this process check what is there and change it one at a time, so two saves of one version,
-# or two moves onto one name, never both land.
+# Saves, moves and deletes through this process check what is there and change it one at a time, so two saves of one
+# version, or two moves onto one name, never both land, and a save that passed its check never brings back a deleted file.
 _CHANGES = threading.Lock()
 
 
@@ -283,7 +283,11 @@ def list_folder(root: Path, raw_path: str) -> Folder:
         open_directory_within_root(found.base, found.relative) as directory,
         os.scandir(directory) as items,
     ):
-        for item in items:
+        for examined, item in enumerate(items):
+            # Every entry counts, also one left out, which code the agent runs can plant without end.
+            if examined == _MAX_FOLDER_ENTRIES:
+                truncated = True
+                break
             child = path / item.name
             if is_hidden(child) or is_hidden(found.relative / item.name):
                 continue
@@ -294,9 +298,6 @@ def list_folder(root: Path, raw_path: str) -> Folder:
             kind = ENTRY_KINDS.get(stat.S_IFMT(status.st_mode))
             if kind is None:
                 continue
-            if len(entries) == _MAX_FOLDER_ENTRIES:
-                truncated = True
-                break
             entries.append(
                 _Entry(
                     name=item.name,
@@ -416,7 +417,7 @@ def delete(root: Path, raw_path: str) -> None:
     removed = parent.relative / name
     _refuse_git(removed)
     _refuse_credential_place(removed)
-    with _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
+    with _CHANGES, _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
         if stat.S_ISDIR(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
             _refuse_holding_kept(directory, name, removed)
             # Walks every level by descriptor, never following a link.

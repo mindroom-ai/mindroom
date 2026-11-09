@@ -58,7 +58,7 @@ Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the a
 | `DELETE /agents/{agent_user_id}/workspace/entry?path=<path>` | 204; a folder goes with everything in it unless it holds Git's files or a hidden credential, and a link without what it leads to |
 
 An entry has `name`, `path`, `kind` (`file`, `folder`, or `link`), `size` (0 for a folder or link), `mtime` in milliseconds since the epoch, and for a link `target`, which is `file` or `folder`, or null when it leads outside, to a hidden credential, or nowhere.
-A folder lists at most 5000 entries, and `truncated` says when there were more.
+A listing takes in at most 5000 of a folder's entries, hidden ones included, and `truncated` says when there were more.
 Before the agent's first turn for this person its workspace does not exist yet, and the workspace itself lists empty.
 A file's `content` is its text when it is valid UTF-8, with `encoding: "utf-8"`, and base64 otherwise, with `encoding: "base64"`; its `etag` is the SHA-256 of its content, in hex.
 Files over 5 MiB answer 413, to read and to save.

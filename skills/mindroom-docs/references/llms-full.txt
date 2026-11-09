@@ -6631,7 +6631,7 @@ Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the a
 | `DELETE /agents/{agent_user_id}/workspace/entry?path=<path>` | 204; a folder goes with everything in it unless it holds Git's files or a hidden credential, and a link without what it leads to |
 
 An entry has `name`, `path`, `kind` (`file`, `folder`, or `link`), `size` (0 for a folder or link), `mtime` in milliseconds since the epoch, and for a link `target`, which is `file` or `folder`, or null when it leads outside, to a hidden credential, or nowhere.
-A folder lists at most 5000 entries, and `truncated` says when there were more.
+A listing takes in at most 5000 of a folder's entries, hidden ones included, and `truncated` says when there were more.
 Before the agent's first turn for this person its workspace does not exist yet, and the workspace itself lists empty.
 A file's `content` is its text when it is valid UTF-8, with `encoding: "utf-8"`, and base64 otherwise, with `encoding: "base64"`; its `etag` is the SHA-256 of its content, in hex.
 Files over 5 MiB answer 413, to read and to save.
@@ -17372,7 +17372,7 @@ Reads of worker-controlled files are capped per surface.
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
-| Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 entries per folder listing | A read or save answers 413; a listing is cut and says so |
+| Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 examined entries per folder listing, hidden ones included | A read or save answers 413; a listing is cut and says so |
 | What the workspace change stream scans | 10,000 folders and 100,000 examined entries, breadth first, 32 folders deep | Changes in the deepest folders and entries past the cap are not reported |
 
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).

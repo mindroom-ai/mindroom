@@ -289,11 +289,32 @@ def test_a_folder_lists_folders_first_then_by_name_with_sizes_and_times(root: Pa
 
 def test_a_long_folder_is_cut_short_and_says_so(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """At most the cap's entries come back, with ``truncated``."""
+    (root / "many").mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (root / "many" / name).write_text("x")
     monkeypatch.setattr(operations, "_MAX_FOLDER_ENTRIES", 2)
 
-    listing = list_folder(root, "")
+    listing = list_folder(root, "many")
 
     assert (len(listing.entries), listing.truncated) == (2, True)
+
+
+def test_entries_a_listing_leaves_out_count_toward_its_cap(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code the agent runs can plant countless hidden or special files; each still counts, so a listing stays bounded."""
+    (root / "planted").mkdir()
+    for index in range(10):
+        (root / "planted" / f".env.{index}").write_text("x")
+        os.mkfifo(root / "planted" / f"pipe{index}")
+    monkeypatch.setattr(operations, "_MAX_FOLDER_ENTRIES", 5)
+    examined = []
+    real_is_hidden = operations.is_hidden
+    monkeypatch.setattr(operations, "is_hidden", lambda path: examined.append(path) or real_is_hidden(path))
+
+    listing = list_folder(root, "planted")
+
+    assert listing.truncated
+    # Each examined entry is checked by its spelled and its canonical path at most.
+    assert len([path for path in examined if len(path.parts) == 2]) <= 2 * 5
 
 
 def test_a_workspace_not_made_yet_lists_empty(tmp_path: Path) -> None:
@@ -519,6 +540,27 @@ def test_two_moves_onto_one_name_never_both_land(root: Path, monkeypatch: pytest
     # The file that did not move is still there under its own name.
     assert len([name for name in ("a.md", "b.md") if (root / name).exists()]) == 1
     assert (root / "report.md").read_text() in {"a", "b"}
+
+
+def test_a_delete_during_a_save_lands_after_it(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A save that passed its etag check can't bring back a file deleted meanwhile: the delete waits for it."""
+    etag = read_file(root, "notes.md").etag
+    real_write = operations.write_resolved_file
+    deletions = []
+
+    with ThreadPoolExecutor(1) as pool:
+
+        def write_while_deleting(*args: object, **kwargs: object) -> None:
+            deletions.append(pool.submit(delete, root, "notes.md"))
+            with pytest.raises(TimeoutError):
+                deletions[0].result(timeout=0.2)
+            real_write(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(operations, "write_resolved_file", write_while_deleting)
+        save_file(root, "notes.md", b"edited", etag)
+        deletions[0].result(timeout=5)
+
+    assert not (root / "notes.md").exists()
 
 
 def test_a_name_that_is_not_utf8_is_left_out(root: Path) -> None:

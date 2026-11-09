@@ -151,7 +151,7 @@ Reads of worker-controlled files are capped per surface.
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
-| Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 entries per folder listing | A read or save answers 413; a listing is cut and says so |
+| Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 examined entries per folder listing, hidden ones included | A read or save answers 413; a listing is cut and says so |
 | What the workspace change stream scans | 10,000 folders and 100,000 examined entries, breadth first, 32 folders deep | Changes in the deepest folders and entries past the cap are not reported |
 
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](../thread-exports.md).
