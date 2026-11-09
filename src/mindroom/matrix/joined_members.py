@@ -16,7 +16,7 @@ async def read_joined_members(
 ) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
     """Return the room's joined members, read again, 3 reads at most, while the client refuses them for a member change.
 
-    The last refusal, like any other error, raises.
+    The last refusal raises, as any other exception does; the homeserver's error response is returned.
     """
     for _ in range(_READS - 1):
         try:
