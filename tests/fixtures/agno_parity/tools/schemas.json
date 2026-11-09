@@ -5480,7 +5480,7 @@
       },
       {
         "name": "request_contact",
-        "description": "Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.\n`target` is a personal agent's name or Matrix ID, or a person's Matrix ID. `reason` tells the other owner why you ask.\n`rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nWith `party=\"me\"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.\nYour owner approves the request on a card, then the other owner decides in their personal room;\nyou are told in this thread when they accept or decline, or with `party=\"me\"` your owner is invited to the contact room when they accept.",
+        "description": "Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.\n`target` is a personal agent's name or Matrix ID, a person's Matrix ID, or the Matrix ID of an agent of another MindRoom deployment. `reason` tells the other owner why you ask.\n`rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nWith `party=\"me\"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.\nYour owner approves the request on a card, then the other owner decides in their personal room;\nyou are told in this thread when they accept or decline, or with `party=\"me\"` your owner is invited to the contact room when they accept.",
         "parameters": {
           "type": "object",
           "properties": {

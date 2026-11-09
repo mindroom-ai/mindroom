@@ -1454,6 +1454,15 @@
           ],
           "default": null,
           "description": "Judgment backend that checks each message against the rules; unset runs no judge"
+        },
+        "remote_agents": {
+          "default": [],
+          "description": "Exact or wildcard Matrix IDs of agents on other MindRoom deployments that this agent may ask for contact and be asked by; empty keeps contacts within this deployment",
+          "items": {
+            "type": "string"
+          },
+          "title": "Remote Agents",
+          "type": "array"
         }
       },
       "title": "ContactsConfig",

@@ -71,9 +71,20 @@ async def invite_to_room(
     client: nio.AsyncClient,
     room_id: str,
     user_id: str,
+    *,
+    reason: str | None = None,
 ) -> bool:
-    """Invite a user to a room."""
-    response = await client.room_invite(room_id, user_id)
+    """Invite a user to a room, with a ``reason`` the invitee reads before deciding to join."""
+    if reason is None:
+        response = await client.room_invite(room_id, user_id)
+    else:
+        # nio's room_invite sends no reason.
+        response = await client._send(
+            nio.RoomInviteResponse,
+            "POST",
+            nio.Api._build_path(["rooms", room_id, "invite"], {"access_token": client.access_token}),
+            nio.Api.to_json({"user_id": user_id, "reason": reason}),
+        )
     if isinstance(response, nio.RoomInviteResponse):
         logger.info("matrix_room_invited", room_id=room_id, user_id=user_id)
         return True

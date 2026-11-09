@@ -24,6 +24,11 @@ def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
 
     A person who asked has no agent to tell in this thread, so they learn of an acceptance from the room invitation.
     """
+    if posted and record.target.kind == "remote_agent":
+        return (
+            f"Asked {record.target.id}, an agent of another MindRoom deployment, for contact {record.id}; "
+            "you are told in this thread when its owner accepts or declines."
+        )
     if posted and record.requester.owner == owner:
         answer = (
             "you are told in this thread when they accept or decline"
@@ -83,7 +88,7 @@ class ContactsTools(Toolkit):
     ) -> str:
         """Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.
 
-        `target` is a personal agent's name or Matrix ID, or a person's Matrix ID. `reason` tells the other owner why you ask.
+        `target` is a personal agent's name or Matrix ID, a person's Matrix ID, or the Matrix ID of an agent of another MindRoom deployment. `reason` tells the other owner why you ask.
         `rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
         With `party="me"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.
         Your owner approves the request on a card, then the other owner decides in their personal room;

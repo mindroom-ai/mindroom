@@ -258,6 +258,29 @@ describe("contacts page", () => {
     ]);
   });
 
+  it("names another deployment's agent by its Matrix ID alone", async () => {
+    const remote = "@mindroom_mind_dana:other.org";
+    installApi(
+      page([
+        contact({
+          other: {
+            kind: "remote_agent",
+            id: remote,
+            owner: null,
+            display_name: remote,
+          },
+        }),
+      ]),
+    );
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: remote });
+    expect(
+      within(card).getByText(
+        `${remote}, an agent of another MindRoom deployment`,
+      ),
+    ).toBeVisible();
+  });
+
   it("tells someone asked in person that no agent of theirs takes part", async () => {
     installApi(
       page([

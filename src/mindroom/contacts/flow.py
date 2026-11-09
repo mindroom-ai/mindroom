@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from mindroom.contacts.parties import (
     person_party,
     personal_room_agent,
     personal_room_of,
+    remote_target,
     resolve_target,
 )
 from mindroom.contacts.policy import effective_rules
@@ -65,6 +67,7 @@ type _Decision = Literal["accept", "decline"]
 
 _SOURCE_HOOK = "native:contacts"
 _PERSON_HAS_NO_SIDE = "A person has no rules or tools; only an agent's side can have them"
+_REMOTE_NEEDS_AN_AGENT = "Only your agent can contact an agent of another MindRoom deployment, so ask with party=agent"
 _NOT_PENDING: dict[_Decision, str] = {
     "accept": "Only a pending contact can be accepted",
     "decline": "Only a pending contact can be declined",
@@ -104,12 +107,13 @@ def tool_actor(context: ToolRuntimeContext, agent_name: str) -> ContactActor:
     if party is None:
         msg = f"contacts are not enabled for {agent_name}"
         raise ValueError(msg)
-    if resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) != party.owner:
-        msg = f"Only {party.owner} may use the contacts of {agent_name}"
+    owner = party.local_owner
+    if resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) != owner:
+        msg = f"Only {owner} may use the contacts of {agent_name}"
         raise ValueError(msg)
     orchestrator = context.orchestrator
     return ContactActor(
-        owner=party.owner,
+        owner=owner,
         agent_name=agent_name,
         config=config,
         runtime_paths=context.runtime_paths,
@@ -199,13 +203,13 @@ def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> 
     return personal
 
 
-async def _post_request_notice(actor: ContactActor, record: ContactRecord) -> ContactRecord:
+async def post_request_notice(actor: ContactActor, record: ContactRecord) -> ContactRecord:
     """Post the request as a new thread in the target owner's personal room and store its event ID.
 
     Return the contact as stored, notice event ID included.
     """
     config, paths = actor.config, actor.runtime_paths
-    poster, room_id = _request_poster(config, paths, record.target.owner)
+    poster, room_id = _request_poster(config, paths, record.target.local_owner)
     if (running := _running_bot(actor, poster)) is None:
         msg = f"{poster} is not running, so it cannot post the request; ask again later"
         raise ValueError(msg)
@@ -255,7 +259,7 @@ def _check_pair(requester: ContactParty, target: ContactParty) -> None:
         raise ValueError(msg)
 
 
-def _existing_contact(
+def existing_contact(
     book: ContactBook,
     requester: ContactParty,
     target: ContactParty,
@@ -273,7 +277,11 @@ def _existing_contact(
         if existing.status == "removed" or ends != pair:
             continue
         if existing.status == "declined":
-            msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
+            if existing.target.kind == "remote_agent":
+                # The owner who declined is out of reach, so the asking owner clears the decline here.
+                msg = f"{existing.target.id} declined contact {existing.id}; remove it with remove_contact to ask again"
+            else:
+                msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
             raise ValueError(msg)
         stored = existing.side("requester" if existing.requester.id == requester.id else "target")
         asked = stored.model_copy(deep=True)
@@ -286,6 +294,20 @@ def _existing_contact(
             raise ValueError(msg)
         return existing
     return None
+
+
+def _check_answerer(config: Config, owner: str) -> None:
+    """Refuse a request to an owner whose personal-room agent cannot ask them, which takes the contacts tools."""
+    poster = personal_room_agent(config, owner)
+    if poster is None:
+        msg = (
+            f"{owner} has no personal agent here, so a request cannot reach them; to reach an agent of another "
+            "MindRoom deployment, add its Matrix ID to contacts.remote_agents"
+        )
+        raise ValueError(msg)
+    if agent_party(config, poster) is None:
+        msg = f"{owner}'s personal agent {poster} does not take contact requests"
+        raise ValueError(msg)
 
 
 async def request_contact(
@@ -309,10 +331,13 @@ async def request_contact(
     actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths
     own = ContactParty(kind="agent", id=agent_name, owner=actor.owner)
-    target_party = resolve_target(config, paths, target)
+    target_party = remote_target(config, paths, agent_name, target) or resolve_target(config, paths, target)
     if not reason.strip():
         msg = "A reason is required, so the other owner knows why you ask"
         raise ValueError(msg)
+    if target_party.kind == "remote_agent":
+        record, invited = await _request_remote(actor, context, own, target_party, reason.strip(), rules, tools, party)
+        return actor, record, invited
     if party == "me":
         if rules is not None or tools is not None:
             raise ValueError(_PERSON_HAS_NO_SIDE)
@@ -321,17 +346,10 @@ async def request_contact(
         requester, side = own, ContactSide()
         _change_side(side, rules, _validate_side_tools(config, paths, agent_name, tools))
     _check_pair(requester, target_party)
-    # The agent of the owner's personal room asks them and accepts for them, which takes the contacts tools.
-    poster = personal_room_agent(config, target_party.owner)
-    if poster is None:
-        msg = f"{target_party.owner} has no personal agent here, so a request cannot reach them"
-        raise ValueError(msg)
-    if agent_party(config, poster) is None:
-        msg = f"{target_party.owner}'s personal agent {poster} does not take contact requests"
-        raise ValueError(msg)
+    _check_answerer(config, target_party.local_owner)
 
     def create(book: ContactBook) -> ContactRecord:
-        existing = _existing_contact(book, requester, target_party, rules=rules, tools=tools)
+        existing = existing_contact(book, requester, target_party, rules=rules, tools=tools)
         if existing is not None:
             # Nobody has read a request whose notice never landed, so its requester's new reason replaces the old one,
             # and the thread asking now is the one the answer goes to.
@@ -357,11 +375,112 @@ async def request_contact(
 
     record = await run_blocking_until_complete(update_contacts, paths, create)
     if record.status == "pending" and record.notice_event_id is None:
-        return actor, await _post_request_notice(actor, record), True
+        return actor, await post_request_notice(actor, record), True
     return actor, record, False
 
 
-async def _post_in_thread(
+async def _request_remote(
+    actor: ContactActor,
+    context: ToolRuntimeContext,
+    requester: ContactParty,
+    target: ContactParty,
+    reason: str,
+    rules: str | None,
+    tools: list[str] | None,
+    party: Literal["agent", "me"],
+) -> tuple[ContactRecord, bool]:
+    """Ask another deployment's agent: open the contact room and invite it with the reason, which is the request.
+
+    Return the request and whether this call invited the other agent; a pending or active contact of the pair is
+    returned as it is, since the other side already holds its invite. The request names its room before the invite,
+    so an early message there starts no ordinary turn, and an invite that fails leaves the room and removes the request.
+    Only an agent asks, because a person who asks has no agent to create the room.
+    """
+    if party == "me":
+        raise ValueError(_REMOTE_NEEDS_AN_AGENT)
+    agent_name, paths = requester.id, actor.runtime_paths
+    side = ContactSide()
+    _change_side(side, rules, _validate_side_tools(actor.config, paths, agent_name, tools))
+    pair = partial(_pair_contact, requester=requester, target=target, rules=rules, tools=tools)
+    if (found := await run_blocking_until_complete(update_contacts, paths, pair)) is not None:
+        return found, False
+    if (running := _running_bot(actor, agent_name)) is None:
+        msg = f"{agent_name} is not running, so it cannot send the request; ask again later"
+        raise ValueError(msg)
+    bot, client = running
+    room_id = await create_room(
+        client,
+        f"{party_name(actor.config, requester)} ↔ {target.id}",
+        # Each agent invites and withdraws its own owner.
+        admin_users=[target.id],
+        initial_state=_CONTACT_ROOM_STATE,
+    )
+    if room_id is None:
+        msg = "The contact room could not be created; ask again to retry"
+        raise ValueError(msg)
+    record = ContactRecord(
+        id=uuid4().hex[:12],
+        status="pending",
+        requester=requester,
+        target=target,
+        reason=reason,
+        requester_side=side,
+        target_side=ContactSide(),
+        origin_room_id=context.room_id,
+        origin_thread_id=context.resolved_thread_id,
+        room_id=room_id,
+        requested_at=datetime.now(UTC),
+    )
+
+    def create(book: ContactBook) -> ContactRecord:
+        # Another request of the pair stored meanwhile wins, and this one leaves its room.
+        if (found := pair(book)) is not None:
+            return found
+        book.contacts.append(record)
+        return record.model_copy(deep=True)
+
+    try:
+        stored = await run_blocking_until_complete(update_contacts, paths, create)
+        invited = stored.id == record.id and await invite_to_room(client, room_id, target.id, reason=reason)
+    except BaseException:
+        await _abandon_remote_request(paths, bot, record)
+        raise
+    if stored.id != record.id:
+        await bot.change_local_membership(room_id, "leave")
+        return stored, False
+    if not invited:
+        await _abandon_remote_request(paths, bot, record)
+        msg = f"The request to {target.id} could not be delivered; ask again to retry"
+        raise ValueError(msg)
+    return stored, True
+
+
+def _pair_contact(
+    book: ContactBook,
+    *,
+    requester: ContactParty,
+    target: ContactParty,
+    rules: str | None,
+    tools: list[str] | None,
+) -> ContactRecord | None:
+    """Return a copy of the pending or active contact of the pair, refusing as ``existing_contact`` does."""
+    found = existing_contact(book, requester, target, rules=rules, tools=tools)
+    return None if found is None else found.model_copy(deep=True)
+
+
+async def _abandon_remote_request(paths: RuntimePaths, bot: AgentBot, record: ContactRecord) -> None:
+    """Remove a request whose invite never went out, if it was stored, and leave its room."""
+
+    def remove(book: ContactBook) -> None:
+        if (stored := next((current for current in book.contacts if current.id == record.id), None)) is not None:
+            stored.status = "removed"
+
+    await run_blocking_until_complete(update_contacts, paths, remove)
+    if record.room_id is not None:
+        await bot.change_local_membership(record.room_id, "leave")
+
+
+async def post_in_thread(
     actor: ContactActor,
     record: ContactRecord,
     agent_name: str,
@@ -405,13 +524,20 @@ async def _answer_request_thread(
     if actor.agent_name is not None or record.notice_event_id is None:
         return
     poster, room_id = personal
-    await _post_in_thread(actor, record, poster, room_id, record.notice_event_id, body)
+    await post_in_thread(actor, record, poster, room_id, record.notice_event_id, body)
 
 
-def _room_creator(record: ContactRecord) -> str:
-    """Return the agent party that creates the contact room: the target agent, or else the requesting agent.
+def _with_another_deployment(record: ContactRecord) -> bool:
+    """Return whether the other party is another deployment's agent, whose request invites no owner before it is active."""
+    return "remote_agent" in {record.requester.kind, record.target.kind}
 
-    The creator stays in the room, so it must be a party; a contact between two people does not exist.
+
+def _room_admin(record: ContactRecord) -> str:
+    """Return the agent of this deployment that administers the contact room: the target agent, else the requester.
+
+    Within one deployment it creates the room and stays in it, so it must be a party; a contact between two people
+    does not exist. With another deployment's agent it is this deployment's one agent, which withdraws its own owner's
+    invitation.
     """
     return record.target.id if record.target.kind == "agent" else record.requester.id
 
@@ -448,7 +574,7 @@ async def _seat_parties(
     whose invitation may stand.
     """
     paths = actor.runtime_paths
-    creator = _room_creator(record)
+    creator = _room_admin(record)
     _, client = agents[creator]
     speakers = party_matrix_ids(record.requester, paths) | party_matrix_ids(record.target, paths)
     for user_id in sorted(speakers - {current_entity_id(creator, paths).full_id}):
@@ -474,7 +600,7 @@ async def _withdraw_owner_invites(
     Only the creating agent, which is still in the room, can withdraw them; invited agents leave on their own.
     A withdrawal that fails or raises is only logged, so the agents still leave.
     """
-    owners = {record.requester.owner, record.target.owner}
+    owners = record.owners()
     for user_id in invited:
         if user_id not in owners:
             continue
@@ -489,7 +615,7 @@ async def _withdraw_owner_invites(
             )
 
 
-async def _withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: ContactRecord, room_id: str) -> None:
+async def withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: ContactRecord, room_id: str) -> None:
     """Withdraw the invitations of the owners who never joined a removed contact's room, as its creating agent.
 
     Once its agents leave, such an invitation leads to a room nobody is left to let them into, while owners who joined
@@ -497,7 +623,7 @@ async def _withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: Cont
     joins while the other's invitation is withdrawn stays; one who joins between that read and the withdrawal does not.
     A member list that cannot be read withdraws nothing for that owner.
     """
-    for owner in (record.requester.owner, record.target.owner):
+    for owner in record.owners():
         joined = await get_room_members(client, room_id)
         if joined is not None and owner not in joined:
             await _withdraw_owner_invites(client, record, room_id, [owner])
@@ -521,12 +647,12 @@ async def withdraw_removed_contact_invites(
             room_id is not None
             and room_id in leaving
             and record.status == "removed"
-            and _room_creator(record) == agent_name
+            and _room_admin(record) == agent_name
         ):
-            await _withdraw_unjoined_owner_invites(client, record, room_id)
+            await withdraw_unjoined_owner_invites(client, record, room_id)
 
 
-async def _leave_contact_room(actor: ContactActor, record: ContactRecord, room_id: str) -> None:
+async def leave_contact_room(actor: ContactActor, record: ContactRecord, room_id: str) -> None:
     """Make the running agents of a contact leave its room.
 
     Each agent leaves even when another's leave raises, which is only logged, so the caller's own outcome stands.
@@ -540,12 +666,16 @@ async def _leave_contact_room(actor: ContactActor, record: ContactRecord, room_i
             logger.exception("contact_room_leave_failed", contact_id=record.id, agent_name=party.id, room_id=room_id)
 
 
-async def _announce_acceptance(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
+async def announce_acceptance(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
     """Start the requesting agent's turn in the thread it asked from, as its owner, so it continues its task.
 
     A person who asked has no agent to continue, so the accepting agent tells their thread, when it is in that room.
     A post that fails is logged, because the acceptance stands.
     """
+    origin_room_id = record.origin_room_id
+    # Another deployment's agent asked from no room here; it learns of the acceptance when the agent joins its room.
+    if origin_room_id is None:
+        return
     # A display name is the other owner's to choose, so a message the requesting agent acts on names the ID.
     target = record.target.id
     requester = record.requester
@@ -554,15 +684,15 @@ async def _announce_acceptance(actor: ContactActor, record: ContactRecord, agent
         kickoff = None
         if bot is not None:
             # Its logs name the requester's thread it goes to, not the accepting turn's.
-            with bound_log_context(room_id=record.origin_room_id, thread_id=record.origin_thread_id):
+            with bound_log_context(room_id=origin_room_id, thread_id=record.origin_thread_id):
                 kickoff = await bot.hook_context.send_message(
-                    record.origin_room_id,
+                    origin_room_id,
                     # Only a mentioned agent answers a message in a room with other responders.
                     f"@{requester.id} {target} accepted your contact request. "
                     f"Continue the task in the contact room {record.room_id}: {record.reason}",
                     record.origin_thread_id,
                     _SOURCE_HOOK,
-                    {ORIGINAL_SENDER_KEY: requester.owner},
+                    {ORIGINAL_SENDER_KEY: requester.local_owner},
                     trigger_dispatch=True,
                 )
         if kickoff is None:
@@ -570,14 +700,14 @@ async def _announce_acceptance(actor: ContactActor, record: ContactRecord, agent
         return
     bot = actor.agent_bot(agent_name)
     joined = None if bot is None else await bot.current_joined_room_ids()
-    if joined is None or record.origin_room_id not in joined:
+    if joined is None or origin_room_id not in joined:
         logger.info("contact_acceptance_notice_skipped", contact_id=record.id, agent_name=agent_name)
         return
-    await _post_in_thread(
+    await post_in_thread(
         actor,
         record,
         agent_name,
-        record.origin_room_id,
+        origin_room_id,
         record.origin_thread_id,
         f"{target} accepted your contact request. The contact room is {record.room_id}.",
     )
@@ -595,7 +725,8 @@ async def _pending_request(
     book = await run_blocking_until_complete(read_contacts, actor.runtime_paths)
     record, side = _owned(book, contact_id, actor.owner)
     if side != "target":
-        msg = f"Only {record.target.owner} may {decision} this contact"
+        decider = record.target.owner or f"the owner of {record.target.id} on another MindRoom deployment"
+        msg = f"Only {decider} may {decision} this contact"
         raise ValueError(msg)
     if record.status != "pending":
         raise ValueError(_NOT_PENDING[decision])
@@ -632,8 +763,29 @@ async def accept_contact(
     # It refuses an agent without contacts first, so the tools are checked only against a configured agent.
     agents = _running_agents(actor, record)
     checked = _validate_side_tools(config, paths, target.id, tools)
-    _, client = agents[_room_creator(record)]
-    room_name = f"{party_name(config, record.requester)} ↔ {party_name(config, target)}"
+    accept = _accept_remote if record.requester.kind == "remote_agent" else _accept_here
+    accepted = await accept(actor, record, agents, rules, checked)
+    await announce_acceptance(actor, accepted, personal[0])
+    await _answer_request_thread(
+        actor,
+        accepted,
+        personal,
+        f"Accepted on the Connections page. The contact room is {accepted.room_id}.",
+    )
+    return accepted
+
+
+async def _accept_here(
+    actor: ContactActor,
+    record: ContactRecord,
+    agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
+    rules: str | None,
+    checked: list[str] | None,
+) -> ContactRecord:
+    """Open the contact room of a request within this deployment, seat both parties, and make the contact active."""
+    config, paths, contact_id = actor.config, actor.runtime_paths, record.id
+    _, client = agents[_room_admin(record)]
+    room_name = f"{party_name(config, record.requester)} ↔ {party_name(config, record.target)}"
     room_id = await create_room(client, room_name, initial_state=_CONTACT_ROOM_STATE)
     if room_id is None:
         msg = "The contact room could not be created; accept again to retry"
@@ -669,15 +821,55 @@ async def accept_contact(
         current = _by_id(await run_blocking_until_complete(read_contacts, paths), contact_id)
         if current.status != "active" or current.room_id != room_id:
             await _withdraw_owner_invites(client, record, room_id, invited)
-            await _leave_contact_room(actor, record, room_id)
+            await leave_contact_room(actor, record, room_id)
         raise
-    await _announce_acceptance(actor, accepted, personal[0])
-    await _answer_request_thread(
-        actor,
-        accepted,
-        personal,
-        f"Accepted on the Connections page. The contact room is {accepted.room_id}.",
+    return accepted
+
+
+async def _accept_remote(
+    actor: ContactActor,
+    record: ContactRecord,
+    agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
+    rules: str | None,
+    tools: list[str] | None,
+) -> ContactRecord:
+    """Accept another deployment's request: join the room it invited the agent to, then invite the owner.
+
+    Joining is the acceptance the other side sees, so a contact that stopped being pending meanwhile leaves the room
+    again, which the other side reads as its end. An owner whose invitation fails is only logged, because the other
+    side already took the join as the acceptance.
+    """
+    bot, client = agents[record.target.id]
+    room_id = record.room_id
+    assert room_id is not None  # A request from another deployment is its invite into this room.
+    withdrawn = (
+        f"{record.target.id} could not join the contact room; the request may have been withdrawn, so accept again "
+        "later or decline it"
     )
+    if not await bot.change_local_membership(room_id, "join"):
+        raise ValueError(withdrawn)
+    # An invite outlives its request when the withdrawal failed, and a room the asking agent left is no contact.
+    members = await get_room_members(client, room_id)
+    if members is not None and record.requester.id not in members:
+        await bot.change_local_membership(room_id, "leave")
+        raise ValueError(withdrawn)
+
+    def activate(book: ContactBook) -> ContactRecord | None:
+        current = _by_id(book, record.id)
+        if current.status != "pending":
+            return None
+        current.status = "active"
+        current.decided_at = datetime.now(UTC)
+        _change_side(current.target_side, rules, tools)
+        return current.model_copy(deep=True)
+
+    accepted = await run_blocking_until_complete(update_contacts, actor.runtime_paths, activate)
+    if accepted is None:
+        await bot.change_local_membership(room_id, "leave")
+        raise ValueError(_NOT_PENDING["accept"])
+    owner = record.target.local_owner
+    if not await invite_to_room(client, room_id, owner):
+        logger.warning("contact_room_owner_invite_failed", contact_id=record.id, user_id=owner, room_id=room_id)
     return accepted
 
 
@@ -694,9 +886,9 @@ async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord
         return record.model_copy(deep=True)
 
     record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, decline)
-    # A person who asked has no agent to tell.
-    if record.requester.kind == "agent":
-        await _post_in_thread(
+    # A person who asked has no agent to tell, and another deployment's agent asked from no room here.
+    if record.requester.kind == "agent" and record.origin_room_id is not None:
+        await post_in_thread(
             actor,
             record,
             record.requester.id,
@@ -705,6 +897,9 @@ async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord
             f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
             "they must remove it before you can ask again.",
         )
+    if record.requester.kind == "remote_agent" and record.room_id is not None:
+        # Rejecting the invite is the decline the other side sees.
+        await leave_contact_room(actor, record, record.room_id)
     await _answer_request_thread(actor, record, personal, "Declined on the Connections page.")
     return record
 
@@ -748,24 +943,30 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
     invitations of owners who never joined; a creator that is not running does so when it leaves at its next start.
     """
 
-    def remove(book: ContactBook) -> ContactRecord:
+    def remove(book: ContactBook) -> tuple[ContactRecord, bool]:
         record, side = _owned(book, contact_id, actor.owner)
         if record.status == "removed":
             msg = "The contact is already removed"
             raise ValueError(msg)
-        # A declined contact blocks new requests until the owner who declined it removes it.
-        if record.status == "declined" and side != "target":
+        # A declined contact blocks new requests until the owner who declined it removes it; another deployment's
+        # owner who declined is out of reach, so there the decline blocks only the other side.
+        if record.status == "declined" and side != "target" and record.target.kind != "remote_agent":
             msg = f"Only {record.target.owner} may remove a declined contact"
             raise ValueError(msg)
+        was_pending = record.status == "pending"
         record.status = "removed"
-        return record.model_copy(deep=True)
+        return record.model_copy(deep=True), was_pending
 
-    record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
+    record, was_pending = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
     if record.room_id is not None:
-        if (running := _running_bot(actor, _room_creator(record))) is not None:
+        if (running := _running_bot(actor, _room_admin(record))) is not None:
             _, client = running
-            await _withdraw_unjoined_owner_invites(client, record, record.room_id)
-        await _leave_contact_room(actor, record, record.room_id)
+            if not (was_pending and _with_another_deployment(record)):
+                await withdraw_unjoined_owner_invites(client, record, record.room_id)
+            elif record.target.kind == "remote_agent":
+                # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
+                await kick_from_room(client, record.room_id, record.target.id)
+        await leave_contact_room(actor, record, record.room_id)
     return record
 
 

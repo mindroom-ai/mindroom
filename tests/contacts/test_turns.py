@@ -15,6 +15,7 @@ from mindroom import agents as agents_module
 from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.contacts.parties import remote_party
 from mindroom.contacts.store import (
     ContactParty,
     ContactRecord,
@@ -110,6 +111,8 @@ OWNER_RULE = "Share only whether Bob is free or busy."
 ALICE_AGENT = ContactParty(kind="agent", id="mind_alice", owner=OWNER)
 BOB_AGENT = ContactParty(kind="agent", id="mind_bob", owner=CO_OWNER)
 DAVE_PERSON = ContactParty(kind="person", id=DAVE, owner=DAVE)
+REMOTE = "@mindroom_mind_dana:other.org"
+REMOTE_OWNER = "@dana:other.org"
 
 
 def _setup(
@@ -165,7 +168,7 @@ def _record(
         reason="Plan the dinner",
         requester_side=ContactSide(),
         target_side=target_side or ContactSide(),
-        origin_room_id="!origin:localhost",
+        origin_room_id=None if requester.kind == "remote_agent" else "!origin:localhost",
         origin_thread_id=None,
         room_id=CONTACT_ROOM,
     )
@@ -469,7 +472,15 @@ async def _dispatch_plan(
     ``history`` names the agents that wrote in the thread before.
     """
     room = nio.MatrixRoom(room_id, _agent(paths, agent_name))
-    for user_id in (OWNER, CO_OWNER, DAVE, _agent(paths, "mind_alice"), _agent(paths, "mind_bob")):
+    for user_id in (
+        OWNER,
+        CO_OWNER,
+        DAVE,
+        REMOTE,
+        REMOTE_OWNER,
+        _agent(paths, "mind_alice"),
+        _agent(paths, "mind_bob"),
+    ):
         room.add_member(user_id, user_id, None)
     mentioned_ids = [current_entity_id(name, paths) for name in mentioned]
     context = MessageContext(
@@ -1157,3 +1168,47 @@ async def test_a_queued_turn_whose_contact_is_removed_before_its_lock_runs_nothi
     assert model.requests == []
     assert turn.contexts == []
     bot.client.room_send.assert_not_awaited()
+
+
+def test_only_another_deployments_agent_itself_speaks_for_it(tmp_path: Path) -> None:
+    """Its turns run as Bob, while its owner, whom nobody here can vouch for, starts none."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, _record(requester=remote_party(REMOTE)))
+    admitted = contact_admission(config, paths, room_id=CONTACT_ROOM, agent_name="mind_bob", sender_ids=[REMOTE])
+    assert admitted == _ContactAdmission(CO_OWNER)
+    refused = contact_admission(config, paths, room_id=CONTACT_ROOM, agent_name="mind_bob", sender_ids=[REMOTE_OWNER])
+    assert refused == _ContactAdmission(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("thread_id", [None, THREAD_ID], ids=["timeline", "thread"])
+async def test_another_deployments_agent_wakes_the_agent_only_by_mentioning_it(
+    tmp_path: Path,
+    thread_id: str | None,
+) -> None:
+    """Agents wake each other only through a mention, so the other agent's unmentioned messages start no turn."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, _record(requester=remote_party(REMOTE)))
+    assert await _plan(config, paths, "mind_bob", sender=REMOTE, owner=CO_OWNER, thread_id=thread_id) == "ignore"
+    mentioned = ("mind_bob",)
+    plan = await _plan(
+        config,
+        paths,
+        "mind_bob",
+        sender=REMOTE,
+        owner=CO_OWNER,
+        mentioned=mentioned,
+        thread_id=thread_id,
+    )
+    assert plan == "respond"
+    assert await _plan(config, paths, "mind_bob", sender=CO_OWNER, owner=CO_OWNER) == "respond"
+
+
+def test_contact_turn_instructions_name_another_deployments_agent_by_id(tmp_path: Path) -> None:
+    """The agent learns who it talks to by Matrix ID, and that it wakes that agent by naming it as recipient."""
+    config, paths = _setup(tmp_path)
+    record = _contact(paths, _record(requester=remote_party(REMOTE)))
+    text = contact_turn_instructions(config, paths, record, "target").text
+    assert f"and {REMOTE}, an agent of another MindRoom deployment." in text
+    assert f"with recipient {REMOTE} when that agent should respond" in text

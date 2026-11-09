@@ -61,7 +61,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 
 A request's reason and the requesting agent's name come from the other side and can try to steer your agent when you reply in its thread, but accepting needs your confirmation on an approval card, and your agent's other tools ask for approval as your [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules say.
 
-The target of a request is a personal agent's name or Matrix ID, or the Matrix ID of a person with a personal agent on this deployment.
+The target of a request is a personal agent's name or Matrix ID, the Matrix ID of a person with a personal agent on this deployment, or the Matrix ID of an agent of another deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)).
 A request to a person reaches that person's own personal room, where their personal-room agent accepts or declines for them; once accepted, the person talks to the requesting agent in the contact room themselves.
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
@@ -72,6 +72,33 @@ After a decline, new requests for that pair are refused until the owner who decl
 Removing a contact makes its agents leave the contact room and withdraws the invitation of an owner who never joined it; owners who joined keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
 
+## Contacts With Other Deployments
+
+A personal agent can be in contact with a personal agent of another MindRoom deployment, on the same homeserver or a federated one, once both agents' `remote_agents` name each other.
+
+```yaml
+personal_agents:
+  mind:
+    agent:
+      contacts:
+        remote_agents:
+          - "@mindroom_*:partner.example"
+```
+
+Ask for such a contact with the other agent's Matrix ID as `target`, which its owner can find as the agent's account in their Matrix client.
+An invite to your agent from any account that `remote_agents` matches is treated as a contact request and posts its reason into your personal room, so name agent accounts, not people.
+The steps are the same as within one deployment, with these differences:
+
+- Your agent creates the contact room when it asks and invites the other agent, and the other owner sees the request in their personal room or on their Contacts page.
+- When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
+- After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
+- When either owner removes the contact, both agents leave the room.
+- Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
+- Your deployment knows the other agent only by its Matrix ID, not who owns it, so the other owner can read the contact room but cannot start turns of your agent, and each owner's messages reach only their own agent.
+- The contact room and its messages are stored on both homeservers.
+
+Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent_replies` apply as within one deployment.
+
 ## Configuration
 
 `contacts` is an object on an agent; set it to `{}` to enable contacts with no default rules, tools, or judge.
@@ -81,6 +108,7 @@ From then on its agents send nothing more into that room, and no message there s
 | `rules` | list of strings | `[]` | Rules for every contact of this agent; owners can add rules for a contact but cannot remove these |
 | `tools` | list of tool names | `[]` | Tools a contact turn offers when the owner chose none for that contact; `matrix_message` is always offered |
 | `judgment` | object or null | `null` | A [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) that checks each message against the rules; `null` runs no judge |
+| `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
 It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, or `dynamic_tools`, which fail validation with `contacts.tools may not include <tool>`.
@@ -180,7 +208,9 @@ The judge is never given a message that looks like it contains a secret such as 
 
 ## Limitations
 
-- Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
+- People without a personal agent on this deployment cannot be contacted and cannot ask, while agents of other deployments can (see [Contacts With Other Deployments](#contacts-with-other-deployments)).
+- In a thread that another deployment's agent wrote in, an unmentioned message from an owner gets no reply, as that agent counts as a second person there, so mention your agent.
+- A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `list_contacts`.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 - Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `remove_contact`.
@@ -196,7 +226,12 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `list_contacts` shows the agents that can be asked |
 | `<agent> is not a personal agent; only personal agents can have contacts` | `contacts` is set on an authored agent; set it on a `personal_agents` template instead |
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
-| `<owner> has no personal agent here, so a request cannot reach them` | The target person is not onboarded on this deployment; they need a personal agent first |
+| `<owner> has no personal agent here, so a request cannot reach them; ...` | The target person is not onboarded on this deployment, or the target is another deployment's agent that `remote_agents` does not name; onboard the person, or add the agent's Matrix ID to `remote_agents` |
+| `Only your agent can contact an agent of another MindRoom deployment, so ask with party=agent` | `party="me"` reaches only this deployment |
+| `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
+| `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
+| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or decline it` | The other side withdrew the request, or its homeserver is unreachable |
+| A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
 | `The request to <target> could not be posted to its owner's personal room; ask again to retry` | Sending the notice failed; the request is kept, so ask again |
 | `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |

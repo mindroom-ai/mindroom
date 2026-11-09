@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord
@@ -137,7 +138,12 @@ def _joined(runtime: _Runtime) -> set[str]:
     return _memberships(runtime, "join")
 
 
-def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> BotRoomLifecycle:
+def _room_lifecycle(
+    config: Config,
+    paths: RuntimePaths,
+    agent_name: str,
+    agent_bot: Callable[[str], AgentBot | None] = lambda _name: None,
+) -> BotRoomLifecycle:
     """Return one agent's room lifecycle on fakes, with no configured, retained, or invited rooms."""
     user_id = _account(paths, agent_name)
     return BotRoomLifecycle(
@@ -163,6 +169,7 @@ def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> Bot
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
             get_conversation_reader=MagicMock(),
+            get_agent_bot=agent_bot,
         ),
     )
 

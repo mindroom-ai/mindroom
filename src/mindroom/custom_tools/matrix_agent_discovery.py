@@ -32,7 +32,8 @@ class _MatrixRoomAgent:
 async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> list[_MatrixRoomAgent]:
     """Apply current ingress authorization, room scope, and runtime availability.
 
-    In the agent's own active contact room, the contact's other agent is a candidate whatever its access says.
+    In the agent's own active contact room, the contact's other agent is a candidate whatever its access says, and
+    another deployment's agent there is one by its Matrix ID.
     """
     context = replace(context, config=context.current_config, config_provider=None)
     target_room = context.room if room_id == context.room_id else None
@@ -55,8 +56,8 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
         room_id=room_id,
         agent_name=context.agent_name,
     )
-    if counterparty is not None:
-        candidates = [*candidates, registry.current_id(counterparty)]
+    if counterparty is not None and counterparty.kind == "agent":
+        candidates = [*candidates, registry.current_id(counterparty.id)]
     if context.orchestrator is not None:
         candidates = filter_materializable_responders(
             candidates,
@@ -76,4 +77,12 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
                 description=describe_agent(name, context.config, tools),
                 thread_mode=context.config.get_entity_thread_mode(name, context.runtime_paths, room_id=room_id),
             )
+    if counterparty is not None and counterparty.kind == "remote_agent":
+        # Another deployment's agent is named by its Matrix ID; its thread mode is its own deployment's to choose.
+        agents[counterparty.id] = _MatrixRoomAgent(
+            name=counterparty.id,
+            matrix_user_id=counterparty.id,
+            description="An agent of another MindRoom deployment.",
+            thread_mode="thread",
+        )
     return [agents[name] for name in sorted(agents)]

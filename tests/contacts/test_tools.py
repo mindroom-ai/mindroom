@@ -91,6 +91,7 @@ def _data(
     contacts: bool = True,
     accept_invites: bool = True,
     contact_tools: tuple[str, ...] = (),
+    remote_agents: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     data = _with_template()
     agent = data["personal_agents"]["mind"]["agent"]
@@ -98,7 +99,11 @@ def _data(
     agent["include_default_tools"] = False
     agent["accept_invites"] = accept_invites
     if contacts:
-        agent["contacts"] = {"rules": ["Never share keys."], "tools": list(contact_tools)}
+        agent["contacts"] = {
+            "rules": ["Never share keys."],
+            "tools": list(contact_tools),
+            "remote_agents": list(remote_agents),
+        }
     data["personal_rooms"] = {"agent": "mind", "onboarding_rooms": ["lobby"]}
     return data
 

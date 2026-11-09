@@ -105,6 +105,7 @@ class _Bot:
                 on_configured_room_joined=AsyncMock(),
                 on_room_joined=self.on_room_joined,
                 get_conversation_reader=MagicMock(),
+                get_agent_bot=lambda _name: None,
             ),
         )
 

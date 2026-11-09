@@ -371,6 +371,7 @@ class AgentBot:
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_joined=self._restore_scheduled_tasks,
                 get_conversation_reader=lambda: self._conversation_reader,
+                get_agent_bot=lambda name: self.orchestrator.agent_bots.get(name),
             ),
         )
         self._init_runtime_components()
@@ -2042,11 +2043,12 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Forward one live room member event to the call manager, the personal-room lifecycle, and the router's hooks."""
+        """Forward one live room member event to the call manager, the personal-room and contact lifecycles, and the router's hooks."""
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
         await self._personal_room_lifecycle.member_event(room, event)
+        await self._room_lifecycle.on_contact_member(room.room_id, event)
         if self._router is not None:
             await self._router.member_event(room, event)
 

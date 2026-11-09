@@ -34,6 +34,8 @@ function DateValue({ value }: { value: string }) {
 
 /** Who a party is, naming an agent's owner, since the other side chooses its agent's name. */
 function partyLine(party: ContactPartyView): string {
+  if (party.kind === "remote_agent")
+    return `${party.id}, an agent of another MindRoom deployment`;
   return party.kind === "agent"
     ? `${party.id}, the agent of ${party.owner}`
     : `${party.id}, in person`;

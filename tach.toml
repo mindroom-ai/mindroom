@@ -2457,6 +2457,7 @@ path = "mindroom.bot_room_lifecycle"
 depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
+    "mindroom.contacts.federation",
     "mindroom.contacts.flow",
     "mindroom.contacts.parties",
     "mindroom.contacts.store",
@@ -4106,6 +4107,7 @@ visibility = [
     "mindroom.orchestration.rooms",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.custom_tools.matrix_api",
+    "mindroom.contacts.federation",
     "mindroom.contacts.flow",
     "mindroom.matrix.room_accounts",
 ]
@@ -10041,6 +10043,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.contacts.federation"
+depends_on = [
+    "mindroom.contacts.flow",
+    "mindroom.contacts.parties",
+    "mindroom.contacts.store",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_room_admin",
+]
+
+[[modules]]
 path = "mindroom.contacts.turns"
 depends_on = [
     "mindroom.config.contacts",
@@ -10048,6 +10060,7 @@ depends_on = [
     "mindroom.contacts.parties",
     "mindroom.contacts.policy",
     "mindroom.contacts.store",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.tool_system.plugins",
 ]
