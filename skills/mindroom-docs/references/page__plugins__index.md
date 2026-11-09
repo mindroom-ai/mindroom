@@ -1476,6 +1476,7 @@ A service that exited stays reported as exited, and starts again only after `sto
 The program's output goes to the worker's log.
 
 A service stops when `idle_timeout_seconds` pass without an ensure, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
+A service that replaced plugin code starts during a reload keeps running until its idle timeout.
 Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
 A plugin with worker services states `"mindroom_plugin_api": "1.19"` in its manifest.
 
