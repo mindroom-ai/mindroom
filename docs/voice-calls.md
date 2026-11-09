@@ -350,28 +350,28 @@ MindRoom Chat finds MindRoom as it does for [worker computers](tools/worker-comp
 
 What people see in MindRoom Chat:
 
-- When a call starts, the router posts a `Call started` row in the room, which shows who is in the call, with Join and Transcript.
+- A new call gets a `Call started` row in the room, posted by the router, that lists who is in the call and offers Join and Transcript.
 - Transcript opens the live transcript: each person's words under their name as they speak, and a gap for a paused or untranscribed stretch.
 - Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
-- When the call ends, the router edits the row to `Call ended · N min`.
-- About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
-- With notes, the router then titles the row's thread from them, as an agent's reply titles its thread, unless someone pinned the thread's title or resolved the thread.
+- Once the call is over, the row changes to `Call ended · N min`.
+- About 30 seconds after the end, the router posts a single message in the row's thread, and the row then links to it: the full transcript under the notes (a summary, decisions, action items with their owners, and open questions), or under `Call · N min` when no notes model is set.
+- When there are notes, the router titles the row's thread from them, as it does after an agent's reply, unless someone pinned the thread's title or resolved the thread.
 - The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
 
 The rules:
 
 - Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
-- A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
+- A person's app stays in the call as long as it checks in at least once a minute, which it does every 20 seconds, and leaving takes it out right away.
 - A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a router restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
-- Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
+- Leaving on one device takes the person out of the call, and another device of theirs still in the call rejoins at its next check-in.
 - Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
 - A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
 - A call's length runs to the last check-in or leave MindRoom recorded from anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down shows as shorter than it really was.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
-- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 240 a minute.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 70 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
-- A stretch said before the call ended that arrives late is still added if it arrives within 20 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
+- A stretch said before the call ended is still added when it arrives within 30 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.
 - A message that cannot be posted is tried again every minute for up to a day after the call, with any notes already written until MindRoom restarts; after a restart, new notes may be written, or the message posted without notes.
 - A call in which nobody spoke, or speech-to-text heard no words, posts no message; one without words but with a stretch that failed to transcribe posts `Call · N min. Nothing could be transcribed.` without a transcript.

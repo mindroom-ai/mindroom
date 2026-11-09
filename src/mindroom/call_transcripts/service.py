@@ -1,7 +1,7 @@
-"""The rules of a call between people: who is in it, who may act on it, Pause, speech, its end, its row and message.
+"""How a call between people runs: who is in it and may act on it, Pause, speech, how it ends, its row and message.
 
-The service does no Matrix or network work of its own: the room side (the router's view of the room), the transcriber
-and the notes writer are passed in, and the store is called in a worker thread.
+All Matrix and network work goes through what the service is given: the room side (the router's view of the room),
+the transcriber and the notes writer. The store runs in a worker thread.
 """
 
 from __future__ import annotations
@@ -25,14 +25,24 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The largest stretch of speech accepted, in bytes.
-MAX_SPEECH_BYTES = 1_000_000
+# The longest stretch of speech accepted. MindRoom Chat's speech finder cuts longer talk into stretches of at most 30
+# seconds, so no line reaches the live transcript later than that after its first word. Speech-to-text takes much
+# longer audio (OpenAI's transcription API takes files up to 25 MB, about 13 minutes of the audio Chat sends), so
+# Chat's cut is the limit that binds.
 _MAX_SPEECH_SECONDS = 30.0
-_SPEECH_PER_MINUTE = 240
+# The largest stretch accepted, in bytes: 30 seconds of the 16 kHz 16-bit mono audio Chat sends is 960,044 bytes.
+MAX_SPEECH_BYTES = 1_000_000
+# The most stretches one person sends in a minute. Chat's speech finder rates 96 ms frames, and a stretch holds at
+# least 4 frames of speech and the 14 quiet frames that end it, 1.73 seconds in all, so one person talking without a
+# break sends at most 35 stretches a minute. Twice that leaves room for the stretches a mute or a new microphone hands
+# on early, and for uploads that queued behind a slow transcription catching up.
+_SPEECH_PER_MINUTE = 70
 _SPEECH_WINDOW_SECONDS = 60.0
 _PRESENCE_SECONDS = 60.0
 _CHECK_SECONDS = 15.0
-_TRANSCRIPT_DELAY_SECONDS = 20.0
+# How long after a call's end its stretches are still taken, and its message waits. Chat gives an upload up 30
+# seconds after it began, its one retry included, so a stretch it began sending before the end arrives by then or never.
+_TRANSCRIPT_DELAY_SECONDS = 30.0
 # How long a call's Matrix writes wait, after one could not be made, before they are tried again.
 _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
@@ -76,17 +86,17 @@ class CallRefusedError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Call:
-    """A call as people see it."""
+    """A call, as clients are shown it."""
 
     id: str
     room_id: str
     row_event_id: str | None
-    """The call's row notice, None until it is posted."""
+    """The notice the router posts in the room for the call; None until it is up."""
     started_at: float
     ended_at: float | None
     """None while the call is live."""
     members: tuple[str, ...]
-    """Whose apps are in the call now."""
+    """The people whose apps are in the call now."""
     paused_by: str | None
     """Who paused transcription, None while it is not paused."""
 
@@ -121,7 +131,7 @@ class CallTranscript:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptMessage:
-    """The one message posted in the call's row thread when it ends: its body is the notes or a summary."""
+    """The single message an ended call leaves in its row's thread, with the notes, or a one-line summary, as its body."""
 
     room_id: str
     call_id: str
@@ -132,7 +142,7 @@ class TranscriptMessage:
 
 @dataclass(frozen=True, slots=True)
 class EndedRow:
-    """What an ended call's row is edited to say: how long the call lasted and, once posted, its transcript message."""
+    """The ended call's row as an edit makes it: the call's length, then also where its transcript message is."""
 
     room_id: str
     call_id: str
@@ -167,19 +177,19 @@ class _CallRoom(Protocol):
         ...
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post the call's row notice and return its event ID; None if it was not posted, such as before the router is ready."""
+        """Post the notice that stands for the call in the room; return its event ID, None when nothing went out."""
         ...
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
-        """Post the transcript message in the row's thread and return its event ID; None if it was not posted."""
+        """Post the call's message in its row's thread; return its event ID, None when nothing went out."""
         ...
 
     async def edit_row(self, row: EndedRow) -> str | None:
-        """Edit the call's row to say it ended, and return the edit's event ID; None if it was not sent."""
+        """Replace the row's text with the ended call's; return the edit's event ID, None when nothing went out."""
         ...
 
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
-        """Title the row's thread again, in the background, from the posted message ``event_id``."""
+        """Have the row's thread retitled from the message ``event_id``, in the background."""
         ...
 
 
@@ -204,7 +214,7 @@ class _NotesWriter(Protocol):
 
 
 class CallTranscriptService:
-    """Live calls between people in rooms, and the one message each leaves behind."""
+    """Calls between people in rooms while they run, and the message each one leaves after it ends."""
 
     def __init__(
         self,
@@ -233,9 +243,9 @@ class CallTranscriptService:
         self._written_notes: dict[str, str] = {}
 
     async def join(self, room_id: str, user_id: str) -> Call:
-        """Join the room's live call, starting one if there is none or nobody is in it; from someone in it, a heartbeat.
+        """Put the person's app in the room's live call, starting a call when there is none or it is empty.
 
-        Coming into the call needs permission to post in the room; a heartbeat does not check it again.
+        From someone already in the call this is their heartbeat. Only coming in checks that they may post in the room.
         """
         live = await asyncio.to_thread(self._store.live_call, room_id)
         await self._require_member(room_id, user_id, _NOT_IN_ROOM, call=live)
@@ -259,11 +269,11 @@ class CallTranscriptService:
             return _call_view(call, await self._present(call, now))
 
     async def leave(self, call_id: str, user_id: str) -> None:
-        """Take the person's app out of the call at once; the last one out ends the call.
+        """Take the person's app out of the call now; when it was the last one in, the call ends.
 
-        Someone whose app is not in the call records nothing, and someone no longer in the room is answered as anyone
-        outside it, after their app is taken out. A leave is never a check-in, so one refused while the room cannot be
-        read leaves the person to drop out of the call a minute after their app last checked in.
+        A leave from an app that is not in the call changes nothing. Someone who is no longer in the room is taken out,
+        then told the call does not exist, as anyone outside the room is. A leave never counts as a check-in: refused
+        while the room cannot be read, the person drops out a minute after their app last checked in.
         """
         call = await self._fresh(call_id)
         member = await self._room.is_member(call.room_id, user_id)
@@ -291,8 +301,8 @@ class CallTranscriptService:
         """Transcribe one stretch the person said from ``started_at`` into a line, or a gap if speech-to-text fails.
 
         A stretch speech-to-text heard no words in adds nothing, and returns None. The audio is never written to disk.
-        A stretch said before its call ended is accepted for 20 seconds after the end; one said while transcription was
-        paused never is.
+        A stretch said before its call ended is still taken for the 30 seconds after the end; one said while
+        transcription was paused never is.
         """
         call = await self._call_for(call_id, user_id)
         seconds = _speech_seconds(audio)
@@ -338,7 +348,7 @@ class CallTranscriptService:
     async def reserve_upload(self, call_id: str, user_id: str) -> None:
         """Take the person's one upload slot before a stretch's audio is read, until ``release_upload``.
 
-        Refused from someone not in the call, or ended and past its 20 seconds, or with another upload under way.
+        Refused from someone not in the call, for a call ended more than 30 seconds ago, or while their last upload runs.
         """
         call = await self._call_for(call_id, user_id)
         await self._require_in_call(call, user_id, self._clock())
@@ -481,7 +491,7 @@ class CallTranscriptService:
         return max(call.ended_at + _TRANSCRIPT_DELAY_SECONDS, call.retry_at or 0.0)
 
     async def _end_if_empty(self, call: StoredCall, now: float) -> StoredCall:
-        """End a live call nobody is in, under the room's lock: its pause ends, and its message falls due 20 seconds later.
+        """End a live call nobody is in, under the room's lock: its pause ends, and its message falls due 30 seconds later.
 
         It ended when an app in it last checked in or left, never before it started: not when that is noticed, which
         may be hours later after MindRoom was down. Returns the call as it is then.
@@ -542,7 +552,7 @@ class CallTranscriptService:
         *,
         said_at: float | None = None,
     ) -> None:
-        """Take speech from someone whose app is in the live call, or was in the ended call, for 20 seconds after its end.
+        """Take speech from someone whose app is in the live call, or was in the ended call, for 30 seconds after its end.
 
         From someone who left the ended call before it ended, only a stretch ``said_at`` before they left. The
         transcript message is begun no sooner, so a retry of its post sends just what the first attempt did.
@@ -558,7 +568,7 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message="That was said after you left the call.")
 
     def _count_speech(self, user_id: str, now: float) -> None:
-        """Refuse more than 240 stretches a minute from one person; otherwise count this one."""
+        """Refuse a person's stretch past their 70 a minute; otherwise count it."""
         recent = self._recent_speech.setdefault(user_id, deque())
         while recent and recent[0] <= now - _SPEECH_WINDOW_SECONDS:
             recent.popleft()
@@ -649,7 +659,7 @@ class CallTranscriptService:
             await self._post_transcript(call, call.row_event_id)
 
     def _transcript_due(self, call: StoredCall, now: float) -> bool:
-        """Return whether the ended call's message is due: 20 seconds after the end, with none of its speech in flight."""
+        """Return whether the ended call's message is due: 30 seconds after the end, with none of its speech in flight."""
         return (
             call.ended_at is not None
             and call.transcript_done_at is None

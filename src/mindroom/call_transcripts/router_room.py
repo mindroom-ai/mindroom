@@ -1,7 +1,7 @@
-"""The router's side of the rooms calls are in: who is in a room, who may post, what the router posts.
+"""What the router knows and does in a call's room: its members, who may post there, and the router's call messages.
 
-Everything is read and sent through the router's own Matrix client, and nothing while the router is not ready. One
-full read of a room's state answers every question about that room for a few seconds, however many heartbeats ask.
+All of it goes through the router's own Matrix client, so nothing is read or sent while the router is not ready.
+Each room's state is read once and reused for a few seconds, however many heartbeats ask about the room meanwhile.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The row notice names its call, and the transcript message the call it finishes.
+# The row names its call in its content, and so does the transcript message.
 _CALL_CONTENT_KEY = "io.mindroom.call"
 _CALL_NOTES_CONTENT_KEY = "io.mindroom.call_notes"
 _ROW_BODY = "Call started"
@@ -141,7 +141,7 @@ class RouterCallRoom:
         return {user_id: _display_name(state.content("m.room.member", user_id)) for user_id in user_ids}
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post the call's row notice: it wakes no agent and mentions nobody."""
+        """Post the call's row, a notice that starts no agent reply and mentions nobody."""
         content = {
             "msgtype": "m.notice",
             "body": _ROW_BODY,
@@ -152,9 +152,9 @@ class RouterCallRoom:
         return await self._post(room_id, content, transaction_id=f"mindroom-call-{call_id}-row", operation="call_row")
 
     async def edit_row(self, row: EndedRow) -> str | None:
-        """Edit the call's row to say the call ended and how long it lasted, then also where its transcript message is.
+        """Edit the row to give the call's end and length, and in its second edit where the transcript message is.
 
-        Still a notice that wakes no agent and mentions nobody. Each of the two edits is its own transaction.
+        The edited row is still a notice that starts no agent reply and mentions nobody. Each edit has its own transaction.
         """
         call: dict[str, object] = {
             "call_id": row.call_id,
@@ -179,11 +179,11 @@ class RouterCallRoom:
         )
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
-        """Post the call's one message in the row's thread: the notes, the transcript and the call it finishes.
+        """Post the call's message in its row's thread, holding the notes, the transcript and the call's ID.
 
-        A transcript too large for one event goes into a sidecar on the way, and the message is not posted while
-        the sidecar cannot be uploaded: a cut-short text without the transcript, sent under the call's transaction,
-        could never be replaced. Mentions in the notes are neutralised.
+        A transcript too big for one event is uploaded as a sidecar first, and the message waits while that upload
+        fails: sent cut short under the call's transaction, the message could never be replaced by the full one.
+        Mentions in the notes ping nobody.
         """
         transcript = message.transcript
         content = build_message_content(
@@ -210,9 +210,9 @@ class RouterCallRoom:
         )
 
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
-        """Have the router title the row's thread again from the posted message ``event_id``, as it was posted.
+        """Have the router retitle the row's thread from the message ``event_id`` it just posted there.
 
-        The title is written in the background, as after the router's own replies, and a title someone pinned stays.
+        This runs in the background, as after the router's replies, and leaves a title someone pinned in place.
         """
         self.retitle(message.room_id, message.row_event_id, event_id, _without_mentions(message.body))
 

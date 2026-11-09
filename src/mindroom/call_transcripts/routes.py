@@ -1,7 +1,7 @@
-"""MindRoom Chat's routes for call transcripts: join, leave, Pause, speech, and the live call.
+"""The HTTP routes MindRoom Chat uses for call transcripts: the room's call, leaving, Pause and speech.
 
-Every route answers 404 while call transcripts are off, and then needs a client session. The service decides the rest;
-each refusal answers with its status, its sentence and its code.
+While call transcripts are off every route answers 404; otherwise each needs a client session. The service makes
+every other decision, and a refusal answers with its HTTP status, a sentence and a code.
 """
 
 from __future__ import annotations
@@ -88,13 +88,13 @@ class _PauseRequest(BaseModel):
 
 @router.post("/rooms/{room_id}/call")
 async def join_call(room_id: str, caller: _SignedIn) -> dict[str, object]:
-    """Join the room's live call, starting it if there is none; from someone already in it, this is the heartbeat."""
+    """Put the person in the room's live call, starting one if needed; sent again while in it, it is the heartbeat."""
     return {"call": _call_json(await caller.service.join(room_id, caller.user_id))}
 
 
 @router.post("/calls/{call_id}/leave")
 async def leave_call(call_id: str, caller: _SignedIn) -> dict[str, object]:
-    """Take the person's app out of the call."""
+    """Take the person's app out of the call; the last one out ends it."""
     await caller.service.leave(call_id, caller.user_id)
     return {}
 
@@ -129,7 +129,7 @@ async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> di
 
 @router.get("/rooms/{room_id}/call")
 async def live_call(room_id: str, caller: _SignedIn, after: str | None = None) -> dict[str, object]:
-    """Return the room's live call, its lines (those added after the line ``after`` if given) and everyone's names."""
+    """Return the room's live call with its lines, only those after the line ``after`` when given, and names."""
     return _live_json(await caller.service.live(room_id, caller.user_id, after=after))
 
 
