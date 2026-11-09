@@ -1721,6 +1721,7 @@ Each call names exactly one of `service`, the name of one of the calling plugin'
 `http()` never follows redirects or decompresses, and the relay keeps no cookies, so a route can pass an answer through as it came.
 `websocket()` never follows a redirect either: a handshake the app redirects raises `aiohttp.WSServerHandshakeError` with the app's status and headers, `Location` included.
 The relay sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
+A route on MindRoom's API origin passes the app only the cookies and headers it needs, never the browser's whole `Cookie` header, which there carries MindRoom's own sign-in cookies.
 Of the `headers` a WebSocket's handshake carries, the app gets only `Accept-Language`, `Authorization`, `Cookie`, `Origin`, and `User-Agent`.
 A route on a [plugin host](#origins-of-your-own) may pass the browser's `Origin` and the app's own cookies, which carry no MindRoom session there, but never its own gate cookie.
 A service gets its secret from the relay, and never one the route sends.
@@ -1749,7 +1750,7 @@ async def share_app() -> str:
         return refused.detail
     async with relay.http("GET", "/", port=5173) as answer:
         if "x-mindroom-relay-refused" in answer.headers:
-            return "Nothing answers on port 5173 yet."
+            return "Nothing answers on port 5173 yet." if answer.status == 502 else (await answer.json())["detail"]
     url = plugin_origin_url(context, "demo")
     return f"The app is at {url}" if url is not None else "Plugin origins are off."
 ```
