@@ -52,18 +52,18 @@ async def test_a_stream_hears_what_changes_but_never_git_credentials_or_save_tem
 
 @pytest.mark.asyncio
 async def test_each_batch_is_sorted(tmp_path: Path) -> None:
-    """One batch lists its paths in order."""
+    """Every batch lists its paths in order."""
     root = tmp_path / "workspace"
     root.mkdir()
     async with workspace_changes(root) as next_changes:
         for name in ("c.md", "a.md", "b.md"):
             (root / name).write_text("x")
-        await asyncio.sleep(0.4)
+        batches: list[list[str]] = []
+        async with asyncio.timeout(5):
+            while not {"a.md", "b.md", "c.md"} <= {path for batch in batches for path in batch}:
+                batches.append(await next_changes())
 
-        batch = await next_changes()
-
-    assert batch == sorted(batch)
-    assert {"a.md", "b.md", "c.md"} <= set(batch)
+    assert all(batch == sorted(batch) for batch in batches)
 
 
 @pytest.mark.asyncio
@@ -334,3 +334,21 @@ def test_a_scan_leaves_out_pipes(tmp_path: Path) -> None:
     os.mkfifo(root / "pipe")
 
     assert set(watch._scan(root)) == {"notes.md"}
+
+
+def test_entries_a_scan_leaves_out_count_toward_its_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code the agent runs can plant countless hidden, cached or special files; each still counts, so a scan stays bounded."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(10):
+        (root / f".env.{index}").write_text("x")
+        os.mkfifo(root / f"pipe{index}")
+    (root / "notes.md").write_text("x")
+    monkeypatch.setattr(watch, "_MAX_ENTRIES", 5)
+    examined = []
+    real_is_hidden = watch.is_hidden
+    monkeypatch.setattr(watch, "is_hidden", lambda path: examined.append(path) or real_is_hidden(path))
+
+    watch._scan(root)
+
+    assert len(examined) <= 5

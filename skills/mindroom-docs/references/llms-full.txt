@@ -6600,7 +6600,7 @@ Paths are relative to the workspace, with `/` between folders, and `""` names th
 Absolute paths, paths starting with `~`, `..`, NUL, and backslashes answer 400.
 Links are followed while they stay inside the workspace; a path through a link that leads outside answers 403.
 Only folders, regular files, and links are listed or read; pipes, sockets, and devices are left out, and reading one answers 400.
-Git's own files, `.git` and anything below it, are never saved, made, moved, or deleted (403), and neither is a folder that holds a `.git` or a hidden credential at any depth deleted (403); move it, or ask the agent to delete it.
+Git's own files, `.git` and anything below it, are never saved, made, moved, or deleted (403), and neither is a folder that holds a `.git` or a hidden credential at any depth deleted (403); ask the agent to delete it.
 The workspace itself can't be deleted, moved, or replaced (400).
 
 The workspace is the agent's home folder, so credentials kept there are hidden: they are never listed, read, changed, or reported as changed, even through a link, and a path naming one answers 404 as an absent one does.
@@ -6625,7 +6625,7 @@ Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the a
 | `GET /agents/{agent_user_id}/workspace/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
 | `PUT /agents/{agent_user_id}/workspace/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |
 | `POST /agents/{agent_user_id}/workspace/folder` with `{"path"}` | 204; the folder is made with any folders above it |
-| `POST /agents/{agent_user_id}/workspace/move` with `{"path", "to"}` | 204; a link moves as a link |
+| `POST /agents/{agent_user_id}/workspace/move` with `{"path", "to"}` | 204; the folders above `to` are made, and a link moves as a link |
 | `DELETE /agents/{agent_user_id}/workspace/entry?path=<path>` | 204; a folder goes with everything in it unless it holds Git's files or a hidden credential, and a link without what it leads to |
 
 An entry has `name`, `path`, `kind` (`file`, `folder`, or `link`), `size` (0 for a folder or link), `mtime` in milliseconds since the epoch, and for a link `target`, which is `file` or `folder`, or null when it leads outside, to a hidden credential, or nowhere.

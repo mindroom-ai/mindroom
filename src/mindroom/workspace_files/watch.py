@@ -33,7 +33,7 @@ _INTERVAL_SECONDS = 0.15
 # A scan rests at least this many times as long as it took, so following a large workspace costs a bounded share of
 # one core; a small one is scanned every interval.
 _REST_FACTOR = 9
-# The folders and entries a scan takes in, breadth first, so a large tree leaves out its deepest ones.
+# The folders a scan takes in and the entries it examines, breadth first, so a large tree leaves out its deepest ones.
 _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
@@ -105,6 +105,7 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
 def _scan(root: Path) -> dict[str, _Seen]:
     """Return what the workspace holds now by relative path, empty while the root is missing or a link."""
     seen: dict[str, _Seen] = {}
+    examined = 0
     with suppress(OSError), open_directory_within_root(root) as root_fd:
         folders = [PurePosixPath()]
         # The list grows while it is read.
@@ -115,6 +116,10 @@ def _scan(root: Path) -> dict[str, _Seen]:
                 os.scandir(directory) as items,
             ):
                 for item in items:
+                    # Every entry counts, also one left out, which code the agent runs can plant without end.
+                    examined += 1
+                    if examined > _MAX_ENTRIES:
+                        return seen
                     relative = folder / item.name
                     # The folders above passed both checks, so the filter needs only the name.
                     if not _FILTER(watchfiles.Change.added, item.name) or is_hidden(relative):
@@ -131,8 +136,6 @@ def _scan(root: Path) -> dict[str, _Seen]:
                             folders.append(relative)
                     elif kind in ENTRY_KINDS:
                         seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
-                    if len(seen) == _MAX_ENTRIES:
-                        return seen
     return seen
 
 
