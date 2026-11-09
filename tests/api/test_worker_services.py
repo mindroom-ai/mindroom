@@ -7,6 +7,7 @@ import json
 import re
 import socket
 import sys
+import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -350,6 +351,29 @@ async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_stop_refuses_a_start_that_arrived_before_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A start still preparing when a stop arrives, such as a reload's, never starts the service after that stop."""
+    preparing, release = threading.Event(), threading.Event()
+    program = worker_services_module._program
+
+    def slow_program(*args: object) -> object:
+        preparing.set()
+        release.wait(10)
+        return program(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker_services_module, "_program", slow_program)
+    async with _runner(tmp_path) as runner:
+        start = asyncio.create_task(_call("POST", runner.url(), _body(), _AUTH))
+        await _until(preparing.is_set)
+        assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
+        release.set()
+        status, answer = await start
+        assert (status, answer["detail"]) == (409, "The service was stopped while it started.")
+        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert (await _call("POST", runner.url(), _body(), _AUTH))[1]["state"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_any_valid_plugin_name_runs_services(tmp_path: Path) -> None:
     """Plugin names may start with an underscore and run longer than service names."""
     name = "_" + "x" * 80
@@ -441,6 +465,8 @@ async def test_a_plugin_runs_its_service_in_the_agent_s_worker(tmp_path: Path, m
 
         await stop_worker_service(context, _SERVICE, _TARGET)
         assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        # A stopped service is not stopped again at the next plugin load.
+        assert plugin_worker_services._started == {}
 
 
 @pytest.mark.asyncio
@@ -465,6 +491,8 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
         unresolved = resolve_worker_target("user", "coder", replace(_TARGET.execution_identity, requester_id=None))
         with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: Worker scope 'user'"):
             await ensure_worker_service(context, _SERVICE, unresolved)
+        with pytest.raises(WorkerServiceError, match=r"tool 'worker service\.stop'"):
+            await stop_worker_service(context, _SERVICE, unresolved)
 
         async def garbled(*_args: object) -> bytes:
             return b'{"state": "gone"}'
@@ -482,6 +510,9 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
             endpoint = f"http://127.0.0.1:{closed.getsockname()[1]}/api/sandbox-runner/execute"
         workers.handle = replace(workers.handle, status="ready", endpoint=endpoint)
         with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: ConnectError"):
+            await ensure_worker_service(context, _SERVICE, _TARGET)
+        workers.handle = replace(workers.handle, auth_token=None)
+        with pytest.raises(WorkerServiceError, match="unavailable: MINDROOM_SANDBOX_PROXY_TOKEN must be set"):
             await ensure_worker_service(context, _SERVICE, _TARGET)
 
 

@@ -99,18 +99,18 @@ def _endpoint(
                 runtime_paths=runtime_paths,
                 runtime_config=config,
                 tool_name="worker service",
-                function_name="ensure",
+                function_name="ensure" if start else "stop",
                 worker_target=target,
                 worker_manager=manager,
                 base_dir=None,
                 start=start,
             )
+        if handle is None or handle.status != "ready":
+            return None
+        headers = worker_request_headers(handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
     except RuntimeError as error:
         msg = f"The agent's worker is unavailable: {error}"
         raise WorkerServiceError(msg) from None
-    if handle is None or handle.status != "ready":
-        return None
-    headers = worker_request_headers(handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
     return _Endpoint(route.model_dump(mode="json"), f"{worker_api_root(handle)}/plugin-services", headers)
 
 
@@ -153,6 +153,7 @@ async def _stop(paths: RuntimePaths, config: Config, target: ResolvedWorkerTarge
     endpoint = await asyncio.to_thread(_endpoint, paths, config, target, start=False)
     # A worker that does not run runs no service.
     if endpoint is not None:
+        _started.pop((str(endpoint.route["worker_key"]), plugin, name), None)
         await _send("DELETE", endpoint, f"{plugin}/{name}", None)
 
 
