@@ -199,7 +199,8 @@ async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_co
 
     def block_default_executor() -> None:
         default_started.set()
-        release_default.wait(timeout=5)
+        # Held past the worker proxy call's own guard; the test releases it once it has checked the call.
+        release_default.wait(timeout=2 * SETTLE_TIMEOUT_SECONDS)
 
     default_blocker = loop.run_in_executor(None, block_default_executor)
     assert default_started.wait(timeout=SETTLE_TIMEOUT_SECONDS)

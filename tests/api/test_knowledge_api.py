@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
-import time
+import threading
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO, cast
 from unittest.mock import ANY, AsyncMock, patch
@@ -881,10 +881,12 @@ async def test_git_status_probe_does_not_block_event_loop(
     publish_api_config(client.app, config)
     loop = asyncio.get_running_loop()
     probe_started = asyncio.Event()
+    release_probe = threading.Event()
 
     def _slow_git_checkout_present(*_args: object, **_kwargs: object) -> bool:
         loop.call_soon_threadsafe(probe_started.set)
-        time.sleep(0.2)
+        # A probe run on the event loop would block it here, so the status could never be awaited unfinished below.
+        release_probe.wait(SETTLE_TIMEOUT_SECONDS)
         return False
 
     async def _empty_file_count(*_args: object, **_kwargs: object) -> knowledge_api._FileCountInfo:
@@ -907,10 +909,12 @@ async def test_git_status_probe_does_not_block_event_loop(
             ),
         ),
     )
-    await asyncio.wait_for(probe_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
-
-    assert status_task.done() is False
+    try:
+        await asyncio.wait_for(probe_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        await asyncio.sleep(0.01)
+        assert status_task.done() is False
+    finally:
+        release_probe.set()
     payload = await status_task
     assert payload["git"]["repo_present"] is False
 
