@@ -675,11 +675,22 @@ def with_user_services(operator: EgressBrokerConfig, **user: EgressService) -> E
     return EgressRules(operator=operator, effective=effective)
 
 
+# Bound for the rest of the test process, so the kernel gives these ports to no other socket.
+_reserved_ports: list[socket.socket] = []
+
+
 def free_port() -> int:
-    """Return a loopback port nothing listens on."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    """Return a loopback port nothing listens on, held for this test process.
+
+    A released probe's port can go to any other socket on a busy machine before the broker binds it. The held socket
+    never listens, so a connection to the port is refused, and a server that sets ``SO_REUSEADDR``, as asyncio's do,
+    still binds it.
+    """
+    probe = socket.socket()
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    probe.bind(("127.0.0.1", 0))
+    _reserved_ports.append(probe)
+    return probe.getsockname()[1]
 
 
 def proxy_authorization(token: str) -> str:
