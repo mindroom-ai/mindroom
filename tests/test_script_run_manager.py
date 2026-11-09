@@ -9,6 +9,7 @@ import stat
 import sys
 import threading
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -2666,18 +2667,30 @@ async def test_terminal_failure_error_is_bounded_with_its_output(tmp_path: Path)
     assert reconciled.error.endswith(":tail")
 
 
+def test_runtime_limit_is_measured_against_the_current_time(tmp_path: Path) -> None:
+    """Unless a test sets it, a run's maximum runtime is measured against the current UTC time."""
+    manager, _backend, _client = _manager(tmp_path)
+
+    before = datetime.now(UTC)
+    measured = manager.clock()
+
+    assert before <= measured <= datetime.now(UTC)
+
+
 @pytest.mark.asyncio
-async def test_reconcile_enforces_runtime_limit_through_revocation_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An expired run is revoked and broker-cancelled before its worker receives a signal."""
+@pytest.mark.parametrize("entry", ["reconcile", "status"])
+async def test_an_expired_run_is_revoked_before_its_worker_is_signalled(tmp_path: Path, entry: str) -> None:
+    """An expired run is revoked and broker-cancelled before its worker receives a signal, also when its owner asks."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
-    monkeypatch.setattr(manager_module, "_runtime_expired", lambda _run: True)
+    started = datetime.fromisoformat(run.started_at or run.created_at)
+    manager.clock = lambda: started + timedelta(seconds=run.max_runtime_seconds)
 
-    reconciled = await manager.reconcile_durable(run_id=run.run_id)
+    if entry == "status":
+        reconciled = (await manager.status(context, run_id=run.run_id)).run
+    else:
+        reconciled = await manager.reconcile_durable(run_id=run.run_id)
 
     assert reconciled.state is ScriptRunState.INTERRUPTED
     assert reconciled.cancellation_reason == "Background script maximum runtime exceeded."
