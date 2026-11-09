@@ -569,6 +569,7 @@ _HTTP_EXPORTS = [
     "require_room_member",
     "require_room_messenger",
     "require_room_reader",
+    "stream_room_reader",
 ]
 _TESTING_EXPORTS = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 _ELSEWHERE_SIGNATURES = {
@@ -592,6 +593,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
+    "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
     "mindroom.plugin_testing.Room": "(room_id, members, power_levels, direct, history_visibility, key, sent)",
     "mindroom.plugin_testing.SentMessage": "(text, thread_id, source, content, mentions)",
     "mindroom.plugin_testing.load_plugin": "(path, tmp_dir, *, config, settings)",
@@ -599,7 +601,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 17), "1c7b6088ef4e9d09d77fd00abf75898d44de788a95fb129be371a545a7d0ed42")
+_PINNED_VERSION = ((1, 18), "d8f441c5698ff368112f95acba31677eb00b55c56a46244b67380974c234fd1c")
 
 
 def _is_enum(obj: object) -> bool:

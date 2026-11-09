@@ -501,6 +501,7 @@ visibility = [
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
+    "mindroom.terminal.client",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
 ]
@@ -516,6 +517,7 @@ expose = [
     "SHELL_FUNCTION",
     "bound_agent_cli_shell_env",
     "current_agent_cli_shell_env",
+    "unbound_agent_cli_shell_env",
 ]
 
 [[modules]]
@@ -2029,6 +2031,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.agent_terminals",
     "mindroom.api.app_state",
     "mindroom.api.auth_user",
     "mindroom.config.commit",
@@ -8255,6 +8258,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.terminal.client"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.bounded_bytes",
     "mindroom.http_error_detail",
     "mindroom.terminal.session",
@@ -8279,6 +8283,16 @@ depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
+]
+
+[[modules]]
+path = "mindroom.api.agent_terminals"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.plugin_http",
+    "mindroom.room_agent_access",
+    "mindroom.terminal.client",
+    "mindroom.terminal.session",
 ]
 
 [[modules]]
@@ -8352,7 +8366,9 @@ depends_on = [
     "mindroom.tool_system.filters",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backend_kinds",
 ]
 
 [[modules]]

@@ -150,6 +150,7 @@ from mindroom.tools.sql import sql_tools
 from mindroom.tools.stop_reply import stop_reply_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
+from mindroom.tools.terminal import terminal_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools

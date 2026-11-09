@@ -8,7 +8,7 @@ import json
 import math
 import os
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -71,17 +71,39 @@ def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
     return raw
 
 
+def _self_reference_error() -> ValueError:
+    return ValueError("it refers to itself")
+
+
+def _refuse_self_reference(value: Any, ancestors: frozenset[int]) -> None:  # noqa: ANN401 - Any metadata value.
+    """Refuse a value inside itself along the dataclasses, dicts, lists, and tuples that ``asdict`` copies."""
+    if id(value) in ancestors:
+        raise _self_reference_error()
+    if is_dataclass(value) and not isinstance(value, type):
+        items = [getattr(value, item.name) for item in dataclass_fields(value)]
+    elif isinstance(value, dict):
+        items = list(value.values())
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return
+    inner = ancestors | {id(value)}
+    for item in items:
+        _refuse_self_reference(item, inner)
+
+
 def _encode(value: Any, allowance: _FileAllowance, ancestors: frozenset[int]) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
     if id(value) in ancestors:
         # A container inside itself would never finish encoding.
-        msg = "it refers to itself"
-        raise ValueError(msg)
+        raise _self_reference_error()
     if isinstance(value, ToolValue):
         media = (value.images, value.audios, value.videos, value.files)
         fields: dict[str, Any] = {"content": value.content}
         fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
         return {"type": "ToolValue", "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, (Image, Audio, Video, File)):
+        # asdict() copies the metadata deeply and would never finish copying one inside itself.
+        _refuse_self_reference(value.metadata, frozenset())
         fields = asdict(value)
         if value.filepath is not None:
             fields["filepath"] = None

@@ -384,7 +384,8 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
   When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
-- Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+  A terminal that a [`terminal_open`](tools/execution-and-coding.md#terminal) call starts keeps that call's changes in its shell for as long as it runs, so later replies and people type with them, while a terminal a person opens from a chat client gets none.
+- Only the `shell` tool's commands and the terminals `terminal_open` starts receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
 - The [agent CLI](tools/agent-cli.md)'s variables, the egress proxy variables from the [egress broker](deployment/egress-broker.md) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](deployment/sandbox-proxy.md#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
 - A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
