@@ -35,3 +35,38 @@ def test_interrupted_stream_preserves_previous_artifact(tmp_path: Path) -> None:
         raise RuntimeError(message)
     assert path.read_bytes() == b"old"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["artifact"]
+
+
+@pytest.mark.parametrize("taken", ["file", "dangling-link"])
+def test_publishing_without_replace_refuses_a_taken_name(tmp_path: Path, taken: str) -> None:
+    """Without ``replace`` a taken name, even a link leading nowhere, keeps what it has, and no temporary file stays."""
+    path = tmp_path / "artifact"
+    if taken == "file":
+        path.write_bytes(b"old")
+    else:
+        path.symlink_to("missing")
+    with (
+        pytest.raises(FileExistsError),
+        open_directory_within_root(tmp_path) as directory,
+        atomic_write_file_at(directory, "artifact", replace=False) as output,
+    ):
+        output.write(b"new")
+    if taken == "file":
+        assert path.read_bytes() == b"old"
+    else:
+        assert str(path.readlink()) == "missing"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["artifact"]
+    assert not (tmp_path / "missing").exists()
+
+
+def test_publishing_without_replace_makes_a_free_name_whole(tmp_path: Path) -> None:
+    """Without ``replace`` a free name gets the whole content and no second link to it."""
+    with (
+        open_directory_within_root(tmp_path) as directory,
+        atomic_write_file_at(directory, "artifact", replace=False) as output,
+    ):
+        output.write(b"new")
+        assert not (tmp_path / "artifact").exists()
+    assert (tmp_path / "artifact").read_bytes() == b"new"
+    assert (tmp_path / "artifact").stat().st_nlink == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["artifact"]

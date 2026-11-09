@@ -33,11 +33,13 @@ def atomic_write_file_at(
     *,
     file_mode: int | None = None,
     temp_prefix: str = ".mindroom-",
+    replace: bool = True,
 ) -> Iterator[BinaryIO]:
     """Stream a replacement, publishing only when the caller finishes successfully.
 
     The caller owns the directory descriptor and validates the single-component filename
-    and any custom temporary prefix.
+    and any custom temporary prefix. Without ``replace``, publishing raises ``FileExistsError``
+    when anything, even a link leading nowhere, already has the name.
     """
     temp_name = f"{temp_prefix}{uuid4().hex}.tmp"
     temp_fd = os.open(
@@ -54,7 +56,10 @@ def atomic_write_file_at(
             if file_mode is not None:
                 os.fchmod(temp_file.fileno(), file_mode)
             os.fsync(temp_file.fileno())
-        os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        if replace:
+            os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        else:
+            os.link(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         with suppress(OSError):
             os.fsync(directory_fd)
     finally:

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Literal
 
 from fastapi import HTTPException
 
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, open_regular_file_at
 from mindroom.path_safety import resolve_base_dir_path, resolve_tool_base_dir, write_resolved_file
 
@@ -355,16 +356,10 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None, *, cr
     path = _relative(raw_path)
     _refuse_git(path)
     if create:
-        parent, name = _leaf(root, path)
-        found = _Found(parent.base, parent.relative / name)
-    else:
-        found = _find(root, path)
+        return _create_file(root, path, payload)
+    found = _find(root, path)
     _refuse_git(found.relative)
     with _changes(found.base):
-        if create:
-            # Claims the name, without following a link there, so nothing that appeared since the checks is replaced.
-            with _refusals(), open_directory_within_root(found.base, found.relative.parent, create=True) as directory:
-                os.close(os.open(found.relative.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=directory))
         try:
             current = _etag(_read(found)[0])
         except HTTPException as error:
@@ -377,6 +372,21 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None, *, cr
             write_resolved_file(found.base, found.base / found.relative, payload)
             with open_directory_within_root(found.base, found.relative.parent) as directory:
                 status = os.stat(found.relative.name, dir_fd=directory, follow_symlinks=False)
+    return Saved(_etag(payload), status.st_size, _mtime(status))
+
+
+def _create_file(root: Path, path: PurePosixPath, payload: bytes) -> Saved:
+    """Publish a new file whole, never over anything there, link or not, even one that appeared since the checks."""
+    parent, name = _leaf(root, path)
+    _refuse_git(parent.relative / name)
+    with (
+        _changes(parent.base),
+        _refusals(),
+        open_directory_within_root(parent.base, parent.relative, create=True) as directory,
+    ):
+        with atomic_write_file_at(directory, name, file_mode=0o644, replace=False) as output:
+            output.write(payload)
+        status = os.stat(name, dir_fd=directory, follow_symlinks=False)
     return Saved(_etag(payload), status.st_size, _mtime(status))
 
 

@@ -413,12 +413,19 @@ def test_a_save_without_an_etag_overwrites(root: Path) -> None:
 
 
 def test_a_create_only_save_makes_a_new_file_and_the_folders_above(root: Path) -> None:
-    """With ``create`` a free name gets a new file with the folders above it, as a plain save makes one."""
-    saved = save_file(root, "docs/guide/new.md", b"", None, create=True)
+    """With ``create`` a free name gets a new file with the folders above it and mode 0o644, as a plain save makes one."""
+    umask = os.umask(0o077)
+    try:
+        saved = save_file(root, "docs/guide/new.md", b"# New\n", None, create=True)
+    finally:
+        os.umask(umask)
 
     created = root / "docs" / "guide" / "new.md"
-    assert created.read_bytes() == b""
-    assert (saved.etag, saved.size, saved.mtime) == (_etag(b""), 0, created.stat().st_mtime_ns // 1_000_000)
+    assert created.read_bytes() == b"# New\n"
+    assert created.stat().st_mode & 0o777 == 0o644
+    assert created.stat().st_nlink == 1
+    assert (saved.etag, saved.size, saved.mtime) == (_etag(b"# New\n"), 6, created.stat().st_mtime_ns // 1_000_000)
+    assert not list(root.rglob(".mindroom-*"))
 
 
 def _tree(root: Path) -> dict[str, bytes | str | None]:
