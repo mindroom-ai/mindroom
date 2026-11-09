@@ -1769,20 +1769,19 @@ async def test_one_stretch_in_flight_per_person(world: World) -> None:
 
 
 @pytest.mark.asyncio
-async def test_at_most_70_stretches_a_minute_per_person(world: World) -> None:
-    """The 71st stretch within a minute is refused until the oldest of them is a minute old."""
+async def test_at_most_240_stretches_a_minute_per_person(world: World) -> None:
+    """The 241st stretch within a minute is refused until the oldest of them is a minute old."""
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
-    for _ in range(70):
+    for _ in range(240):
         await world.say(call.id, ANN, ago=1, seconds=0.25)
-        world.clock.advance(0.5)
+        world.clock.advance(0.125)
 
     refused = await _refused("too-many-requests", lambda: world.say(call.id, ANN, ago=1, seconds=0.25))
-    assert refused.retry_after == 25
-    assert refused.message == "You sent 70 stretches of speech in the last minute."
+    assert refused.retry_after == 30
     await world.service.join(ROOM, BOB)
     assert (await world.say(call.id, BOB, ago=1, seconds=0.25)).kind == "speech"
-    world.clock.advance(24)
+    world.clock.advance(29)
     refused = await _refused("too-many-requests", lambda: world.say(call.id, ANN, ago=1, seconds=0.25))
     assert refused.retry_after == 1
     world.clock.advance(1)

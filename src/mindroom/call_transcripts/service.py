@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The longest stretch of speech accepted. MindRoom Chat's speech finder cuts longer talk into stretches of at most 30
-# seconds, so no line reaches the live transcript later than that after its first word. Speech-to-text takes much
+# seconds, so a stretch never holds more than 30 seconds of speech before it is sent. Speech-to-text takes much
 # longer audio (OpenAI's transcription API takes files up to 25 MB, about 13 minutes of the audio Chat sends), so
 # Chat's cut is the limit that binds.
 _MAX_SPEECH_SECONDS = 30.0
@@ -34,9 +34,11 @@ _MAX_SPEECH_SECONDS = 30.0
 MAX_SPEECH_BYTES = 1_000_000
 # The most stretches one person sends in a minute. Chat's speech finder rates 96 ms frames, and a stretch holds at
 # least 4 frames of speech and the 14 quiet frames that end it, 1.73 seconds in all, so one person talking without a
-# break sends at most 35 stretches a minute. Twice that leaves room for the stretches a mute or a new microphone hands
-# on early, and for uploads that queued behind a slow transcription catching up.
-_SPEECH_PER_MINUTE = 70
+# break records at most 35 stretches a minute. Chat sends them one at a time, each once the last is transcribed, so
+# stretches that queued behind a slow speech-to-text arrive as fast as it answers once it recovers, and Chat retries
+# a refused one only once. 240, about seven times that, lets such a queue drain at four a second while still stopping
+# a client that sends without end.
+_SPEECH_PER_MINUTE = 240
 _SPEECH_WINDOW_SECONDS = 60.0
 _PRESENCE_SECONDS = 60.0
 _CHECK_SECONDS = 15.0
@@ -568,7 +570,7 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message="That was said after you left the call.")
 
     def _count_speech(self, user_id: str, now: float) -> None:
-        """Refuse a person's stretch past their 70 a minute; otherwise count it."""
+        """Refuse a person's stretch past their 240 a minute; otherwise count it."""
         recent = self._recent_speech.setdefault(user_id, deque())
         while recent and recent[0] <= now - _SPEECH_WINDOW_SECONDS:
             recent.popleft()
