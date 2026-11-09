@@ -116,6 +116,7 @@ depends_on = []
 visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
+    "mindroom.plugin_worker_services",
     "mindroom.script_runs.worker_client",
     "mindroom.terminal.client",
 ]
@@ -2303,6 +2304,7 @@ depends_on = [
     "mindroom.api.sandbox_runner_scripts",
     "mindroom.api.validation_errors",
     "mindroom.api.worker_preview",
+    "mindroom.api.worker_services",
     "mindroom.api.worker_terminal",
 ]
 
@@ -5479,6 +5481,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.plugin_context",
     "mindroom.plugin_lifecycle",
+    "mindroom.plugin_worker_services",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.authoring",
@@ -5791,6 +5794,7 @@ visibility = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_media",
     "mindroom.api.sandbox_runner",
+    "mindroom.plugin_worker_services",
 ]
 
 [[modules]]
@@ -7513,6 +7517,7 @@ expose = [
     "WorkerAttachmentSaveReceipt",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
+    "lease_worker_manager",
     "worker_stand_ins",
     "runner_config_snapshot",
     "sandbox_proxy_config",
@@ -7522,6 +7527,8 @@ expose = [
     "view_file_from_worker",
     "to_json_compatible",
     "worker_call",
+    "worker_proxy_client_config",
+    "worker_route",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
 
@@ -8269,6 +8276,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.worker_services"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.worker_preview",
+    "mindroom.plugin_worker_services",
+    "mindroom.tool_system.plugins",
+]
+
+[[modules]]
 path = "mindroom.api.worker_terminal"
 depends_on = [
     "mindroom.api.sandbox_runner",
@@ -8427,7 +8444,17 @@ depends_on = [
 path = "mindroom.plugin_lifecycle"
 depends_on = [
     "mindroom.plugin_context",
+    "mindroom.plugin_worker_services",
     "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.plugin_worker_services"
+depends_on = [
+    "mindroom.http_error_detail",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_proxy_client",
+    "mindroom.workers.backend_kinds",
 ]
 
 [[modules]]

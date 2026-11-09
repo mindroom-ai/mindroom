@@ -1417,6 +1417,69 @@ A lifecycle module that fails to import or defines no `lifespan` logs `Plugin li
 Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
 
+## Worker services
+
+A worker service is a long-lived program of a plugin, such as a web server, that runs inside an agent's dedicated worker and never in the process that runs the agents.
+Declare it once with `WorkerService` from `mindroom.plugin_api`, and start it from a tool with `requires_primary_runtime=True`, which has the plugin's [context](#plugin-context) and the agent's worker target:
+
+```python
+# tools.py
+from mindroom.plugin_api import WorkerService, current_plugin_context, ensure_worker_service, get_tool_runtime_context
+
+HELLO = WorkerService("hello", "hello_service.py", idle_timeout_seconds=600)
+
+
+async def open_hello() -> str:
+    runtime = get_tool_runtime_context()
+    state = await ensure_worker_service(current_plugin_context("my-plugin"), HELLO, runtime.resolve_worker_target())
+    return f"{state.state} on port {state.port}"
+```
+
+The program is a Python file in the plugin's folder that the worker runs with its own Python and environment.
+Every process in the worker, including code the agent runs, can reach the service's port, so the worker hands each start a fresh secret on the first line of its stdin, and the program must refuse every request whose `X-MindRoom-Service-Secret` header does not carry it:
+
+```python
+# hello_service.py
+import hmac
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+SECRET = sys.stdin.readline().strip()
+
+
+class Hello(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if not hmac.compare_digest(self.headers.get("X-MindRoom-Service-Secret", ""), SECRET):
+            self.send_error(403)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"hello")
+
+
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Hello).serve_forever()
+```
+
+| Call | Effect |
+|------|--------|
+| `ensure_worker_service(context, service, target)` | Starts the service in the worker `target` names, starting that worker as a tool call does, unless the service already runs there, and returns a `WorkerServiceState` |
+| `stop_worker_service(context, service, target)` | Stops the service; a stopped worker is not started |
+
+`target` is the worker an agent's turns use for one requester: in a tool call, `get_tool_runtime_context().resolve_worker_target()`.
+Neither call checks who may use the agent, so check that before you start a service for someone.
+`WorkerService(name, module, idle_timeout_seconds=600.0)` takes a `name` of 1-64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit, a `module` path relative to the plugin's folder, and a positive, finite `idle_timeout_seconds`.
+`WorkerServiceState` has `state`, `port`, and `exit_code`.
+`state` is `running` once the program accepts connections on its port, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
+Each worker runs one instance of a service, so ensuring a running service returns the same port.
+A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
+The program's output goes to the worker's log.
+
+A service stops when `idle_timeout_seconds` pass without an ensure, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
+A service that replaced plugin code starts during a reload keeps running until its idle timeout.
+Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
+A plugin with worker services states `"mindroom_plugin_api": "1.20"` in its manifest.
+
 ## People, agents, and administrators
 
 These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.

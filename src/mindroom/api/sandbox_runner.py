@@ -580,7 +580,7 @@ async def _request_body_protocol_failure(request: Request) -> WorkerFailure | No
     return _protocol_failure(protocol)
 
 
-def _prepare_route(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFailure:
+def prepare_route(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFailure:
     """Prepare the config, caller, worker and workspace one routed request acts on, or say why it cannot run."""
     if (failure := _protocol_failure(route.protocol)) is not None:
         return failure
@@ -1108,7 +1108,7 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     """
     if payload.tool_name != "shell":
         raise TerminalError(400, "A terminal opens only with a shell call's request.")
-    route = _prepare_route(app, payload)
+    route = prepare_route(app, payload)
     if isinstance(route, WorkerFailure):
         raise TerminalError(400, route.error)
     tools = refresh_plugins(route.config, route.runtime_paths).tools
@@ -1630,7 +1630,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
     payload: SaveAttachmentRequest,
 ) -> SaveAttachmentResponse | WorkerFailure:
     """Save one context-authorized attachment into the request's workspace."""
-    route = _prepare_route(request.app, payload)
+    route = prepare_route(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -1670,7 +1670,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
 @router.post("/view-file")
 async def view_file_in_worker(request: Request, payload: ViewFileRequest) -> ViewFileResponse | WorkerFailure:
     """View an image only after resolving the request's workspace."""
-    route = _prepare_route(request.app, payload)
+    route = prepare_route(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -1838,7 +1838,7 @@ async def execute_tool_call(request: Request, payload: ExecuteRequest) -> Respon
     A request the runner refuses before the call starts answers at once. The primary stops the call through
     /execute/cancel or by hanging up.
     """
-    route = _prepare_route(request.app, payload)
+    route = prepare_route(request.app, payload)
     if isinstance(route, WorkerFailure):
         return JSONResponse(route.model_dump(mode="json"))
     call = _prepare_tool_call(request.app, payload, route)

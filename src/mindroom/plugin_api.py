@@ -92,6 +92,13 @@ from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connec
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.plugin_context import PluginContext, current_plugin_context
 from mindroom.plugin_lifecycle import PluginLifecycle
+from mindroom.plugin_worker_services import (
+    WorkerService,
+    WorkerServiceError,
+    WorkerServiceState,
+    ensure_worker_service,
+    stop_worker_service,
+)
 from mindroom.providers.registry import build_model_provider
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
 from mindroom.redaction import redact_sensitive_text
@@ -234,6 +241,9 @@ __all__ = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "WorkerService",
+    "WorkerServiceError",
+    "WorkerServiceState",
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
@@ -245,6 +255,7 @@ __all__ = [
     "current_execution_identity",
     "current_plugin_context",
     "emit_custom_event",
+    "ensure_worker_service",
     "entity_directory",
     "fetch_public_url",
     "fetch_public_url_sync",
@@ -267,6 +278,7 @@ __all__ = [
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_turn_model",
+    "stop_worker_service",
     "tool",
     "toolkit_functions",
     "write_agent_file",

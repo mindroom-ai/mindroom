@@ -182,7 +182,7 @@ def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         return route, None
 
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_route", worker_route)
 
 
 def _call(
@@ -308,7 +308,7 @@ async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
             worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
         ), None
 
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_route", worker_route)
     config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
