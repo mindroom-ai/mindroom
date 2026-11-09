@@ -991,6 +991,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "git push -u origin main",
         "docker run --user 1000:0 alpine id",
         "curl --user-agent=Mozilla:5.0 https://example.test/x",
+        "curl -u admin https://example.test/x",
         "date -u +%H:%M:%S",
         "rsync -u host:/srv/data ./data",
         "docker run --name mysql -p3306:3306 -d mysql:8",
