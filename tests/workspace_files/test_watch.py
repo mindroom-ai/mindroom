@@ -8,6 +8,7 @@ import os
 import shutil
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
@@ -352,13 +353,12 @@ def test_entries_a_scan_leaves_out_count_toward_its_cap(tmp_path: Path, monkeypa
         os.mkfifo(root / f"pipe{index}")
     (root / "notes.md").write_text("x")
     monkeypatch.setattr(watch, "_MAX_ENTRIES", 5)
-    examined = []
-    real_is_hidden = watch.is_hidden
-    monkeypatch.setattr(watch, "is_hidden", lambda path: examined.append(path) or real_is_hidden(path))
+    examined = Mock(wraps=watch.is_hidden)
+    monkeypatch.setattr(watch, "is_hidden", examined)
 
     watch._scan(root)
 
-    assert len(examined) <= 5
+    assert examined.call_count <= 5
 
 
 @pytest.mark.asyncio
@@ -386,12 +386,11 @@ def test_a_scan_stops_once_its_paths_reach_the_cap_s_length(tmp_path: Path, monk
     for index in range(10):
         (root / f"{index}{'x' * 49}").write_text("x")
     monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 100)
-    examined = []
-    real_is_hidden = watch.is_hidden
-    monkeypatch.setattr(watch, "is_hidden", lambda path: examined.append(path) or real_is_hidden(path))
+    examined = Mock(wraps=watch.is_hidden)
+    monkeypatch.setattr(watch, "is_hidden", examined)
 
     assert len(watch._scan(root)) == 2
-    assert len(examined) == 3
+    assert examined.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -424,7 +423,7 @@ async def test_sent_paths_no_longer_count_toward_the_cap_s_length(monkeypatch: p
     assert await follower.next() == ["bbbbbb"]
 
 
-def test_a_follower_of_an_ordinary_workspace_reaches_the_entry_cap_before_the_length_cap() -> None:
+def test_a_follower_of_an_ordinary_workspace_at_the_entry_cap_stays_within_the_length_cap() -> None:
     """A workspace at the entry cap whose paths run to 100 characters still has every change followed."""
     follower = watch._Follower()
     follower.add({f"{index:0100d}" for index in range(watch._MAX_ENTRIES)})

@@ -42,9 +42,9 @@ _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
 # Each folder is opened from the root, so a deeper one costs more opens.
 _MAX_DEPTH = 32
-# The length of the paths a scan keeps and a follower holds unsent, which Python keeps in at most 4 bytes a character:
-# names of 255 bytes 32 folders deep would let the entry cap alone keep about 800 MB per scan. It leaves the entry cap
-# room for paths of 160 characters each.
+# The length of the paths a scan keeps and a follower holds unsent, so each holds at most 64 MB of path text, at 4 bytes
+# a character at most; names of 255 bytes 32 folders deep would let the entry cap alone keep about 800 MB per scan. It
+# leaves the entry cap room for paths of 160 characters each.
 _MAX_PATH_CHARACTERS = 16_000_000
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
