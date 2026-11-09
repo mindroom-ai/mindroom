@@ -83,7 +83,7 @@ _LOOPBACK_ADDRESSES = frozenset(
 _CANNOT_TELL = "This runner can't tell which processes hold its ports, so it relays to none."
 # The listening sockets each port was last found to be the worker's by, so their holders are read again only once
 # another socket listens there.
-_workers_sockets: dict[int, frozenset[int]] = {}
+_found_workers_sockets: dict[int, frozenset[int]] = {}
 # The relay's checks read /proc on a thread of their own, so tool calls busy on the loop's default threads never delay
 # them; one thread also keeps the record above to one writer.
 _CHECKS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="worker-relay-checks")
@@ -126,11 +126,11 @@ def _workers_ports(listening: dict[int, frozenset[int]]) -> list[int]:
     Blocking: reads in one pass which processes hold the sockets of the ports not last found to be the worker's by them.
     Raises OSError when ``/proc`` can't say.
     """
-    unseen = {port: sockets for port, sockets in listening.items() if _workers_sockets.get(port) != sockets}
+    unseen = {port: sockets for port, sockets in listening.items() if _found_workers_sockets.get(port) != sockets}
     if unseen:
         workers = workers_sockets(frozenset().union(*unseen.values()))
-        _workers_sockets.update((port, sockets) for port, sockets in unseen.items() if sockets <= workers)
-    return sorted(port for port, sockets in listening.items() if _workers_sockets.get(port) == sockets)
+        _found_workers_sockets.update((port, sockets) for port, sockets in unseen.items() if sockets <= workers)
+    return sorted(port for port, sockets in listening.items() if _found_workers_sockets.get(port) == sockets)
 
 
 def _check_reachable(port: int, runner_port: int) -> None:
@@ -139,7 +139,7 @@ def _check_reachable(port: int, runner_port: int) -> None:
         raise _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
     try:
         sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
-        held = bool(sockets) and bool(_workers_ports({port: sockets}))
+        held = bool(sockets) and port in _workers_ports({port: sockets})
     except OSError:
         raise _refused(403, _CANNOT_TELL) from None
     if not sockets:
@@ -148,15 +148,10 @@ def _check_reachable(port: int, runner_port: int) -> None:
         raise _refused(403, f"The server on port {port} is not one this worker runs.")
 
 
-async def _require_reachable(connection: HTTPConnection, port: int) -> None:
-    """Refuse ``port`` unless a server of the worker's own listens on it."""
-    await asyncio.get_running_loop().run_in_executor(_CHECKS, _check_reachable, port, connection.scope["server"][1])
-
-
 async def _upstream_url(connection: HTTPConnection, port: int, segments: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for, below its route's first ``segments``."""
     _require_dedicated_worker(connection)
-    await _require_reachable(connection, port)
+    await asyncio.get_running_loop().run_in_executor(_CHECKS, _check_reachable, port, connection.scope["server"][1])
     host = await loopback_host(port)
     if host is None:
         raise _no_app(port)

@@ -15,6 +15,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from subprocess import DEVNULL, PIPE
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import aiohttp
 import pytest
@@ -352,14 +353,8 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
 @pytest.mark.asyncio
 async def test_port_list_reads_every_ports_holders_in_one_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Listing ports not yet found to be the worker's reads which processes hold their sockets once, not once per port."""
-    passes: list[frozenset[int]] = []
-
-    def counted(sockets: frozenset[int]) -> frozenset[int]:
-        passes.append(sockets)
-        return listeners.workers_sockets(sockets)
-
-    monkeypatch.setattr(worker_preview, "workers_sockets", counted)
-    monkeypatch.setattr(worker_preview, "_workers_sockets", {})
+    passes = Mock(wraps=listeners.workers_sockets)
+    monkeypatch.setattr(worker_preview, "workers_sockets", passes)
     async with (
         _app() as first,
         _app() as second,
@@ -368,7 +363,7 @@ async def test_port_list_reads_every_ports_holders_in_one_pass(tmp_path: Path, m
         client.get(runner.root, headers=_AUTH) as response,
     ):
         assert {first, second} <= set(await response.json())
-    assert len(passes) == 1
+    passes.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -403,13 +398,6 @@ async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: 
     assert refused.value.status == status
     assert refused.value.headers is not None
     assert refused.value.headers[_REFUSED] == "1"
-
-
-def _hide_every_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Show the runner a ``/proc`` with no processes, as a pod sidecar's processes in their own PID namespace are hidden."""
-    proc = tmp_path / "proc"
-    proc.mkdir()
-    monkeypatch.setattr(listeners, "_PROC", proc)
 
 
 @pytest.mark.asyncio
@@ -510,7 +498,10 @@ async def test_relay_refuses_a_server_no_process_of_the_worker_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An app the runner sees no process of its own holding, as a pod sidecar in its own PID namespace, is refused."""
-    _hide_every_holder(tmp_path, monkeypatch)
+    # A /proc with no processes, as a pod sidecar's processes in their own PID namespace are hidden.
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(listeners, "_PROC", proc)
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
         await _assert_refused(client, runner, port, 403, f"The server on port {port} is not one this worker runs.")
         async with client.get(runner.root, headers=_AUTH) as response:
@@ -524,7 +515,6 @@ async def test_relay_refuses_a_port_where_another_process_holds_one_of_its_socke
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A port is the worker's only when its processes hold every socket listening there, as a sidecar on [::1] may not."""
-    monkeypatch.setattr(worker_preview, "_workers_sockets", {})
     async with AsyncExitStack() as stack:
         port = await stack.enter_async_context(_app())
         try:

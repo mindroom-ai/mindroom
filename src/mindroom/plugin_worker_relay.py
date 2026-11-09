@@ -130,7 +130,8 @@ class WorkerRelay:
     ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
         """Open one WebSocket and yield it until the block ends.
 
-        A refused or redirected handshake raises ``aiohttp.WSServerHandshakeError`` with the runner's status and headers.
+        A refused handshake raises ``aiohttp.WSServerHandshakeError`` with the runner's status and headers, and a
+        redirected one with the app's, which the runner hands back.
         """
         url = self._url(path, service, port)
         with worker_call_in_flight(self._backend, self._worker_key):

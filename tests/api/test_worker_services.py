@@ -999,7 +999,7 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
             proc = tmp_path / "proc"
             proc.mkdir()
             monkeypatch.setattr(listeners, "_PROC", proc)
-            monkeypatch.setattr("mindroom.api.worker_preview._workers_sockets", {})
+            monkeypatch.setattr("mindroom.api.worker_preview._found_workers_sockets", {})
             assert (await _get(relay, "/", port=unused_tcp_port))[::2] == (403, True)
             assert unused_tcp_port not in await relay.ports()
 
