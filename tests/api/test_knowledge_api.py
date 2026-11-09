@@ -731,6 +731,63 @@ def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> No
     assert list_response.json()["bases"][0]["file_count"] == 1
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_file_listing_leaves_out_a_file_whose_name_is_not_utf8(tmp_path: Path, git: bool) -> None:
+    """A file whose name is not valid UTF-8 is left out of the dashboard listing instead of failing it."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    odd_name = os.fsdecode(b"odd-\xff.md")
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    (docs / odd_name).write_text("odd", encoding="utf-8")
+    if git:
+        _init_git_checkout(tmp_path, docs, "guide.md", odd_name)
+    publish_api_config(client.app, _knowledge_config(docs, git=git))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert [entry["path"] for entry in response.json()["files"]] == ["guide.md"]
+    assert response.json()["file_listing_degraded"] is False
+
+
+def test_git_file_listing_lists_a_tracked_name_holding_a_carriage_return(tmp_path: Path) -> None:
+    """A tracked file whose name holds a carriage return is listed under that exact name."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a\rb.md").write_text("carriage return", encoding="utf-8")
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    _init_git_checkout(tmp_path, docs, "a\rb.md", "guide.md")
+    publish_api_config(client.app, _knowledge_config(docs, git=True))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert [entry["path"] for entry in response.json()["files"]] == ["a\rb.md", "guide.md"]
+    assert response.json()["file_listing_degraded"] is False
+
+
+def test_git_file_listing_reports_what_git_printed_when_it_fails(tmp_path: Path) -> None:
+    """A checkout whose Git index is corrupt degrades the listing with the exit code and Git's own message."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    _init_git_checkout(tmp_path, docs, "guide.md")
+    (_checkout_git_dir(tmp_path, docs) / "index").write_bytes(b"garbage")
+    publish_api_config(client.app, _knowledge_config(docs, git=True))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert response.json()["file_listing_degraded"] is True
+    assert response.json()["file_listing_error"].startswith(
+        "Git command failed with exit code 128: git ls-files -z\nfatal: ",
+    )
+    assert "index file smaller than expected" in response.json()["file_listing_error"]
+
+
 def test_git_file_listing_timeout_degrades_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -876,6 +933,26 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
     ]
+
+
+def test_upload_accepts_a_name_at_the_file_system_limit(tmp_path: Path) -> None:
+    """A file name of 255 bytes, the longest the knowledge folder accepts, uploads and is listed."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    publish_api_config(client.app, _knowledge_config(docs))
+    long_name = "a" * 252 + ".md"
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", (long_name, b"hello", "text/markdown"))],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["uploaded"] == [long_name]
+    assert [entry["path"] for entry in client.get("/api/knowledge/bases/research/files").json()["files"]] == [
+        long_name,
+    ]
+    assert [path.name for path in docs.iterdir()] == [long_name]
 
 
 def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path) -> None:
@@ -1231,6 +1308,60 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     assert not (docs / "guide.md").exists()
     assert list(docs.glob(".*.upload.tmp")) == []
     assert scheduler.scheduled == []
+
+
+@pytest.mark.parametrize("existing_folder", [False, True])
+def test_batch_upload_holding_a_name_too_long_for_the_folder_publishes_none_of_it(
+    tmp_path: Path,
+    existing_folder: bool,
+) -> None:
+    """A batch whose second name is longer than any file name can be fails without publishing its first file."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    if existing_folder:
+        docs.mkdir()
+    publish_api_config(client.app, _knowledge_config(docs))
+    scheduler = _bound_scheduler(client)
+
+    with pytest.raises(OSError, match="File name too long"):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[
+                ("files", ("short.md", b"short", "text/markdown")),
+                ("files", ("名" * 90 + ".md", b"long", "text/markdown")),
+            ],
+        )
+
+    assert list(docs.iterdir()) == []
+    assert scheduler.scheduled == []
+
+
+@pytest.mark.parametrize("prefix", ["", "x" * 245], ids=["short", "long"])
+def test_failed_batch_upload_removes_the_files_it_staged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    """A batch upload that fails on its third file leaves neither that file nor the two staged before it.
+
+    The long prefix makes every name about 250 bytes, close to the longest a file name can be.
+    """
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    publish_api_config(client.app, _knowledge_config(docs))
+    monkeypatch.setattr(knowledge_api, "_MAX_UPLOAD_BYTES", 5)
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[
+            ("files", (f"{prefix}one.md", b"one", "text/markdown")),
+            ("files", (f"{prefix}two.md", b"two", "text/markdown")),
+            ("files", (f"{prefix}three.md", b"too large", "text/markdown")),
+        ],
+    )
+
+    assert response.status_code == 413
+    assert list(docs.iterdir()) == []
 
 
 @pytest.mark.asyncio

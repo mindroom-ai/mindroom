@@ -83,6 +83,11 @@ class RouterCallRoom:
 
     client: Callable[[], nio.AsyncClient | None]
     """The router's client while it runs and has synced, else None."""
+    retitle: Callable[[str, str, str, str], None]
+    """Have the router title a thread again now, nothing while it is away.
+
+    Given the room, the thread's root, and the event ID and body of the message the router just posted there.
+    """
     monotonic: Callable[[], float] = time.monotonic
     """A clock that never jumps, which times how long one read of a room's state is reused."""
     _reads: dict[str, _StateRead] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -203,6 +208,13 @@ class RouterCallRoom:
             operation="call_transcript",
             sidecar_required=True,
         )
+
+    def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
+        """Have the router title the row's thread again from the posted message ``event_id``, as it was posted.
+
+        The title is written in the background, as after the router's own replies, and a title someone pinned stays.
+        """
+        self.retitle(message.room_id, message.row_event_id, event_id, _without_mentions(message.body))
 
     async def _state(self, client: nio.AsyncClient, room_id: str) -> _RoomState | None:
         """Return the room's state from one read shared by everyone asking while it is recent; None if unreadable.

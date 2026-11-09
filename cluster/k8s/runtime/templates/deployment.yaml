@@ -281,6 +281,9 @@ spec:
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
+            # The static runner sidecar mounts the agents' storage, so people in a room may type in agents' terminals.
+            - name: MINDROOM_STATIC_RUNNER_AGENT_STORAGE
+              value: "true"
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_WORKER_COMPUTER_ENABLED
               value: {{ .Values.workers.computerEnabled | quote }}

@@ -6738,6 +6738,36 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Persistent terminals in the agent's workspace, which people in the room can watch and type in",
+      "display_name": "Terminal",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#terminal",
+      "executes_code": true,
+      "file_access": "none",
+      "function_names": [
+        "terminal_open",
+        "terminal_run",
+        "terminal_send",
+        "terminal_read",
+        "terminal_list"
+      ],
+      "helper_text": null,
+      "icon": "SquareTerminal",
+      "icon_color": "text-green-500",
+      "name": "terminal",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "authored_override": false,

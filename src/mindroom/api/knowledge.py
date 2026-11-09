@@ -513,7 +513,11 @@ class _StagedUpload:
 
 async def _stage_upload(root_fd: int, target: _UploadTarget) -> _StagedUpload:
     _validate_upload_size_hint(target.upload, target.filename)
-    temp_name = f".{target.relative_path}.{uuid.uuid4().hex}.upload.tmp"
+    # Fail on a name too long for the folder before any upload of the batch is published.
+    with suppress(FileNotFoundError):
+        os.lstat(target.relative_path, dir_fd=root_fd)
+    # The name leaves out the target's, so any name the folder accepts can be staged beside it.
+    temp_name = f".{uuid.uuid4().hex}.upload.tmp"
     temp_fd = open_regular_file_at(root_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(temp_fd, "wb") as handle:
@@ -559,7 +563,9 @@ async def _write_uploads(
         with pinned_canonical_directory(root) as root_fd:
             staged_uploads: list[_StagedUpload] = []
             try:
-                staged_uploads = [await _stage_upload(root_fd, target) for target in upload_targets]
+                # Record each upload as soon as it is staged, so a failure still removes every one staged before it.
+                for target in upload_targets:
+                    staged_uploads.append(await _stage_upload(root_fd, target))  # noqa: PERF401
                 cancelled_after_source_changed = await before_commit() if before_commit else False
                 for staged_upload in staged_uploads:
                     os.replace(

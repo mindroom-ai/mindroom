@@ -178,6 +178,10 @@ class _CallRoom(Protocol):
         """Edit the call's row to say it ended, and return the edit's event ID; None if it was not sent."""
         ...
 
+    def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
+        """Title the row's thread again, in the background, from the posted message ``event_id``."""
+        ...
+
 
 class _Transcriber(Protocol):
     """Speech-to-text for one stretch of a call, recording the usage it causes."""
@@ -703,13 +707,20 @@ class CallTranscriptService:
             body=notes if notes is not None else _summary(transcript),
             transcript=transcript,
         )
+        await self._post_message(call, message, with_notes=notes is not None)
+
+    async def _post_message(self, call: StoredCall, message: TranscriptMessage, *, with_notes: bool) -> None:
+        """Post the call's message and finish it, or hold it a minute; notes then title the row's thread."""
         if _past_a_day(call, self._clock()):
             return  # A tick gives the message up.
         event_id = await self._room.post_transcript(message)
         if event_id is None:
             await self._postpone(call, reason="transcript-not-posted")
             return
-        await self._finish(call, event_id=event_id, with_notes=notes is not None, turns=len(turns))
+        await self._finish(call, event_id=event_id, with_notes=with_notes, turns=len(message.transcript.turns))
+        if with_notes:
+            # The notes say what the call was about; until then the thread is titled by its row: "Call ended".
+            self._room.title_thread(message, event_id)
 
     async def _postpone(self, call: StoredCall, *, reason: str) -> None:
         """Hold the call's Matrix writes a minute."""

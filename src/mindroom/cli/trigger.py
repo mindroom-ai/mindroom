@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import typer
 
-from mindroom.cli.config import console
+from mindroom.cli.config import console, print_literal
 from mindroom.constants import DEFAULT_MINDROOM_URL
 
 if TYPE_CHECKING:
@@ -145,7 +145,6 @@ def send(
 ) -> None:
     """Send a signed external trigger request."""
     import httpx  # noqa: PLC0415
-    from rich.markup import escape  # noqa: PLC0415
 
     from mindroom.external_triggers.auth import sign_trigger_request  # noqa: PLC0415
 
@@ -181,12 +180,10 @@ def send(
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        console.print(
-            f"[red]Error:[/red] external trigger request failed: {escape(_status_error_detail(exc.response))}",
-        )
+        print_literal("[red]Error:[/red] external trigger request failed: ", _status_error_detail(exc.response))
         raise typer.Exit(1) from exc
     except httpx.HTTPError as exc:
-        console.print(f"[red]Error:[/red] external trigger request failed: {escape(str(exc))}")
+        print_literal("[red]Error:[/red] external trigger request failed: ", exc)
         raise typer.Exit(1) from exc
     console.print_json(data=response.json())
 

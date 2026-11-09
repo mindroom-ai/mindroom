@@ -8,6 +8,10 @@ dedicated worker as a shell call does; nothing else starts it, and a stopped wor
 The terminals of one agent's workspace in one worker share an owner key, derived from the request's worker, agent
 and workspace: two requesters for whom the agent's calls go to the same worker and workspace see the same
 terminals, and nobody else does.
+
+Every viewer's typing is recorded on its terminal's line (``mindroom.terminal.lines``) and sent on the terminal's one
+input connection, and a terminal's shell never starts with a response's CLI grant: the shell outlives the response,
+while the grant is only for its own commands.
 """
 
 from __future__ import annotations
@@ -16,20 +20,23 @@ import asyncio
 import contextlib
 import hashlib
 import re
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.http_error_detail import validation_error_detail
 from mindroom.logging_config import get_logger
+from mindroom.terminal.lines import PromptMarks, TerminalLine, forget_line, terminal_line
 from mindroom.terminal.session import TerminalError, TerminalEvent, TerminalInfo
 from mindroom.tool_system.sandbox_proxy import worker_call
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.tool_system.sandbox_proxy import WorkerCall, WorkerStandIns
     from mindroom.workers.protocol import ExecuteRequest
@@ -50,6 +57,8 @@ _MAX_FRAME_BYTES = 4 * 1024 * 1024
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _INFO = TypeAdapter(TerminalInfo)
 _INFOS = TypeAdapter(list[TerminalInfo])
+# At most 4 bytes a character, so within the 64 KiB the runner takes at once.
+MAX_INPUT_CHARS = 16384
 
 
 class TerminalDetachedError(Exception):
@@ -66,35 +75,115 @@ class _Refusal(BaseModel):
     detail: str | list[object]
 
 
+type _Connect = Callable[[], Awaitable[tuple[aiohttp.ClientSession, aiohttp.ClientWebSocketResponse]]]
+
+
+class _TerminalInput:
+    """The one connection every viewer's and call's typing and resizing reaches one terminal through.
+
+    Separate connections reach the runner in no promised order, so typing recorded before a run could reach the shell
+    after it and join its command. Its holder opens and sends while holding the line's lock; it opens at a send while
+    viewers are attached and closes, before any next one opens, with the last viewer.
+    """
+
+    def __init__(self) -> None:
+        self.viewers = 0
+        self._websocket: aiohttp.ClientWebSocketResponse | None = None
+        self._reader: asyncio.Task[None] | None = None
+
+    async def open(self, connect: _Connect, line: TerminalLine) -> aiohttp.ClientWebSocketResponse:
+        """Return the open connection, first opening one; the runner may not have read what one it ended carried."""
+        if self._websocket is not None:
+            if not self._websocket.closed:
+                return self._websocket
+            line.lost()
+            await self.close()
+        client, self._websocket = await connect()
+        self._reader = asyncio.create_task(_drained(client, self._websocket), name="terminal-input-reader")
+        return self._websocket
+
+    async def close(self) -> None:
+        if self._reader is not None:
+            self._reader.cancel()
+            await asyncio.wait({self._reader})
+        self._reader = self._websocket = None
+
+
+async def _drained(client: aiohttp.ClientSession, websocket: aiohttp.ClientWebSocketResponse) -> None:
+    """Discard what the runner shows the input connection, which its viewers see, and close it when it ends."""
+    async with client, websocket:
+        async for _ in websocket:
+            pass
+
+
+async def _typed(websocket: aiohttp.ClientWebSocketResponse, frame: dict[str, object]) -> None:
+    try:
+        await websocket.send_json(frame)
+    except (aiohttp.ClientError, ConnectionResetError):
+        raise TerminalDetachedError from None
+
+
+_inputs: weakref.WeakKeyDictionary[TerminalLine, _TerminalInput] = weakref.WeakKeyDictionary()
+
+
 class TerminalStream:
     """One attached viewer: the scrollback, then live output, then the shell's exit; and its keys and size."""
 
-    def __init__(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
+    def __init__(
+        self,
+        websocket: aiohttp.ClientWebSocketResponse,
+        line: TerminalLine,
+        typing: _TerminalInput,
+        connect: _Connect,
+    ) -> None:
         self._websocket = websocket
+        self._typing = typing
+        self._connect = connect
+        self.line = line
+        """The terminal's line, which this viewer's typing and the prompts it reads update."""
+        self.prompt = 0
+        """The number of the last prompt mark this viewer read."""
+        self._marks = PromptMarks()
 
     async def receive(self) -> TerminalEvent:
         """Return the next output or the exit; raise ``TerminalDetachedError`` when the viewer must attach again."""
         message = await self._websocket.receive()
         if message.type == aiohttp.WSMsgType.BINARY:
+            for number in self._marks.feed(message.data):
+                self.line.prompted(number)
+                self.prompt = number
             return TerminalEvent("output", data=message.data)
         if message.type == aiohttp.WSMsgType.TEXT:
             with contextlib.suppress(ValidationError):
                 return TerminalEvent("exit", code=_Exit.model_validate_json(message.data).code)
         raise TerminalDetachedError
 
-    async def send_input(self, data: str) -> None:
-        """Type ``data``."""
-        await self._send({"type": "input", "data": data})
+    async def send_input(self, data: str, *, empty_line: bool = False) -> int:
+        """Type ``data``, after the input before it, record it on the terminal's line, and return the line's ``awaited``.
+
+        With ``empty_line``, only while the shell waits at its prompt with nothing typed; otherwise it types nothing and
+        raises ``TerminalError`` (409).
+        """
+        if len(data) > MAX_INPUT_CHARS:
+            raise TerminalError(413, f"Type at most {MAX_INPUT_CHARS} characters at once; send a long text in parts.")
+        async with self.line.lock:
+            websocket = await self._typing.open(self._connect, self.line)
+            if empty_line and not self.line.empty:
+                raise TerminalError(409, "The terminal's shell is not waiting at an empty prompt.")
+            awaited = self.line.awaited
+            self.line.type(data)
+            try:
+                await _typed(websocket, {"type": "input", "data": data})
+            except BaseException:
+                self.line.lost()
+                raise
+        return awaited
 
     async def resize(self, cols: int, rows: int) -> None:
         """Change the terminal's size."""
-        await self._send({"type": "resize", "cols": cols, "rows": rows})
-
-    async def _send(self, frame: dict[str, object]) -> None:
-        try:
-            await self._websocket.send_json(frame)
-        except (aiohttp.ClientError, ConnectionResetError):
-            raise TerminalDetachedError from None
+        async with self.line.lock:
+            websocket = await self._typing.open(self._connect, self.line)
+            await _typed(websocket, {"type": "resize", "cols": cols, "rows": rows})
 
 
 def _owner(request: ExecuteRequest) -> str:
@@ -141,6 +230,27 @@ async def _send(worker: WorkerCall, method: str, path: str, *, body: dict[str, o
     return answer
 
 
+async def _viewer_connection(
+    client: aiohttp.ClientSession,
+    worker: WorkerCall,
+    path: str,
+) -> aiohttp.ClientWebSocketResponse:
+    try:
+        return await client.ws_connect(
+            worker.api_root + path,
+            headers=worker.headers,
+            params={"owner": _owner(worker.request)},
+            max_msg_size=_MAX_FRAME_BYTES,
+            heartbeat=_HEARTBEAT_SECONDS,
+        )
+    except aiohttp.WSServerHandshakeError as error:
+        if error.status == 403:
+            raise TerminalError(404, "No such terminal.") from None
+        raise TerminalError(503, f"The agent's worker is unavailable: HTTP {error.status}") from None
+    except (aiohttp.ClientError, TimeoutError) as error:
+        raise TerminalError(503, f"The agent's worker is unavailable: {type(error).__name__}") from None
+
+
 def _parsed[T](adapter: TypeAdapter[T], answer: bytes) -> T:
     try:
         return adapter.validate_json(answer)
@@ -156,7 +266,7 @@ class WorkerTerminals:
 
     async def _worker(self, *, start: bool) -> WorkerCall | None:
         try:
-            return await asyncio.to_thread(worker_call, self.stand_ins, "run_shell_command", start=start)
+            return await asyncio.to_thread(worker_call, self.stand_ins, SHELL_FUNCTION, start=start)
         except (RuntimeError, OSError) as error:
             raise TerminalError(503, f"The agent's worker is unavailable: {error}") from None
 
@@ -168,7 +278,8 @@ class WorkerTerminals:
 
     async def open(self, *, cols: int = 80, rows: int = 24, cwd: str | None = None) -> TerminalInfo:
         """Start a terminal in ``cwd``, a folder inside the workspace (the workspace itself by default)."""
-        worker = await self._worker(start=True)
+        with unbound_agent_cli_shell_env():
+            worker = await self._worker(start=True)
         if worker is None:
             raise TerminalError(503, "The agent's worker is not ready.")
         body: dict[str, object] = {
@@ -177,7 +288,9 @@ class WorkerTerminals:
             "rows": rows,
             "cwd": cwd,
         }
-        return _parsed(_INFO, await _send(worker, "POST", _SESSIONS_PATH, body=body))
+        info = _parsed(_INFO, await _send(worker, "POST", _SESSIONS_PATH, body=body))
+        terminal_line(_owner(worker.request), info.id, opened=True)
+        return info
 
     async def sessions(self) -> list[TerminalInfo]:
         """Describe the workspace's terminals, oldest first."""
@@ -188,36 +301,40 @@ class WorkerTerminals:
 
     async def close(self, session_id: str) -> None:
         """End a terminal."""
-        path = _session_path(session_id)
-        await _send(await self._running_worker(), "DELETE", path)
+        worker = await self._running_worker()
+        await _send(worker, "DELETE", _session_path(session_id))
+        forget_line(_owner(worker.request), session_id)
 
     @contextlib.asynccontextmanager
     async def attach(self, session_id: str) -> AsyncIterator[TerminalStream]:
         """Attach a viewer to a terminal: it gets the scrollback, then live output, then the exit."""
         path = _session_path(session_id, "/io")
         worker = await self._running_worker()
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=15)) as client:
+
+        async def connect() -> tuple[aiohttp.ClientSession, aiohttp.ClientWebSocketResponse]:
+            client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=15))
             try:
-                websocket = await client.ws_connect(
-                    worker.api_root + path,
-                    headers=worker.headers,
-                    params={"owner": _owner(worker.request)},
-                    max_msg_size=_MAX_FRAME_BYTES,
-                    heartbeat=_HEARTBEAT_SECONDS,
-                )
-            except aiohttp.WSServerHandshakeError as error:
-                if error.status == 403:
-                    raise TerminalError(404, "No such terminal.") from None
-                raise TerminalError(503, f"The agent's worker is unavailable: HTTP {error.status}") from None
-            except (aiohttp.ClientError, TimeoutError) as error:
-                raise TerminalError(503, f"The agent's worker is unavailable: {type(error).__name__}") from None
-            async with websocket:
-                keepalive = asyncio.create_task(self._keep_worker(), name="terminal-worker-keepalive")
-                try:
-                    yield TerminalStream(websocket)
-                finally:
-                    keepalive.cancel()
-                    await asyncio.wait({keepalive})
+                return client, await _viewer_connection(client, worker, path)
+            except BaseException:
+                await client.close()
+                raise
+
+        client, websocket = await connect()
+        line = terminal_line(_owner(worker.request), session_id)
+        typing = _inputs.setdefault(line, _TerminalInput())
+        typing.viewers += 1
+        keepalive = asyncio.create_task(self._keep_worker(), name="terminal-worker-keepalive")
+        try:
+            yield TerminalStream(websocket, line, typing, connect)
+        finally:
+            typing.viewers -= 1
+            keepalive.cancel()
+            await asyncio.wait({keepalive})
+            await websocket.close()
+            await client.close()
+            async with line.lock:
+                if not typing.viewers:
+                    await typing.close()
 
     async def _keep_worker(self) -> None:
         while True:
@@ -229,4 +346,4 @@ class WorkerTerminals:
                 logger.warning("Terminal keepalive failed to look up the agent's worker", exc_info=True)
 
 
-__all__ = ["TerminalDetachedError", "TerminalStream", "WorkerTerminals"]
+__all__ = ["MAX_INPUT_CHARS", "TerminalDetachedError", "TerminalStream", "WorkerTerminals"]
