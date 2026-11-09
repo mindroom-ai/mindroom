@@ -30,6 +30,7 @@ from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepar
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 ROOM = "!room:example.org"
@@ -68,6 +69,11 @@ async def whoami(request: Request) -> dict:
 async def member(request: Request, room_id: str, user_id: str) -> dict:
     room = await stream_room_reader(request, ClientUser(user_id), room_id)
     return {"user_id": room.user.user_id}
+
+
+@router.post("/save")
+async def save(item: dict) -> dict:
+    return {"size": len(item["text"])}
 
 
 @router.get("/boom")
@@ -185,6 +191,24 @@ def test_the_frame_floor_stands_beside_the_routes_own_policy(tmp_path: Path) -> 
 
     assert answer.text == "<p>app</p>"
     assert answer.headers.get_list("content-security-policy") == ["default-src 'self'", FLOOR]
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "streamed"])
+def test_an_origin_route_gets_no_body_larger_than_the_apis_limit(tmp_path: Path, declared: bool) -> None:
+    """FastAPI reads a body before the route's gate runs, so one over 16 MiB answers 413, as on the API."""
+    _write(tmp_path, "demo", origin=ORIGIN)
+    client = _client(_api_app(tmp_path, "demo"), "x.demo.localhost")
+    body = json.dumps({"text": "x" * (16 * 1024 * 1024)}).encode()
+
+    def chunks() -> Iterator[bytes]:
+        yield body
+
+    big = client.post("/save", content=body if declared else chunks(), headers={"content-type": "application/json"})
+    small = client.post("/save", json={"text": "hello"})
+
+    assert big.status_code == 413
+    assert big.headers.get_list("content-security-policy") == [FLOOR]
+    assert (small.status_code, small.json()) == (200, {"size": 5})
 
 
 def test_a_raising_origin_route_answers_500_without_its_detail(tmp_path: Path) -> None:
@@ -407,10 +431,24 @@ async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_invalid_public_port_fails_the_start(tmp_path: Path) -> None:
-    """A mistyped ``MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT`` stops MindRoom from starting rather than break every link."""
-    paths = _paths(tmp_path, MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT="https")
-    with pytest.raises(ValueError, match="MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT must be a TCP port"):
+@pytest.mark.parametrize(
+    ("env", "error"),
+    [
+        ({"MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT": "https"}, "MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT must be a TCP port"),
+        (
+            {"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "https://example-apps.net"},
+            "MINDROOM_PLUGIN_ORIGIN_DOMAIN must be a domain",
+        ),
+    ],
+)
+async def test_an_invalid_public_port_or_domain_fails_the_start(
+    tmp_path: Path,
+    env: dict[str, str],
+    error: str,
+) -> None:
+    """A mistyped setting stops MindRoom from starting rather than break every link."""
+    paths = _paths(tmp_path, **env)
+    with pytest.raises(ValueError, match=error):
         async with serve_plugin_origins(paths, host="127.0.0.1", api_app=FastAPI(), log_level="INFO"):
             pass
 

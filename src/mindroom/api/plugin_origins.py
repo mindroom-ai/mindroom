@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, Response
 
 from mindroom.api import config_lifecycle
 from mindroom.api.plugin_routes import framed_by_server, published_plugins
+from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
 from mindroom.api.script_gateway import listener_port, serve_listener
 from mindroom.logging_config import get_logger
 from mindroom.origins import allowed_client_origins
@@ -98,15 +99,25 @@ class _PluginOrigins:
         if scope["type"] == "websocket":
             send = framed_by_server(send)
         host = _plugin_host(Headers(scope=scope).get("host", ""), _domain(paths))
-        origin = self._origin(host[1]) if host is not None else None
-        if host is not None and origin is not None:
-            await origin[0]({**scope, "app": self._api_app, PLUGIN_NAME_SCOPE_KEY: host[1]}, receive, send)
-            return
-        if host is None and scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == _ASK_PATH:
+        not_found = JSONResponse({"detail": "Not Found"}, status_code=404)
+        if host is not None:
+            _, plugin_name = host
+            origin = self._origin(plugin_name)
+            if origin is not None:
+                origin_app, _ = origin
+                # Bodies are capped as on the API, since FastAPI reads a body before a route's gate runs.
+                await RequestBodyLimitMiddleware(origin_app)(
+                    {**scope, "app": self._api_app, PLUGIN_NAME_SCOPE_KEY: plugin_name},
+                    receive,
+                    send,
+                )
+                return
+            # A websocket gets the same 404 as its handshake's denial response.
+            response: Response = not_found
+        elif scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == _ASK_PATH:
             response = await self._ask(QueryParams(scope["query_string"]).get("domain", ""), _domain(paths))
         else:
-            # A websocket gets the same 404 as its handshake's denial response.
-            response = JSONResponse({"detail": "Not Found"}, status_code=404)
+            response = not_found
         await response(scope, receive, send)
 
     def _origin(self, name: str) -> tuple[PluginRoutesApp, Callable[[str], object] | None] | None:
@@ -121,15 +132,15 @@ class _PluginOrigins:
         """Answer 200 when ``domain`` is a host whose plugin's ``serves`` says yes within the deadline, else 404."""
         host = _plugin_host(domain, origin_domain)
         origin = self._origin(host[1]) if host is not None else None
-        serves = origin[1] if origin is not None else None
         served = False
-        if host is not None and serves is not None:
+        if host is not None and origin is not None and (serves := origin[1]) is not None:
+            label, plugin_name = host
             try:
                 async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
-                    answer = serves(host[0])
+                    answer = serves(label)
                     served = (await answer if inspect.isawaitable(answer) else answer) is True
             except Exception:
-                logger.exception("Plugin origin serves() failed", plugin_name=host[1])
+                logger.exception("Plugin origin serves() failed", plugin_name=plugin_name)
         return Response(status_code=200 if served else 404, headers={"cache-control": "no-store"})
 
 
@@ -158,8 +169,11 @@ async def serve_plugin_origins(
     if port is None:
         yield
         return
-    # An invalid public port fails the start, rather than each link a route makes.
+    # An invalid public port or domain fails the start, rather than each link a route makes.
     listener_port(runtime_paths, _PUBLIC_PORT_ENV)
+    if not all(DNS_LABEL.fullmatch(part) for part in _domain(runtime_paths).split(".")):
+        msg = f"{_DOMAIN_ENV} must be a domain name, such as example-apps.net, not {_domain(runtime_paths)!r}."
+        raise ValueError(msg)
     async with serve_listener(
         _PluginOrigins(api_app),
         name="plugin_origins_listener",
