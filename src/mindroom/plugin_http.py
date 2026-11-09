@@ -21,7 +21,11 @@ from mindroom.api.client_sessions import (
     offered_session,
     presented_session,
 )
-from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.api.config_lifecycle import (
+    bind_current_request_snapshot,
+    rebind_current_request_snapshot,
+    require_api_state,
+)
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_directory import entity_directory
@@ -69,6 +73,7 @@ __all__ = [
     "require_room_member",
     "require_room_messenger",
     "require_room_reader",
+    "stream_room_reader",
 ]
 
 # A stream in a room rechecks its user's membership this long after each check.
@@ -351,8 +356,24 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     else of the room.
     """
     user = await require_client_user(request)
-    members = await _require_joined(request, user.user_id, room_id)
-    state = ensure_app_state(request.app)
+    return await _room_reader(request, user, room_id)
+
+
+async def stream_room_reader(websocket: WebSocket, user: ClientUser, room_id: str) -> RoomReader:
+    """Return what a ``client_stream`` block for ``user`` may read and change about ``room_id`` now.
+
+    It is ``require_room_reader`` for a websocket, which can't send a session's ``Authorization``: it reads the room's
+    members again, answering 403 once ``user`` left and 503 when they can't be read, and answers ``agents()`` and
+    ``agent()`` under the config the API serves now, or 409 when the API serves another runtime. A stream that keeps
+    checking what its caller may do calls it again for each check.
+    """
+    rebind_current_request_snapshot(websocket)
+    return await _room_reader(websocket, user, room_id)
+
+
+async def _room_reader(connection: HTTPConnection, user: ClientUser, room_id: str) -> RoomReader:
+    members = await _require_joined(connection, user.user_id, room_id)
+    state = ensure_app_state(connection.app)
     return RoomReader(
         user,
         members,
@@ -361,7 +382,7 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         room_id,
         lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
         partial(_bound(state.room_history), room_id, user.user_id),
-        partial(room_agent_workspaces, request, user.user_id, room_id, members),
+        partial(room_agent_workspaces, connection, user.user_id, room_id, members),
     )
 
 

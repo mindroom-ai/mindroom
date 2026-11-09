@@ -4,120 +4,47 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import pytest
-import pytest_asyncio
-import uvicorn
 from aiohttp import web
 from structlog.testing import capture_logs
 
-from mindroom.agents import build_agent_toolkit
-from mindroom.api import sandbox_runner
+from mindroom.agent_cli.shell_contract import AGENT_CLI_TOKEN_ENV, AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.terminal import client as client_module
 from mindroom.terminal import session as session_module
-from mindroom.terminal.client import TerminalDetachedError, WorkerTerminals
+from mindroom.terminal.client import TerminalDetachedError, TerminalStream, WorkerTerminals
+from mindroom.terminal.lines import TerminalLine
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
-from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
+from mindroom.tool_system.sandbox_proxy import worker_call
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from mindroom.workers.runtime import reset_primary_worker_manager
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.terminal.conftest import RUNNER_TOKEN, agent_toolkit, primary_paths, serve_runner
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.terminal.client import TerminalStream
     from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 pytestmark = pytest.mark.asyncio
 
-_TOKEN = "runner-token"  # noqa: S105
 # Headers the runner refuses: no token, and a token that is not ASCII.
 _REFUSED_TOKEN_HEADERS = ({}, {"x-mindroom-sandbox-token": "runner-tökén"})
-_IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
-
-
-@pytest.fixture(autouse=True)
-def _fresh_primary_worker_manager() -> Iterator[None]:
-    reset_primary_worker_manager()
-    yield
-    reset_primary_worker_manager()
-
-
-async def _serve(tmp_path: Path, execution_mode: str) -> tuple[uvicorn.Server, asyncio.Task[None], str]:
-    """Serve the sandbox runner app on a free port, sharing the primary's storage, as a shared runner does."""
-    seed = tmp_path / "seed" / "config.yaml"
-    seed.parent.mkdir(exist_ok=True)
-    seed.write_text("agents: {}\n", encoding="utf-8")
-    runner_paths = resolve_runtime_paths(
-        config_path=seed,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": execution_mode,
-        },
-    )
-    sandbox_runner.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TOKEN)
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    server = uvicorn.Server(uvicorn.Config(sandbox_runner_app, ws="websockets-sansio", log_level="error"))
-    serving = asyncio.create_task(server.serve(sockets=[listener]))
-    async with asyncio.timeout(30):
-        while not server.started:
-            if serving.done():
-                await serving
-            await asyncio.sleep(0.01)
-    return server, serving, f"http://127.0.0.1:{listener.getsockname()[1]}"
-
-
-@pytest_asyncio.fixture
-async def runner(tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[str]:
-    """Return the URL of a running sandbox runner; ``request.param`` is its execution mode."""
-    server, serving, url = await _serve(tmp_path, getattr(request, "param", "inprocess"))
-    yield url
-    server.should_exit = True
-    await serving
-
-
-def _primary_paths(tmp_path: Path, runner_url: str) -> RuntimePaths:
-    return resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_SANDBOX_PROXY_URL": runner_url,
-            "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
-            "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-            "MINDROOM_SANDBOX_PROXY_TOOLS": "shell",
-        },
-    )
 
 
 def _shell(paths: RuntimePaths) -> AnyToolkit:
-    """Build the agent's worker-routed shell toolkit as a reply to ``_IDENTITY`` builds it."""
-    config = Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])})
-    toolkit = build_agent_toolkit(
-        "shell",
-        agent_tools=resolve_agent_tools(config, "code", builtin_tool_registry()),
-        placement=tool_placement(paths, builtin_tool_registry()),
-        runtime_paths=paths,
-        execution_identity=_IDENTITY,
-    )
-    assert toolkit is not None
-    return toolkit
+    """Build the agent's worker-routed shell toolkit as a reply to ``IDENTITY`` builds it."""
+    return agent_toolkit("shell", Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])}), paths)
 
 
 def _terminals(toolkit: AnyToolkit) -> WorkerTerminals:
@@ -173,7 +100,7 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
 
     That includes the call's own environment, and no startup file in the shell's home runs.
     """
-    toolkit = _shell(_primary_paths(tmp_path, runner))
+    toolkit = _shell(primary_paths(tmp_path, runner))
     terminals = _terminals(toolkit)
     home = agent_workspace_root_path(tmp_path / "storage", "code")
     home.mkdir(parents=True, exist_ok=True)
@@ -198,6 +125,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     assert terminal_env["PATH"].startswith("/opt/from-the-call/bin:")
     assert "FROM_STARTUP_FILE" not in terminal_env
     assert terminal_env.pop("TERM") == "xterm-256color"
+    # The shell marks its prompts and keeps its prompt command from the commands it starts.
+    assert "PROMPT_COMMAND" not in terminal_env
     for name in ("TERM", "SHLVL", "_"):
         command_env.pop(name, None)
         terminal_env.pop(name, None)
@@ -206,9 +135,28 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     assert terminal_env["PWD"] == workspace == str(home.resolve())
 
 
+async def test_a_terminal_opened_while_a_cli_grant_is_bound_starts_without_it(tmp_path: Path, runner: str) -> None:
+    """The response's CLI grant reaches the shell commands it binds, never a terminal, whose shell outlives it."""
+    toolkit = _shell(primary_paths(tmp_path, runner))
+    terminals = _terminals(toolkit)
+    grant = AgentCliShellEnv(api_url="http://primary/cli", token="grant-token", bin_dir="/opt/grant/bin")  # noqa: S106
+    with bound_agent_cli_shell_env(grant, window="window"):
+        command_env = _env((await _run_shell_command(toolkit, "env")).partition("\n")[2])
+        info = await terminals.open()
+    async with terminals.attach(info.id) as stream:
+        await stream.send_input("env > terminal.env; exit\r")
+        assert await _exit_code(stream) == 0
+
+    terminal_env = _env((agent_workspace_root_path(tmp_path / "storage", "code") / "terminal.env").read_text())
+    assert command_env[AGENT_CLI_TOKEN_ENV] == "grant-token"
+    assert command_env["PATH"].startswith("/opt/grant/bin:")
+    assert not [name for name in terminal_env if name.startswith("MINDROOM_AGENT_CLI_")]
+    assert "/opt/grant/bin" not in terminal_env["PATH"].split(":")
+
+
 async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resize(tmp_path: Path, runner: str) -> None:
     """A second viewer gets the scrollback, then live output; its keys and size reach the shell, and exit ends it."""
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     info = await terminals.open(cols=80, rows=24)
     async with terminals.attach(info.id) as first:
         await first.send_input("for i in $(seq 1 100000); do echo n$i; sleep 0.05; done\r")
@@ -234,13 +182,77 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
     assert await terminals.sessions() == []
 
 
+async def test_viewers_type_through_one_connection_that_ends_with_the_last_viewer(tmp_path: Path, runner: str) -> None:
+    """The terminal's input connection is a viewer of its own, held while anyone watches, and gone with the last one."""
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    call = worker_call(terminals.stand_ins, "run_shell_command", start=False)
+    assert call is not None
+    session = sandbox_runner_app.state.worker_terminals.get(client_module._owner(call.request), info.id)
+    async with terminals.attach(info.id) as first, terminals.attach(info.id) as second:
+        await first.send_input("echo $((3*3))one\r")
+        await second.send_input("echo $((4*4))two\r")
+        await _read_until(second, b"16two")
+        assert session.idle_seconds() == 0.0
+    async with asyncio.timeout(10):
+        while session.idle_seconds() == 0.0:  # noqa: ASYNC110 - the runner signals no event when a viewer leaves
+            await asyncio.sleep(0.01)
+
+
+class _Connection:
+    """A stand-in for a connection to the runner: it takes frames and shows nothing until someone closes it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.frames: list[dict[str, object]] = []
+
+    async def send_json(self, frame: dict[str, object]) -> None:
+        self.frames.append(frame)
+
+    def __aiter__(self) -> _Connection:
+        return self
+
+    async def __anext__(self) -> object:
+        await asyncio.Event().wait()
+
+    async def __aenter__(self) -> _Connection:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.closed = True
+
+
+async def test_a_run_after_the_input_connection_ended_is_not_typed_on_its_successor() -> None:
+    """The runner may not have read what a connection it ended carried last, however late the primary notices."""
+    connections: list[_Connection] = []
+
+    async def connect() -> tuple[Any, Any]:
+        connections.append(_Connection())
+        return connections[-1], connections[-1]
+
+    line = TerminalLine(opened=True)
+    line.prompted(1)
+    stream = TerminalStream(_Connection(), line, client_module._TerminalInput(), connect)  # type: ignore[arg-type]
+    # Had the runner read `abc` but not the Ctrl-C after it, the prompt after `sleep` would hold `abc`.
+    await stream.send_input("sleep 1\r")
+    await stream.send_input("abc\x03")
+    line.prompted(2)
+    assert line.empty
+    connections[0].closed = True
+    with pytest.raises(TerminalError) as refused:
+        await stream.send_input("ls\r", empty_line=True)
+
+    assert refused.value.status_code == 409
+    assert [frame["data"] for connection in connections for frame in connection.frames] == ["sleep 1\r", "abc\x03"]
+
+
 async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(
     tmp_path: Path,
     runner: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dropped viewer's stream ends without an exit, while the terminal runs on and a new viewer gets its output."""
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     info = await terminals.open()
     with monkeypatch.context() as limited:
         # Any output at all puts the viewer too far behind.
@@ -261,7 +273,7 @@ async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_pat
 
     A session ID names only a session, a terminal starts in the workspace, and a request the runner refuses says why.
     """
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     target = terminals.stand_ins.worker_target
     assert target is not None
     other = WorkerTerminals(replace(terminals.stand_ins, worker_target=replace(target, routing_agent_name="other")))
@@ -309,7 +321,7 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
             sessions,
             params={"owner": "x"},
             json=body,
-            headers={"x-mindroom-sandbox-token": _TOKEN},
+            headers={"x-mindroom-sandbox-token": RUNNER_TOKEN},
         ) as response:
             assert response.status == 400
             assert (await response.json())["detail"] == "A terminal opens only with a shell call's request."
@@ -317,7 +329,7 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
 
 async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tmp_path: Path, runner: str) -> None:
     """Knowing a terminal's ID and owner is not enough to attach to it without the runner token."""
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     info = await terminals.open()
     call = worker_call(terminals.stand_ins, "run_shell_command", start=False)
     assert call is not None
@@ -334,9 +346,9 @@ async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tm
 
 async def test_a_stopping_runner_hangs_up_its_terminals(tmp_path: Path) -> None:
     """Every terminal's shell ends when its runner stops."""
-    server, serving, url = await _serve(tmp_path, "inprocess")
+    server, serving, url = await serve_runner(tmp_path, "inprocess")
     try:
-        terminals = _terminals(_shell(_primary_paths(tmp_path, url)))
+        terminals = _terminals(_shell(primary_paths(tmp_path, url)))
         info = await terminals.open()
         async with terminals.attach(info.id) as stream:
             await stream.send_input("echo $$ > shell.pid; echo $((9*9))saved\r")
@@ -375,7 +387,7 @@ async def test_an_attached_viewer_keeps_marking_the_worker_used(
         return real_worker_call(*args, start=start)
 
     monkeypatch.setattr(client_module, "worker_call", recorded)
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     info = await terminals.open()
     with capture_logs() as logs:
         async with terminals.attach(info.id):
@@ -418,7 +430,7 @@ async def test_a_viewer_whose_runner_goes_silent_is_told_to_attach_again(
 
     monkeypatch.setattr(client_module, "worker_call", to_silent_peer)
     monkeypatch.setattr(client_module, "_HEARTBEAT_SECONDS", 0.1)
-    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     try:
         await web.TCPSite(server, "127.0.0.1", 0).start()
         async with terminals.attach("abc") as stream:
@@ -452,7 +464,7 @@ async def test_a_stopped_dedicated_worker_has_no_terminals_and_is_not_started(
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN, "MINDROOM_WORKER_BACKEND": "kubernetes"},
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": RUNNER_TOKEN, "MINDROOM_WORKER_BACKEND": "kubernetes"},
     )
     terminals = _terminals(_shell(paths))
 
