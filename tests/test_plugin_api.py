@@ -473,6 +473,12 @@ _MEMBERS = {
         "history": "(self)",
     },
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
+    "mindroom.plugin_http.WorkerRelay": {
+        "http": "(self, method, path, *, service, port, headers, body)",
+        "websocket": "(self, path, *, service, port, protocols)",
+        "relay_messages": "(self, websocket, upstream)",
+        "ports": "(self)",
+    },
     "mindroom.plugin_http.RoomMessenger": {
         "notice": "(self, text, *, thread_id, content)",
         "relay": "(self, text, *, mentions, thread_id, content)",
@@ -570,6 +576,7 @@ _HTTP_EXPORTS = [
     "RoomModes",
     "RoomPower",
     "RoomReader",
+    "WorkerRelay",
     "client_rooms",
     "client_stream",
     "plugin_context",
@@ -579,6 +586,7 @@ _HTTP_EXPORTS = [
     "require_room_messenger",
     "require_room_reader",
     "stream_room_reader",
+    "worker_relay",
 ]
 _TESTING_EXPORTS = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 _ELSEWHERE_SIGNATURES = {
@@ -587,7 +595,9 @@ _ELSEWHERE_SIGNATURES = {
     ),
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
-    "mindroom.plugin_http.AgentWorkspace": "(name, user_id, display_name, private, root, files, terminal, config)",
+    "mindroom.plugin_http.AgentWorkspace": (
+        "(name, user_id, display_name, private, root, files, terminal, worker_target, config)"
+    ),
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomHistory": "(visibility)",
     "mindroom.plugin_http.RoomMessenger": "(user)",
@@ -603,6 +613,8 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
     "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
+    "mindroom.plugin_http.WorkerRelay": "()",
+    "mindroom.plugin_http.worker_relay": "(connection, target)",
     "mindroom.plugin_testing.Room": "(room_id, members, power_levels, direct, history_visibility, key, sent)",
     "mindroom.plugin_testing.SentMessage": "(text, thread_id, source, content, mentions)",
     "mindroom.plugin_testing.load_plugin": "(path, tmp_dir, *, config, settings)",
@@ -610,7 +622,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 21), "b23083c4534c751a558c3ee638cb3d5d27878d8950625551474cd31acc4c0bf0")
+_PINNED_VERSION = ((1, 22), "cd6a449d271244b555943014349932a0e3ee808ea090fc9281b5f39d82b58802")
 
 
 def _is_enum(obj: object) -> bool:

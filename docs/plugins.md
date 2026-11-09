@@ -1207,6 +1207,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
 | `files` | `none`, `read`, or `write`, as [Who may open and change a workspace](workspace-files.md#who-may-open-and-change-a-workspace) describes, from each toolkit's [`workspace_writers`](#decorator-fields) |
+| `worker_target` | The worker the agent's turns for this caller use, which [`worker_relay`](#reaching-the-agents-worker) and [`ensure_worker_service`](#worker-services) take |
 | `terminal` | `none` when the agent's [`terminals`](configuration/agents.md) setting is `none`, its default, or the agent has no [`shell`](tools/execution-and-coding.md#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](tools/execution-and-coding.md#terminal) runs. `type` when the setting is `type`, the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
@@ -1479,7 +1480,7 @@ Each worker runs one instance of a service, so ensuring a running service return
 A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
 The program's output goes to the worker's log.
 
-A service stops when `idle_timeout_seconds` pass without an ensure, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
+A service stops when `idle_timeout_seconds` pass without an ensure or a [relayed](#reaching-the-agents-worker) request, though never while a relayed answer or WebSocket to it is open, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
 A service that replaced plugin code starts during a reload keeps running until its idle timeout.
 Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
 A plugin with worker services states `"mindroom_plugin_api": "1.20"` in its manifest.
@@ -1554,6 +1555,113 @@ asyncio.run(main())
 ```
 
 A plugin that uses the bridge states `"mindroom_plugin_api": "1.21"` in its manifest.
+
+### Reaching the agent's worker
+
+A route reaches a worker service of its own plugin, or a server the agent runs in its worker, such as a web app it started from its shell, through `await worker_relay(connection, target)` from `mindroom.plugin_http`.
+`target` is the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` returned, so the caller's room and agent checks have run, or one a tool of the plugin recorded.
+It never starts the worker: it answers 503 with `The agent's worker is not running.` until the agent's first tool call there or an `ensure_worker_service` starts it, and after idle cleanup stops it, and 503 without a dedicated worker backend.
+
+A WebSocket service greets each message it gets, and like every service refuses a connection without its secret:
+
+```python
+# greeter_service.py
+import asyncio
+import hmac
+import os
+import sys
+
+from websockets.asyncio.server import serve
+
+SECRET = sys.stdin.readline().strip()
+
+
+def check_secret(connection, request):
+    if not hmac.compare_digest(request.headers.get("X-MindRoom-Service-Secret", ""), SECRET):
+        return connection.respond(403, "Forbidden\n")
+    return None
+
+
+async def greet(websocket) -> None:
+    async for message in websocket:
+        await websocket.send(f"hello {message}")
+
+
+async def main() -> None:
+    port = int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])
+    async with serve(greet, "127.0.0.1", port, process_request=check_secret) as server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
+```
+
+This websocket route lets a room member who may use the agent talk to it, refusing anyone else at the handshake:
+
+```python
+# routes.py
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_api import WorkerService, ensure_worker_service
+from mindroom.plugin_http import AgentWorkspace, ClientUser, client_stream, plugin_context, stream_room_reader, worker_relay
+
+GREETER = WorkerService("greeter", "greeter_service.py")
+router = APIRouter()
+
+
+@router.websocket("/rooms/{room_id}/agents/{agent_user_id}/greeter")
+async def greeter(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
+    agents: list[AgentWorkspace] = []
+
+    async def may_use_agent(user: ClientUser) -> bool:
+        agents.append(await (await stream_room_reader(websocket, user, room_id)).agent(agent_user_id))
+        return True
+
+    async with client_stream(websocket, room_id, admit=may_use_agent):
+        target = agents[0].worker_target
+        await ensure_worker_service(plugin_context(websocket), GREETER, target)
+        relay = await worker_relay(websocket, target)
+        async with relay.websocket("/", service="greeter") as upstream:
+            await relay.relay_messages(websocket, upstream)
+```
+
+The relay ends with the client's stream, which `client_stream` closes when the session ends or the caller leaves the room, with its own close code; a route that must also notice the agent's access rules changing calls `stream_room_reader(...).agent()` again as often as it needs.
+Plugin routes answer JSON, never pages for a browser, so this HTTP route reads the status a server the agent started on port 5173 reports:
+
+```python
+# routes.py
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from mindroom.plugin_http import RoomReader, require_room_reader, worker_relay
+
+router = APIRouter()
+
+
+@router.get("/rooms/{room_id}/agents/{agent_user_id}/build-status")
+async def build_status(request: Request, agent_user_id: str, room: RoomReader = Depends(require_room_reader)) -> object:
+    relay = await worker_relay(request, (await room.agent(agent_user_id)).worker_target)
+    async with relay.http("GET", "/status.json", port=5173) as answer:
+        if answer.status != 200:
+            raise HTTPException(502, "The agent's app did not answer.")
+        return await answer.json()
+```
+
+| Call | Effect |
+|------|--------|
+| `async with relay.http(method, path, *, service=None, port=None, headers=(), body=None) as answer` | Sends one request, with `body` as `bytes` or streamed from an async iterator of `bytes`, and yields the answer, an `aiohttp.ClientResponse`, as it streams in |
+| `async with relay.websocket(path, *, service=None, port=None, protocols=()) as upstream` | Opens a WebSocket and yields it, an `aiohttp.ClientWebSocketResponse`; a refused handshake raises `aiohttp.WSServerHandshakeError` with the status and headers |
+| `await relay.relay_messages(websocket, upstream)` | Passes messages both ways between the route's accepted websocket and `upstream` until either side closes, then closes both with the code that ended it |
+| `await relay.ports()` | The ports the relay reaches: those that servers the worker's own processes run listen on at its loopback; a refusal raises `HTTPException` with the relay's answer |
+
+Each call names exactly one of `service`, the name of one of the calling plugin's own worker services, or `port`, a port on the worker's loopback, and raises `ValueError` otherwise.
+`path` is percent-encoded and may carry a query; it always stays below the service or port, `..` included.
+`http()` never follows redirects or decompresses, and the relay keeps no cookies, so a route can pass an answer through as it came.
+It sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
+A service gets its secret from the relay, and never one the route sends.
+The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.
+While an answer or WebSocket is open, idle cleanup leaves the worker running.
+Without an answer from the worker, the calls raise `aiohttp.ClientError`.
+A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest.
 
 ## People, agents, and administrators
 

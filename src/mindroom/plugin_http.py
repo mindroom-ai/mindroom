@@ -34,6 +34,7 @@ from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
@@ -65,6 +67,7 @@ __all__ = [
     "RoomModes",
     "RoomPower",
     "RoomReader",
+    "WorkerRelay",
     "client_rooms",
     "client_stream",
     "plugin_context",
@@ -74,6 +77,7 @@ __all__ = [
     "require_room_messenger",
     "require_room_reader",
     "stream_room_reader",
+    "worker_relay",
 ]
 
 # A stream in a room rechecks its user's membership this long after each check.
@@ -580,6 +584,18 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
         return latest.runtime_config if latest.runtime_paths == snapshot.runtime_paths else None
 
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
+
+
+async def worker_relay(connection: HTTPConnection, target: ResolvedWorkerTarget) -> WorkerRelay:
+    """Return the relay into the dedicated worker ``target`` names, for the plugin whose route serves ``connection``.
+
+    ``target`` is an ``AgentWorkspace``'s ``worker_target``, which ``RoomReader.agent()`` and ``agents()`` return once
+    the caller may use the agent, or one a tool of the plugin recorded. By name, the relay reaches only that plugin's
+    own worker services. It never starts the worker: it answers 503 while the worker is not running, and without a
+    dedicated worker backend.
+    """
+    plugin_name = _route_plugin_name(connection, "worker_relay")
+    return await open_worker_relay(require_api_state(connection.app).snapshot.runtime_paths, target, plugin_name)
 
 
 def _route_plugin_name(connection: HTTPConnection, helper: str) -> str:

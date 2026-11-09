@@ -5800,6 +5800,7 @@ visibility = [
     "mindroom.tool_system.worker_media",
     "mindroom.api.sandbox_runner",
     "mindroom.plugin_worker_services",
+    "mindroom.plugin_worker_relay",
 ]
 
 [[modules]]
@@ -8263,6 +8264,7 @@ path = "mindroom.api.worker_preview"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
+    "mindroom.api.worker_services",
     "mindroom.previews.listeners",
     "mindroom.previews.relay",
 ]
@@ -8396,6 +8398,7 @@ depends_on = [
     "mindroom.matrix.reserved_content",
     "mindroom.matrix.room_power",
     "mindroom.plugin_context",
+    "mindroom.plugin_worker_relay",
     "mindroom.room_agent_access",
     "mindroom.room_modes",
     "mindroom.room_reply_modes",
@@ -8458,6 +8461,16 @@ depends_on = [
     "mindroom.plugin_context",
     "mindroom.plugin_worker_services",
     "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.plugin_worker_relay"
+depends_on = [
+    "mindroom.plugin_worker_services",
+    "mindroom.previews.relay",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_proxy_client",
+    "mindroom.workers.backend_kinds",
 ]
 
 [[modules]]

@@ -31,9 +31,9 @@ from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, up
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_tool_execution_identity, normal_worker_key
 from tests.access_schema_support import joined_members_response
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -188,8 +188,8 @@ async def _status(read: Awaitable[object]) -> tuple[int, object]:
     return 200, None
 
 
-def _turn_root(room: _Room, agent_name: str, requester_id: str) -> Path:
-    """The workspace a turn of ``agent_name`` for ``requester_id`` in a thread of ``ROOM`` resolves."""
+def _turn(room: _Room, agent_name: str, requester_id: str) -> ResolvedAgentRuntime:
+    """The runtime a turn of ``agent_name`` for ``requester_id`` in a thread of ``ROOM`` resolves."""
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
@@ -200,7 +200,17 @@ def _turn_root(room: _Room, agent_name: str, requester_id: str) -> Path:
         resolved_thread_id="$thread",
         session_id="session",
     )
-    return resolve_agent_runtime(agent_name, room.config, room.paths, identity).workspace.root
+    return resolve_agent_runtime(agent_name, room.config, room.paths, identity)
+
+
+def _turn_root(room: _Room, agent_name: str, requester_id: str) -> Path:
+    """The workspace a turn of ``agent_name`` for ``requester_id`` in a thread of ``ROOM`` resolves."""
+    return _turn(room, agent_name, requester_id).workspace.root
+
+
+def _turn_worker(room: _Room, agent_name: str, requester_id: str) -> str | None:
+    """The key of the dedicated worker a turn of ``agent_name`` for ``requester_id`` in a thread of ``ROOM`` uses."""
+    return normal_worker_key(_turn(room, agent_name, requester_id).execution.worker_target)
 
 
 def _access(workspaces: list[AgentWorkspace]) -> list[tuple[str, str, str]]:
@@ -231,6 +241,26 @@ async def test_agents_lists_those_the_caller_may_use_in_config_order_with_what_t
         _turn_root(room, "notes", CAROL),
     )
     assert len({alice[1].root, bob[1].root, carol[0].root}) == 3
+
+
+@pytest.mark.asyncio
+async def test_each_workspace_names_the_worker_the_caller_s_turns_use(tmp_path: Path) -> None:
+    """Callers of a shared agent share its worker, and each caller of a per-user private agent gets their own."""
+    room = _room(tmp_path, _agents())
+
+    alice = await room.agents(ALICE)
+    bob = await room.agents(BOB)
+
+    workers = [normal_worker_key(workspace.worker_target) for workspace in (*alice, *bob)]
+    assert workers == [
+        _turn_worker(room, "coder", ALICE),
+        _turn_worker(room, "notes", ALICE),
+        _turn_worker(room, "coder", BOB),
+        _turn_worker(room, "notes", BOB),
+    ]
+    assert workers[0] == workers[2]
+    assert len({workers[0], workers[1], workers[3]}) == 3
+    assert None not in workers
 
 
 @pytest.mark.asyncio
