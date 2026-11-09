@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -29,6 +30,7 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
+from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
@@ -44,6 +46,19 @@ if TYPE_CHECKING:
 _RUN_ID = f"script-{'a' * 32}"
 _GATEWAY_URL = "http://primary.test/api/script-gateway"
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+# Far beyond the test's own timeout, so the supervisor never ends the script on wall time and only the test's clock
+# reaches the run's deadline.
+_MAX_RUNTIME_SECONDS = 3600
+
+
+@dataclass
+class _Clock:
+    """The time the primaries measure the run's maximum runtime against, which only the test advances."""
+
+    now: datetime
+
+    def __call__(self) -> datetime:
+        return self.now
 
 
 @dataclass
@@ -165,6 +180,7 @@ def _lifecycle(
     backend: _RecoveringWorkerBackend,
     worker_client: _SupervisorWorkerClient,
     config: Config,
+    clock: _Clock,
 ) -> ScriptRuntimeLifecycle:
     resolver = _AuthorizedResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)  # type: ignore[arg-type]
@@ -174,6 +190,7 @@ def _lifecycle(
         worker_client=worker_client,  # type: ignore[arg-type]
         worker_backend=backend,
         gateway_url=_GATEWAY_URL,
+        clock=clock,
     )
     lifecycle = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -200,20 +217,6 @@ async def _read_progress(path: Path, *, greater_than: int = -1) -> int:
         await asyncio.sleep(0.05)
     message = f"Script progress never advanced beyond {greater_than}."
     raise AssertionError(message)
-
-
-async def _wait_for_finished(socket_path: str, *, worker_key: str) -> WorkerScriptStatus:
-    for _ in range(120):
-        status = await supervised_script_status(
-            socket_path,
-            namespace=worker_script_namespace(worker_key, _RUN_ID),
-            run_id=_RUN_ID,
-        )
-        if status.state == "exited":
-            return status
-        await asyncio.sleep(0.05)
-    error = f"Script process did not reach its supervisor deadline: {status}"
-    raise AssertionError(error)
 
 
 @pytest.mark.asyncio
@@ -262,10 +265,13 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             worker_key=worker_key,
             worker_backend_locator=backend.cleanup_locator,
             recovery_signature=recovery_signature,
-            max_runtime_seconds=4,
+            max_runtime_seconds=_MAX_RUNTIME_SECONDS,
         ),
     )
-    store.transition_run(_RUN_ID, state=ScriptRunState.RUNNING, worker_id=worker.worker_id)
+    running = store.transition_run(_RUN_ID, state=ScriptRunState.RUNNING, worker_id=worker.worker_id)
+    assert running.started_at is not None
+    started = datetime.fromisoformat(running.started_at)
+    clock = _Clock(started)
 
     supervisor = _ShellSupervisorManager()
     first_lifecycle: ScriptRuntimeLifecycle | None = None
@@ -297,7 +303,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             tail=100,
             timeout=0,
             handle=supervisor_handle_for_run(_RUN_ID),
-            max_runtime_seconds=4,
+            max_runtime_seconds=_MAX_RUNTIME_SECONDS,
         )
         process_group_leader = int(re.search(r"PID (\d+)", launch.message).group(1))  # type: ignore[union-attr]
         first_progress = await _read_progress(progress_path)
@@ -311,6 +317,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             backend=backend,
             worker_client=worker_client,
             config=config,
+            clock=clock,
         )
         await first_lifecycle.start()
         initially_adopted = store.get_run(_RUN_ID)
@@ -338,6 +345,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             backend=backend,
             worker_client=worker_client,
             config=config,
+            clock=clock,
         )
         await second_lifecycle.start()
 
@@ -370,11 +378,16 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert response.status_code == 200
         assert response.json()["state"] == ScriptCallState.INDETERMINATE
 
-        finished = await _wait_for_finished(socket_path, worker_key=worker_key)
-        assert finished.exit_code == -9
-        await assert_linux_pid_not_running(script_pid)
+        clock.now = started + timedelta(seconds=_MAX_RUNTIME_SECONDS - 1)
+        before_deadline = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
+        assert before_deadline.state is ScriptRunState.RUNNING
+        clock.now = started + timedelta(seconds=_MAX_RUNTIME_SECONDS)
         terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED
+        assert terminal.cancellation_reason == MAX_RUNTIME_EXCEEDED
+        # The script ignores SIGTERM, so it ends only by the kill that follows.
+        assert terminal.exit_code == -9
+        await assert_linux_pid_not_running(script_pid)
         await second_lifecycle.shutdown()
         second_shutdown = True
     finally:
