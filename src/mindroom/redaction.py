@@ -89,11 +89,8 @@ _SHELL_WORD_PATTERN = re.compile(_SHELL_WORD)
 _LEADING_WHITESPACE_PATTERN = re.compile(r"\s*+")
 # The space between two arguments of a command, which a backslash line break may continue.
 _ARGUMENT_GAP_PATTERN = re.compile(r"(?:[^\S\r\n]|\\\r?\n)*+")
-# A quoted `user:password` ends at its own unescaped quote.
-_CURL_USER_OPTION_PATTERN = re.compile(
-    r"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
-    rf"(?P<token>(?(quote)(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])++|{_SHELL_WORD}))",
-)
+# curl's `user:password` is one shell word, whose part after the first colon is the password.
+_CURL_USER_OPTION_PATTERN = re.compile(rf"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<word>{_SHELL_WORD})")
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(rf"(?<!\S)-p(?P<token>{_SHELL_WORD})")
 # Words that run the word after them as a program, as in `sudo mysql`.
 _COMMAND_PREFIX_WORDS = frozenset(
@@ -461,7 +458,7 @@ def _assignment_value_span(
         if value_start >= len(value) or value[value_start] in ";|&<>":
             return None
         word = _SHELL_WORD_PATTERN.match(value, value_start)
-        if word is not None and value[value_start] not in "'\"":
+        if word is not None:
             return value_start, word.end(), word.end()
     if value_start >= len(value):
         return None
@@ -716,8 +713,19 @@ def _redact_password_options(command_match: re.Match[str]) -> str:
     words_before = [word for word in command[: program.start()].split() if word != "\\"]
     if words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS:
         return command
-    option = _CURL_USER_OPTION_PATTERN if program.group("curl") else _MYSQL_PASSWORD_OPTION_PATTERN
-    return command[: program.end()] + option.sub(_redact_matched_token, command[program.end() :])
+    arguments = command[program.end() :]
+    if program.group("curl"):
+        arguments = _CURL_USER_OPTION_PATTERN.sub(_redact_curl_password, arguments)
+    else:
+        arguments = _MYSQL_PASSWORD_OPTION_PATTERN.sub(_redact_matched_token, arguments)
+    return command[: program.end()] + arguments
+
+
+def _redact_curl_password(match: re.Match[str]) -> str:
+    user, colon, _password = match.group("word").partition(":")
+    if not colon:
+        return match.group(0)
+    return match.group(0)[: match.start("word") - match.start()] + user + colon + REDACTED
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
