@@ -19358,7 +19358,7 @@ This websocket route lets a room member who may use the agent talk to it, refusi
 # routes.py
 from fastapi import APIRouter, WebSocket
 
-from mindroom.plugin_api import WorkerService, ensure_worker_service
+from mindroom.plugin_api import WorkerService, ensure_worker_service, stop_worker_service
 from mindroom.plugin_http import AgentWorkspace, ClientUser, client_stream, plugin_context, stream_room_reader, worker_relay
 
 GREETER = WorkerService("greeter", "greeter_service.py")
@@ -19375,7 +19375,11 @@ async def greeter(websocket: WebSocket, room_id: str, agent_user_id: str) -> Non
 
     async with client_stream(websocket, room_id, admit=may_use_agent):
         target = agents[0].worker_target
-        state = await ensure_worker_service(plugin_context(websocket), GREETER, target)
+        context = plugin_context(websocket)
+        state = await ensure_worker_service(context, GREETER, target)
+        if state.state == "exited":
+            await stop_worker_service(context, GREETER, target)
+            state = await ensure_worker_service(context, GREETER, target)
         if state.state != "running":
             await websocket.close(1013, f"The greeter is {state.state}.")
             return
@@ -19384,7 +19388,7 @@ async def greeter(websocket: WebSocket, room_id: str, agent_user_id: str) -> Non
             await relay.relay_messages(websocket, upstream)
 ```
 
-The route relays only once the ensure reports `running`, since a `starting` service does not listen yet and an `exited` one does not run.
+The route starts an `exited` service again, and relays only once the ensure reports `running`, since a `starting` service does not listen yet.
 The relay ends with the client's stream, which `client_stream` closes when the session ends or the caller leaves the room, with its own close code; a route that must also notice the agent's access rules changing calls `stream_room_reader(...).agent()` again as often as it needs.
 Plugin routes answer JSON, never pages for a browser, so this HTTP route reads the status a server the agent started on port 5173 reports:
 
