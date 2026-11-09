@@ -616,7 +616,7 @@ async def test_a_contact_room_opens_no_workspace(tmp_path: Path) -> None:
 async def test_a_corrupt_contacts_store_leaves_out_only_the_personal_agent(tmp_path: Path) -> None:
     """Only a personal agent reads the contacts store, so a corrupt one leaves out that agent and lists the rest."""
     data = _with_template()
-    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"], "terminals": "type"}
+    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"]}
     data["agents"]["creator"]["access"] = {"users": [ALICE]}
     room = _Room(
         _load(tmp_path, data, entries=[_personal(ALICE)]),

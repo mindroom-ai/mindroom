@@ -198,8 +198,7 @@ Use it for work people should see or that keeps state between commands, such as 
 An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
-People see an agent's terminals only when its `terminals` setting is `watch` or `type`; by default it is `none`, and only the agent itself uses them.
-With `type`, people who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
+With [`terminals: type`](https://docs.mindroom.chat/configuration/agents/), people who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
 After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 

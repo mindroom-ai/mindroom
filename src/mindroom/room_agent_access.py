@@ -351,7 +351,11 @@ def _workspace(
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
     # sees the workspace, and get it only as far as the agent's config allows.
     shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None
-    allowed = config.agents[name].terminals
+    terminal = config.agents[name].terminals
+    if shell in (None, "primary"):
+        terminal = "none"
+    elif terminal == "type" and not (may_send and shell == "workspace_worker"):
+        terminal = "watch"
     return AgentWorkspace(
         name=name,
         user_id=user_id,
@@ -359,13 +363,7 @@ def _workspace(
         private=storage.execution.is_private,
         root=workspace.root,
         files="none" if not path_toolkits else "write" if may_send and any(path_toolkits.values()) else "read",
-        terminal=(
-            "none"
-            if allowed == "none" or shell in (None, "primary")
-            else "type"
-            if allowed == "type" and may_send and shell == "workspace_worker"
-            else "watch"
-        ),
+        terminal=terminal,
         config=config,
     )
 
