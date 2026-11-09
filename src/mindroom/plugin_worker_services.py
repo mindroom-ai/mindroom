@@ -7,6 +7,7 @@ every plugin's code, so the primary stops the services it started whenever it lo
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -47,12 +48,12 @@ class WorkerService:
     idle_timeout_seconds: float = 600.0
 
     def __post_init__(self) -> None:
-        """Refuse a name the runner's routes cannot carry and a timeout that is not positive."""
+        """Refuse a name the runner's routes cannot carry and a timeout that is not a positive number of seconds."""
         if not re.fullmatch(SERVICE_NAME_PATTERN, self.name):
             msg = f"Worker service name {self.name!r} must be 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
             raise ValueError(msg)
-        if self.idle_timeout_seconds <= 0:
-            msg = "A worker service's idle_timeout_seconds must be positive."
+        if not math.isfinite(self.idle_timeout_seconds) or self.idle_timeout_seconds <= 0:
+            msg = "A worker service's idle_timeout_seconds must be positive and finite."
             raise ValueError(msg)
 
 

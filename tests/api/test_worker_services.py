@@ -586,7 +586,18 @@ async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_pat
         await stop_worker_service(context, _SERVICE, _TARGET)
 
 
-@pytest.mark.parametrize(("name", "idle"), [("Hello", 1.0), ("_cache", 1.0), ("a/b", 1.0), ("", 1.0), ("hello", 0.0)])
+@pytest.mark.parametrize(
+    ("name", "idle"),
+    [
+        ("Hello", 1.0),
+        ("_cache", 1.0),
+        ("a/b", 1.0),
+        ("", 1.0),
+        ("hello", 0.0),
+        ("hello", float("inf")),
+        ("hello", float("nan")),
+    ],
+)
 def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: float) -> None:
     """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
     with pytest.raises(ValueError, match=r"(?i)worker service"):
