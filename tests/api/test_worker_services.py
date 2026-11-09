@@ -7,7 +7,7 @@ import json
 import re
 import socket
 import sys
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -56,7 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 secret = sys.stdin.readline().strip()
 # A process the service starts, which a stop asks to end with it, as a TERM signal it takes a while to record.
-CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: (time.sleep(0.3), sys.exit(open('child-term', 'w').close()))); time.sleep(600)"
+CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: (time.sleep(0.3), sys.exit(open('child-term', 'w').close()))); open('child-ready', 'w').close(); time.sleep(600)"
 child = subprocess.Popen([sys.executable, "-c", CHILD])
 with open("service.json", "w") as record:
     runner_url = os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]
@@ -128,6 +128,9 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     config = _config(plugin_root, paths)
     initialize_sandbox_runner_app(sandbox_runner_app.app, paths, config=config, runner_token=_TOKEN)
+    # The app outlives each test's event loop, so each test starts with services of its own.
+    with suppress(KeyError):
+        del sandbox_runner_app.app.state.worker_services
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(sandbox_runner_app.app, lifespan="off", log_level="error"))
@@ -220,6 +223,7 @@ async def test_stop_ends_the_service_and_the_next_ensure_starts_it_again(tmp_pat
     async with _runner(tmp_path) as runner:
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
+        await _until((runner.workspace / "child-ready").exists)
         # The stop waits for the processes that end on the TERM signal, not for its whole grace period.
         async with asyncio.timeout(3):
             assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
@@ -267,11 +271,12 @@ async def test_each_ensure_resets_the_idle_timer(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_an_idle_service_stops_after_its_timeout(tmp_path: Path) -> None:
-    """Without an ensure or traffic for its idle timeout, the instance ends and is forgotten."""
+    """Without an ensure for its idle timeout, the instance ends and is forgotten."""
     async with _runner(tmp_path) as runner:
-        await _call("POST", runner.url(), _body(idle_timeout_seconds=0.5), _AUTH)
+        # Long enough for the program to start on a busy machine.
+        await _call("POST", runner.url(), _body(idle_timeout_seconds=2.0), _AUTH)
         pid = int(runner.record()["pid"])
-        await _until(lambda: not _pid_alive(pid))
+        await _until(lambda: not _pid_alive(pid), seconds=20)
         assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
 
 
