@@ -790,7 +790,8 @@ class Echo(socketserver.StreamRequestHandler):
         headers = {}
         while (line := self.rfile.readline().strip()):
             name, _, value = line.decode().partition(":")
-            headers[name.lower()] = value.strip()
+            # The first copy counts, so a forged one passed on ahead of the runner's own fails the check.
+            headers.setdefault(name.lower(), value.strip())
         if headers.get("x-mindroom-service-secret") != secret:
             self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
             return
