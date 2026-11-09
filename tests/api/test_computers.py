@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Never, cast
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
@@ -30,7 +30,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
-from mindroom.worker_computer.protocol import SCREENCAST_PROTOCOL, BrowserSession, ComputerStatus
+from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
@@ -191,23 +191,20 @@ def test_active_stream_authorization_transport_failure_revokes_control(
     assert client.get(path, headers=headers).status_code == 401
 
 
-@pytest.mark.parametrize("protocol", ["binary", SCREENCAST_PROTOCOL])
 @pytest.mark.parametrize("protocol_format", ["split", "combined", "combined_whitespace"])
-@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_protocol", "other_protocol", "missing_ticket"])
-def test_stream_ticket_scope_representations(gateway: Gateway, protocol: str, protocol_format: str, offer: str) -> None:
+@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
+def test_stream_ticket_scope_representations(gateway: Gateway, protocol_format: str, offer: str) -> None:
     """Raw header lines and normalized ASGI tokens enforce the same ticket contract, including replay rejection."""
     client, _, app = gateway
     session = create(client).json()
     path = "/api/computers/sessions/" + session["session_id"]
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
-    protocols = [protocol, "mindroom-ticket." + ticket]
+    protocols = ["binary", "mindroom-ticket." + ticket]
     if offer == "duplicate":
         protocols.append(protocols[-1])
-    elif offer == "missing_protocol":
+    elif offer == "missing_binary":
         protocols.pop(0)
-    elif offer == "other_protocol":
-        protocols[0] = "binary" if protocol == SCREENCAST_PROTOCOL else SCREENCAST_PROTOCOL
     elif offer == "missing_ticket":
         protocols.pop()
     if protocol_format == "combined":
@@ -226,13 +223,13 @@ def test_stream_ticket_scope_representations(gateway: Gateway, protocol: str, pr
         send=AsyncMock(),
     )
     if offer == "valid":
-        assert computers._stream_session(websocket, session["session_id"], protocol).session_id == session["session_id"]
+        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
         with pytest.raises(ComputerError) as replayed:
-            computers._stream_session(websocket, session["session_id"], protocol)
+            computers._stream_session(websocket, session["session_id"])
         assert replayed.value.status_code == 401
     else:
         with pytest.raises(ComputerError, match="A computer stream ticket is required") as denied:
-            computers._stream_session(websocket, session["session_id"], protocol)
+            computers._stream_session(websocket, session["session_id"])
         assert denied.value.status_code == 401
 
 
@@ -287,55 +284,19 @@ def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway, *, combi
     assert create(client).json()["state"] == "ready"
 
 
-def test_screencast_relays_text_input_and_replaces_the_desktop_stream(gateway: Gateway) -> None:
-    """A screencast carries JSON text input up and frames and text down, as the session's one live stream."""
-    client, _peer, _app = gateway
-    session = create(client).json()
-    path = "/api/computers/sessions/" + session["session_id"]
-    headers = {"Authorization": "Bearer " + session["session_token"]}
-
-    def offer(protocol: str) -> list[str]:
-        ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
-        return [protocol, "mindroom-ticket." + ticket]
-
-    with client.websocket_connect(
-        path + "/stream",
-        subprotocols=offer("binary"),
-        headers={"Origin": "https://chat.example.org"},
-    ) as desktop:
-        assert desktop.receive_bytes() == b"screen"
-        with client.websocket_connect(
-            path + "/screencast",
-            subprotocols=offer(SCREENCAST_PROTOCOL),
-            headers={"Origin": "https://chat.example.org"},
-        ) as screencast:
-            assert screencast.accepted_subprotocol == SCREENCAST_PROTOCOL
-            with pytest.raises(WebSocketDisconnect):
-                desktop.receive_bytes()
-            assert screencast.receive_bytes() == b"screen"
-            screencast.send_text("input")
-            assert screencast.receive_text() == "view"
-            assert client.post(path + "/control", headers=headers, json={"action": "take"}).json()["mode"] == "control"
-            screencast.send_text("input")
-            assert screencast.receive_text() == "control"
-            screencast.send_bytes(b"input")
-            with pytest.raises(WebSocketDisconnect):
-                screencast.receive_text()
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol", ["binary", SCREENCAST_PROTOCOL])
-async def test_worker_text_reaches_only_a_screencast_viewer(protocol: str) -> None:
-    """A screencast relays the worker's text between frames; the desktop stream, which is all RFB, ends at text."""
+async def test_worker_text_ends_the_desktop_stream() -> None:
+    """The desktop stream is all RFB, so text from the worker ends it before anything after it reaches the viewer."""
     websocket = AsyncMock()
 
     async def worker() -> AsyncIterator[aiohttp.WSMessage]:
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"screen", None)
         yield aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "status", None)
         yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"frame", None)
 
-    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", worker()), protocol)
-    relayed = [call("status"), call(b"frame")] if protocol == SCREENCAST_PROTOCOL else []
-    assert [*websocket.send_text.await_args_list, *websocket.send_bytes.await_args_list] == relayed
+    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", worker()))
+    websocket.send_bytes.assert_awaited_once_with(b"screen")
+    websocket.send_text.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["origin", "missing", "expired", "generation", "config"])
@@ -1120,11 +1081,7 @@ def test_public_stream_invalid_frames_close_and_unexpected_errors_are_sanitized(
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     if termination == "bug":
 
-        async def fail_after_input(
-            websocket: WebSocket,
-            _upstream: aiohttp.ClientWebSocketResponse,
-            _protocol: str,
-        ) -> Never:
+        async def fail_after_input(websocket: WebSocket, _upstream: aiohttp.ClientWebSocketResponse) -> Never:
             await websocket.receive()
             message = "credential-bearing-secret"
             raise KeyError(message)
