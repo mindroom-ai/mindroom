@@ -6784,7 +6784,6 @@ async def test_terminate_refresh_subprocess_gives_a_child_time_after_its_leader_
     script = f"""
 import os
 import signal
-import sys
 import time
 
 if os.fork() == 0:

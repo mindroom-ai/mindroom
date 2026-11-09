@@ -344,7 +344,7 @@ async def test_the_runner_stopping_ends_its_services(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
-    """A plugin this worker lacks, a program outside the plugin, another protocol, no token: refusals, no process."""
+    """A missing plugin, a program outside it, another protocol, a non-finite timeout, no token: refusals, no process."""
     async with _runner(tmp_path) as runner:
         status, answer = await _call("POST", runner.url(plugin="other"), _body(), _AUTH)
         assert status == 404
@@ -356,16 +356,9 @@ async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
         status, answer = await _call("POST", runner.url(), {**_body(), "protocol": 0}, _AUTH)
         assert status == 400
         assert "worker protocol" in answer["detail"]
+        for idle in (float("inf"), float("nan")):
+            assert (await _call("POST", runner.url(), _body(idle_timeout_seconds=idle), _AUTH))[0] == 422
         assert (await _call("POST", runner.url(), _body()))[0] == 401
-        assert not (runner.workspace / "service.json").exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("idle", [float("inf"), float("nan")])
-async def test_the_runner_refuses_a_timeout_that_is_not_finite(tmp_path: Path, idle: float) -> None:
-    """JSON carries ``Infinity`` and ``NaN``, and the runner refuses either as a service's idle timeout."""
-    async with _runner(tmp_path) as runner:
-        assert (await _call("POST", runner.url(), _body(idle_timeout_seconds=idle), _AUTH))[0] == 422
         assert not (runner.workspace / "service.json").exists()
 
 

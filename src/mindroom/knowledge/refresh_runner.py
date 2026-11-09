@@ -515,13 +515,17 @@ def _process_group_exists(process_group_id: int) -> bool:
     return True
 
 
-async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+async def _process_group_outlives(process_group_id: int, seconds: float) -> bool:
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + wait_seconds
+    deadline = loop.time() + seconds
     # There is no asyncio readiness primitive for POSIX process-group exit.
     while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
         await asyncio.sleep(0.01)
-    if _process_group_exists(process_group_id):
+    return _process_group_exists(process_group_id)
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+    if await _process_group_outlives(process_group_id, wait_seconds):
         logger.warning(
             "Knowledge refresh process group survived termination wait",
             process_group_id=process_group_id,
@@ -544,12 +548,8 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
     process_group_id = process.pid
     with suppress(ProcessLookupError):
         os.killpg(process_group_id, signal.SIGTERM)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _TERMINATE_GRACE_SECONDS
     # The group outlives its leader while a process the leader started runs, and that process gets the grace period too.
-    while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
-        await asyncio.sleep(0.01)
-    if _process_group_exists(process_group_id):
+    if await _process_group_outlives(process_group_id, _TERMINATE_GRACE_SECONDS):
         with suppress(ProcessLookupError):
             os.killpg(process_group_id, signal.SIGKILL)
         await _wait_for_process_group_exit(process_group_id)
