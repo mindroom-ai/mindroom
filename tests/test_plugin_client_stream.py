@@ -15,6 +15,7 @@ from urllib.parse import quote
 import aiohttp
 import pytest
 import uvicorn
+from aiohttp import web
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
@@ -48,9 +49,12 @@ ROUTES = f"""
 import asyncio
 import sys
 
+import aiohttp
+
 from fastapi import APIRouter, Depends, WebSocket
 
 from mindroom.plugin_http import ClientUser, client_stream, require_client_user
+from mindroom.previews.relay import relay_websocket
 
 router = APIRouter()
 _probe = sys.modules[{PROBE_MODULE!r}]
@@ -96,6 +100,14 @@ async def admits(websocket: WebSocket, room_id: str) -> None:
     async with client_stream(websocket, room_id, admit=_probe.admit) as user:
         await websocket.send_text(user.user_id)
         await asyncio.Event().wait()
+
+
+@router.websocket("/relayed")
+async def relayed(websocket: WebSocket) -> None:
+    # Relays the stream to an upstream app, as a route relaying to an agent's worker does.
+    async with client_stream(websocket), aiohttp.ClientSession() as session:
+        async with session.ws_connect(_probe.upstream) as upstream:
+            await relay_websocket(websocket, upstream)
 
 
 @router.get("/whoami")
@@ -708,3 +720,47 @@ async def test_a_stream_whose_client_left_ends_cleanly_on_the_embedded_servers_t
         async with asyncio.timeout(10):
             while sys.modules[PROBE_MODULE].after_block != [ALICE]:  # noqa: ASYNC110 - the plugin route signals no event
                 await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_relayed_stream_closes_with_the_streams_own_code_when_the_session_ends(app: FastAPI) -> None:
+    """The relay leaves the close to `client_stream`, so the client is told to sign in again, and the upstream ends."""
+    upstream_closed = asyncio.Event()
+
+    async def echo(request: web.Request) -> web.WebSocketResponse:
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        async for message in websocket:
+            await websocket.send_str(message.data)
+        upstream_closed.set()
+        return websocket
+
+    upstream = web.Application()
+    upstream.router.add_get("/", echo)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    sys.modules[PROBE_MODULE].upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/"
+    store = client_session_store(app)
+    token = store.create(ALICE).token
+    try:
+        async with _serving(app) as port, aiohttp.ClientSession() as session:
+            async with session.ws_connect(
+                f"http://127.0.0.1:{port}/api/plugins/demo/relayed",
+                protocols=_offers(token),
+                origin=CLIENT_ORIGIN,
+            ) as websocket:
+                await websocket.send_str("hi")
+                assert await websocket.receive_str() == "hi"
+                store.revoke(token)
+                closed = await websocket.receive()
+            assert (closed.type, closed.data, closed.extra) == (
+                aiohttp.WSMsgType.CLOSE,
+                4401,
+                "Client session ended; sign in again.",
+            )
+            async with asyncio.timeout(10):
+                await upstream_closed.wait()
+    finally:
+        await runner.cleanup()
