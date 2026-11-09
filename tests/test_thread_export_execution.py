@@ -1259,24 +1259,17 @@ async def test_member_filter_reads_a_member_list_refused_for_a_membership_change
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
         new=AsyncMock(return_value=([], False)),
     ):
-        accumulators = await _export_threads_for_targets_for_client(
+        stats = await _export_threads_for_client(
             client=client,
-            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            entity_name=ROUTER_AGENT_NAME,
-            membership_index=AgentReplyMembershipIndex(),
             rooms=(_ThreadExportRoom("room", "!room:localhost", "#room:localhost", "Room"),),
-            targets=(
-                ThreadExportTarget(
-                    output_dir=tmp_path / "exports",
-                    required_member_user_ids=("@owner:localhost",),
-                ),
-            ),
+            output_dir=tmp_path / "exports",
+            required_member_user_ids=("@owner:localhost",),
         )
 
-    assert accumulators[0].rooms_exported == 1
-    assert accumulators[0].failed_items == []
+    assert stats.rooms_exported == 1
+    assert stats.failures == 0
 
 
 @pytest.mark.asyncio

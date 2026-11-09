@@ -566,13 +566,14 @@ async def _assert_requester_joined_room(
     requester_user_id: str,
 ) -> None:
     """Require the requester to be a joined member of the target room."""
+    failure = f"Failed to verify requester membership for {requester_user_id} in {room_id}"
     try:
         response = await read_joined_members(client, room_id)
     except nio.LocalProtocolError as exc:
-        msg = f"Failed to verify requester membership for {requester_user_id} in {room_id}: {exc}"
+        msg = f"{failure}: {exc}"
         raise ThreadTagsError(msg) from exc
     if not isinstance(response, nio.JoinedMembersResponse):
-        msg = f"Failed to verify requester membership for {requester_user_id} in {room_id}: {response}"
+        msg = f"{failure}: {response}"
         raise ThreadTagsError(msg)
 
     joined_member_ids = {member.user_id for member in response.members}
