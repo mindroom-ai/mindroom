@@ -226,11 +226,22 @@ def _revoke(client: TestClient, token: str) -> None:
 
 
 @asynccontextmanager
-async def _serving(app: FastAPI) -> AsyncIterator[int]:
-    """Serve ``app`` on a free local port with the websocket transport `mindroom run` uses, and yield the port."""
+async def _serving(app: FastAPI, *, ping_seconds: float = 20.0) -> AsyncIterator[int]:
+    """Serve ``app`` on a free local port with the websocket transport `mindroom run` uses, and yield the port.
+
+    The server pings each stream every ``ping_seconds`` and drops one whose client answers none within as long, as
+    uvicorn does by default every 20 seconds.
+    """
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
-    server = uvicorn.Server(uvicorn.Config(app, ws="websockets-sansio", log_level="critical"))
+    config = uvicorn.Config(
+        app,
+        ws="websockets-sansio",
+        log_level="critical",
+        ws_ping_interval=ping_seconds,
+        ws_ping_timeout=ping_seconds,
+    )
+    server = uvicorn.Server(config)
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         async with asyncio.timeout(10):
@@ -719,17 +730,19 @@ def test_a_refused_or_failed_handshake_takes_no_place(
             _assert_refused_for_too_many(client, token)
 
 
+def _handshake_request(port: int, path: str, origin: str, protocols: str) -> bytes:
+    return (
+        f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        f"Origin: {origin}\r\nSec-WebSocket-Protocol: {protocols}\r\n\r\n"
+    ).encode()
+
+
 async def _handshake(port: int, path: str, origin: str, protocols: str) -> tuple[list[str], bytes]:
     """Send one raw websocket handshake and return the answer's status and header lines, and its body."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
-        writer.write(
-            (
-                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
-                f"Origin: {origin}\r\nSec-WebSocket-Protocol: {protocols}\r\n\r\n"
-            ).encode(),
-        )
+        writer.write(_handshake_request(port, path, origin, protocols))
         await writer.drain()
         async with asyncio.timeout(5):
             head = await reader.readuntil(b"\r\n\r\n")
@@ -820,6 +833,25 @@ async def test_a_stream_whose_client_left_ends_cleanly_on_the_embedded_servers_t
         async with asyncio.timeout(10):
             while sys.modules[PROBE_MODULE].after_block != [ALICE]:  # noqa: ASYNC110 - the plugin route signals no event
                 await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_whose_client_answers_no_pings_ends_and_gives_its_place_back(app: FastAPI) -> None:
+    """A client that keeps its connection open but answers no pings, as a sleeping laptop, loses its stream and place."""
+    token = client_session_store(app).create(ALICE).token
+    async with _serving(app, ping_seconds=0.2) as port:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            writer.write(_handshake_request(port, _echo_path(), CLIENT_ORIGIN, ", ".join(_offers(token))))
+            async with asyncio.timeout(5):
+                assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 101")
+            assert plugin_http._open_streams[ALICE] == 1
+            # The client neither reads nor writes from here on, so the server's pings go unanswered.
+            async with asyncio.timeout(10):
+                while ALICE in plugin_http._open_streams:  # noqa: ASYNC110 - the stream signals no event
+                    await asyncio.sleep(0.01)
+        finally:
+            writer.close()
 
 
 @pytest.mark.asyncio

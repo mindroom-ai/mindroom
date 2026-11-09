@@ -21,7 +21,7 @@ from starlette.datastructures import Headers, QueryParams
 from starlette.responses import JSONResponse, Response
 
 from mindroom.api import config_lifecycle
-from mindroom.api.plugin_routes import FramedWebsocketDenials, published_plugins
+from mindroom.api.plugin_routes import published_plugins
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
 from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
 from mindroom.logging_config import get_logger
@@ -177,7 +177,7 @@ async def serve_plugin_origins(
         msg = f"{_DOMAIN_ENV} must be a domain name, such as example-apps.net, not {domain!r}."
         raise ValueError(msg)
     async with serve_listener(
-        FramedWebsocketDenials(_PluginOrigins(api_app)),
+        _PluginOrigins(api_app),
         name="plugin_origins_listener",
         host=host,
         port=port,

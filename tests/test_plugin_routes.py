@@ -18,7 +18,7 @@ from starlette.testclient import WebSocketDenialResponse
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import ClientSessionStore, client_session_store
-from mindroom.api.plugin_routes import FramedWebsocketDenials, mount_plugin_routes
+from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.script_gateway import serve_listener
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
@@ -195,7 +195,6 @@ def _api_state(config: Config | None, runtime_paths: RuntimePaths) -> config_lif
 def _app(config: Config | None, runtime_paths: RuntimePaths) -> FastAPI:
     """Return an API app serving ``config`` with the plugin routes mounted, answering errors as the main app does."""
     app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
-    app.add_middleware(FramedWebsocketDenials)
     ensure_app_state(app).api_state = _api_state(config, runtime_paths)
     mount_plugin_routes(app)
     return app

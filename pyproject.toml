@@ -563,6 +563,10 @@ override-dependencies = [
   # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
+  # openbb-core 1.6 declares uvicorn<0.41 for its own API server, which MindRoom does not run.
+  # MindRoom's websocket streams need the keepalive pings and denial framing of uvicorn 0.52.1+.
+  # An override replaces every requirement's extras, so it names chromadb's standard extras.
+  "uvicorn[standard]>=0.52.1",
 ]
 # Exact version pins for everything uv installs into isolated build environments, so release, desktop-helper,
 # and image builds install only the build package versions this revision names.

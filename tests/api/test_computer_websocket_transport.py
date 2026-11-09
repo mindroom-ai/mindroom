@@ -39,7 +39,7 @@ async def _assert_denial(port: int, path: str, protocols: str, status: int, *, a
     assert lengths == [str(len(body))]
     types = [line for line in lines[1:] if line.lower().startswith("content-type:")]
     assert len(types) == 1
-    assert "text/plain" in types[0]
+    assert "application/json" in types[0]
     assert "cache-control: no-store" in head.decode().lower()
     assert "detail" in json.loads(body)
     assert "mindroom-ticket." not in body.decode()
@@ -61,6 +61,9 @@ async def _assert_denial(port: int, path: str, protocols: str, status: int, *, a
                 ),
                 pytest.mark.filterwarnings(
                     r"ignore:remove second argument of ws_handler:DeprecationWarning:websockets\.legacy\.server",
+                ),
+                pytest.mark.filterwarnings(
+                    r"ignore:The `websockets` implementation is deprecated:uvicorn.config.UvicornDeprecationWarning",
                 ),
             ],
         ),
