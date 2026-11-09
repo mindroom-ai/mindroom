@@ -2961,7 +2961,12 @@ def _restore_published_plugins() -> Iterator[None]:
         for name, module in sys.modules.items()
         if name.startswith(tool_registry_module.PLUGIN_MODULE_PREFIX)
     }
+    imported = set(sys.modules)
     yield
+    # The modules the test's package plugins loaded under their package names go too.
+    test_packages = tuple(set(plugins_module._ROOT_PACKAGES) - set(root_packages))
+    for name in set(plugins_module._modules_named(test_packages)) - imported:
+        del sys.modules[name]
     plugins_module._PUBLISHED = published
     plugins_module._PROCESS_STATE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()

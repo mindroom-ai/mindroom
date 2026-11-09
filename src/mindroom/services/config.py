@@ -45,7 +45,6 @@ class UninstallResult:
 
     success: bool
     message: str
-    was_running: bool = False
 
 
 @dataclass(frozen=True)
