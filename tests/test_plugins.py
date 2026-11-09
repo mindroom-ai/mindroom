@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import importlib
 import json
 import os
 import py_compile
@@ -39,7 +40,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
-from mindroom.tool_system.registry import ToolMetadataValidationError
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError
 from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -1235,6 +1236,299 @@ def test_a_package_plugins_helper_module_follows_the_published_plugin_modules(
         assert sys.modules["demo_pkg.helpers"] is published
         publish_plugins(generation)
         assert sys.modules["demo_pkg.helpers"] is generation.modules["demo_pkg.helpers"] is not published
+
+
+def _write_package_state_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    init_source: str = "",
+) -> tuple[Path, Config]:
+    """Write the package plugin ``state_pkg``, whose tools module imports its hooks module's state by package name.
+
+    The tools module imports ``STATE`` as it loads and again when ``lazy_state`` runs; the root and config are returned.
+    """
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "state_pkg"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text(init_source, encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "state-pkg", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        "from state_pkg.hooks import STATE\n\n\ndef lazy_state():\n    from state_pkg.hooks import STATE\n\n    return STATE\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site_packages))
+    return plugin_root, _bind_runtime_paths(Config(plugins=["state_pkg"]), tmp_path / "config.yaml")
+
+
+def _published_hooks_module(plugin_root: Path) -> ModuleType:
+    """Return the hooks module MindRoom loaded for ``state_pkg``, asserting that the package name reaches only it."""
+    hooks = cached_plugin_module(plugin_root / "hooks.py")
+    tools = cached_plugin_module(plugin_root / "tools.py")
+    assert sys.modules["state_pkg.hooks"] is hooks
+    assert tools.STATE is tools.lazy_state() is hooks.STATE
+    # Loaded by name, they leave no package of a separate namespace behind.
+    assert not [name for name in sys.modules if name.startswith(f"{PLUGIN_MODULE_PREFIX}state_pkg_")]
+    return hooks
+
+
+@_PRIMARY_AND_WORKER
+@pytest.mark.parametrize("edited", ["hooks.py", "tools.py"])
+@pytest.mark.parametrize("init_source", ["", "from .hooks import STATE\n"], ids=["empty-init", "init-imports-hooks"])
+def test_a_package_plugins_module_imported_by_its_package_name_is_the_module_mindroom_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+    edited: str,
+    init_source: str,
+) -> None:
+    """A tool reads the state the hooks module keeps through ``state_pkg.hooks``, before and after a reload."""
+    plugin_root, config = _write_package_state_plugin(tmp_path, monkeypatch, init_source)
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("state_pkg"):
+        load(config, runtime_paths)
+        first = _published_hooks_module(plugin_root)
+        edited_path = plugin_root / edited
+        edited_path.write_text(f"{edited_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+        _bump_mtime(edited_path)
+        load(config, runtime_paths)
+        assert _published_hooks_module(plugin_root) is not first
+
+
+@pytest.mark.parametrize(
+    ("plugin_path", "hooks_path", "hooks_name"),
+    [
+        pytest.param(
+            "pkg:outer_pkg:plugins/state",
+            "outer_pkg/plugins/state/hooks.py",
+            "outer_pkg.plugins.state.hooks",
+            id="subpath",
+        ),
+        pytest.param("python:outer_pkg.state", "outer_pkg/state/hooks.py", "outer_pkg.state.hooks", id="dotted"),
+        pytest.param("outer_pkg", "outer_pkg/__init__.py", "outer_pkg", id="init"),
+        pytest.param("outer_pkg", "outer_pkg/hooks.v2.py", None, id="no-import-name"),
+    ],
+)
+def test_a_package_plugins_module_loads_under_the_name_python_gives_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_path: str,
+    hooks_path: str,
+    hooks_name: str | None,
+) -> None:
+    """Importing a package plugin's module by the name Python gives it returns the loaded module, when it has one."""
+    site_packages = tmp_path / "site-packages"
+    hooks_file = site_packages / hooks_path
+    hooks_file.parent.mkdir(parents=True)
+    (site_packages / "outer_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    hooks_file.write_text("STATE = {}\n", encoding="utf-8")
+    (hooks_file.parent / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "named", "hooks_module": hooks_file.name, "skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site_packages))
+    config = _bind_runtime_paths(Config(plugins=[plugin_path]), tmp_path / "config.yaml")
+
+    with _forgetting_modules("outer_pkg"):
+        _load(config, runtime_paths_for(config))
+        hooks = cached_plugin_module(hooks_file)
+        if hooks_name is None:
+            assert hooks.__name__.startswith(PLUGIN_MODULE_PREFIX)
+        else:
+            assert importlib.import_module(hooks_name) is hooks
+
+
+def test_a_package_plugins_module_imported_before_its_first_load_executes_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tools module some other code imported by package name before the plugin loads still registers its tools."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+
+    with _forgetting_modules("demo_pkg"):
+        imported = importlib.import_module("demo_pkg.tools")
+        assert "helper_tool" in _load(config, runtime_paths_for(config)).tools
+        assert sys.modules["demo_pkg.tools"] is cached_plugin_module(plugin_root / "tools.py") is not imported
+
+
+def test_validating_an_edited_package_plugin_executes_it_apart_from_its_loaded_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation runs the edited tools module under its own namespace and leaves the loaded one under its name."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "edited_pkg"
+    _write_working_tool_plugin(plugin_root, plugin_name="edited-pkg", tool_name="edited_pkg_tool")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "tools": ["edited_pkg_tool"]}},
+        "plugins": ["edited_pkg"],
+    }
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    with _forgetting_modules("edited_pkg"):
+        _load(Config.validate_with_runtime(data, runtime_paths), runtime_paths)
+        loaded = sys.modules["edited_pkg.tools"]
+        _bump_mtime(plugin_root / "tools.py")
+        validated = Config.validate_with_runtime(data, runtime_paths)
+
+        assert validated.get_agent("assistant").tool_names == ["edited_pkg_tool"]
+        assert sys.modules["edited_pkg.tools"] is loaded is cached_plugin_module(plugin_root / "tools.py")
+
+
+def _write_outer_and_inner_plugins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools_source: str,
+) -> tuple[Path, Path]:
+    """Write the package plugin ``outer_pkg`` and the plugin ``pkg:outer_pkg:plugins/inner`` inside it; return both roots."""
+    outer_root = tmp_path / "site-packages" / "outer_pkg"
+    inner_root = outer_root / "plugins" / "inner"
+    inner_root.mkdir(parents=True)
+    (outer_root / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "plugins" / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
+    (outer_root / "tools.py").write_text(tools_source, encoding="utf-8")
+    (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
+    (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(outer_root.parent))
+    return outer_root, inner_root
+
+
+@_PRIMARY_AND_WORKER
+@pytest.mark.parametrize("inner_first", [False, True], ids=["outer-first", "inner-first"])
+def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+    inner_first: bool,
+) -> None:
+    """A plugin inside a package plugin's package keeps its modules apart, so both load before and after a reload."""
+    outer_root, inner_root = _write_outer_and_inner_plugins(
+        tmp_path,
+        monkeypatch,
+        "import outer_pkg.plugins.inner.hooks as inner_hooks\n",
+    )
+    entries = ["outer_pkg", "pkg:outer_pkg:plugins/inner"]
+    config = _bind_runtime_paths(Config(plugins=entries[::-1] if inner_first else entries), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    def installed_inner_hooks() -> ModuleType:
+        assert sorted(plugin.name for plugin in load(config, runtime_paths).loaded_plugins) == ["inner", "outer"]
+        inner_hooks = cached_plugin_module(inner_root / "hooks.py")
+        assert inner_hooks.__name__.startswith(PLUGIN_MODULE_PREFIX)
+        assert plugins_module._PUBLISHED.modules[inner_hooks.__name__] is inner_hooks
+        return inner_hooks
+
+    with _forgetting_modules("outer_pkg"):
+        first = installed_inner_hooks()
+        _bump_mtime(outer_root / "tools.py")
+        # A worker keeps the unchanged plugin's module; a primary load runs every plugin again.
+        assert (installed_inner_hooks() is first) is (load is plugins_module.refresh_plugins)
+
+
+def test_a_package_plugin_inside_a_directory_plugin_keeps_names_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A package plugin whose package lies in another plugin's directory loads apart from that plugin's names."""
+    site_packages = tmp_path / "site-packages"
+    hooks_path = site_packages / "inner_pkg" / "hooks.py"
+    hooks_path.parent.mkdir(parents=True)
+    (site_packages / "mindroom.plugin.json").write_text(json.dumps({"name": "outer"}))
+    (hooks_path.parent / "__init__.py").write_text("", encoding="utf-8")
+    (hooks_path.parent / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
+    hooks_path.write_text("STATE = {}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    config = _bind_runtime_paths(Config(plugins=[str(site_packages), "inner_pkg"]), tmp_path / "config.yaml")
+
+    with _forgetting_modules("inner_pkg"):
+        _load(config, runtime_paths_for(config))
+
+        assert cached_plugin_module(hooks_path).__name__.startswith(PLUGIN_MODULE_PREFIX)
+
+
+def test_a_worker_keeps_a_nested_plugins_modules_when_the_plugin_around_it_is_added(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested plugin's module names do not depend on whether the config also loads the plugin around it."""
+    _, inner_root = _write_outer_and_inner_plugins(tmp_path, monkeypatch, "VALUE = 1\n")
+    config_path = tmp_path / "config.yaml"
+    inner_only = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner"]), config_path)
+    both = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner", "outer_pkg"]), config_path)
+
+    with _forgetting_modules("outer_pkg"):
+        plugins_module.refresh_plugins(inner_only, runtime_paths_for(inner_only))
+        inner_hooks = cached_plugin_module(inner_root / "hooks.py")
+        plugins_module.refresh_plugins(both, runtime_paths_for(both))
+
+        assert cached_plugin_module(inner_root / "hooks.py") is inner_hooks
+        assert (
+            sys.modules[inner_hooks.__name__] is plugins_module._PUBLISHED.modules[inner_hooks.__name__] is inner_hooks
+        )
+
+
+def test_removing_a_package_plugin_drops_its_modules_package_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a config no longer loads the plugin, neither its package name nor the loader holds its modules."""
+    plugin_root, config = _write_package_state_plugin(tmp_path, monkeypatch)
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("state_pkg"):
+        _load(config, runtime_paths)
+        _published_hooks_module(plugin_root)
+        _load(_bind_runtime_paths(Config(plugins=[]), tmp_path / "config.yaml"), runtime_paths)
+
+        assert [name for name in sys.modules if name.partition(".")[0] == "state_pkg"] == []
+        assert [
+            entry
+            for entry in plugin_module._MODULE_IMPORT_CACHE.values()
+            if plugins_module._module_within(entry.module, plugin_root)
+        ] == []
+
+
+def _prepare_unpublished(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Load ``config``'s plugins without publishing them, as a reload whose plugins fail does."""
+    dispose_plugins(prepare_plugins(config, runtime_paths))
+
+
+@pytest.mark.parametrize(
+    ("load", "reload"),
+    [(_load, _prepare_unpublished), (plugins_module.refresh_plugins, plugins_module.refresh_plugins)],
+    ids=["primary", "worker"],
+)
+def test_a_failed_reload_keeps_a_package_plugins_modules_under_their_package_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], object],
+    reload: Callable[[Config, RuntimePaths], object],
+) -> None:
+    """A reload whose edited tools module fails leaves the loaded hooks module under its package name."""
+    plugin_root, config = _write_package_state_plugin(tmp_path, monkeypatch)
+    runtime_paths = runtime_paths_for(config)
+    tools_path = plugin_root / "tools.py"
+
+    with _forgetting_modules("state_pkg"):
+        load(config, runtime_paths)
+        first = _published_hooks_module(plugin_root)
+        tools_path.write_text(
+            f"{tools_path.read_text(encoding='utf-8')}raise RuntimeError('broken')\n",
+            encoding="utf-8",
+        )
+        _bump_mtime(tools_path)
+        reload(config, runtime_paths)
+        assert sys.modules["state_pkg.hooks"] is first
+        assert cached_plugin_module(plugin_root / "hooks.py") is first
 
 
 @_PRIMARY_AND_WORKER
@@ -3416,13 +3710,20 @@ def _write_import_task_plugin(plugin_root: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(tmp_path: Path) -> None:
+@pytest.mark.parametrize("plugin_path", ["./plugins/fails_after_task", "python:fails_after_task"])
+async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_path: str,
+) -> None:
     """Validating or loading a plugin whose module raises after starting a task ends that task too."""
     probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
     probe.tasks = []
     sys.modules[probe.__name__] = probe
-    plugin_root = tmp_path / "plugins" / "fails-after-task"
+    plugin_root = tmp_path / "plugins" / "fails_after_task"
     plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(plugin_root.parent))
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": "fails-after-task", "hooks_module": "hooks.py", "skills": []}),
         encoding="utf-8",
@@ -3431,7 +3732,7 @@ async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_r
     hooks_path.write_text("", encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+    config = _bind_runtime_paths(Config(plugins=[plugin_path]), config_path)
     hooks_path.write_text(
         "import asyncio\n"
         f"import {probe.__name__} as probe\n"
@@ -3446,7 +3747,7 @@ async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_r
     generation = None
     try:
         with pytest.raises(ConfigRuntimeValidationError, match="setup failed after the poller started"):
-            _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+            _bind_runtime_paths(Config(plugins=[plugin_path]), config_path)
         generation = prepare_plugins(config, runtime_paths_for(config))
         [skipped] = generation.skipped
         assert "setup failed after the poller started" in str(skipped.error)
