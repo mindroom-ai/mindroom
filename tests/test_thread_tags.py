@@ -2080,7 +2080,13 @@ async def test_requester_membership_read_refused_for_a_membership_change(refusal
         state = await _write_operation(client, "set")
         assert state.tags["resolved"].set_by == "@alice:localhost"
     else:
-        with pytest.raises(ThreadTagsError, match="room membership changed during lookup"):
+        with pytest.raises(
+            ThreadTagsError,
+            match=(
+                r"^Failed to verify requester membership for @alice:localhost in !room:localhost: "
+                r"room membership changed during lookup$"
+            ),
+        ):
             await _write_operation(client, "set")
         client.room_put_state.assert_not_awaited()
 
