@@ -236,7 +236,8 @@ class AgentWorkspace:
     messages in the room."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
-    the workspace, as a dedicated worker does, and the caller may post messages in the room."""
+    the workspace, as a dedicated worker does, and the caller may post messages in the room; never more than the
+    agent's ``terminals`` setting allows."""
     config: Config = field(repr=False)
     """The config this answer was resolved under, the one the API served when the request arrived."""
 
@@ -339,8 +340,13 @@ def _workspace(
         # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.
         path_toolkits[entry.name] = writes and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
-    # sees the workspace.
+    # sees the workspace, and get it only as far as the agent's config allows.
     shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None
+    terminal = config.agents[name].terminals
+    if shell in (None, "primary"):
+        terminal = "none"
+    elif terminal == "type" and not (may_send and shell == "workspace_worker"):
+        terminal = "watch"
     return AgentWorkspace(
         name=name,
         user_id=user_id,
@@ -348,9 +354,7 @@ def _workspace(
         private=storage.execution.is_private,
         root=workspace.root,
         files="none" if not path_toolkits else "write" if may_send and any(path_toolkits.values()) else "read",
-        terminal=(
-            "none" if shell in (None, "primary") else "type" if may_send and shell == "workspace_worker" else "watch"
-        ),
+        terminal=terminal,
         config=config,
     )
 

@@ -6742,7 +6742,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Persistent terminals in the agent's workspace, which people in the room can watch and type in",
+      "description": "Persistent terminals in the agent's workspace, which people in the room can watch and type in where the agent's config allows",
       "display_name": "Terminal",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#terminal",
       "executes_code": true,

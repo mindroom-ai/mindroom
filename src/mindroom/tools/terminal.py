@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="terminal",
     display_name="Terminal",
-    description="Persistent terminals in the agent's workspace, which people in the room can watch and type in",
+    description="Persistent terminals in the agent's workspace, which people in the room can watch and type in where the agent's config allows",
     category=ToolCategory.DEVELOPMENT,
     # It reaches files only through the shell it types into, in the agent's worker.
     file_access=ToolFileAccess.NONE,
