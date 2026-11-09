@@ -1050,6 +1050,19 @@ def test_unrelated_tool_constructors_run_in_parallel(
     assert all(isinstance(tool, DummyToolkit) for tool in tools)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX file modes")
+def test_optional_dependency_lock_is_private_to_the_current_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Other local accounts that can read the installation cannot open its lock to hold it."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+    monkeypatch.syspath_prepend(str(site_packages))
+    with optional_dependency_environment():
+        pass
+    assert (site_packages / ".mindroom-optional-dependencies.lock").stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
 @pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root can write a read-only directory")
 def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -45,15 +45,18 @@ _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 def _environment_lock_path() -> Path:
     """Return the lock that every process running this MindRoom installation takes.
 
-    The lock lives in the site-packages directory MindRoom is installed in: installs into its
-    environment write there, and every process running it imports from there, including local
-    worker tool subprocesses with their own TMPDIR and venv. Only accounts that can already change
-    those packages can hold it. When that directory is read-only, a private per-user directory in
-    the OS temporary directory keeps other local users from creating or holding the lock.
+    The lock lives in the site-packages directory MindRoom is installed in: installs into MindRoom's
+    own environment write there, and every process running it imports from there, including local
+    worker tool subprocesses with their own TMPDIR and venv. The file is private to the current user,
+    so other local users can hold it only if they can already change those packages. When that
+    directory is read-only, a private per-user directory in the OS temporary directory keeps other
+    local users from creating or holding the lock.
     """
     site_packages = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
     if os.access(site_packages, os.W_OK):
-        return site_packages / ".mindroom-optional-dependencies.lock"
+        lock_path = site_packages / ".mindroom-optional-dependencies.lock"
+        os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+        return lock_path
     key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
     if sys.platform == "win32":
         # Windows temporary directories are already per user.
@@ -70,7 +73,7 @@ def _environment_lock_path() -> Path:
 
 @contextmanager
 def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
-    """Coordinate same-user optional imports and installs for one Python environment.
+    """Coordinate optional imports and installs for one MindRoom installation.
 
     Imports share the lock; installers own it exclusively. Install before entering
     an import scope, so no reader attempts a non-atomic upgrade to a write lock.
