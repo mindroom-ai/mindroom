@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.25",
+  "mindroom_plugin_api": "1.26",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1560,7 +1560,7 @@ A plugin that uses the bridge states `"mindroom_plugin_api": "1.21"` in its mani
 ### Reaching the agent's worker
 
 A route reaches a worker service of its own plugin, or a server the agent runs in its worker, such as a web app it started from its shell, through `await worker_relay(connection, target)` from `mindroom.plugin_http`.
-`target` is the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` returned, so the caller's room and agent checks have run, or one a tool of the plugin recorded.
+`target` is the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` returned, so the caller's room and agent checks have run, or one a tool of the plugin recorded, also [across restarts](#keeping-a-target-across-restarts).
 A tool with `requires_primary_runtime=True` passes its plugin's [context](#plugin-context) instead of `connection`, and only its own agent's `resolve_worker_target()`, since the relay checks no caller.
 It never starts the worker: it answers 503 with `The agent's worker is not running.` until the agent's first tool call there or an `ensure_worker_service` starts it, and after idle cleanup stops it, and 503 without a dedicated worker backend.
 
@@ -1699,6 +1699,62 @@ async def share_app() -> str:
     url = plugin_origin_url(context, "demo")
     return f"The app is at {url}" if url is not None else "Plugin origins are off."
 ```
+
+### Keeping a target across restarts
+
+A target lives only in memory, so a plugin that lets people come back to something an agent started in its worker, such as a web app it shared, stores the target to reach that worker again after MindRoom restarts.
+`dump_worker_target(target)` from `mindroom.plugin_api` returns a JSON-safe `dict`, and `load_worker_target(data)` returns the target again.
+A tool that stores one, like `share_app` below, sets [`requires_primary_runtime=True`](#decorator-fields), since it reads its plugin's context and the call's runtime context.
+`load_worker_target` raises `ValueError` for data it does not know, such as data a later MindRoom stored, and for a target whose worker is not the one its own agent and requester resolve to.
+A loaded target reaches the agent's worker for the requester whose turn recorded it, for a private agent that requester's own, whoever calls the route later.
+So store a target with what it belongs to in the plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), load only what the plugin stored there itself, never a target a client sends, and before relaying a caller check that the record belongs to the room and agent the route serves and that the caller may use that agent there:
+
+```python
+# tools.py
+import json
+import secrets
+
+from mindroom.plugin_api import current_plugin_context, dump_worker_target, get_tool_runtime_context
+
+
+async def share_app() -> str:
+    runtime = get_tool_runtime_context()
+    app_id = secrets.token_hex(8)
+    record = {"room_id": runtime.room_id, "agent": runtime.agent_name, "target": dump_worker_target(runtime.resolve_worker_target())}
+    (current_plugin_context("my-plugin").state_root / f"app-{app_id}.json").write_text(json.dumps(record))
+    return f"Shared app {app_id}."
+```
+
+```python
+# routes.py
+import json
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from mindroom.plugin_api import load_worker_target
+from mindroom.plugin_http import RoomReader, plugin_context, require_room_reader, worker_relay
+
+router = APIRouter()
+
+
+@router.get("/rooms/{room_id}/agents/{agent_user_id}/apps/{app_id}/status")
+async def app_status(
+    request: Request, room_id: str, agent_user_id: str, app_id: str, room: RoomReader = Depends(require_room_reader)
+) -> object:
+    path = plugin_context(request).state_root / f"app-{app_id}.json"
+    if not re.fullmatch(r"[0-9a-f]{16}", app_id) or not path.is_file():
+        raise HTTPException(404, "No such app.")
+    record = json.loads(path.read_text())
+    agent = await room.agent(agent_user_id)
+    if (record["room_id"], record["agent"]) != (room_id, agent.name):
+        raise HTTPException(404, "No such app.")
+    relay = await worker_relay(request, load_worker_target(record["target"]))
+    async with relay.http("GET", "/status.json", port=5173) as answer:
+        return await answer.json()
+```
+
+A plugin that uses `dump_worker_target` or `load_worker_target` states `"mindroom_plugin_api": "1.26"` in its manifest.
 
 ## Origins of your own
 
