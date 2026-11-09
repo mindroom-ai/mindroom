@@ -1479,6 +1479,8 @@ Neither call checks who may use the agent, so check that before you start a serv
 Each worker runs one instance of a service, so ensuring a running service returns the same port.
 A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
 The program's output goes to the worker's log.
+The program runs in the worker's own workspace folder, not in the agent's workspace where its shell and file tools work, so a file it writes by a relative path is not in the agent's workspace.
+It finds its port in `MINDROOM_WORKER_SERVICE_PORT` and the loopback address of the worker's runner, which serves the [agent's browser](#the-agents-browser) bridge, in `MINDROOM_WORKER_SERVICE_RUNNER_URL`.
 
 A service stops when `idle_timeout_seconds` pass without an ensure or a [relayed](#reaching-the-agents-worker) request, though never while a relayed answer or WebSocket to it is open, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
 A service that replaced plugin code starts during a reload keeps running until its idle timeout.

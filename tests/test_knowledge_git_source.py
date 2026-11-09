@@ -29,6 +29,7 @@ import pytest
 import mindroom.knowledge.git_source as knowledge_git_source_module
 import mindroom.knowledge.legacy_git_checkout as legacy_git_checkout_module
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
+import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -965,6 +966,8 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real crashed checkout must not block the next subprocess refresh."""
+    # The blocking filter ignores TERM, so it lasts the whole grace period before it is killed.
+    monkeypatch.setattr(knowledge_refresh_runner, "_TERMINATE_GRACE_SECONDS", 0.5)
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 

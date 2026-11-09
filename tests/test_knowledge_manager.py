@@ -6723,8 +6723,12 @@ async def test_successful_refresh_subprocess_drains_its_process_group(
 
 @pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
 @pytest.mark.asyncio
-async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(tmp_path: Path) -> None:
+async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A Git-like grandchild that ignores SIGTERM must not outlive its refresh leader."""
+    monkeypatch.setattr(knowledge_refresh_runner, "_TERMINATE_GRACE_SECONDS", 0.2)
     descendant_lock_path = tmp_path / "descendant.lock"
     ready_read_fd, ready_write_fd = os.pipe()
     script = f"""
@@ -6764,6 +6768,56 @@ time.sleep(60)
         await knowledge_refresh_runner._terminate_refresh_subprocess(process)
 
         assert file_locks.file_lock_is_held(descendant_lock_path) is False
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        os.close(ready_read_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_terminate_refresh_subprocess_gives_a_child_time_after_its_leader_exits(tmp_path: Path) -> None:
+    """A child that finishes its work on SIGTERM gets the grace period, though its leader exits at once."""
+    marker = tmp_path / "finished"
+    ready_read_fd, ready_write_fd = os.pipe()
+    script = f"""
+import os
+import signal
+import sys
+import time
+
+if os.fork() == 0:
+    def finish(*_args):
+        time.sleep(0.3)
+        open({str(marker)!r}, "w").close()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, finish)
+    os.write({ready_write_fd}, b"1")
+    time.sleep(60)
+    os._exit(0)
+
+os.close({ready_write_fd})
+signal.signal(signal.SIGTERM, lambda *_args: os._exit(0))
+time.sleep(60)
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        start_new_session=True,
+        pass_fds=(ready_write_fd,),
+    )
+    os.close(ready_write_fd)
+    try:
+        assert (
+            await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=SETTLE_TIMEOUT_SECONDS) == b"1"
+        )
+
+        await knowledge_refresh_runner._terminate_refresh_subprocess(process)
+
+        assert marker.exists()
     finally:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)

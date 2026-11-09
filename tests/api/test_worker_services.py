@@ -361,6 +361,15 @@ async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("idle", [float("inf"), float("nan")])
+async def test_the_runner_refuses_a_timeout_that_is_not_finite(tmp_path: Path, idle: float) -> None:
+    """JSON carries ``Infinity`` and ``NaN``, and the runner refuses either as a service's idle timeout."""
+    async with _runner(tmp_path) as runner:
+        assert (await _call("POST", runner.url(), _body(idle_timeout_seconds=idle), _AUTH))[0] == 422
+        assert not (runner.workspace / "service.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path) -> None:
     """The request's config names the plugin, but its folder is missing here: a clear refusal."""
     async with _runner(tmp_path) as runner:
@@ -627,7 +636,7 @@ async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_pat
     ],
 )
 def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: float) -> None:
-    """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
+    """A name the runner's routes cannot carry, or a timeout not positive and finite, fails where it is declared."""
     with pytest.raises(ValueError, match=r"(?i)worker service"):
         WorkerService(name, "hello.py", idle_timeout_seconds=idle)
 
