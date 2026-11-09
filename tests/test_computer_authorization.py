@@ -140,6 +140,47 @@ async def test_live_membership_policy_and_canonical_browser_scope(
 
 
 @pytest.mark.asyncio
+async def test_a_member_list_raced_by_a_membership_change_is_read_again(tmp_path: Path) -> None:
+    """A joiner's first Computer call, whose member read the client refuses for that join, reads again and passes."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "https://example.org", "MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    config = Config(
+        agents={
+            "writer": AgentConfig(
+                display_name="Writer",
+                tools=["browser"],
+                worker_tools=["browser"],
+                worker_scope="user_agent",
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
+            ),
+        },
+    )
+    persist_entity_accounts(config, paths)
+    agent_id = entity_ids(config, paths)["writer"].full_id
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        joined_members_response("!room:example.org", "@alice:example.org", agent_id),
+    ]
+    memberships = AgentReplyMembershipIndex()
+    target = await _authorize_computer(
+        "@alice:example.org",
+        "!room:example.org",
+        agent_id,
+        config=config,
+        runtime_paths=paths,
+        client=client,
+        memberships=memberships,
+        refresh_memberships=AsyncMock(),
+    )
+    assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["rooms", "members"])
 async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: Path, stage: str) -> None:
     """The shared grant refresh retains uncertainty while removing URL-bearing diagnostics."""

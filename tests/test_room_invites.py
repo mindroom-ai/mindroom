@@ -199,12 +199,25 @@ def _router_room_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_member_lookup_raced_by_a_membership_change_counts_as_a_failed_fetch() -> None:
-    """A config reload's room setup must skip the room, not abort, when the member list went stale mid-lookup."""
-    client = MagicMock(spec=nio.AsyncClient)
-    client.joined_members = AsyncMock(side_effect=nio.LocalProtocolError("room membership changed during lookup"))
+@pytest.mark.parametrize(("refusals", "members"), [(1, {"@alice:localhost"}), (3, None)])
+async def test_member_lookup_raced_by_a_membership_change_is_read_again_then_counts_as_a_failed_fetch(
+    refusals: int,
+    members: set[str] | None,
+) -> None:
+    """A member list that went stale mid-lookup is read again, and counts as a failed fetch once every read did.
 
-    assert await client_room_admin.get_room_members(client, "!room:localhost") is None
+    A config reload's room setup then skips the room instead of aborting.
+    """
+    client = MagicMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(
+        side_effect=[
+            *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+            joined_members_response("!room:localhost", "@alice:localhost"),
+        ],
+    )
+
+    assert await client_room_admin.get_room_members(client, "!room:localhost") == members
+    assert client.joined_members.await_count == min(refusals + 1, 3)
 
 
 @pytest.mark.parametrize(
