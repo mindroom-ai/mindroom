@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
+from mindroom import plugin_http
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.plugin_origins import _PluginOrigins, plugin_origin_url, serve_plugin_origins
@@ -21,6 +22,7 @@ from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.plugin_check import check_plugin
+from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
@@ -338,6 +340,27 @@ def test_plugin_origin_url_refuses_a_plugin_without_origins(tmp_path: Path) -> N
 
     with pytest.raises(RuntimeError, match="Plugin 'linker' has no origin_module"):
         TestClient(_api_app(tmp_path, "linker", "demo")).get("/api/plugins/linker/link")
+
+
+@pytest.mark.parametrize(
+    ("env", "url"),
+    [({}, "http://item-1.linker.localhost:9100"), ({"MINDROOM_PLUGIN_ORIGIN_PORT": ""}, None)],
+)
+def test_plugin_origin_url_from_a_tools_context(tmp_path: Path, env: dict[str, str], url: str | None) -> None:
+    """A tool's context names its own plugin's host, and None while origins are off, since a tool answers no request."""
+    _write(tmp_path, "linker", origin=EMPTY_ORIGIN)
+    _write(tmp_path, "plain")
+    app = _api_app(tmp_path, "linker", "plain", **env)
+    snapshot = config_lifecycle.require_api_state(app).snapshot
+    config = snapshot.runtime_config
+    assert config is not None
+
+    def context(name: str) -> PluginContext:
+        return build_plugin_context(name, config, snapshot.runtime_paths, lambda: config)
+
+    assert plugin_http.plugin_origin_url(context("linker"), "item-1") == url
+    with pytest.raises(RuntimeError, match="Plugin 'plain' has no origin_module"):
+        plugin_http.plugin_origin_url(context("plain"), "item-1")
 
 
 @pytest.mark.parametrize(
