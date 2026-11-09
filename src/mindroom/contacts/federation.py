@@ -89,21 +89,20 @@ async def _reject(actor: ContactActor, agent_name: str, room_id: str, inviter: s
 def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str) -> tuple[ContactRecord, bool] | None:
     """Store a new request and return it with True, or return the one this room already holds with False.
 
-    Return None, storing nothing, for a room whose request was declined or removed, for a pair with a pending or
-    active contact in another room, or one this side declined, which blocks the pair until the owner removes the
-    declined contact. A decline of this agent's own request by the other side blocks only that side, so the other
-    agent asking now clears it.
+    Return None, storing nothing, for a room whose request was declined or removed, for a pair with an active contact
+    or this agent's own pending request in another room, or one this side declined, which blocks the pair until the
+    owner removes the declined contact. A decline of this agent's own request by the other side blocks only that side,
+    and the other side keeps one pending request per pair, so the other agent asking now clears that decline and
+    replaces its own earlier request, whose withdrawal this side does not see.
     """
     for stored in book.contacts:
         if stored.room_id == record.room_id and stored.agent_side(agent_name) is not None:
             # A room whose request was answered or withdrawn is no new request.
             return (stored.model_copy(deep=True), False) if stored.status in {"pending", "active"} else None
     for stored in book.contacts:
-        if (
-            stored.status == "declined"
-            and stored.requester.id == agent_name
-            and stored.target.id == record.requester.id
-        ):
+        ours_declined = stored.requester.id == agent_name and stored.target.id == record.requester.id
+        theirs = stored.requester.id == record.requester.id and stored.target.id == agent_name
+        if (stored.status == "declined" and ours_declined) or (stored.status == "pending" and theirs):
             stored.status = "removed"
     try:
         if existing_contact(book, record.requester, record.target, rules=None, tools=None) is not None:

@@ -97,6 +97,7 @@ The steps are the same as within one deployment, with these differences:
 - When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
 - After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
+- A request the other side withdraws stays in your list until you answer it or that agent asks again: accepting it fails, and declining clears it.
 - Removing an agent from `remote_agents` stops you from accepting its waiting requests; contacts already active with it continue until an owner removes them.
 - Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.

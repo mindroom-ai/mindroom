@@ -406,7 +406,7 @@ async def test_a_request_whose_notice_failed_still_waits(tmp_path: Path) -> None
     assert not _rejected(runtime)
 
 
-@pytest.mark.parametrize("stored", ["declined", "pending", "active"])
+@pytest.mark.parametrize("stored", ["declined", "active"])
 @pytest.mark.asyncio
 async def test_a_second_invite_of_a_known_pair_is_rejected(tmp_path: Path, stored: ContactStatus) -> None:
     """A decline blocks the pair until Bob removes it, and a pair has one contact, so a new room's invite is rejected."""
@@ -418,6 +418,21 @@ async def test_a_second_invite_of_a_known_pair_is_rejected(tmp_path: Path, store
     assert [record.id for record in _stored(paths)] == ["in"]
     assert _rejected(runtime, "!second:other.org")
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_new_invite_replaces_a_request_whose_withdrawal_was_never_seen(tmp_path: Path) -> None:
+    """The other side keeps one pending request per pair, so its new room's invite means the earlier one is gone."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    with _delivered() as send:
+        await _invited(config, paths, runtime, room_id="!second:other.org")
+    old, new = _stored(paths)
+    assert (old.id, old.status) == ("in", "removed")
+    assert (new.room_id, new.status) == ("!second:other.org", "pending")
+    assert not _rejected(runtime, "!second:other.org")
+    send.assert_awaited_once()
 
 
 @pytest.mark.parametrize("reason", [None, "  ", 7])

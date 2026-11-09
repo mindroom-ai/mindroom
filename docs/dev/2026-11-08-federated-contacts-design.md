@@ -118,7 +118,7 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 - The other side's owner reads the contact room but cannot start a turn of this agent, and a mention of it from them is refused.
 - In a thread the other agent wrote in, an owner's unmentioned message counts the other agent as a second person, so the owner mentions their own agent there.
 - A remote request whose notice could not be posted is shown only on the Contacts page and by `list_contacts`.
-- A withdrawn request whose withdrawal the target never saw is found only when its owner accepts it, which then fails.
+- The asked side never sees a request withdrawn, because the agent receives no member event when an invite to a room it never joined is withdrawn; the request stays pending there until its owner answers it, where accepting fails and declining clears it, or until the same agent asks again, which replaces it.
 - An agent that restarts between joining a remote contact's room and marking it active leaves the room, so the other side activates and then ends the contact.
 
 ## Evidence
@@ -129,6 +129,9 @@ Across the pair on one homeserver it covered a request, acceptance, conversation
 
 The run found that declining, refusing, and removing a pending request from another deployment sent nothing to the homeserver, because the bot's membership commands read an invite as already left, so the asking side stayed pending.
 Rejecting the invite therefore leaves the room on the homeserver directly.
+
+A second live run with both homeservers on room version 11, where creators have no unlimited power, covered withdrawing a pending request, the asked agent inviting its owner before it gets power, the grant of power level 100 after the join, and both agents withdrawing their owners' unjoined invites on removal.
+It also showed that the asked side never sees a withdrawal, which led to a new invite from the same agent replacing the stale request.
 
 ## Open Questions
 
