@@ -26,9 +26,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 22)
+PLUGIN_API_VERSION = (1, 23)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
+# One DNS label, as a plugin origin's host takes its plugin's name and a label the plugin picks.
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
 _PreparedPluginModule = tuple[ModuleType, dict[str, ModuleType | None]] | None
@@ -50,6 +52,7 @@ class _PluginManifest:
     oauth_module: str | None
     routes_module: str | None
     lifecycle_module: str | None
+    origin_module: str | None
     skills: list[str]
     reserved_namespaces: tuple[str, ...]
 
@@ -67,6 +70,7 @@ class _PluginBase:
     oauth_module_path: Path | None
     routes_module_path: Path | None
     lifecycle_module_path: Path | None
+    origin_module_path: Path | None
     skill_dirs: list[Path]
     reserved_namespaces: tuple[str, ...]
     # The name Python's import system gives the root of a plugin configured as a package, such as ``my_plugin``.
@@ -333,6 +337,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     oauth_module_path = _resolve_module_path(root, manifest.oauth_module, kind="oauth")
     routes_module_path = _resolve_module_path(root, manifest.routes_module, kind="routes")
     lifecycle_module_path = _resolve_module_path(root, manifest.lifecycle_module, kind="lifecycle")
+    origin_module_path = _resolve_module_path(root, manifest.origin_module, kind="origin")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
     return _PluginBase(
@@ -345,6 +350,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         oauth_module_path=oauth_module_path,
         routes_module_path=routes_module_path,
         lifecycle_module_path=lifecycle_module_path,
+        origin_module_path=origin_module_path,
         skill_dirs=skill_dirs,
         reserved_namespaces=manifest.reserved_namespaces,
     )
@@ -381,6 +387,13 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     oauth_module = _manifest_module(data, "oauth_module", path)
     routes_module = _manifest_module(data, "routes_module", path)
     lifecycle_module = _manifest_module(data, "lifecycle_module", path)
+    origin_module = _manifest_module(data, "origin_module", path)
+    if origin_module and not DNS_LABEL.fullmatch(normalized_name):
+        msg = (
+            f"Plugin {normalized_name!r} cannot serve origins: a plugin with an origin_module needs a name of at most"
+            f" 63 lowercase letters, digits, and hyphens, starting and ending with a letter or digit ({path})"
+        )
+        raise PluginValidationError(msg)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -407,6 +420,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         oauth_module=oauth_module,
         routes_module=routes_module,
         lifecycle_module=lifecycle_module,
+        origin_module=origin_module,
         skills=raw_skills,
         reserved_namespaces=tuple(reserved_namespaces),
     )

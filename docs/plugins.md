@@ -231,6 +231,7 @@ my-plugin/
 ├── tools.py               # Tool factories (optional)
 ├── oauth.py               # OAuth providers (optional)
 ├── routes.py              # HTTP routes (optional)
+├── origin.py              # Pages on hosts of the plugin's own (optional)
 ├── hooks.py               # Event hooks and automations (optional)
 ├── lifecycle.py           # Start and stop code (optional)
 └── skills/                # Skill directories (optional)
@@ -248,12 +249,13 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.0",
+  "mindroom_plugin_api": "1.23",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
   "lifecycle_module": "lifecycle.py",
+  "origin_module": "origin.py",
   "skills": ["skills"],
   "reserved_namespaces": ["com.example.my_plugin."]
 }
@@ -268,6 +270,7 @@ Other `mindroom` modules can change in any release.
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `lifecycle_module` | string | no | Relative path to the module defining `lifespan(lifecycle)`, the plugin's start and stop code; see [Plugin lifecycle](#plugin-lifecycle) |
+| `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
@@ -1069,7 +1072,7 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
 !!! warning "Plugin routes share the dashboard's origin"
     MindRoom serves plugin routes from the same origin as its dashboard, so script in a page a plugin route returns would run with the dashboard's signed-in session.
     Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
-    Return JSON.
+    Return JSON, and serve pages from [origins of your own](#origins-of-your-own).
     MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
 
 MindRoom builds each plugin's app from its router as the plugin loads, and a reload builds a new one.
@@ -1675,6 +1678,190 @@ While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
 A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest.
 
+## Origins of your own
+
+A plugin serves pages a browser renders, such as a web app an agent runs in its worker, on hosts of its own, `<label>.<plugin>.<domain>`, where `<plugin>` is the manifest `name` and `<label>` is one DNS label the plugin picks, such as one per app it shows.
+Each host is an origin of its own, so its pages share no origin with the dashboard, the API, or another plugin's hosts.
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `MINDROOM_PLUGIN_ORIGIN_PORT` | Port of the listener that serves plugin hosts; setting it turns plugin origins on | _(unset; off)_ |
+| `MINDROOM_PLUGIN_ORIGIN_DOMAIN` | Domain the plugin hosts are under | `localhost` |
+| `MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT` | Port in plugin hosts' URLs, when browsers reach the listener through a proxy on another port | The listener's own port on `localhost`, none elsewhere |
+
+URLs are `https`, except under `localhost`, where browsers send every `*.localhost` host to this machine, so `http://<label>.<plugin>.localhost:<port>` works without DNS.
+A proxy in front of the listener must pass the browser's `Host` header on.
+🔒 Put `MINDROOM_PLUGIN_ORIGIN_DOMAIN` on a registrable domain of its own, such as `example-apps.net` beside a dashboard at `example.org`.
+MindRoom's API refuses cookie-authenticated changes from any other origin, but a page can set cookies for every parent domain of its host, which every other site under that domain then receives.
+
+The manifest's `origin_module` names a module defining `router`, a FastAPI `APIRouter`, which answers every request on the plugin's hosts, at their root.
+MindRoom loads it as it loads a routes module: `request.app` is MindRoom's API app, so the helpers of `mindroom.plugin_http` work in its routes, except `client_stream`, which admits only MindRoom Chat's origins, a reload closes its open websockets with 1012, and a module that fails to load costs the plugin only its origins, logging `Plugin origin module failed to load; serving no origins`.
+A route reads which host it serves from `request.url.hostname`.
+A host whose plugin is not loaded or has no `origin_module` answers 404, and a route that raises answers 500 without the error's detail.
+A plugin name with `_` is not a valid DNS label, so a plugin with such a name and an `origin_module` fails to load, and `mindroom plugins check` says `Plugin 'my_plugin' cannot serve origins`.
+
+MindRoom authenticates nothing on these hosts: the plugin's router decides who sees each page.
+Every answer carries `Content-Security-Policy: frame-ancestors 'self'` followed by the origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, as a policy of its own beside any the route sets, so only MindRoom Chat and the host's own pages may frame it, and a route can tighten that but never loosen it.
+MindRoom adds no other header, so the route sets its own caching and content-type rules.
+
+| Helper (`mindroom.plugin_http`) | Returns |
+| --- | --- |
+| `plugin_origin_url(connection, label)` | The public URL of host `label` of the plugin whose route serves `connection`, on the API or on one of its hosts; it raises `ValueError` for a `label` that is not one DNS label, and answers 503 with `Plugin origins are off.` while `MINDROOM_PLUGIN_ORIGIN_PORT` is unset |
+| `client_origins(connection)` | The origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, MindRoom Chat's, such as for the target origin of a page's `postMessage` to the chat that frames it |
+| `await stream_room_reader(request, ClientUser(user_id), room_id)` | The `RoomReader` for a user the route's own gate established, once they are joined to `room_id`, as in [Websocket routes](#websocket-routes) |
+
+### Certificates on demand
+
+On any host that is not a plugin host, such as `127.0.0.1`, the listener answers `GET /ask?domain=<host>`, the check Caddy's on-demand TLS makes before it gets a certificate.
+It answers 200 when the host's plugin defines `async def serves(label)` in its origin module and it returns `True` within 5 seconds; it answers 404 otherwise, including for a plugin without `serves`.
+A `serves` that raises or takes longer is logged as `Plugin origin serves() failed` with the plugin's name.
+A `serves` that is not `async def` fails the module's load with `Plugin origin module's serves must be async def serves(label)`, since only a coroutine can be held to the deadline.
+This Caddyfile serves plugin hosts under `example-apps.net` with a listener on port 8770:
+
+```caddy
+{
+	on_demand_tls {
+		ask http://127.0.0.1:8770/ask
+	}
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8770
+}
+```
+
+### A gate for an agent's app
+
+A plugin that shows a web app an agent runs in its worker, here one on port 5173, to the people in the room hands each of them a link that works once.
+A route on the API, signed in with the caller's client session, mints the link, after checking that the caller may use the agent:
+
+```python
+# apps.py, shared by both modules
+import secrets
+import time
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class App:
+    label: str
+    user_id: str
+    room_id: str
+    agent_user_id: str
+    port: int
+
+
+LINKS: dict[str, tuple[App, float]] = {}  # one-use secret -> app, expiry
+SESSIONS: dict[str, App] = {}  # cookie -> app
+
+
+def mint(app: App) -> str:
+    secret = secrets.token_urlsafe(32)
+    LINKS[secret] = (app, time.monotonic() + 60)
+    return secret
+```
+
+```python
+# routes.py
+import hashlib
+
+from fastapi import APIRouter, Depends, Request
+
+from mindroom.plugin_http import RoomReader, plugin_origin_url, require_room_reader
+
+from .apps import App, mint
+
+router = APIRouter()
+
+
+@router.post("/rooms/{room_id}/agents/{agent_user_id}/app")
+async def open_app(
+    request: Request, room_id: str, agent_user_id: str, room: RoomReader = Depends(require_room_reader)
+) -> dict[str, str]:
+    await room.agent(agent_user_id)
+    # One host per person, room, and agent, so opening the app again needs no new certificate.
+    label = hashlib.sha256(f"{room.user.user_id} {room_id} {agent_user_id}".encode()).hexdigest()[:16]
+    app = App(label, room.user.user_id, room_id, agent_user_id, 5173)
+    return {"url": f"{plugin_origin_url(request, app.label)}/enter?link={mint(app)}"}
+```
+
+The origin module redeems the link, sets a cookie only this host gets, and on every request checks again that the caller is in the room and may use the agent, then relays to the app with `worker_relay`:
+
+```python
+# origin.py
+import secrets
+import time
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
+
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, StreamingResponse
+
+from mindroom.plugin_http import ClientUser, stream_room_reader, worker_relay
+
+from .apps import LINKS, SESSIONS
+
+COOKIE = "__Host-app"
+router = APIRouter()
+
+
+async def serves(label: str) -> bool:
+    return any(app.label == label for app in SESSIONS.values()) or any(app.label == label for app, _ in LINKS.values())
+
+
+def own_label(request: Request) -> str:
+    return (request.url.hostname or "").split(".")[0]
+
+
+@router.get("/enter")
+async def enter(request: Request, link: str) -> Response:
+    app, expires = LINKS.pop(link, (None, 0.0))
+    if app is None or app.label != own_label(request) or expires < time.monotonic():
+        raise HTTPException(403, "This link was used or has expired.")
+    session = secrets.token_urlsafe(32)
+    SESSIONS[session] = app
+    # The app's first page loads from this host's own page, so it is a same-origin navigation too.
+    response = HTMLResponse('<meta http-equiv="refresh" content="0;url=/">')
+    response.headers.append("set-cookie", f"{COOKIE}={session}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
+    return response
+
+
+@router.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
+async def relay(request: Request) -> Response:
+    app = SESSIONS.get(request.cookies.get(COOKIE, ""))
+    if app is None or app.label != own_label(request) or request.headers.get("sec-fetch-site") != "same-origin":
+        raise HTTPException(403, "Open this app from its room.")
+    room = await stream_room_reader(request, ClientUser(app.user_id), app.room_id)
+    target = (await room.agent(app.agent_user_id)).worker_target
+    # The path as the browser sent it, still percent-encoded, and only the headers the app needs, never the cookie.
+    path = request.scope["raw_path"].decode() + (f"?{request.url.query}" if request.url.query else "")
+    headers = [("content-type", request.headers["content-type"])] if "content-type" in request.headers else []
+    relay = await worker_relay(request, target)
+    stack = AsyncExitStack()
+    answer = await stack.enter_async_context(
+        relay.http(request.method, path, port=app.port, headers=headers, body=await request.body())
+    )
+
+    # The answer streams through as it came, so an app's large or endless answer never fills MindRoom's memory.
+    async def body() -> AsyncIterator[bytes]:
+        async with stack:
+            async for chunk in answer.content.iter_any():
+                yield chunk
+
+    names = ("content-type", "content-encoding", "location")
+    kept = {name: answer.headers[name] for name in names if name in answer.headers}
+    return StreamingResponse(body(), answer.status, headers=kept)
+```
+
+Every host of the domain is same-site with every other, so a browser sends a host's cookies with requests that pages on its sibling hosts make to it.
+A gate therefore admits only requests whose `Sec-Fetch-Site` is `same-origin`, as `relay` does, and never trusts its cookie alone; a websocket route checks that its `Origin` is the host's own, `plugin_origin_url(websocket, label)`.
+The `__Host-` prefix keeps a page on another host from setting the cookie, and `SameSite=None` with `Partitioned` lets MindRoom Chat's frames, which are cross-site, keep it while no other site's frames get it.
+Safari keeps no `Secure` cookie on `http://localhost`, so try such a gate in Safari only over HTTPS.
+A plugin that uses `origin_module`, `plugin_origin_url`, or `client_origins` states `"mindroom_plugin_api": "1.23"` in its manifest.
+
 ## People, agents, and administrators
 
 These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.
@@ -1865,7 +2052,7 @@ async def test_hook(plugin):
 
 | Call | What it does |
 | --- | --- |
-| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
+| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes, origin, or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
 | `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room the router is joined to and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's. The router is a member too and test rooms have no name, so MindRoom also counts a room where one member is alone with the router as direct. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
 | `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given, which works until the block ends. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
 | `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |

@@ -163,7 +163,10 @@ class PluginLifespans:
                     self._running[plugin.name] = running
             # A primary load executes every plugin again, so each plugin of the previous generation is replaced.
             await _close_websockets(
-                plugin.routes_app for plugin in previous.plugins.values() if plugin.routes_app is not None
+                app
+                for plugin in previous.plugins.values()
+                for app in (plugin.routes_app, plugin.origin_app)
+                if app is not None
             )
             for name, running in replaced.items():
                 await _stop(running, "reload" if name in self._running else "disabled")

@@ -1613,6 +1613,7 @@ async def _run_api_server(
 ) -> None:
     """Serve the bundled dashboard/API, lending it the runtime's shared state for exactly as long as it serves."""
     from mindroom.api import main as api_main  # noqa: PLC0415
+    from mindroom.api.plugin_origins import serve_plugin_origins  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
@@ -1653,6 +1654,7 @@ async def _run_api_server(
                     log_level=log_level,
                     agent_cli_registry=orchestrator.agent_cli_registry,
                 ),
+                serve_plugin_origins(runtime_paths, host=host, api_app=api_main.app, log_level=log_level),
             ):
                 await server.serve()
         except SystemExit as exc:

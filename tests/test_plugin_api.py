@@ -562,6 +562,7 @@ _MANIFEST = {
     "hooks_module": "hooks.py",
     "routes_module": "routes.py",
     "lifecycle_module": "lifecycle.py",
+    "origin_module": "origin.py",
     "skills": ["skills"],
     "reserved_namespaces": ["com.example.demo."],
 }
@@ -577,9 +578,11 @@ _HTTP_EXPORTS = [
     "RoomPower",
     "RoomReader",
     "WorkerRelay",
+    "client_origins",
     "client_rooms",
     "client_stream",
     "plugin_context",
+    "plugin_origin_url",
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
@@ -604,9 +607,11 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
+    "mindroom.plugin_http.client_origins": "(connection)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
     "mindroom.plugin_http.client_stream": "(websocket, room_id, *, admit)",
     "mindroom.plugin_http.plugin_context": "(connection)",
+    "mindroom.plugin_http.plugin_origin_url": "(connection, label)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
@@ -622,7 +627,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 22), "cd6a449d271244b555943014349932a0e3ee808ea090fc9281b5f39d82b58802")
+_PINNED_VERSION = ((1, 23), "7fec787b0a7fa9c0b93631172e92c68db804bbe5fad7f3e9be42ad8211f36b81")
 
 
 def _is_enum(obj: object) -> bool:
@@ -692,7 +697,7 @@ def test_each_exported_constant_keeps_its_value() -> None:
 def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
     """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
     root = tmp_path.resolve()
-    module_files = ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py")
+    module_files = tuple(value for key, value in _MANIFEST.items() if key.endswith("_module"))
     for module in module_files:
         (root / module).touch()
     (root / "skills").mkdir()
@@ -708,6 +713,7 @@ def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
         plugin.hooks_module_path,
         plugin.routes_module_path,
         plugin.lifecycle_module_path,
+        plugin.origin_module_path,
     )
     assert plugin.name == "demo"
     assert modules == tuple(root / module for module in module_files)

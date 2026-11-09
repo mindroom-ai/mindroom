@@ -9,6 +9,7 @@ generations.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import json
 import sys
@@ -85,7 +86,8 @@ class _LoadedPlugin:
     # The content-key and event-type prefixes its manifest reserves from agent tools.
     reserved_namespaces: tuple[str, ...]
     # The tools, hooks, and OAuth modules' paths and mtimes as the load began, so validation and worker refreshes know
-    # when the source changed; candidate validation never imports a routes or lifecycle module, so it leaves them out.
+    # when the source changed; candidate validation never imports a routes, origin, or lifecycle module, so it leaves
+    # them out.
     source: tuple[tuple[Path, float], ...]
     tools: Mapping[str, ToolMetadata]
     discovered_hooks: tuple[HookCallback, ...]
@@ -100,6 +102,12 @@ class _LoadedPlugin:
     lifespan: PluginLifespan | None
     # Why a staged load found no ``lifespan`` in the plugin's lifecycle module, which leaves the rest of it loaded.
     lifespan_error: plugin_imports.PluginValidationError | None
+    # The origin module's router as an app of its own, built by staged loads like the routes app, and its optional
+    # ``serves(label)``.
+    origin_app: PluginRoutesApp | None
+    origin_serves: Callable[[str], Awaitable[object]] | None
+    # Why a staged load serves no origins from the plugin's origin module, which leaves the rest of it loaded.
+    origin_error: plugin_imports.PluginValidationError | None
 
 
 @dataclass(frozen=True, eq=False)
@@ -168,8 +176,8 @@ _PROCESS_STATE: dict[str, dict[str, Any]] = {}
 # that root. The modules under it, whenever imported, are the plugin's modules too, so its next load imports them again.
 _ROOT_PACKAGES: dict[str, Path] = {}
 
-# The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
-# ``mindroom.plugin_http``'s ``plugin_context`` and ``require_room_messenger`` read it.
+# The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` and
+# ``mindroom.api.plugin_origins`` set it, and ``mindroom.plugin_http``'s helpers read it.
 PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
 
 
@@ -565,8 +573,8 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     Unchanged plugins stay as installed, and each module of a plugin whose tools, hooks, or OAuth module changed
     executes again, on every worker request, ending the tasks of the modules they replace. The generation only grows
     or refreshes, so another request's config keeps the plugins it loaded; a plugin that fails to load leaves it until
-    it loads again. Workers serve no HTTP routes and run no lifespans, so they never load routes or lifecycle modules
-    themselves.
+    it loads again. Workers serve no HTTP routes or origins and run no lifespans, so they never load routes, origin, or
+    lifecycle modules themselves.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
@@ -725,7 +733,7 @@ def _load_plugins(
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...], dict[str, ModuleType]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
 
-    Their routes and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
+    Their routes, origin, and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
     plugins loading afresh replaced. A structural error raises with the canonical modules as they were before the load
     and stops what it executed.
     """
@@ -819,33 +827,31 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         else _load_plugin_module(plugin, plugin.hooks_module_path, kind="hooks")
     )
     oauth_entry = _load_plugin_module(plugin, plugin.oauth_module_path, kind="oauth")
-    routes_app: PluginRoutesApp | None = None
-    routes_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.routes_module_path is not None:
-        # A broken routes module costs only the routes: a reload must not take the plugin's tools from agents.
-        try:
-            routes_entry = _load_plugin_module(plugin, plugin.routes_module_path, kind="routes")
-            assert routes_entry is not None
-            routes_app = _plugin_routes_app(routes_entry.module)
-        except plugin_imports.PluginValidationError as error:
-            logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
-            routes_error = error
-    lifespan: PluginLifespan | None = None
-    lifespan_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.lifecycle_module_path is not None:
-        # Likewise, a broken lifecycle module costs only the lifespan. It loads last, so a helper module it shares with
-        # the tools module registers its tools while the tools module loads.
-        try:
-            lifecycle_entry = _load_plugin_module(plugin, plugin.lifecycle_module_path, kind="lifecycle")
-            assert lifecycle_entry is not None
-            lifespan = _plugin_lifespan(lifecycle_entry.module)
-        except plugin_imports.PluginValidationError as error:
-            logger.warning(
-                "Plugin lifecycle module failed to load; running no lifespan",
-                plugin_name=plugin.name,
-                error=str(error),
-            )
-            lifespan_error = error
+    # A broken routes, origin, or lifecycle module costs only what it serves: a reload must not take the plugin's tools
+    # from agents. The lifecycle module loads last, so a helper module it shares with the tools module registers its
+    # tools while the tools module loads.
+    routes_app, routes_error = _load_primary_module(
+        plugin,
+        plugin.routes_module_path if primary_modules else None,
+        kind="routes",
+        build=lambda module: _plugin_routes_app(module, kind="routes"),
+        failure="Plugin routes failed to load; serving none",
+    )
+    origin, origin_error = _load_primary_module(
+        plugin,
+        plugin.origin_module_path if primary_modules else None,
+        kind="origin",
+        build=lambda module: (_origin_serves(module), _plugin_routes_app(module, kind="origin")),
+        failure="Plugin origin module failed to load; serving no origins",
+    )
+    origin_serves, origin_app = origin or (None, None)
+    lifespan, lifespan_error = _load_primary_module(
+        plugin,
+        plugin.lifecycle_module_path if primary_modules else None,
+        kind="lifecycle",
+        build=_plugin_lifespan,
+        failure="Plugin lifecycle module failed to load; running no lifespan",
+    )
     hooks_module = hooks_entry.module if hooks_entry is not None else None
     return _LoadedPlugin(
         name=plugin.name,
@@ -864,7 +870,30 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         routes_error=routes_error,
         lifespan=lifespan,
         lifespan_error=lifespan_error,
+        origin_app=origin_app,
+        origin_serves=origin_serves,
+        origin_error=origin_error,
     )
+
+
+def _load_primary_module[T](
+    plugin: plugin_imports._PluginBase,
+    module_path: Path | None,
+    *,
+    kind: str,
+    build: Callable[[ModuleType], T],
+    failure: str,
+) -> tuple[T | None, plugin_imports.PluginValidationError | None]:
+    """Load the module at ``module_path`` and build what it serves, or log ``failure`` and return why it cannot."""
+    if module_path is None:
+        return None, None
+    try:
+        entry = _load_plugin_module(plugin, module_path, kind=kind)
+        assert entry is not None
+        return build(entry.module), None
+    except plugin_imports.PluginValidationError as error:
+        logger.warning(failure, plugin_name=plugin.name, error=str(error))
+        return None, error
 
 
 def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
@@ -883,9 +912,18 @@ def _plugin_lifespan(module: ModuleType) -> PluginLifespan:
     return lifespan
 
 
-def _plugin_routes_app(module: ModuleType) -> PluginRoutesApp:
+def _origin_serves(module: ModuleType) -> Callable[[str], Awaitable[object]] | None:
+    serves = vars(module).get("serves")
+    # Only a coroutine can be held to its deadline without blocking the server or holding a thread.
+    if serves is not None and not inspect.iscoroutinefunction(serves):
+        msg = "Plugin origin module's serves must be async def serves(label)"
+        raise plugin_imports.PluginValidationError(msg)
+    return serves
+
+
+def _plugin_routes_app(module: ModuleType, *, kind: str) -> PluginRoutesApp:
     """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
-    # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
+    # Deferred: workers and slim entry points load plugins too, and only routes and origin modules need FastAPI.
     from fastapi import APIRouter, FastAPI, WebSocket, status  # noqa: PLC0415
     from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
     from fastapi.responses import JSONResponse  # noqa: PLC0415
@@ -894,7 +932,7 @@ def _plugin_routes_app(module: ModuleType) -> PluginRoutesApp:
 
     router = vars(module).get("router")
     if not isinstance(router, APIRouter):
-        msg = "Plugin routes module must define router: APIRouter"
+        msg = f"Plugin {kind} module must define router: APIRouter"
         raise plugin_imports.PluginValidationError(msg)
 
     async def plugin_inactive(connection: HTTPConnection, error: Exception) -> JSONResponse | None:
@@ -923,7 +961,7 @@ def _plugin_routes_app(module: ModuleType) -> PluginRoutesApp:
 
 @dataclass(eq=False)
 class PluginRoutesApp:
-    """One plugin's routes app, which tracks its open websockets so a reload that replaces it can close them."""
+    """One plugin's routes or origin app, which tracks its open websockets so a reload that replaces it can close them."""
 
     app: ASGIApp
     # Closes one open websocket each.

@@ -27,7 +27,7 @@ _MOUNT_PATH = "/api/plugins"
 _DENIAL_FRAMING_HEADERS = frozenset({b"content-length", b"content-type"})
 
 
-def _published_plugins(app: FastAPI) -> ConfigPlugins | None:
+def published_plugins(app: FastAPI) -> ConfigPlugins | None:
     """Return the served config's view of the published plugins, or None before any config has loaded."""
     snapshot = config_lifecycle.require_api_state(app).snapshot
     if snapshot.runtime_config is None:
@@ -52,7 +52,7 @@ class _PluginRoutesApp:
         name = scope["path"].removeprefix(root_path).removeprefix("/").partition("/")[0]
         routes_app = self._routes_app(name)
         if scope["type"] == "websocket":
-            send = _framed_by_server(send)
+            send = framed_by_server(send)
         if routes_app is None:
             # A websocket gets the same 404 as its handshake's denial response.
             await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
@@ -68,13 +68,13 @@ class _PluginRoutesApp:
         )
 
     def _routes_app(self, name: str) -> ASGIApp | None:
-        plugins = _published_plugins(self._app)
+        plugins = published_plugins(self._app)
         if plugins is None:
             return None
         return next((plugin.routes_app for plugin in plugins.loaded_plugins if plugin.name == name), None)
 
 
-def _framed_by_server(send: Send) -> Send:
+def framed_by_server(send: Send) -> Send:
     """Leave a websocket denial's framing headers to the server, so the 404 and a route's refusals reach clients intact."""
 
     async def framed(message: Message) -> None:
@@ -95,7 +95,7 @@ async def _list_plugins(request: Request) -> dict[str, object]:
     or load error.
     """
     presented_session(request)
-    plugins = _published_plugins(request.app)
+    plugins = published_plugins(request.app)
     major, minor = PLUGIN_API_VERSION
     return {
         "plugin_api_version": f"{major}.{minor}",
