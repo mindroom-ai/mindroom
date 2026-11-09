@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.0",
+  "mindroom_plugin_api": "1.23",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1779,9 +1779,11 @@ The origin module redeems the link, sets a cookie only this host gets, and on ev
 # origin.py
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from mindroom.plugin_http import ClientUser, stream_room_reader, worker_relay
 
@@ -1822,16 +1824,27 @@ async def relay(request: Request) -> Response:
     # The path as the browser sent it, still percent-encoded, and only the headers the app needs, never the cookie.
     path = request.scope["raw_path"].decode() + (f"?{request.url.query}" if request.url.query else "")
     headers = [("content-type", request.headers["content-type"])] if "content-type" in request.headers else []
-    async with (await worker_relay(request, target)).http(
-        request.method, path, port=app.port, headers=headers, body=await request.body()
-    ) as answer:
-        kept = {name: answer.headers[name] for name in ("content-type", "location") if name in answer.headers}
-        return Response(await answer.read(), answer.status, headers=kept)
+    relay = await worker_relay(request, target)
+    stack = AsyncExitStack()
+    answer = await stack.enter_async_context(
+        relay.http(request.method, path, port=app.port, headers=headers, body=await request.body())
+    )
+
+    # The answer streams through as it came, so an app's large or endless answer never fills MindRoom's memory.
+    async def body() -> AsyncIterator[bytes]:
+        async with stack:
+            async for chunk in answer.content.iter_any():
+                yield chunk
+
+    names = ("content-type", "content-encoding", "location")
+    kept = {name: answer.headers[name] for name in names if name in answer.headers}
+    return StreamingResponse(body(), answer.status, headers=kept)
 ```
 
 Every host of the domain is same-site with every other, so a browser sends a host's cookies with requests that pages on its sibling hosts make to it.
 A gate therefore admits only requests whose `Sec-Fetch-Site` is `same-origin`, as `relay` does, and never trusts its cookie alone; a websocket route checks that its `Origin` is the host's own, `plugin_origin_url(websocket, label)`.
 The `__Host-` prefix keeps a page on another host from setting the cookie, and `SameSite=None` with `Partitioned` lets MindRoom Chat's frames, which are cross-site, keep it while no other site's frames get it.
+Safari keeps no `Secure` cookie on `http://localhost`, so try such a gate in Safari only over HTTPS.
 A plugin that uses `origin_module`, `plugin_origin_url`, or `client_origins` states `"mindroom_plugin_api": "1.23"` in its manifest.
 
 ## People, agents, and administrators
