@@ -17,6 +17,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.contacts.flow import (
     ContactActor,
     announce_acceptance,
+    answerer_problem,
     existing_contact,
     leave_contact_room,
     post_in_thread,
@@ -24,7 +25,7 @@ from mindroom.contacts.flow import (
     reject_contact_invite,
     withdraw_unjoined_owner_invites,
 )
-from mindroom.contacts.parties import agent_party, personal_room_agent, remote_party, remote_target
+from mindroom.contacts.parties import agent_party, remote_party, remote_target
 from mindroom.contacts.store import (
     ContactBook,
     ContactParty,
@@ -145,12 +146,11 @@ async def store_contact_invite(
     if target is None:
         return None
     text = reason.strip() if isinstance(reason, str) else ""
-    poster = personal_room_agent(config, target.local_owner)
     rejection = (
         "no_reason"
         if not text
         else "owner_cannot_answer"
-        if poster is None or agent_party(config, poster) is None
+        if answerer_problem(config, target.local_owner) is not None
         else None
     )
     if rejection is not None:

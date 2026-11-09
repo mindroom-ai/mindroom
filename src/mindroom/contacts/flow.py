@@ -317,18 +317,21 @@ def existing_contact(
     return None
 
 
-def _check_answerer(config: Config, owner: str) -> None:
-    """Refuse a request to an owner whose personal-room agent cannot ask them, which takes the contacts tools."""
+def answerer_problem(config: Config, owner: str) -> str | None:
+    """Return why the owner's personal-room agent cannot ask them about a request, or None when it can.
+
+    Asking takes that agent's contacts tools, so a request, sent from here or received from another deployment,
+    needs it to have contacts.
+    """
     poster = personal_room_agent(config, owner)
     if poster is None:
-        msg = (
+        return (
             f"{owner} has no personal agent here, so a request cannot reach them; to reach an agent of another "
             "MindRoom deployment, add its Matrix ID to contacts.remote_agents"
         )
-        raise ValueError(msg)
     if agent_party(config, poster) is None:
-        msg = f"{owner}'s personal agent {poster} does not take contact requests"
-        raise ValueError(msg)
+        return f"{owner}'s personal agent {poster} does not take contact requests"
+    return None
 
 
 async def request_contact(
@@ -367,7 +370,8 @@ async def request_contact(
         requester, side = own, ContactSide()
         _change_side(side, rules, _validate_side_tools(config, paths, agent_name, tools))
     _check_pair(requester, target_party)
-    _check_answerer(config, target_party.local_owner)
+    if (problem := answerer_problem(config, target_party.local_owner)) is not None:
+        raise ValueError(problem)
 
     def create(book: ContactBook) -> ContactRecord:
         existing = existing_contact(book, requester, target_party, rules=rules, tools=tools)
