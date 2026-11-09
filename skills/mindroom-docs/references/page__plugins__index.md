@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.23",
+  "mindroom_plugin_api": "1.24",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1658,7 +1658,7 @@ async def build_status(request: Request, agent_user_id: str, room: RoomReader = 
 | Call | Effect |
 |------|--------|
 | `async with relay.http(method, path, *, service=None, port=None, headers=(), body=None) as answer` | Sends one request, with `body` as `bytes` or streamed from an async iterator of `bytes`, and yields the answer, an `aiohttp.ClientResponse`, as it streams in |
-| `async with relay.websocket(path, *, service=None, port=None, protocols=()) as upstream` | Opens a WebSocket and yields it, an `aiohttp.ClientWebSocketResponse`; a refused handshake raises `aiohttp.WSServerHandshakeError` with the status and headers |
+| `async with relay.websocket(path, *, service=None, port=None, protocols=(), headers=()) as upstream` | Opens a WebSocket, its handshake carrying `headers`, and yields it, an `aiohttp.ClientWebSocketResponse`; a refused handshake raises `aiohttp.WSServerHandshakeError` with the status and headers |
 | `await relay.relay_messages(websocket, upstream)` | Passes messages both ways between the route's accepted websocket and `upstream` until either side closes, then closes both with the code that ended it |
 | `await relay.ports()` | The ports the relay reaches: those that servers the worker's own processes run listen on at its loopback; a refusal raises `HTTPException` with the relay's answer |
 
@@ -1666,13 +1666,15 @@ Each call names exactly one of `service`, the name of one of the calling plugin'
 `path` is percent-encoded and may carry a query; it always stays below the service or port, `..` included.
 `http()` never follows redirects or decompresses, and the relay keeps no cookies, so a route can pass an answer through as it came.
 `websocket()` never follows a redirect either: a handshake the app redirects raises `aiohttp.WSServerHandshakeError` with the app's status and headers, `Location` included.
-It sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
+The relay sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
+Of the `headers` a WebSocket's handshake carries, the app gets only `Accept-Language`, `Authorization`, `Cookie`, `Origin`, and `User-Agent`.
+A route on a [plugin host](#origins-of-your-own) may pass the browser's `Origin` and the app's own cookies, which carry no MindRoom session there, but never its own gate cookie.
 A service gets its secret from the relay, and never one the route sends.
 The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.
 The marked 502 also answers a relay to a service that is still `starting`: ensure it again instead of stopping it.
 While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
-A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest.
+A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest, and one that passes `headers` to `websocket()` states `"1.24"`.
 
 ## Origins of your own
 

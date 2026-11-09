@@ -790,7 +790,8 @@ class Echo(socketserver.StreamRequestHandler):
         headers = {}
         while (line := self.rfile.readline().strip()):
             name, _, value = line.decode().partition(":")
-            headers[name.lower()] = value.strip()
+            # The first copy counts, so a forged one passed on ahead of the runner's own fails the check.
+            headers.setdefault(name.lower(), value.strip())
         if headers.get("x-mindroom-service-secret") != secret:
             self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
             return
@@ -820,7 +821,9 @@ class Echo(socketserver.StreamRequestHandler):
             if first & 0x0F == 8:
                 self.wfile.write(bytes([0x88, len(data)]) + data)
                 return
-            reply = f"{os.getpid()}:{path}:{data.decode()}".encode()
+            # At /headers it echoes the handshake headers an app reads instead.
+            seen = "|".join(headers.get(name, "") for name in ("cookie", "origin", "user-agent"))
+            reply = (seen if path == "/headers" else f"{os.getpid()}:{path}:{data.decode()}").encode()
             self.wfile.write(bytes([0x81, len(reply)]) + reply)
 
 
@@ -935,6 +938,31 @@ async def test_a_relayed_stream_keeps_its_service_and_its_worker_in_use_while_it
         async with relay.http("GET", "/slow", service="echo") as answer:
             assert await answer.text() == f"first;second from {instance.process.pid}"
         await _until(lambda: services.instance("demo", "echo") is None)
+
+
+@pytest.mark.asyncio
+async def test_a_route_passes_the_headers_it_chooses_to_its_services_websocket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handshake carries the route's cookie, origin, and user agent, and the secret only the runner adds."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "echo.py").write_text(_ECHO)
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        assert (await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)).state == "running"
+        async with relay.websocket("/headers", service="echo") as upstream:
+            await upstream.send_str("which")
+            assert (await upstream.receive_str()) == "||"
+        headers = [
+            ("Cookie", "app=1"),
+            ("Origin", "http://app.demo.localhost"),
+            ("User-Agent", "browser"),
+            ("X-MindRoom-Service-Secret", "forged"),
+            ("X-Mindroom-Sandbox-Token", "forged"),
+        ]
+        async with relay.websocket("/headers", service="echo", headers=headers) as upstream:
+            await upstream.send_str("which")
+            assert (await upstream.receive_str()) == "app=1|http://app.demo.localhost|browser"
 
 
 @pytest.mark.asyncio
