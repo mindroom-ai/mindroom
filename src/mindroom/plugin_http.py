@@ -7,7 +7,7 @@ import inspect
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, overload
 
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
@@ -593,26 +593,45 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
 
 
-async def worker_relay(connection: HTTPConnection, target: ResolvedWorkerTarget) -> WorkerRelay:
-    """Return the relay into the dedicated worker ``target`` names, for the plugin whose route serves ``connection``.
+async def worker_relay(connection: HTTPConnection | PluginContext, target: ResolvedWorkerTarget) -> WorkerRelay:
+    """Return the relay into the dedicated worker ``target`` names, for the plugin a route or tool calls it for.
 
-    ``target`` is an ``AgentWorkspace``'s ``worker_target``, which ``RoomReader.agent()`` and ``agents()`` return once
-    the caller may use the agent, or one a tool of the plugin recorded. By name, the relay reaches only that plugin's
-    own worker services. It never starts the worker: it answers 503 while the worker is not running, and without a
+    ``connection`` is the connection a plugin's route serves, or a tool's ``current_plugin_context``. ``target`` is an
+    ``AgentWorkspace``'s ``worker_target``, which ``RoomReader.agent()`` and ``agents()`` return once the caller may use
+    the agent, or the calling tool's own ``resolve_worker_target()``. By name, the relay reaches only that plugin's own
+    worker services. It never starts the worker: it answers 503 while the worker is not running, and without a
     dedicated worker backend.
     """
-    plugin_name = _route_plugin_name(connection, "worker_relay")
-    return await open_worker_relay(require_api_state(connection.app).snapshot.runtime_paths, target, plugin_name)
+    if isinstance(connection, PluginContext):
+        plugin_name, paths = connection.plugin_name, connection.runtime_paths
+    else:
+        plugin_name = _route_plugin_name(connection, "worker_relay")
+        paths = require_api_state(connection.app).snapshot.runtime_paths
+    return await open_worker_relay(paths, target, plugin_name)
 
 
-def plugin_origin_url(connection: HTTPConnection, label: str) -> str:
-    """Return the public URL of host ``label`` of the plugin whose route serves ``connection``.
+@overload
+def plugin_origin_url(connection: HTTPConnection, label: str) -> str: ...
 
-    ``label`` is one DNS label the plugin picks, else ``ValueError``; it answers 503 while plugin origins are off. It
-    raises ``RuntimeError`` for a plugin without an ``origin_module``, whose hosts answer only 404.
+
+@overload
+def plugin_origin_url(connection: PluginContext, label: str) -> str | None: ...
+
+
+def plugin_origin_url(connection: HTTPConnection | PluginContext, label: str) -> str | None:
+    """Return the public URL of host ``label`` of the plugin a route or tool calls it for.
+
+    ``connection`` is the connection a plugin's route serves, or a tool's ``current_plugin_context``. ``label`` is one
+    DNS label the plugin picks, else ``ValueError``. While plugin origins are off, a route's call answers 503 and a
+    tool's returns None. It raises ``RuntimeError`` for a plugin without an ``origin_module``, whose hosts answer only
+    404.
     """
-    plugin_name = _route_plugin_name(connection, "plugin_origin_url")
-    plugins = published_plugins(connection.app)
+    if isinstance(connection, PluginContext):
+        plugin_name = connection.plugin_name
+        plugins = config_plugins(connection.config, connection.runtime_paths)
+    else:
+        plugin_name = _route_plugin_name(connection, "plugin_origin_url")
+        plugins = published_plugins(connection.app)
     # A staged load sets one of these exactly when the manifest names an origin module.
     if plugins is None or not any(
         plugin.name == plugin_name and (plugin.origin_app is not None or plugin.origin_error is not None)
@@ -621,7 +640,7 @@ def plugin_origin_url(connection: HTTPConnection, label: str) -> str:
         msg = f"Plugin {plugin_name!r} has no origin_module, so plugin_origin_url() has no host of it to name"
         raise RuntimeError(msg)
     url = plugin_origins.plugin_origin_url(plugins.runtime_paths, plugin_name, label)
-    if url is None:
+    if url is None and not isinstance(connection, PluginContext):
         raise HTTPException(503, "Plugin origins are off.")
     return url
 

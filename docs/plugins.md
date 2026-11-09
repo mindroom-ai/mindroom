@@ -249,7 +249,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.23",
+  "mindroom_plugin_api": "1.24",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1565,6 +1565,7 @@ A plugin that uses the bridge states `"mindroom_plugin_api": "1.21"` in its mani
 
 A route reaches a worker service of its own plugin, or a server the agent runs in its worker, such as a web app it started from its shell, through `await worker_relay(connection, target)` from `mindroom.plugin_http`.
 `target` is the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` returned, so the caller's room and agent checks have run, or one a tool of the plugin recorded.
+A tool with `requires_primary_runtime=True` passes its plugin's [context](#plugin-context) instead of `connection`, and only its own agent's `resolve_worker_target()`, since the relay checks no caller.
 It never starts the worker: it answers 503 with `The agent's worker is not running.` until the agent's first tool call there or an `ensure_worker_service` starts it, and after idle cleanup stops it, and 503 without a dedicated worker backend.
 
 A WebSocket service greets each message it gets, and like every service refuses a connection without its secret:
@@ -1676,7 +1677,30 @@ The relay refuses with its own answer, marked with the `x-mindroom-relay-refused
 The marked 502 also answers a relay to a service that is still `starting`: ensure it again instead of stopping it.
 While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
-A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest.
+A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest, and `"1.24"` when a tool calls `worker_relay`.
+
+This tool tells the agent whether its app on port 5173 answers yet, and once it does, links to it on one of the plugin's [hosts](#origins-of-your-own), whose origin module relays to the app:
+
+```python
+# tools.py
+from fastapi import HTTPException
+
+from mindroom.plugin_api import current_plugin_context, get_tool_runtime_context
+from mindroom.plugin_http import plugin_origin_url, worker_relay
+
+
+async def share_app() -> str:
+    context = current_plugin_context("my-plugin")
+    try:
+        relay = await worker_relay(context, get_tool_runtime_context().resolve_worker_target())
+    except HTTPException as refused:
+        return refused.detail
+    async with relay.http("GET", "/", port=5173) as answer:
+        if "x-mindroom-relay-refused" in answer.headers:
+            return "Nothing answers on port 5173 yet."
+    url = plugin_origin_url(context, "demo")
+    return f"The app is at {url}" if url is not None else "Plugin origins are off."
+```
 
 ## Origins of your own
 
@@ -1707,7 +1731,7 @@ MindRoom adds no other header, so the route sets its own caching and content-typ
 
 | Helper (`mindroom.plugin_http`) | Returns |
 | --- | --- |
-| `plugin_origin_url(connection, label)` | The public URL of host `label` of the plugin whose route serves `connection`, on the API or on one of its hosts; it raises `ValueError` for a `label` that is not one DNS label, raises `RuntimeError` for a plugin without an `origin_module`, and answers 503 with `Plugin origins are off.` while `MINDROOM_PLUGIN_ORIGIN_PORT` is unset |
+| `plugin_origin_url(connection, label)` | The public URL of host `label` of the plugin whose route serves `connection`, on the API or on one of its hosts, or whose tool passes its plugin's [context](#plugin-context) as `connection`; it raises `ValueError` for a `label` that is not one DNS label, raises `RuntimeError` for a plugin without an `origin_module`, and while `MINDROOM_PLUGIN_ORIGIN_PORT` is unset answers 503 with `Plugin origins are off.`, or returns `None` to a tool |
 | `client_origins(connection)` | The origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, MindRoom Chat's, such as for the target origin of a page's `postMessage` to the chat that frames it |
 | `await stream_room_reader(request, ClientUser(user_id), room_id)` | The `RoomReader` for a user the route's own gate established, once they are joined to `room_id`, as in [Websocket routes](#websocket-routes) |
 
@@ -1861,7 +1885,7 @@ Every host of the domain is same-site with every other, so a browser sends a hos
 A gate therefore admits only requests whose `Sec-Fetch-Site` is `same-origin`, as `relay` does, and never trusts its cookie alone; a websocket route checks that its `Origin` is the host's own, `plugin_origin_url(websocket, label)`.
 The `__Host-` prefix keeps a page on another host from setting the cookie, and `SameSite=None` with `Partitioned` lets MindRoom Chat's frames, which are cross-site, keep it while no other site's frames get it.
 Safari keeps no `Secure` cookie on `http://localhost`, so try such a gate in Safari only over HTTPS.
-A plugin that uses `origin_module`, `plugin_origin_url`, or `client_origins` states `"mindroom_plugin_api": "1.23"` in its manifest.
+A plugin that uses `origin_module`, `plugin_origin_url`, or `client_origins` states `"mindroom_plugin_api": "1.23"` in its manifest, and `"1.24"` when a tool calls `plugin_origin_url`.
 
 ## People, agents, and administrators
 

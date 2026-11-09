@@ -1061,3 +1061,20 @@ async def test_worker_relay_takes_the_plugin_from_the_route_that_serves_it(
         assert await _get(await worker_relay(route, _TARGET), "/", service="hello") == (200, "hello", False)
         with pytest.raises(RuntimeError, match=r"worker_relay\(\) serves only a plugin's own routes"):
             await worker_relay(Request({"type": "http", "app": app}), _TARGET)
+
+
+@pytest.mark.asyncio
+async def test_worker_relay_takes_the_plugin_from_a_tools_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool's context reaches its own plugin's service, another plugin's context never; a stopped worker answers 503."""
+    async with _runner(tmp_path) as runner:
+        context, workers, _ = await _relay(tmp_path, runner, monkeypatch)
+        assert await _get(await worker_relay(context, _TARGET), "/", service="hello") == (200, "hello", False)
+        other = await worker_relay(replace(context, plugin_name="other"), _TARGET)
+        assert (await _get(other, "/", service="hello"))[::2] == (503, True)
+        workers.running = False
+        with pytest.raises(HTTPException) as stopped:
+            await worker_relay(context, _TARGET)
+        assert (stopped.value.status_code, stopped.value.detail) == (503, "The agent's worker is not running.")
