@@ -444,10 +444,6 @@ def git_tracked_relative_paths_from_checkout(
             env=hardened_git_env(git_dir=git_dir, work_tree=knowledge_root),
             check=False,
             capture_output=True,
-            text=True,
-            # Escape the bytes of a name that is not valid UTF-8, as a directory listing does, so the inclusion rule
-            # leaves that file out instead of the listing failing.
-            errors="surrogateescape",
             timeout=effective_timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -458,14 +454,18 @@ def git_tracked_relative_paths_from_checkout(
         raise RuntimeError(msg) from exc
 
     if result.returncode != 0:
-        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
+        details = redact_credentials_in_text(os.fsdecode(result.stderr or result.stdout).strip())
         msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
         if details:
             msg = f"{msg}\n{details}"
         raise RuntimeError(msg)
 
+    # Decode the bytes as a directory listing does: a carriage return stays in its name, and the bytes of a name that
+    # is not valid UTF-8 are escaped, so the inclusion rule leaves that file out instead of the listing failing.
     return {
-        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
+        path
+        for path in os.fsdecode(result.stdout).split("\x00")
+        if path and include_knowledge_relative_path(config, base_id, path)
     }
 
 
