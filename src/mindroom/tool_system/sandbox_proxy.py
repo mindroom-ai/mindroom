@@ -357,7 +357,8 @@ def worker_route(
     placement = (worker_target.placement if worker_target is not None else None) or (
         placement_for_session(execution_identity.session_id) if execution_identity is not None else None
     )
-    # Placements exist only on a dedicated backend (``delegation.workers``), where every call has a worker spec.
+    # A turn binds a placement only on a dedicated backend (``delegation.workers``), where every call has a worker
+    # spec; a stored target's placement reaches here only through relays and worker services, which need one too.
     if placement is not None and spec is not None:
         # The subagent's own worker serves its normal worker's workspaces and credentials, in a runtime of its own.
         spec = replace(

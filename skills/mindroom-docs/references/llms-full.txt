@@ -19525,7 +19525,7 @@ A target lives only in memory, so a plugin that lets people come back to somethi
 A tool that stores one, like `share_app` below, sets [`requires_primary_runtime=True`](#decorator-fields), since it reads its plugin's context and the call's runtime context.
 `load_worker_target` raises `ValueError` for data it does not know, such as data a later MindRoom stored, and for a target whose worker is not the one its own agent and requester resolve to.
 A loaded target reaches the agent's worker for the requester whose turn recorded it, for a private agent that requester's own, whoever calls the route later.
-A target that `resolve_worker_target()` returned in the turn of a delegated subagent with a worker of its own reaches that subagent's worker, in memory and once loaded.
+A target that `resolve_worker_target()` returned in the turn of a delegated subagent with a worker of its own reaches that subagent's worker, in memory and once loaded; a plugin that relies on this states `"mindroom_plugin_api": "1.28"` in its manifest.
 So store a target with what it belongs to in the plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), load only what the plugin stored there itself, never a target a client sends, and before relaying a caller check that the record belongs to the room and agent the route serves and that the caller may use that agent there:
 
 ```python
