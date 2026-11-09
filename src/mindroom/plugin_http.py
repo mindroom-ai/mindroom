@@ -38,7 +38,7 @@ from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level,
 from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
-from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces
+from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
     clear_room_reply_mode_override,
@@ -50,6 +50,9 @@ from mindroom.room_thread_modes import (
     resolve_room_thread_mode_override,
 )
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
+from mindroom.terminal.client import WorkerTerminals
+from mindroom.terminal.resolution import agent_terminals
+from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
@@ -71,7 +74,9 @@ __all__ = [
     "RoomModes",
     "RoomPower",
     "RoomReader",
+    "TerminalError",
     "WorkerRelay",
+    "WorkerTerminals",
     "client_origins",
     "client_rooms",
     "client_stream",
@@ -263,6 +268,7 @@ class RoomReader:
     _room_agents: Callable[[Callable[[], Awaitable[RoomPower]], str | None], Awaitable[list[AgentWorkspace]]] = field(
         repr=False,
     )
+    _workspace_terminals: Callable[[AgentWorkspace, bool], Awaitable[WorkerTerminals | None]] = field(repr=False)
 
     async def power(self) -> RoomPower:
         """Read the room's power levels now, answering 503 when they cannot be read."""
@@ -358,6 +364,15 @@ class RoomReader:
         (workspace,) = await self._room_agents(self.power, agent_user_id)
         return workspace
 
+    async def terminals(self, workspace: AgentWorkspace, *, create: bool = False) -> WorkerTerminals | None:
+        """Return the terminals of ``workspace``, which ``agents()`` or ``agent()`` returned, or None while it has none.
+
+        They are those the agent's turns for the caller in this room run beside, which the chat's Terminal tab shows.
+        It checks nothing more than ``agent()`` did: a route opens, closes, and types in them only while ``terminal``
+        is ``type``. ``create`` makes the agent's workspace first, as a terminal it opens needs.
+        """
+        return await self._workspace_terminals(workspace, create)
+
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
     """Return what a route may read and change about ``room_id``, once the client session's user is joined to it.
@@ -394,7 +409,22 @@ async def _room_reader(connection: HTTPConnection, user: ClientUser, room_id: st
         lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
         partial(_bound(state.room_history), room_id, user.user_id),
         partial(room_agent_workspaces, connection, user.user_id, room_id, members),
+        partial(_workspace_terminals, connection, user.user_id, room_id),
     )
+
+
+async def _workspace_terminals(
+    connection: HTTPConnection,
+    user_id: str,
+    room_id: str,
+    workspace: AgentWorkspace,
+    create: bool,
+) -> WorkerTerminals | None:
+    if workspace.terminal == "none":
+        return None
+    paths = bind_current_request_snapshot(connection).runtime_paths
+    identity = room_execution_identity(workspace.name, user_id, room_id, workspace.config, paths)
+    return await asyncio.to_thread(agent_terminals, workspace.name, workspace.config, paths, identity, create=create)
 
 
 # Matrix's own content keys are those without a namespace, such as `body` and `msgtype`, and those under these.
