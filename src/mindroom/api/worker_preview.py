@@ -87,7 +87,7 @@ _found_workers_sockets: dict[int, frozenset[int]] = {}
 # Likewise the listening sockets each service's port was last found to be its process group's by, by port and group.
 _found_service_sockets: dict[tuple[int, int], frozenset[int]] = {}
 # The relay's checks read /proc on a thread of their own, so tool calls busy on the loop's default threads never delay
-# them; one thread also keeps the record above to one writer.
+# them; one thread also keeps the records above to one writer.
 _CHECKS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="worker-relay-checks")
 # The relay reaches an app within this long, then waits on it as long as the stream lasts.
 _CONNECT_SECONDS = 10

@@ -1065,7 +1065,7 @@ async def test_the_relay_reads_a_services_holders_again_only_once_another_socket
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Relaying to a running service reads which processes hold its port once, not on every request."""
+    """Relaying to a running service reads which processes hold its port once, and again once another socket joins it."""
     reads: list[int] = []
     read = worker_preview.group_sockets
 
@@ -1075,10 +1075,15 @@ async def test_the_relay_reads_a_services_holders_again_only_once_another_socket
 
     monkeypatch.setattr(worker_preview, "group_sockets", counted)
     async with _runner(tmp_path) as runner:
-        _, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
         for _ in range(3):
             assert await _get(relay, "/", service="hello") == (200, "hello", False)
         assert len(reads) == 1
+        state = await ensure_worker_service(context, _SERVICE, _TARGET)
+        # A socket outside the service's process group listens on another loopback address of the same port.
+        with socket.create_server(("127.0.0.2", state.port)):
+            status, _, marked = await _get(relay, "/", service="hello")
+        assert (status, marked, len(reads)) == (403, True, 2)
 
 
 # A service whose server is a process it starts, as a launcher's is, while the program itself only waits for it.
