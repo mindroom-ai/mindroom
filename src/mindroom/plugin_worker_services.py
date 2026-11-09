@@ -16,17 +16,22 @@ from pydantic import TypeAdapter, ValidationError
 
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, worker_proxy_client_config, worker_route
+from mindroom.tool_system.sandbox_proxy import (
+    lease_worker_manager,
+    sandbox_proxy_config,
+    worker_proxy_client_config,
+    worker_route,
+)
 from mindroom.tool_system.worker_proxy_client import worker_request_headers
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.models import worker_api_root
-from mindroom.workers.runtime import lease_primary_worker_manager
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_context import PluginContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.workers.protocol import WorkerRoute
 
 logger = get_logger(__name__)
 
@@ -67,14 +72,14 @@ class WorkerServiceError(RuntimeError):
 class _Endpoint(NamedTuple):
     """The route of a target's worker, its runner's service routes, and the headers that authenticate to it."""
 
-    route: dict[str, object]
+    route: WorkerRoute
     root: str
     headers: dict[str, str]
 
 
 _STATE = TypeAdapter(WorkerServiceState)
 # The services this primary started, by worker key, plugin, and name, with what reaches their worker again.
-_started: dict[tuple[str, str, str], tuple[RuntimePaths, Config, ResolvedWorkerTarget]] = {}
+_started: dict[tuple[str | None, str, str], tuple[RuntimePaths, Config, ResolvedWorkerTarget]] = {}
 
 
 def _endpoint(
@@ -90,11 +95,7 @@ def _endpoint(
         raise WorkerServiceError(msg)
     proxy_config = sandbox_proxy_config(runtime_paths)
     try:
-        with lease_primary_worker_manager(
-            runtime_paths,
-            proxy_url=proxy_config.proxy_url,
-            proxy_token=proxy_config.proxy_token,
-        ) as manager:
+        with lease_worker_manager(runtime_paths, proxy_config) as manager:
             route, handle = worker_route(
                 runtime_paths=runtime_paths,
                 runtime_config=config,
@@ -111,7 +112,7 @@ def _endpoint(
     except RuntimeError as error:
         msg = f"The agent's worker is unavailable: {error}"
         raise WorkerServiceError(msg) from None
-    return _Endpoint(route.model_dump(mode="json"), f"{worker_api_root(handle)}/plugin-services", headers)
+    return _Endpoint(route, f"{worker_api_root(handle)}/plugin-services", headers)
 
 
 async def _send(method: str, endpoint: _Endpoint, path: str, body: object) -> bytes:
@@ -139,8 +140,9 @@ async def ensure_worker_service(
     if endpoint is None:
         msg = "The agent's worker is not ready."
         raise WorkerServiceError(msg)
-    _started[(str(endpoint.route["worker_key"]), plugin, service.name)] = (paths, config, target)
-    body = {**endpoint.route, "module": service.module, "idle_timeout_seconds": service.idle_timeout_seconds}
+    _started[(endpoint.route.worker_key, plugin, service.name)] = (paths, config, target)
+    route = endpoint.route.model_dump(mode="json")
+    body = {**route, "module": service.module, "idle_timeout_seconds": service.idle_timeout_seconds}
     answer = await _send("POST", endpoint, f"{plugin}/{service.name}", body)
     try:
         return _STATE.validate_json(answer)
@@ -153,7 +155,7 @@ async def _stop(paths: RuntimePaths, config: Config, target: ResolvedWorkerTarge
     endpoint = await asyncio.to_thread(_endpoint, paths, config, target, start=False)
     # A worker that does not run runs no service.
     if endpoint is not None:
-        _started.pop((str(endpoint.route["worker_key"]), plugin, name), None)
+        _started.pop((endpoint.route.worker_key, plugin, name), None)
         await _send("DELETE", endpoint, f"{plugin}/{name}", None)
 
 
@@ -166,11 +168,10 @@ async def stop_started_worker_services() -> None:
     """Stop every service this primary started, as a plugin load or shutdown replaces the code that started them."""
     started = list(_started.items())
     _started.clear()
-    stops = (_stop(paths, config, target, plugin, name) for (_, plugin, name), (paths, config, target) in started)
-    for ((_, plugin, name), _), result in zip(
-        started,
-        await asyncio.gather(*stops, return_exceptions=True),
-        strict=True,
-    ):
+    results = await asyncio.gather(
+        *(_stop(*where, plugin, name) for (_, plugin, name), where in started),
+        return_exceptions=True,
+    )
+    for ((_, plugin, name), _), result in zip(started, results, strict=True):
         if isinstance(result, Exception):
             logger.warning("Failed to stop a worker service", plugin_name=plugin, service=name, error=str(result))

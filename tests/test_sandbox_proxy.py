@@ -5253,7 +5253,7 @@ def test_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.Mo
 
     def load_manager() -> None:
         try:
-            with sandbox_proxy_module._lease_worker_manager(runtime_paths, proxy_config) as manager:
+            with sandbox_proxy_module.lease_worker_manager(runtime_paths, proxy_config) as manager:
                 managers.append(manager)
         except Exception as exc:  # pragma: no cover - surfaced by assertion below
             exceptions.append(exc)

@@ -33,8 +33,11 @@ from mindroom.workers.protocol import WorkerFailure, WorkerRoute
 if TYPE_CHECKING:
     from pathlib import Path as FilePath
 
-router = APIRouter(prefix="/api/sandbox-runner/plugin-services", tags=["sandbox-runner"])
-_GUARDED = [Depends(validate_runner_token)]
+router = APIRouter(
+    prefix="/api/sandbox-runner/plugin-services",
+    tags=["sandbox-runner"],
+    dependencies=[Depends(validate_runner_token)],
+)
 _Name = Annotated[str, Path(pattern=f"^{SERVICE_NAME_PATTERN}$")]
 # How long an ensure waits for a new instance to listen, and a stopped one's process group gets before it is killed.
 _START_SECONDS = 10.0
@@ -53,6 +56,7 @@ class _Program:
     python: str
     env: dict[str, str] = field(repr=False)
     cwd: str
+    idle_timeout_seconds: float
 
 
 @dataclass(eq=False)
@@ -95,7 +99,6 @@ class _WorkerServices:
         plugin: str,
         name: str,
         program: _Program,
-        idle_timeout_seconds: float,
         stops: int,
     ) -> WorkerServiceState:
         """Start the service unless an instance of this program exists, crashed or not, then report it.
@@ -104,24 +107,25 @@ class _WorkerServices:
         """
         key = (plugin, name)
         async with self._lock:
-            if self.stops(plugin, name) != stops:
+            if self._stops.get(key, 0) != stops:
                 raise HTTPException(409, "The service was stopped while it started.")
             instance = self._instances.get(key)
             if instance is not None and instance.entry_hash != program.entry_hash:
                 await self._end(key, instance)
                 instance = None
             if instance is None:
-                instance = self._instances[key] = await _start(program, idle_timeout_seconds)
+                instance = self._instances[key] = await _start(program)
                 instance.expiry = asyncio.create_task(self._expire(key, instance), name="worker-service-idle")
             self.touch(plugin, name)
         return await _settled(instance)
 
     async def stop(self, plugin: str, name: str) -> None:
         """End the service's instance, if any, and refuse the starts that arrived before this stop."""
-        self._stops[(plugin, name)] = self.stops(plugin, name) + 1
+        key = (plugin, name)
+        self._stops[key] = self._stops.get(key, 0) + 1
         async with self._lock:
-            if (instance := self._instances.get((plugin, name))) is not None:
-                await self._end((plugin, name), instance)
+            if (instance := self._instances.get(key)) is not None:
+                await self._end(key, instance)
 
     async def close(self) -> None:
         """End every instance as the runner stops."""
@@ -164,7 +168,7 @@ async def close_worker_services(app: FastAPI) -> None:
     await _services(app).close()
 
 
-async def _start(program: _Program, idle_timeout_seconds: float) -> _ServiceInstance:
+async def _start(program: _Program) -> _ServiceInstance:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -173,7 +177,9 @@ async def _start(program: _Program, idle_timeout_seconds: float) -> _ServiceInst
     ours, theirs = socket.socketpair()
     with ours, theirs:
         process = await asyncio.create_subprocess_exec(
-            *(program.python, "-s", str(program.path)),
+            program.python,
+            "-s",
+            str(program.path),
             stdin=theirs.fileno(),
             env={**program.env, "MINDROOM_WORKER_SERVICE_PORT": str(port)},
             cwd=program.cwd,
@@ -182,7 +188,7 @@ async def _start(program: _Program, idle_timeout_seconds: float) -> _ServiceInst
         # The secret fits the socket's buffer, so this never blocks; a program that already exited is reported as such.
         with suppress(OSError):
             ours.sendall(f"{secret}\n".encode())
-    return _ServiceInstance(process, port, secret, program.entry_hash, idle_timeout_seconds)
+    return _ServiceInstance(process, port, secret, program.entry_hash, program.idle_timeout_seconds)
 
 
 def _group_alive(pgid: int) -> bool:
@@ -199,9 +205,10 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     """Ask the instance's process group to end, then kill what is left of it after ``_STOP_SECONDS``."""
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
-    deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STOP_SECONDS
     # The group outlives its leader while a process the leader started runs.
-    while _group_alive(process.pid) and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
+    while _group_alive(process.pid) and loop.time() < deadline:  # noqa: ASYNC110
         await asyncio.sleep(0.05)
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
@@ -209,11 +216,12 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 async def _settled(instance: _ServiceInstance) -> WorkerServiceState:
-    deadline = asyncio.get_running_loop().time() + _START_SECONDS
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _START_SECONDS
     while instance.process.returncode is None:
         if await loopback_host(instance.port) is not None:
             return WorkerServiceState("running", instance.port)
-        if asyncio.get_running_loop().time() >= deadline:
+        if loop.time() >= deadline:
             return WorkerServiceState("starting", instance.port)
         await asyncio.sleep(0.1)
     return WorkerServiceState("exited", instance.port, instance.process.returncode)
@@ -245,10 +253,11 @@ def _program(app: FastAPI, payload: _Ensure, plugin: str, runner_url: str) -> _P
     paths = route.worker.paths
     env = {**worker_subprocess_env(paths), "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url}
     entry_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    return _Program(path, entry_hash, str(paths.venv_dir / "bin" / "python"), env, str(paths.workspace))
+    python, workspace = str(paths.venv_dir / "bin" / "python"), str(paths.workspace)
+    return _Program(path, entry_hash, python, env, workspace, payload.idle_timeout_seconds)
 
 
-@router.post("/{plugin}/{name}", dependencies=_GUARDED)
+@router.post("/{plugin}/{name}")
 async def ensure_service(request: Request, plugin: str, name: _Name, payload: _Ensure) -> WorkerServiceState:
     """Start the plugin's service unless it runs, and report it."""
     _require_dedicated_worker(request.app)
@@ -256,10 +265,10 @@ async def ensure_service(request: Request, plugin: str, name: _Name, payload: _E
     services = _services(request.app)
     stops = services.stops(plugin, name)
     program = await asyncio.to_thread(_program, request.app, payload, plugin, runner_url)
-    return await services.ensure(plugin, name, program, payload.idle_timeout_seconds, stops)
+    return await services.ensure(plugin, name, program, stops)
 
 
-@router.delete("/{plugin}/{name}", status_code=204, dependencies=_GUARDED)
+@router.delete("/{plugin}/{name}", status_code=204)
 async def stop_service(request: Request, plugin: str, name: _Name) -> None:
     """End the plugin's service, if it runs."""
     _require_dedicated_worker(request.app)

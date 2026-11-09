@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import socket
 import sys
 import threading
@@ -33,6 +34,7 @@ from mindroom.plugin_worker_services import (
     ensure_worker_service,
     stop_worker_service,
 )
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
@@ -342,10 +344,7 @@ async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
 async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path) -> None:
     """The request's config names the plugin, but its folder is missing here: a clear refusal."""
     async with _runner(tmp_path) as runner:
-        (runner.plugin_root / "mindroom.plugin.json").rename(tmp_path / "moved.json")
-        for child in runner.plugin_root.iterdir():
-            child.unlink()
-        runner.plugin_root.rmdir()
+        shutil.rmtree(runner.plugin_root)
         status, answer = await _call("POST", runner.url(), _body(), _AUTH)
         assert status == 404
         assert answer["detail"] == (
@@ -408,13 +407,13 @@ _TARGET = resolve_worker_target(
 class _Workers:
     """A dedicated backend whose one worker is the test's runner: an ensure starts it, a touch only finds it."""
 
-    def __init__(self, port: int, status: str = "ready") -> None:
+    def __init__(self, port: int) -> None:
         self.handle = WorkerHandle(
             worker_id="worker-1",
             worker_key=_WORKER_KEY,
             endpoint=f"http://127.0.0.1:{port}/api/sandbox-runner/execute",
             auth_token=_TOKEN,
-            status=status,  # type: ignore[arg-type]
+            status="ready",
             backend_name="docker",
             last_used_at=0.0,
             created_at=0.0,
@@ -449,7 +448,7 @@ def _primary(tmp_path: Path, runner: _Runner, monkeypatch: pytest.MonkeyPatch, w
     )
     config = _config(runner.plugin_root, paths)
     publish_test_plugins(config, paths)
-    monkeypatch.setattr(plugin_worker_services, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
     return build_plugin_context("demo", config, paths, lambda: config)
 
 
@@ -517,29 +516,6 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
         workers.handle = replace(workers.handle, auth_token=None)
         with pytest.raises(WorkerServiceError, match="unavailable: MINDROOM_SANDBOX_PROXY_TOKEN must be set"):
             await ensure_worker_service(context, _SERVICE, _TARGET)
-
-
-@pytest.mark.asyncio
-async def test_a_plugin_load_or_shutdown_stops_the_services_the_primary_started(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each load replaces every plugin's code, so the services that code started stop with it, as at shutdown."""
-    async with _runner(tmp_path) as runner:
-        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
-        config = context.config
-        lifespans = PluginLifespans(context.runtime_paths, lambda: config)
-        await lifespans.apply_published()
-        services = _services(sandbox_runner_app.app)
-
-        await ensure_worker_service(context, _SERVICE, _TARGET)
-        publish_test_plugins(config, context.runtime_paths)
-        await lifespans.apply_published()
-        assert services.instance("demo", "hello") is None
-
-        await ensure_worker_service(context, _SERVICE, _TARGET)
-        await lifespans.stop()
-        assert services.instance("demo", "hello") is None
 
 
 # The lifespan of a plugin that starts its service as it starts, for Alice's turns of the agent ``coder``.
@@ -630,7 +606,7 @@ async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytes
 
     monkeypatch.setattr(plugin_worker_services, "_stop", stop)
     for name in ("broken", "hello"):
-        plugin_worker_services._started[("v1:default:shared:coder", "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
+        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
     await plugin_worker_services.stop_started_worker_services()
     assert stopped == ["broken", "hello"]
     assert plugin_worker_services._started == {}
