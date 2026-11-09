@@ -57,7 +57,8 @@ def _package_plugin_config(
 ) -> tuple[Config, Path]:
     """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory.
 
-    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead.
+    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead. The package's directory is on
+    ``sys.path`` too, so ``tools`` names a second copy of its tools module, the stray import.
     """
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "stray_pkg"
@@ -69,6 +70,7 @@ def _package_plugin_config(
     linked_site_packages = tmp_path / "linked-site-packages"
     linked_site_packages.symlink_to(site_packages)
     monkeypatch.syspath_prepend(str(linked_site_packages))
+    monkeypatch.syspath_prepend(str(plugin_root))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     return _bind_runtime_paths(Config(plugins=["stray_pkg"]), config_path), plugin_root
@@ -79,18 +81,19 @@ def test_stray_import_of_a_loaded_plugin_tools_module_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plugin's tools module imported by its own name works but registers nothing, and the plugin keeps its tools."""
+    """A second copy of a plugin's tools module works but registers nothing, and the plugin keeps its tools."""
     config, plugin_root = _package_plugin_config(tmp_path, monkeypatch)
 
-    with _forgetting_modules("stray_pkg"):
+    with _forgetting_modules("stray_pkg", "tools"):
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
 
         with capture_logs() as logs:
-            stray_tools = importlib.import_module("stray_pkg.tools")
+            stray_tools = importlib.import_module("tools")
+        assert stray_tools is not importlib.import_module("stray_pkg.tools")
         assert stray_tools.demo_plugin_tools().__name__ == "DemoTool"
         assert "stray_pkg_tool" not in builtin_tool_registry()
         assert [(log["tool"], log["plugin_root"], log["module"]) for log in _warnings(logs)] == [
-            ("stray_pkg_tool", str(plugin_root.resolve()), "stray_pkg.tools"),
+            ("stray_pkg_tool", str(plugin_root.resolve()), "tools"),
         ]
 
         # The plugin's next load executes its tools module again and still registers the tool.
@@ -130,11 +133,11 @@ def test_stray_import_of_a_module_registering_through_a_plugin_helper_registers_
     helper, tools_source = _HELPER_TOOLS_SOURCES[tool_name]
     config, _ = _package_plugin_config(tmp_path, monkeypatch, tools_source)
 
-    with _forgetting_modules("stray_pkg"):
+    with _forgetting_modules("stray_pkg", "tools"):
         assert tool_name in _load(config, runtime_paths_for(config)).tools
 
         with capture_logs() as logs:
-            importlib.import_module("stray_pkg.tools")
+            importlib.import_module("tools")
         assert tool_name not in builtin_tool_registry()
         assert [log["caller"] for log in _warnings(logs)] == [helper]
         assert tool_name in _load(config, runtime_paths_for(config)).tools
