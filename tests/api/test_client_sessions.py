@@ -207,11 +207,12 @@ def test_revoke_needs_a_live_session(client: TestClient) -> None:
 
 
 def test_cors_allows_client_origin_on_plugin_paths(client: TestClient) -> None:
-    """Only origins in MINDROOM_COMPUTER_ALLOWED_ORIGINS pass a preflight on plugin and session paths."""
+    """Only origins in MINDROOM_COMPUTER_ALLOWED_ORIGINS pass a preflight on plugin, session and room paths."""
     for path, method in (
         ("/api/plugins/x/y", "POST"),
         ("/api/client-sessions", "POST"),
         ("/api/client-sessions", "DELETE"),
+        ("/api/rooms/x/agents/y/terminals", "POST"),
     ):
         headers = {"Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization"}
         allowed = client.options(path, headers={**headers, "Origin": CLIENT_ORIGIN})
@@ -280,7 +281,7 @@ def test_client_origin_paths_stop_at_their_own_segment(client: TestClient) -> No
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "authorization",
     }
-    for path in ("/api/pluginsX/y", "/api/client-sessionsX", "/api/computersX"):
+    for path in ("/api/pluginsX/y", "/api/client-sessionsX", "/api/computersX", "/api/roomsX"):
         preflight = client.options(path, headers=headers)
         assert "access-control-allow-origin" not in preflight.headers, path
         assert preflight.headers.get("cache-control") != "no-store", path
