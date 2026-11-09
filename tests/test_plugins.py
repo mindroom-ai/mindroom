@@ -40,7 +40,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError, record_plugin_root
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError
 from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -1349,7 +1349,6 @@ def test_a_package_plugins_module_imported_before_its_first_load_executes_again(
     """A tools module some other code imported by package name before the plugin loads still registers its tools."""
     plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
-    record_plugin_root(plugin_root.resolve())
 
     with _forgetting_modules("demo_pkg"):
         imported = importlib.import_module("demo_pkg.tools")
@@ -1372,9 +1371,7 @@ def test_validating_an_edited_package_plugin_executes_it_apart_from_its_loaded_m
         "agents": {"assistant": {"display_name": "Assistant", "role": "test", "tools": ["edited_pkg_tool"]}},
         "plugins": ["edited_pkg"],
     }
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = _runtime_paths(config_path)
+    runtime_paths = _minimal_runtime_paths(tmp_path)
 
     with _forgetting_modules("edited_pkg"):
         _load(Config.validate_with_runtime(data, runtime_paths), runtime_paths)
@@ -1386,6 +1383,25 @@ def test_validating_an_edited_package_plugin_executes_it_apart_from_its_loaded_m
         assert sys.modules["edited_pkg.tools"] is loaded is cached_plugin_module(plugin_root / "tools.py")
 
 
+def _write_outer_and_inner_plugins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools_source: str,
+) -> tuple[Path, Path]:
+    """Write the package plugin ``outer_pkg`` and the plugin ``pkg:outer_pkg:plugins/inner`` inside it; return both roots."""
+    outer_root = tmp_path / "site-packages" / "outer_pkg"
+    inner_root = outer_root / "plugins" / "inner"
+    inner_root.mkdir(parents=True)
+    (outer_root / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "plugins" / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
+    (outer_root / "tools.py").write_text(tools_source, encoding="utf-8")
+    (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
+    (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(outer_root.parent))
+    return outer_root, inner_root
+
+
 @_PRIMARY_AND_WORKER
 @pytest.mark.parametrize("inner_first", [False, True], ids=["outer-first", "inner-first"])
 def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
@@ -1395,18 +1411,11 @@ def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
     inner_first: bool,
 ) -> None:
     """A plugin inside a package plugin's package keeps its modules apart, so both load before and after a reload."""
-    site_packages = tmp_path / "site-packages"
-    outer_root = site_packages / "outer_pkg"
-    inner_root = outer_root / "plugins" / "inner"
-    inner_root.mkdir(parents=True)
-    (outer_root / "__init__.py").write_text("", encoding="utf-8")
-    (outer_root / "plugins" / "__init__.py").write_text("", encoding="utf-8")
-    (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
-    tools_path = outer_root / "tools.py"
-    tools_path.write_text("import outer_pkg.plugins.inner.hooks as inner_hooks\n", encoding="utf-8")
-    (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
-    (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(site_packages))
+    outer_root, inner_root = _write_outer_and_inner_plugins(
+        tmp_path,
+        monkeypatch,
+        "import outer_pkg.plugins.inner.hooks as inner_hooks\n",
+    )
     entries = ["outer_pkg", "pkg:outer_pkg:plugins/inner"]
     config = _bind_runtime_paths(Config(plugins=entries[::-1] if inner_first else entries), tmp_path / "config.yaml")
     runtime_paths = runtime_paths_for(config)
@@ -1420,7 +1429,7 @@ def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
 
     with _forgetting_modules("outer_pkg"):
         first = installed_inner_hooks()
-        _bump_mtime(tools_path)
+        _bump_mtime(outer_root / "tools.py")
         # A worker keeps the unchanged plugin's module; a primary load runs every plugin again.
         assert (installed_inner_hooks() is first) is (load is plugins_module.refresh_plugins)
 
@@ -1451,16 +1460,7 @@ def test_a_worker_keeps_a_nested_plugins_modules_when_the_plugin_around_it_is_ad
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A nested plugin's module names do not depend on whether the config also loads the plugin around it."""
-    site_packages = tmp_path / "site-packages"
-    outer_root = site_packages / "outer_pkg"
-    inner_root = outer_root / "plugins" / "inner"
-    inner_root.mkdir(parents=True)
-    (outer_root / "__init__.py").write_text("", encoding="utf-8")
-    (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
-    (outer_root / "tools.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
-    (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(site_packages))
+    _, inner_root = _write_outer_and_inner_plugins(tmp_path, monkeypatch, "VALUE = 1\n")
     config_path = tmp_path / "config.yaml"
     inner_only = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner"]), config_path)
     both = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner", "outer_pkg"]), config_path)
