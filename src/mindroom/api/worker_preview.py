@@ -292,9 +292,8 @@ async def _deny(websocket: WebSocket, refusal: HTTPException) -> None:
 async def _hand_back(websocket: WebSocket, redirect: HandshakeRedirected) -> None:
     """Answer the handshake with the app's redirect, its status and headers, which the relay never follows."""
     response = Response(status_code=redirect.status)
-    # The redirect's body is not passed on, so neither are the headers that describe it.
-    dropped = _SERVER_HEADERS | {"content-length", "content-type"}
-    for name, value in _end_to_end((redirect.headers or {}).items(), dropped):
+    # The redirect's body is not passed on, so neither is its length.
+    for name, value in _end_to_end((redirect.headers or {}).items(), _SERVER_HEADERS | {"content-length"}):
         response.headers.append(name, value)
     await websocket.send_denial_response(response)
 
