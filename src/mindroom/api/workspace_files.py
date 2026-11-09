@@ -159,8 +159,10 @@ async def save_file(
     except ValueError:  # Half of a surrogate pair, or text that is not base64.
         raise HTTPException(400, f"content is not valid {body.encoding}.") from None
     root = await _made_root(request, room, room_id, agent_user_id)
+    if body.create:
+        return await asyncio.to_thread(operations.create_file, root, body.path, payload)
     try:
-        return await asyncio.to_thread(operations.save_file, root, body.path, payload, body.etag, create=body.create)
+        return await asyncio.to_thread(operations.save_file, root, body.path, payload, body.etag)
     except operations.StaleEtagError as stale:
         return JSONResponse({"detail": str(stale), "etag": stale.etag}, status_code=409)
 

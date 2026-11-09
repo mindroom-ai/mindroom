@@ -187,9 +187,8 @@ def test_a_save_with_a_stale_etag_answers_409_with_the_current_one(client: _Clie
 
 def test_a_create_only_save_writes_only_where_nothing_is(client: _Client) -> None:
     """``create`` makes a new file, answers 409 over a taken name without changing it, and refuses an etag with 422."""
-    new = client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "", "create": True})
-    assert (new.status_code, new.json()["etag"]) == (200, _etag(b""))
-    client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "# Notes\n"})
+    new = client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "# Notes\n", "create": True})
+    assert (new.status_code, new.json()["etag"]) == (200, _etag(b"# Notes\n"))
 
     taken = client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "", "create": True})
 

@@ -35,7 +35,7 @@ def atomic_write_file_at(
     temp_prefix: str = ".mindroom-",
     replace: bool = True,
 ) -> Iterator[BinaryIO]:
-    """Stream a replacement, publishing only when the caller finishes successfully.
+    """Stream a file, publishing it only when the caller finishes successfully.
 
     The caller owns the directory descriptor and validates the single-component filename
     and any custom temporary prefix. Without ``replace``, publishing raises ``FileExistsError``

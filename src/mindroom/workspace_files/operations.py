@@ -345,18 +345,15 @@ def read_file(root: Path, raw_path: str) -> FileContent:
     return FileContent(str(path), encoding, content, len(payload), _mtime(status), _etag(payload))
 
 
-def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None, *, create: bool = False) -> Saved:
+def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Saved:
     """Save a file atomically, keeping an existing one's mode and making the folders above a new one.
 
-    Given ``etag``, it saves only while the file still has that version, else raises ``StaleEtagError``. With
-    ``create``, it saves only where nothing is, not even a link leading nowhere, else answers 409.
+    Given ``etag``, it saves only while the file still has that version, else raises ``StaleEtagError``.
     """
     if len(payload) > _MAX_FILE_BYTES:
         raise _too_large()
     path = _relative(raw_path)
     _refuse_git(path)
-    if create:
-        return _create_file(root, path, payload)
     found = _find(root, path)
     _refuse_git(found.relative)
     with _changes(found.base):
@@ -375,8 +372,9 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None, *, cr
     return Saved(_etag(payload), status.st_size, _mtime(status))
 
 
-def _create_file(root: Path, path: PurePosixPath, payload: bytes) -> Saved:
-    """Publish a new file whole, never over anything there, link or not, even one that appeared since the checks."""
+@contextmanager
+def _new_entry(root: Path, path: PurePosixPath) -> Iterator[tuple[int, str]]:
+    """Open, under the workspace's change lock, the folder that gets ``path``'s last part, making the folders above."""
     parent, name = _leaf(root, path)
     _refuse_git(parent.relative / name)
     with (
@@ -384,6 +382,16 @@ def _create_file(root: Path, path: PurePosixPath, payload: bytes) -> Saved:
         _refusals(),
         open_directory_within_root(parent.base, parent.relative, create=True) as directory,
     ):
+        yield directory, name
+
+
+def create_file(root: Path, raw_path: str, payload: bytes) -> Saved:
+    """Publish a new file whole, never over anything there, link or not, even one that appeared since the checks."""
+    if len(payload) > _MAX_FILE_BYTES:
+        raise _too_large()
+    path = _relative(raw_path)
+    _refuse_git(path)
+    with _new_entry(root, path) as (directory, name):
         with atomic_write_file_at(directory, name, file_mode=0o644, replace=False) as output:
             output.write(payload)
         status = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -394,13 +402,7 @@ def make_folder(root: Path, raw_path: str) -> None:
     """Make a folder and the folders above it, answering 409 when something is already there."""
     path = _relative(raw_path)
     _refuse_git(path)
-    parent, name = _leaf(root, path)
-    _refuse_git(parent.relative / name)
-    with (
-        _changes(parent.base),
-        _refusals(),
-        open_directory_within_root(parent.base, parent.relative, create=True) as directory,
-    ):
+    with _new_entry(root, path) as (directory, name):
         os.mkdir(name, dir_fd=directory)
 
 
