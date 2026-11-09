@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ import pytest
 from openai import AsyncOpenAI
 from openai.types.image import Image
 from openai.types.images_response import ImagesResponse
+from rich.console import Console
 
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
@@ -1320,7 +1322,10 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
     )
     target = generate_avatars._AvatarTarget(entity_type="agents", entity_name="general", role="general work")
 
-    with pytest.raises(ValueError, match=f"after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts"):
+    with pytest.raises(
+        ValueError,
+        match=f"^No image data found for agents/general after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts$",
+    ):
         await generate_avatars._generate_avatar(
             client,
             target,
@@ -1337,3 +1342,145 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
 
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
     assert client.images.generate.await_count == generate_avatars._MAX_IMAGE_ATTEMPTS
+
+
+def _record_console(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Send avatar output to an 80-column console and return the text it prints."""
+    output = io.StringIO()
+    console = Console(file=output, width=80)
+    monkeypatch.setattr(generate_avatars, "_get_console", lambda: console)
+    return output
+
+
+@pytest.mark.asyncio
+async def test_generation_prints_roles_room_names_and_errors_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Roles, room names, and errors print as written and whole on one line, though Rich would read markup in them."""
+    output = _record_console(monkeypatch)
+    beta_role = "Ships the [beta] build" + ", with a role that runs past eighty columns" * 2
+    closing_role = "Closes [/x] tags and :fire: alerts" + ", with a role that runs past eighty columns" * 2
+    done_room, retried_room, failing_room = "done[work]", "lab:fire:", "ops[work]"
+    error = "Upstream rejected [/x] :fire:" + ", with an error that runs past eighty columns" * 2
+    config = _config_with_runtime_paths(
+        {
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "router": {"model": "default"},
+            "agents": {
+                "beta": {
+                    "display_name": "Beta",
+                    "model": "default",
+                    "role": beta_role,
+                    "rooms": [done_room, retried_room, failing_room],
+                },
+                "closing": {"display_name": "Closing", "model": "default", "role": closing_role},
+            },
+            "matrix_space": {"enabled": False},
+        },
+        workspace_avatar_dir.parent,
+    )
+    done_path = workspace_avatar_dir / "rooms" / f"{done_room}.png"
+    done_path.parent.mkdir(parents=True)
+    done_path.write_bytes(b"existing")
+    image_attempts: dict[str, int] = {}
+
+    async def create_prompt(*, input: str, **_kwargs: object) -> SimpleNamespace:  # noqa: A002
+        return SimpleNamespace(status="completed", output_text=input.splitlines()[0])
+
+    async def generate_image(*, prompt: str, **_kwargs: object) -> ImagesResponse:
+        if failing_room in prompt:
+            raise ValueError(error)
+        image_attempts[prompt] = image_attempts.get(prompt, 0) + 1
+        if retried_room in prompt and image_attempts[prompt] == 1:
+            return _no_image_response()
+        return _image_response(b"avatar")
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=create_prompt),
+        images=SimpleNamespace(generate=generate_image),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: client)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    targets = {("agents", "beta"), ("agents", "closing")} | {
+        ("rooms", room) for room in (done_room, retried_room, failing_room)
+    }
+
+    success = await generate_avatars._generate_missing_avatars(
+        config,
+        _runtime_paths(workspace_avatar_dir.parent),
+        targets,
+    )
+
+    assert success is False
+    lines = output.getvalue().splitlines()
+    assert f"✓ Avatar already exists for rooms/{done_room}" in lines
+    assert f"🎨 Generating avatar for rooms/{retried_room}..." in lines
+    assert f"   Role: {beta_role}" in lines
+    assert f"   Role: {closing_role}" in lines
+    assert f"   Role: Collaboration space for {retried_room} activities" in lines
+    assert any(line.startswith("╭") and f" rooms/{retried_room} " in line for line in lines), lines
+    max_attempts = generate_avatars._MAX_IMAGE_ATTEMPTS
+    assert f"⟳ No image returned for rooms/{retried_room} (attempt 1/{max_attempts}); regenerating prompt" in lines
+    assert f"✓ Generated avatar for rooms/{retried_room}" in lines
+    assert f"✗ Failed to generate rooms/{failing_room}: {error}" in lines
+    assert f"✗ Avatar generation failed for: rooms/{failing_room}" in lines
+
+
+@pytest.mark.asyncio
+async def test_sync_prints_room_names_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Room names in avatar sync lines print as written, though Rich would read markup or emoji codes in them."""
+    output = _record_console(monkeypatch)
+    kept, bare, new, rejected, missing = "kept[work]", "bare:fire:", "new[work]", "bad[work]:fire:", "gone[work]"
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": [kept, bare, new, rejected, missing],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    room_ids = {kept: "!kept:localhost", bare: "!bare:localhost", new: "!new:localhost", rejected: "!bad:localhost"}
+
+    async def resolve_avatar(room_name: str, *_args: object) -> Path | None:
+        return None if room_name == bare else workspace_avatar_dir / "room.png"
+
+    async def has_avatar(_client: object, room_id: str) -> bool:
+        return room_id == room_ids[kept]
+
+    async def set_avatar(_client: object, room_id: str, _path: Path) -> bool:
+        return room_id != room_ids[rejected]
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "_load_validated_config",
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
+    )
+    monkeypatch.setattr(
+        generate_avatars,
+        "create_agent_http_client",
+        MagicMock(return_value=SimpleNamespace(close=AsyncMock())),
+    )
+    monkeypatch.setattr(generate_avatars, "room_avatar_path", resolve_avatar)
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", has_avatar)
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_avatar)
+    monkeypatch.setattr(generate_avatars, "get_room_id", lambda room_name, _runtime_paths: room_ids.get(room_name))
+
+    with pytest.raises(generate_avatars.AvatarSyncError):
+        await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
+
+    lines = output.getvalue().splitlines()
+    assert f"⊘ Skipped avatar for room '{kept}' (already set)" in lines
+    assert f"⊘ Skipped avatar for room '{bare}' (no avatar available)" in lines
+    assert f"✓ Set avatar for room '{new}'" in lines
+    assert f"✗ Failed to set avatar for room '{rejected}'" in lines
+    assert f"⚠ Room '{missing}' not found in Matrix" in lines
+    assert f"Error: Failed to set avatars for: room '{rejected}'" in lines

@@ -6265,7 +6265,10 @@ class TestLocalStackSetup:
         assert f"  Env:     {narrow_markup_dir / '.env'}" in lines
         assert f"  docker rm -f {container}" in lines
         assert f"  cd {synapse_dir} && docker compose down" in lines
-        assert f"  MATRIX_HOMESERVER={homeserver} uv run mindroom run" in printed.output.splitlines()
+        assert (
+            f"  MATRIX_HOMESERVER={homeserver} MATRIX_SERVER_NAME=localhost uv run mindroom run"
+            in printed.output.splitlines()
+        )
 
     def test_prints_failures_whole_on_one_line(self, narrow_markup_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A bad homeserver URL, a missing compose file, a failed command, and an unhealthy service print whole."""
@@ -6378,55 +6381,61 @@ class TestLocalStackSetup:
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
     @pytest.mark.parametrize(
-        ("homeserver_url", "env_prefix"),
+        ("homeserver_url", "expected_env"),
         [
-            ("http://localhost:8008", "MATRIX_HOMESERVER=http://localhost:8008 uv run"),
-            ("https://localhost:8448", "MATRIX_HOMESERVER=https://localhost:8448 MATRIX_SSL_VERIFY=false uv run"),
+            (
+                "http://localhost:8008",
+                {"MATRIX_HOMESERVER": "http://localhost:8008", "MATRIX_SERVER_NAME": "example.org"},
+            ),
+            (
+                "https://localhost:8448",
+                {
+                    "MATRIX_HOMESERVER": "https://localhost:8448",
+                    "MATRIX_SERVER_NAME": "example.org",
+                    "MATRIX_SSL_VERIFY": "false",
+                },
+            ),
         ],
     )
-    def test_no_persist_env_prints_inline_command(
+    def test_no_persist_env_prints_command_that_runs_with_the_settings_it_would_persist(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         homeserver_url: str,
-        env_prefix: str,
+        expected_env: dict[str, str],
     ) -> None:
-        """--no-persist-env writes no .env and prints the same settings it would persist."""
+        """--no-persist-env writes no .env, and its printed command, run as printed, sets what the .env would hold."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        run = subprocess.run  # The Docker stub replaces subprocess.run for every caller.
         self._fake_docker(monkeypatch)
+        setup = [
+            "local-stack-setup",
+            "--skip-synapse",
+            "--homeserver-url",
+            homeserver_url,
+            "--server-name",
+            "example.org",
+        ]
 
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--no-persist-env", "--homeserver-url", homeserver_url],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
-        )
+        result = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=tmp_path / "mindroom_data")
 
         assert result.exit_code == 0, result.output
         assert not (tmp_path / ".env").exists()
-        output = normalize_console_output(result.output)
-        assert f"{env_prefix} mindroom run" in output
-
-    def test_https_homeserver_persists_ssl_verify_override(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An https:// local homeserver still gets MATRIX_SSL_VERIFY=false for its local certificate."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._fake_docker(monkeypatch)
-
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--homeserver-url", "https://localhost:8448"],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
+        command = next(line.strip() for line in result.output.splitlines() if line.endswith(" uv run mindroom run"))
+        ran = run(
+            ["sh", "-c", command.replace(" uv run mindroom run", " env")],
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
         )
-
-        assert result.exit_code == 0, result.output
-        env_content = (tmp_path / ".env").read_text()
-        assert "MATRIX_HOMESERVER=https://localhost:8448" in env_content
-        assert "MATRIX_SSL_VERIFY=false" in env_content
+        ran_env = dict(line.split("=", 1) for line in ran.stdout.splitlines())
+        assert {name: value for name, value in ran_env.items() if name.startswith("MATRIX_")} == expected_env
+        persisted = _invoke_with_runtime(setup, cfg, storage_path=tmp_path / "mindroom_data")
+        assert persisted.exit_code == 0, persisted.output
+        persisted_lines = (tmp_path / ".env").read_text().splitlines()
+        assert sorted(persisted_lines) == sorted(f"{name}={value}" for name, value in expected_env.items())
 
     def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command fails on unsupported operating systems."""
