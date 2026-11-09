@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
+from mindroom.cli.config import print_literal
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
 from mindroom.credentials.environment import get_secret_from_env
@@ -179,7 +180,7 @@ async def _generate_prompt(
     _get_console().print(
         Panel(
             Text(final_prompt, style="cyan"),
-            title=f"[bold yellow]{target.entity_type}/{target.entity_name}[/bold yellow]",
+            title=Text(f"{target.entity_type}/{target.entity_name}", style="bold yellow"),
             border_style="green",
         ),
     )
@@ -209,15 +210,14 @@ async def _generate_avatar(
 ) -> None:
     """Generate an avatar for a single entity if it does not exist."""
     avatar_path = _get_avatar_path(target.entity_type, target.entity_name, runtime_paths)
+    console = _get_console()
+    label = f"{target.entity_type}/{target.entity_name}"
     if avatar_path.exists() and not force:
-        _get_console().print(
-            f"[green]✓[/green] Avatar already exists for [bold]{target.entity_type}/{target.entity_name}[/bold]",
-        )
+        print_literal("[green]✓[/green] Avatar already exists for ", label, console=console)
         return
 
-    console = _get_console()
-    console.print(f"\n[yellow]🎨 Generating avatar for {target.entity_type}/{target.entity_name}...[/yellow]")
-    console.print(f"   [dim]Role: {target.role}[/dim]")
+    print_literal("\n[yellow]🎨 Generating avatar for[/yellow] ", label, "[yellow]...[/yellow]", console=console)
+    print_literal("   [dim]Role:[/dim] ", target.role, console=console)
     if target.team_members:
         console.print(f"   [dim]Team members: {', '.join(member.name for member in target.team_members)}[/dim]")
 
@@ -242,9 +242,11 @@ async def _generate_avatar(
             max_attempts=_MAX_IMAGE_ATTEMPTS,
         )
         if attempt < _MAX_IMAGE_ATTEMPTS:
-            console.print(
-                f"[yellow]⟳ No image returned for {target.entity_type}/{target.entity_name} "
-                f"(attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
+            print_literal(
+                "[yellow]⟳ No image returned for[/yellow] ",
+                label,
+                f"[yellow] (attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
+                console=console,
             )
 
     if not image_bytes:
@@ -252,7 +254,7 @@ async def _generate_avatar(
         raise ValueError(msg)
 
     avatar_path.write_bytes(image_bytes)
-    console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
+    print_literal("[green]✓ Generated avatar for[/green] ", label, console=console)
 
 
 async def _sync_avatar_target(
@@ -264,19 +266,20 @@ async def _sync_avatar_target(
     force: bool = False,
 ) -> bool | None:
     """Apply one managed avatar target unless the room already has an avatar or none is available."""
+    console = _get_console()
     if not force and await room_has_avatar(client, room_id):
-        _get_console().print(f"[dim]⊘ Skipped avatar for {label} (already set)[/dim]")
+        print_literal("[dim]⊘ Skipped avatar for[/dim] ", label, "[dim] (already set)[/dim]", console=console)
         return None
 
     avatar_path = await resolve_avatar()
     if avatar_path is None:
-        _get_console().print(f"[dim]⊘ Skipped avatar for {label} (no avatar available)[/dim]")
+        print_literal("[dim]⊘ Skipped avatar for[/dim] ", label, "[dim] (no avatar available)[/dim]", console=console)
         return None
 
     if await set_room_avatar_from_file(client, room_id, avatar_path):
-        _get_console().print(f"[green]✓ Set avatar for {label}[/green]")
+        print_literal("[green]✓ Set avatar for[/green] ", label, console=console)
         return True
-    _get_console().print(f"[red]✗ Failed to set avatar for {label}[/red]")
+    print_literal("[red]✗ Failed to set avatar for[/red] ", label, console=console)
     return False
 
 
@@ -294,7 +297,12 @@ async def _sync_configured_room_avatars(
     for room_name in sorted(config.managed_room_keys()):
         room_id = get_room_id(room_name, runtime_paths)
         if not room_id:
-            _get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
+            print_literal(
+                "[yellow]⚠ Room[/yellow] ",
+                f"'{room_name}'",
+                "[yellow] not found in Matrix[/yellow]",
+                console=_get_console(),
+            )
             continue
 
         label = f"room '{room_name}'"
@@ -380,7 +388,7 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     if failed_labels:
         formatted_labels = ", ".join(failed_labels)
         msg = f"Failed to set avatars for: {formatted_labels}"
-        console.print(f"[red]Error:[/red] {msg}")
+        print_literal("[red]Error:[/red] ", msg, console=console)
         raise AvatarSyncError(msg)
 
 
@@ -531,7 +539,11 @@ async def _generate_missing_avatars(
                 error=repr(result),
                 exc_info=(type(result), result, result.__traceback__),
             )
-            console.print(f"[red]✗ Failed to generate {target.entity_type}/{target.entity_name}: {result}[/red]")
+            print_literal(
+                "[red]✗ Failed to generate[/red] ",
+                f"{target.entity_type}/{target.entity_name}: {result}",
+                console=console,
+            )
 
     remaining_targets = _remaining_missing_avatar_targets(selected_targets, runtime_paths)
     if failed_targets or remaining_targets:
@@ -540,7 +552,7 @@ async def _generate_missing_avatars(
             f"{entity_type}/{entity_name}"
             for entity_type, entity_name in sorted(remaining_targets | failed_target_keys)
         )
-        console.print(f"\n[red]✗ Avatar generation failed for: {formatted_targets}[/red]")
+        print_literal("\n[red]✗ Avatar generation failed for:[/red] ", formatted_targets, console=console)
         return False
 
     console.print("\n[bold green]✨ Avatar generation complete![/bold green]")

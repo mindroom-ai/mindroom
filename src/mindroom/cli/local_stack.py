@@ -165,17 +165,12 @@ def _needs_ssl_verify_override(homeserver_url: str) -> bool:
     return urlparse(homeserver_url).scheme == "https"
 
 
-def _persist_local_matrix_env(
-    homeserver_url: str,
-    server_name: str,
-    *,
-    config_path: Path,
-) -> Path:
-    """Write local Matrix settings to .env next to the active config file."""
+def _local_matrix_env_values(homeserver_url: str, server_name: str) -> dict[str, str]:
+    """Return the Matrix settings that point MindRoom at the local stack."""
     values = {"MATRIX_HOMESERVER": homeserver_url, "MATRIX_SERVER_NAME": server_name}
     if _needs_ssl_verify_override(homeserver_url):
         values["MATRIX_SSL_VERIFY"] = "false"
-    return upsert_env_values(env_path_for_config(config_path), values)
+    return values
 
 
 def _require_supported_platform() -> None:
@@ -268,19 +263,16 @@ def _print_local_stack_summary(
     print_literal("  Synapse: ", homeserver_url)
     console.print(f"  MindRoom Chat: {cinny_url}")
     print_literal("  Server:  ", server_name)
+    env_values = _local_matrix_env_values(homeserver_url, server_name)
     if persist_env:
-        env_path = _persist_local_matrix_env(
-            homeserver_url,
-            server_name,
-            config_path=config_path,
-        )
+        env_path = upsert_env_values(env_path_for_config(config_path), env_values)
         print_literal("  Env:     ", env_path)
         console.print("\nRun MindRoom backend:")
         console.print("  uv run mindroom run")
     else:
-        ssl_override = " MATRIX_SSL_VERIFY=false" if _needs_ssl_verify_override(homeserver_url) else ""
+        assignments = " ".join(f"{name}={value}" for name, value in env_values.items())
         console.print("\nRun MindRoom backend against this stack:")
-        print_literal("  ", f"MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
+        print_literal("  ", f"{assignments} uv run mindroom run")
     console.print("\nStop commands:")
     print_literal("  ", f"docker rm -f {cinny_container_name}")
     if not skip_synapse:
