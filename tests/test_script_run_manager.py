@@ -9,7 +9,7 @@ import stat
 import sys
 import threading
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -2665,6 +2665,16 @@ async def test_terminal_failure_error_is_bounded_with_its_output(tmp_path: Path)
     assert reconciled.error is not None
     assert len(reconciled.error.encode("utf-8")) <= 64 * 1024
     assert reconciled.error.endswith(":tail")
+
+
+def test_runtime_limit_is_measured_against_the_current_time(tmp_path: Path) -> None:
+    """Unless a test sets it, a run's maximum runtime is measured against the current UTC time."""
+    manager, _backend, _client = _manager(tmp_path)
+
+    before = datetime.now(UTC)
+    measured = manager.clock()
+
+    assert before <= measured <= datetime.now(UTC)
 
 
 @pytest.mark.asyncio
