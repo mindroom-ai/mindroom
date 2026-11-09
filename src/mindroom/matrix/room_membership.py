@@ -147,44 +147,47 @@ async def ensure_room_membership_synced(
         return True
     lookup = _lookups.setdefault(room, _MembershipLookup())
     async with lookup.lock:
-        if room_membership_is_complete(room):
-            return True
-        projected_members = _projected_members(room)
-        revision = lookup.revision
-        try:
-            response = await read_joined_members(client, room.room_id)
-        except Exception as exc:
-            logger.warning(
-                "authoritative_room_membership_fetch_failed",
-                room_id=room.room_id,
-                sender_id=sender_id,
-                error=str(exc),
-            )
-            return False
-        if not isinstance(response, nio.JoinedMembersResponse):
-            logger.warning(
-                "authoritative_room_membership_fetch_failed",
-                room_id=room.room_id,
-                sender_id=sender_id,
-                error=str(response),
-            )
-            return False
-        # An ordinary nio client can complete its own projection during lookup.
-        if not room.members_synced:
-            if revision != lookup.revision or projected_members != _projected_members(room):
+        # A membership change synced during a read makes its answer stale, so the room is read again, 3 reads at most.
+        for _ in range(3):
+            if room_membership_is_complete(room):
+                return True
+            projected_members = _projected_members(room)
+            revision = lookup.revision
+            try:
+                response = await read_joined_members(client, room.room_id)
+            except Exception as exc:
+                logger.warning(
+                    "authoritative_room_membership_fetch_failed",
+                    room_id=room.room_id,
+                    sender_id=sender_id,
+                    error=str(exc),
+                )
                 return False
-            lookup.snapshot = _RoomMembershipSnapshot(
-                projected_members=projected_members,
-                joined_user_ids=frozenset(member.user_id for member in response.members),
-                display_names=tuple(
-                    (member.user_id, member.display_name) for member in response.members if member.display_name
-                ),
+            if not isinstance(response, nio.JoinedMembersResponse):
+                logger.warning(
+                    "authoritative_room_membership_fetch_failed",
+                    room_id=room.room_id,
+                    sender_id=sender_id,
+                    error=str(response),
+                )
+                return False
+            # An ordinary nio client can complete its own projection during lookup.
+            if not room.members_synced:
+                if revision != lookup.revision or projected_members != _projected_members(room):
+                    continue
+                lookup.snapshot = _RoomMembershipSnapshot(
+                    projected_members=projected_members,
+                    joined_user_ids=frozenset(member.user_id for member in response.members),
+                    display_names=tuple(
+                        (member.user_id, member.display_name) for member in response.members if member.display_name
+                    ),
+                )
+            logger.info(
+                "authoritative_room_membership_refreshed",
+                room_id=room.room_id,
+                sender_id=sender_id,
+                cached_member_count=len(projected_members),
+                refreshed_member_count=len(response.members),
             )
-        logger.info(
-            "authoritative_room_membership_refreshed",
-            room_id=room.room_id,
-            sender_id=sender_id,
-            cached_member_count=len(projected_members),
-            refreshed_member_count=len(response.members),
-        )
-        return True
+            return True
+        return False
