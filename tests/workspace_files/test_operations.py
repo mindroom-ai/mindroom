@@ -400,15 +400,29 @@ def test_a_folder_cannot_move_into_itself(root: Path) -> None:
 
 def test_delete_removes_a_folder_with_its_content_and_a_link_but_not_its_target(root: Path) -> None:
     """Deleting a link leaves its target, a folder goes with its content, and an absent entry answers 404."""
-    (root / "code").symlink_to("src")
+    (root / "lib" / "deep").mkdir(parents=True)
+    (root / "lib" / "deep" / "mod.py").write_text("x")
+    (root / "code").symlink_to("lib")
 
     delete(root, "code")
-    assert (root / "src" / "main.py").is_file()
-    delete(root, "src")
+    assert (root / "lib" / "deep" / "mod.py").is_file()
+    delete(root, "lib")
 
-    assert not (root / "src").exists()
+    assert not (root / "lib").exists()
     assert not (root / "code").is_symlink()
-    assert _status(lambda: delete(root, "src")) == 404
+    assert _status(lambda: delete(root, "lib")) == 404
+
+
+@pytest.mark.parametrize("kept", ["src/.env.local", "repo/.git/HEAD", "keys/id_rsa"])
+def test_a_folder_holding_git_s_files_or_a_credential_at_any_depth_is_never_deleted(root: Path, kept: str) -> None:
+    """Neither the folder holding it nor one holding that folder goes, and the kept file stays."""
+    held = root / "outer" / kept
+    held.parent.mkdir(parents=True, exist_ok=True)
+    held.write_text("x")
+
+    for folder in ("outer", str(Path("outer") / Path(kept).parts[0])):
+        assert _status(lambda folder=folder: delete(root, folder)) == 403
+    assert held.is_file()
 
 
 @pytest.mark.parametrize("path", ["", ".", "./"])

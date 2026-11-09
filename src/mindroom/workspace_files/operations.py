@@ -399,6 +399,15 @@ def move(root: Path, raw_path: str, raw_to: str) -> None:
                 raise FileExistsError
 
 
+def _refuse_holding_kept(directory: int, name: str, folder: Path) -> None:
+    """Refuse deleting a folder that holds Git's files or a hidden credential at any depth, which are never changed."""
+    # Walks every level by descriptor, never following a link.
+    for current, folders, files, _ in os.fwalk(name, dir_fd=directory):
+        below = folder / Path(current).relative_to(name)
+        if any(is_git_metadata_path(below / entry) or is_hidden(below / entry) for entry in (*folders, *files)):
+            raise HTTPException(403, "That folder holds Git's files or credentials, so it can't be deleted here.")
+
+
 def delete(root: Path, raw_path: str) -> None:
     """Delete a file, a link but not what it leads to, or a folder with everything in it."""
     path = _relative(raw_path)
@@ -409,6 +418,7 @@ def delete(root: Path, raw_path: str) -> None:
     _refuse_credential_place(removed)
     with _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
         if stat.S_ISDIR(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
+            _refuse_holding_kept(directory, name, removed)
             # Walks every level by descriptor, never following a link.
             shutil.rmtree(name, dir_fd=directory)
         else:
