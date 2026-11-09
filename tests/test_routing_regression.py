@@ -539,7 +539,7 @@ class TestRoutingRegression:
         router_bot, _healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
 
         async def recover_until_settled(event_id: str) -> None:
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 while await router_bot._journal_dispatcher.store.is_pending(event_id):
                     await router_bot.recover_pending_turn_journal_events()
                     await drain_coalescing(router_bot)
@@ -733,7 +733,7 @@ class TestRoutingRegression:
                 release_send.set()
                 await relay_task
                 assert await wait_for_background_tasks(
-                    timeout=1,
+                    timeout=SETTLE_TIMEOUT_SECONDS,
                     owner=orchestrator._mcp_catalog_change_task_owner,
                 )
 

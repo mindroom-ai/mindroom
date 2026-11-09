@@ -4205,7 +4205,7 @@ class TestMultiAgentOrchestrator:
         with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(responder_bot)
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
 
@@ -4240,7 +4240,7 @@ class TestMultiAgentOrchestrator:
         with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
             orchestrator.turn_recovery.schedule()
             assert await wait_for_background_tasks(
-                timeout=1,
+                timeout=SETTLE_TIMEOUT_SECONDS,
                 owner=orchestrator.turn_recovery.task_owner,
             )
 
@@ -4369,7 +4369,7 @@ class TestMultiAgentOrchestrator:
                 await ready_task
 
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
         assert recovery_task.done()
@@ -4590,7 +4590,7 @@ class TestMultiAgentOrchestrator:
         with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(member_bot)
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
 
