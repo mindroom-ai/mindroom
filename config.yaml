@@ -392,6 +392,8 @@ mindroom_user:
   display_name: MindRoomUser
   username: mindroom_user
 defaults:
+  # Lets the shell run in the MindRoom process while it has no worker.
+  allow_shell_without_worker: true
   enable_streaming: true
   markdown: true
   show_stop_button: true

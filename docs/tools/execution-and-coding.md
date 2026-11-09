@@ -129,6 +129,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 ## [`shell`]
 
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
+It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](../configuration/agents.md#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
 With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
