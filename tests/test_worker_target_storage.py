@@ -46,6 +46,7 @@ _AGENTS = {
     "shared": AgentConfig(display_name="Coder", worker_scope="shared"),
     "private per user": AgentConfig(display_name="Coder", private=AgentPrivateConfig(per="user")),
     "private per user and agent": AgentConfig(display_name="Coder", private=AgentPrivateConfig(per="user_agent")),
+    "shared per user and agent": AgentConfig(display_name="Coder", worker_scope="user_agent"),
     "unscoped": AgentConfig(display_name="Coder"),
 }
 
@@ -100,6 +101,13 @@ _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "another person's identity": lambda stored: _identity(stored, requester_id="@mallory:localhost"),
     "another agent": lambda stored: {**stored, "routing_agent_name": "other"},
     "another agent's visibility": lambda stored: {**stored, "private_agent_names": ["coder", "other"]},
+    "visible private agents without an agent": lambda stored: {
+        **stored,
+        "routing_agent_name": None,
+        "execution_identity": None,
+        "worker_key": None,
+        "private_agent_names": [],
+    },
 }
 
 
