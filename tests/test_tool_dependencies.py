@@ -782,6 +782,14 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     assert calls["env"] == 1
 
 
+def _fake_mindroom_site_packages(path: Path) -> Path:
+    """Return a site-packages directory holding a MindRoom distribution, as a test's own installation."""
+    info = path / "mindroom-0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: mindroom\nVersion: 0\n")
+    return path
+
+
 _DEPENDENCY_PROCESS_SCRIPT = """
 import importlib.metadata
 import json
@@ -884,8 +892,8 @@ def _dependency_process_line(process: subprocess.Popen[str]) -> str:
 @pytest.mark.parametrize("contender", ["reader", "mem0_reader", "installer"])
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
-    environment = tmp_path / "environment"
-    environment.mkdir()
+    # The scripts put this directory first on sys.path, so its MindRoom distribution holds their lock.
+    environment = _fake_mindroom_site_packages(tmp_path / "environment")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (environment / "uv-receipt.toml").write_text(
@@ -938,6 +946,65 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
                 process.communicate(timeout=20)
 
 
+_LOCK_CONTENDER_SCRIPT = """
+import sys
+
+site_packages, prefix, mode = sys.argv[1:]
+sys.path.insert(0, site_packages)
+sys.prefix = prefix
+
+from mindroom.tool_system.dependencies import optional_dependency_environment
+
+print('ready', flush=True)
+with optional_dependency_environment(exclusive=mode == 'installer'):
+    print('locked', flush=True)
+    if mode == 'installer':
+        sys.stdin.readline()
+"""
+
+
+@pytest.mark.parametrize("importer_prefix", ["primary", "worker-venv"])
+def test_dependency_lock_is_shared_across_temporary_directories(tmp_path: Path, importer_prefix: str) -> None:
+    """An import waits for an install from a process with another TMPDIR, also from a local worker's own venv."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+
+    def start(mode: str, prefix: str) -> subprocess.Popen[str]:
+        scratch = tmp_path / f"{mode}-tmp"
+        scratch.mkdir()
+        return subprocess.Popen(
+            [sys.executable, "-u", "-c", _LOCK_CONTENDER_SCRIPT, str(site_packages), str(tmp_path / prefix), mode],
+            env={**os.environ, "TMPDIR": str(scratch)},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    installer = start("installer", "primary")
+    importer: subprocess.Popen[str] | None = None
+    try:
+        assert installer.stdin is not None
+        assert _dependency_process_line(installer) == "ready"
+        assert _dependency_process_line(installer) == "locked"
+        importer = start("importer", importer_prefix)
+        assert _dependency_process_line(importer) == "ready"
+        with pytest.raises(subprocess.TimeoutExpired):
+            importer.wait(timeout=0.5)
+        installer.stdin.write("done\n")
+        installer.stdin.flush()
+        _, installer_error = installer.communicate(timeout=20)
+        assert installer.returncode == 0, installer_error
+        importer_output, importer_error = importer.communicate(timeout=20)
+        assert importer.returncode == 0, importer_error
+        assert importer_output.strip() == "locked"
+    finally:
+        for process in (installer, importer):
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=20)
+
+
 def test_unrelated_tool_constructors_run_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
@@ -984,14 +1051,21 @@ def test_unrelated_tool_constructors_run_in_parallel(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root can write a read-only directory")
 def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Other local users cannot share or plant this user's lock directory."""
+    """With a read-only installation, other local users cannot share or plant this user's lock directory."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+    monkeypatch.syspath_prepend(str(site_packages))
+    site_packages.chmod(0o555)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     lock_dir = tmp_path / f"mindroom-optional-dependencies-{os.getuid()}"
     lock_dir.mkdir()
     lock_dir.chmod(0o755)
-    with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
-        pass
-    lock_dir.chmod(0o700)
-    with optional_dependency_environment():
-        assert len(list(lock_dir.glob("*.lock"))) == 1
+    try:
+        with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
+            pass
+        lock_dir.chmod(0o700)
+        with optional_dependency_environment():
+            assert len(list(lock_dir.glob("*.lock"))) == 1
+    finally:
+        site_packages.chmod(0o755)
