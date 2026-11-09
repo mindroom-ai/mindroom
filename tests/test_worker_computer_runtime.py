@@ -4,16 +4,20 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
+import mindroom.worker_computer
 from mindroom.worker_computer.display import WorkerDisplay
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 
+OPENBOX_CONFIG = Path(mindroom.worker_computer.__file__).with_name("openbox_rc.xml")
+
 
 async def unused(*_args: object, **_kwargs: object) -> None:
-    """Stand in for a browser entrypoint or closer a test never calls."""
+    """Stand in for a coroutine whose work a test does not need."""
 
 
 class FakeDisplay:
@@ -254,6 +258,37 @@ async def test_display_long_socket_root_uses_private_bounded_owned_directory(
         for server in servers:
             server.close()
             await server.wait_closed()
+
+
+def test_openbox_config_has_no_menu_or_program_binding() -> None:
+    """The desktop opens no menu and starts no program from a key or mouse binding."""
+    root = ET.parse(OPENBOX_CONFIG).getroot()  # noqa: S314 - the shipped package file
+    assert root.tag == "{http://openbox.org/3.4/rc}openbox_config", "Openbox ignores any other root"
+    local_names = {element.tag.rpartition("}")[2] for element in root.iter()}
+    assert "menu" not in local_names
+    actions = {element.get("name") for element in root.iter("{http://openbox.org/3.4/rc}action")}
+    assert not actions & {"Execute", "ShowMenu"}
+
+
+@pytest.mark.asyncio
+async def test_display_starts_openbox_with_shipped_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window manager runs with MindRoom's config, not the stock one."""
+    real_spawn = asyncio.create_subprocess_exec
+    commands = []
+
+    async def spawn(*args: str, **_kwargs: object) -> asyncio.subprocess.Process:
+        commands.append(args)
+        return await real_spawn("sleep", "60")
+
+    monkeypatch.setattr("mindroom.worker_computer.display.shutil.which", lambda _name: "/display")
+    monkeypatch.setattr("mindroom.worker_computer.display.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr(WorkerDisplay, "_wait_ready", unused)
+    display = WorkerDisplay(tmp_path)
+    try:
+        await display.start()
+    finally:
+        await display.close()
+    assert commands[1] == ("openbox", "--sm-disable", "--config-file", str(OPENBOX_CONFIG))
 
 
 @pytest.mark.asyncio
