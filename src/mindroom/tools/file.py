@@ -496,6 +496,7 @@ class _MindRoomFileTools(AgnoFileTools):
         "search_content",
         "search_files",
     ),
+    workspace_writers=("replace_file_chunk", "save_file"),
 )
 def file_tools() -> type[AgnoFileTools]:
     """Return file tools for local file operations."""
