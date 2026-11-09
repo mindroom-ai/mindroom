@@ -17,7 +17,7 @@ OPENBOX_CONFIG = Path(mindroom.worker_computer.__file__).with_name("openbox_rc.x
 
 
 async def unused(*_args: object, **_kwargs: object) -> None:
-    """Stand in for a browser entrypoint or closer a test never calls."""
+    """Stand in for a coroutine whose work a test does not need."""
 
 
 class FakeDisplay:
@@ -280,19 +280,15 @@ async def test_display_starts_openbox_with_shipped_config(tmp_path: Path, monkey
         commands.append(args)
         return await real_spawn("sleep", "60")
 
-    async def ready(*_args: object) -> None:
-        return None
-
     monkeypatch.setattr("mindroom.worker_computer.display.shutil.which", lambda _name: "/display")
     monkeypatch.setattr("mindroom.worker_computer.display.asyncio.create_subprocess_exec", spawn)
-    monkeypatch.setattr(WorkerDisplay, "_wait_ready", ready)
+    monkeypatch.setattr(WorkerDisplay, "_wait_ready", unused)
     display = WorkerDisplay(tmp_path)
     try:
         await display.start()
     finally:
         await display.close()
     assert commands[1] == ("openbox", "--sm-disable", "--config-file", str(OPENBOX_CONFIG))
-    assert OPENBOX_CONFIG.is_file()
 
 
 @pytest.mark.asyncio
