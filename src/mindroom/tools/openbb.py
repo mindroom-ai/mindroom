@@ -17,28 +17,6 @@ if TYPE_CHECKING:
     from agno.tools.openbb import OpenBBTools
 
 
-def _load_openbb_tools() -> type[OpenBBTools]:
-    """Import OpenBB tools, letting one process at a time run OpenBB's package build on first import.
-
-    OpenBB builds its command package into its own install on first import and fails the import
-    of any other process that starts while the build holds its non-blocking lock, so every process
-    using that install waits on a lock beside it instead.
-    """
-    spec = importlib.util.find_spec("openbb")
-    if spec is None or spec.origin is None:
-        msg = "No module named 'openbb'"
-        raise ModuleNotFoundError(msg, name="openbb")
-    with advisory_file_lock(Path(spec.origin).parent / ".mindroom-build.lock"):
-        try:
-            module = importlib.import_module("agno.tools.openbb")
-        except ValueError:
-            # OpenBB's build installs a signal handler, which only the main thread may do,
-            # so a build needed off the main thread runs in a child process before the import retries.
-            subprocess.run([sys.executable, "-c", "import openbb"], check=True)
-            module = importlib.import_module("agno.tools.openbb")
-    return cast("type[OpenBBTools]", module.OpenBBTools)
-
-
 @register_tool_with_metadata(
     name="openbb",
     file_access=ToolFileAccess.NONE,
@@ -121,5 +99,22 @@ def _load_openbb_tools() -> type[OpenBBTools]:
     ),
 )
 def openbb_tools() -> type[OpenBBTools]:
-    """Return OpenBB tools for financial data."""
-    return _load_openbb_tools()
+    """Return OpenBB tools, letting one process at a time run OpenBB's package build on first import.
+
+    OpenBB builds its command package into its own install on first import and fails the import
+    of any other process that starts while the build holds its non-blocking lock, so every process
+    using that install waits on a lock beside it instead.
+    """
+    spec = importlib.util.find_spec("openbb")
+    if spec is None or spec.origin is None:
+        msg = "No module named 'openbb'"
+        raise ModuleNotFoundError(msg, name="openbb")
+    with advisory_file_lock(Path(spec.origin).parent / ".mindroom-build.lock"):
+        try:
+            module = importlib.import_module("agno.tools.openbb")
+        except ValueError:
+            # OpenBB's build installs a signal handler, which only the main thread may do,
+            # so a build needed off the main thread runs in a child process before the import retries.
+            subprocess.run([sys.executable, "-c", "import openbb"], check=True)
+            module = importlib.import_module("agno.tools.openbb")
+    return cast("type[OpenBBTools]", module.OpenBBTools)

@@ -102,20 +102,25 @@ def test_openbb_tool_builds_on_first_use_in_concurrent_processes(tmp_path: Path)
     env = {key: value for key, value in os.environ.items() if key != "OPENBB_AUTO_BUILD"}
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     # Processes sharing one install can have different temporary directories, as worker tool subprocesses do.
-    temp_dirs = [tmp_path / f"tmp-{index}" for index in range(2)]
-    processes = []
-    for temp_dir in temp_dirs:
-        temp_dir.mkdir()
-        processes.append(
-            subprocess.Popen(
-                [sys.executable, "-c", _OPENBB_FIRST_CALL],
-                env={**env, "TMPDIR": str(temp_dir)},
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            ),
-        )
-    outputs = [process.communicate(timeout=300)[0] for process in processes]
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for index in range(2):
+            temp_dir = tmp_path / f"tmp-{index}"
+            temp_dir.mkdir()
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _OPENBB_FIRST_CALL],
+                    env={**env, "TMPDIR": str(temp_dir)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ),
+            )
+        outputs = [process.communicate(timeout=300)[0] for process in processes]
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
 
     assert [process.returncode for process in processes] == [0, 0], outputs
     assert all(output.rstrip().endswith("(2, 2)") for output in outputs), outputs
