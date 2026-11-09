@@ -41,8 +41,11 @@ def _agents(*users: str) -> dict[str, AgentConfig]:
     }
 
 
-def _paths(tmp_path: Path, runner: str) -> RuntimePaths:
-    """A primary whose shared runner mounts the agents' storage and runs their shell commands, with the client origin."""
+def _paths(tmp_path: Path, runner: str, **env: str) -> RuntimePaths:
+    """A primary whose shared runner mounts the agents' storage and runs their shell commands, with the client origin.
+
+    ``env`` adds to or overrides its environment.
+    """
     (tmp_path / "config.yaml").write_text("router:\n  model: default\n", encoding="utf-8")
     return primary_paths(
         tmp_path,
@@ -51,6 +54,7 @@ def _paths(tmp_path: Path, runner: str) -> RuntimePaths:
         MINDROOM_NAMESPACE="",
         MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([_ORIGIN]),
         MINDROOM_STATIC_RUNNER_AGENT_STORAGE="true",
+        **env,
     )
 
 
@@ -151,7 +155,7 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
             client.post(f"{base}/{coder}", headers=_auth(room, BOB)),
             client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, BOB)),
         ):
-            assert (await _answer(refused))[0] == 403
+            assert await _answer(refused) == (403, {"detail": agent_terminals._NO_TYPING})
         # Another workspace's terminal is no terminal of this one.
         assert (await _answer(client.delete(f"{base}/{coder}/{other['id']}", headers=_auth(room, ALICE))))[0] == 404
         assert (await _answer(client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, ALICE))))[0] == 204
@@ -183,8 +187,10 @@ async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(
         for coder_config, terminal, listed in ((watching, "watch", [(opened["id"], False)]), (unset, "none", [])):
             room.serve(Config(agents=_agents(ALICE) | {"coder": coder_config}))
             assert await workspace_list_terminal() == terminal
-            assert (await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE))))[0] == 403
-            _, seen = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+            refused = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+            assert refused == (403, {"detail": agent_terminals._NO_TYPING})
+            listed_status, seen = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+            assert listed_status == 200
             assert [(t["id"], t["writable"]) for t in seen["terminals"]] == listed
             stream = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
             first = await stream.receive()
@@ -192,7 +198,11 @@ async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(
                 assert json.loads(first.data) == {"type": "writable", "writable": False}
                 await stream.close()
             else:
-                assert (first.type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+                assert (first.type, stream.close_code, first.extra) == (
+                    aiohttp.WSMsgType.CLOSE,
+                    1008,
+                    "This agent has no terminals.",
+                )
 
 
 async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(

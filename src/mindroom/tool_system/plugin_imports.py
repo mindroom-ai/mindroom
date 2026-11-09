@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 26)
+PLUGIN_API_VERSION = (1, 28)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 # One DNS label, as a plugin origin's host takes its plugin's name and a label the plugin picks.

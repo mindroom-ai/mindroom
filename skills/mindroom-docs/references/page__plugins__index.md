@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.26",
+  "mindroom_plugin_api": "1.28",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1132,6 +1132,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
+| `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
 | `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
@@ -1256,6 +1257,56 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ```json
 {"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
+
+### An agent's terminals
+
+`await terminals(workspace, *, create=False)` returns a `WorkerTerminals` for the agent's [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal), those the chat's Terminal tab shows the caller for that agent in this room, or `None` while `workspace.terminal` is `none`.
+It checks nothing beyond what `agent()` checked, so the route enforces what the caller may do, as MindRoom's own terminal routes do: opening, closing, and typing in a terminal require `workspace.terminal == "type"`, and listing and watching require `watch` or `type`.
+Pass `create=True` before opening a terminal, so the agent's workspace exists, as its first turn would make it.
+
+| Call | Effect |
+|------|--------|
+| `await terminals.open(*, cols=80, rows=24, cwd=None)` | Starts a terminal in `cwd`, a folder of the workspace given relative to it, by default the workspace itself, starting the agent's worker as a shell call would, and returns its `id`, `cols`, `rows`, `alive`, `exit_code`, and `created_at` |
+| `await terminals.sessions()` | The workspace's terminals, oldest first, each described as `open()` describes it |
+| `await terminals.close(session_id)` | Ends a terminal |
+| `async with terminals.attach(session_id) as terminal` | Attaches to a terminal; `await terminal.send_input(data)` types `data`, at most 16384 characters at once |
+
+A refused call raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have, 413 for longer input, or 503 while the agent's worker is unavailable.
+This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run, and refuses a command too long to type at once before it opens one:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+from mindroom.plugin_http import RoomReader, TerminalError, require_room_reader
+
+router = APIRouter()
+
+
+@router.post("/rooms/{room_id}/agents/{agent_user_id}/run")
+async def run(
+    agent_user_id: str,
+    command: Annotated[str, Body(embed=True, max_length=16383)],
+    room: RoomReader = Depends(require_room_reader),
+) -> dict[str, str]:
+    workspace = await room.agent(agent_user_id)
+    if workspace.terminal != "type":
+        raise HTTPException(403, "You may not type in this agent's terminals.")
+    terminals = await room.terminals(workspace, create=True)
+    if terminals is None:
+        raise HTTPException(403, "This agent has no terminals.")
+    try:
+        info = await terminals.open()
+        async with terminals.attach(info.id) as terminal:
+            await terminal.send_input(f"{command}\r")
+    except TerminalError as error:
+        raise HTTPException(error.status_code, error.detail) from None
+    return {"terminal_id": info.id}
+```
+
+A plugin that uses `terminals()` states `"mindroom_plugin_api": "1.27"` in its manifest.
 
 ### Websocket routes
 
@@ -1707,6 +1758,7 @@ A target lives only in memory, so a plugin that lets people come back to somethi
 A tool that stores one, like `share_app` below, sets [`requires_primary_runtime=True`](#decorator-fields), since it reads its plugin's context and the call's runtime context.
 `load_worker_target` raises `ValueError` for data it does not know, such as data a later MindRoom stored, and for a target whose worker is not the one its own agent and requester resolve to.
 A loaded target reaches the agent's worker for the requester whose turn recorded it, for a private agent that requester's own, whoever calls the route later.
+A target that `resolve_worker_target()` returned in the turn of a delegated subagent with a worker of its own reaches that subagent's worker, in memory and once loaded; a plugin that relies on this states `"mindroom_plugin_api": "1.28"` in its manifest.
 So store a target with what it belongs to in the plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), load only what the plugin stored there itself, never a target a client sends, and before relaying a caller check that the record belongs to the room and agent the route serves and that the caller may use that agent there:
 
 ```python

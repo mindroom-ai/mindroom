@@ -9630,6 +9630,7 @@ Before that, and on phones, open it from the room's More menu with **Show Comput
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
 Keyboard input over a controlled screen goes to the browser, not the composer.
+The desktop has no menu: right-clicking it opens nothing, and no key or click on it starts a program.
 
 The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
@@ -17471,6 +17472,7 @@ Routes that act on one room use `require_room_member` instead, which authenticat
 Each admitted agent's `root` is the workspace a turn of that agent for that caller in that room resolves, never a path from the request; `files` and `terminal` follow the agent's toolkits as their declarations and settings describe them, and give only `read` and `watch` to a caller whose power level keeps them from posting; a contact room opens none, because its turns run as the agent's owner.
 `terminal` is `none` unless the agent's `terminals` setting is `watch` or `type`, `none` by default, and its shell offers `run_shell_command` in a worker, and `type` only under `terminals: type` where that worker mounts the workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, because only there does typing act on the files the caller sees as the agent's `root`.
 The terminal routes under `/api/rooms/` take the same sessions and admit through `RoomReader.agents()` or `agent()` on every request, stream only with `watch` or `type`, open, close, and take input only with `type`, and take no path or worker from the client; their streams recheck `agent()` every 15 seconds under the config served then, dropping input once the caller may only watch and closing once the agent is no longer open to them.
+A plugin route reaches the same terminals through `RoomReader.terminals()`, for a workspace `agents()` or `agent()` returned, resolved for the reader's own caller and room as these routes resolve them, and none while `terminal` is `none`; it checks nothing more, so the route itself opens, closes, and types only with `type`, as the plugin docs say, since plugins run with the primary's trust.
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/rooms/` take the same sessions and admit the caller through `RoomReader.agents()` or `agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`, which needs a writing toolkit that works in the workspace: in the primary, a dedicated worker, or a `static_runner` the deployment says mounts the agents' storage, since only there could the agent itself change those files.
 The workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
@@ -17483,7 +17485,7 @@ The session names a Matrix user and nothing more; a plugin route that serves roo
 A browser cannot set a websocket's headers, so a plugin websocket route signs its caller in with `client_stream` from `mindroom.plugin_http`: the client offers the session token as the subprotocol `mindroom-session.<session_token>` beside `mindroom-session`, which the server accepts with, so the token is never echoed in the handshake answer.
 Browsers apply no CORS to websockets, so `client_stream` itself refuses an `Origin` missing from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, and given a room it checks membership as `require_room_member` does before accepting and every 60 seconds after, closing the websocket when the user has left or membership is unavailable.
 A plugin websocket route without `client_stream` is public and accepts any origin.
-`worker_relay` from `mindroom.plugin_http` reaches only the running dedicated worker of the `worker_target` a route or tool passes, never starting one, and checks no caller, so a route passes only the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` admitted for its caller, or one a tool of the plugin recorded, once the route checked that the record belongs to the route's room and agent and that its caller may use that agent there, and a tool only its own agent's; `load_worker_target` refuses a stored target whose worker key or private-agent visibility is not what its own scope, agent, and identity resolve, and a plugin loads only targets it stored in its state directory, which no worker mounts, never one a client sends; by name it reaches only services of the plugin whose route calls it, which it takes from the route's own scope, never from an argument, or of the plugin the context a tool passes names, and by port only what the worker's runner relays; it adds the runner token and drops any copy the route sends, and the runner adds the service's secret and drops any copy that arrives.
+`worker_relay` from `mindroom.plugin_http` reaches only the running dedicated worker of the `worker_target` a route or tool passes, never starting one, and checks no caller, so a route passes only the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` admitted for its caller, or one a tool of the plugin recorded, once the route checked that the record belongs to the route's room and agent and that its caller may use that agent there, and a tool only its own agent's; `load_worker_target` refuses a stored target whose worker key or private-agent visibility is not what its own scope, agent, and identity resolve, while its subagent placement only picks one of that worker's own subagent workers, which serve its workspaces and credentials, and a plugin loads only targets it stored in its state directory, which no worker mounts, never one a client sends; by name it reaches only services of the plugin whose route calls it, which it takes from the route's own scope, never from an argument, or of the plugin the context a tool passes names, and by port only what the worker's runner relays; it adds the runner token and drops any copy the route sends, and the runner adds the service's secret and drops any copy that arrives.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
@@ -18010,7 +18012,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.26",
+  "mindroom_plugin_api": "1.28",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -18897,6 +18899,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
+| `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
 | `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
@@ -19021,6 +19024,56 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ```json
 {"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
+
+### An agent's terminals
+
+`await terminals(workspace, *, create=False)` returns a `WorkerTerminals` for the agent's [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal), those the chat's Terminal tab shows the caller for that agent in this room, or `None` while `workspace.terminal` is `none`.
+It checks nothing beyond what `agent()` checked, so the route enforces what the caller may do, as MindRoom's own terminal routes do: opening, closing, and typing in a terminal require `workspace.terminal == "type"`, and listing and watching require `watch` or `type`.
+Pass `create=True` before opening a terminal, so the agent's workspace exists, as its first turn would make it.
+
+| Call | Effect |
+|------|--------|
+| `await terminals.open(*, cols=80, rows=24, cwd=None)` | Starts a terminal in `cwd`, a folder of the workspace given relative to it, by default the workspace itself, starting the agent's worker as a shell call would, and returns its `id`, `cols`, `rows`, `alive`, `exit_code`, and `created_at` |
+| `await terminals.sessions()` | The workspace's terminals, oldest first, each described as `open()` describes it |
+| `await terminals.close(session_id)` | Ends a terminal |
+| `async with terminals.attach(session_id) as terminal` | Attaches to a terminal; `await terminal.send_input(data)` types `data`, at most 16384 characters at once |
+
+A refused call raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have, 413 for longer input, or 503 while the agent's worker is unavailable.
+This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run, and refuses a command too long to type at once before it opens one:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+from mindroom.plugin_http import RoomReader, TerminalError, require_room_reader
+
+router = APIRouter()
+
+
+@router.post("/rooms/{room_id}/agents/{agent_user_id}/run")
+async def run(
+    agent_user_id: str,
+    command: Annotated[str, Body(embed=True, max_length=16383)],
+    room: RoomReader = Depends(require_room_reader),
+) -> dict[str, str]:
+    workspace = await room.agent(agent_user_id)
+    if workspace.terminal != "type":
+        raise HTTPException(403, "You may not type in this agent's terminals.")
+    terminals = await room.terminals(workspace, create=True)
+    if terminals is None:
+        raise HTTPException(403, "This agent has no terminals.")
+    try:
+        info = await terminals.open()
+        async with terminals.attach(info.id) as terminal:
+            await terminal.send_input(f"{command}\r")
+    except TerminalError as error:
+        raise HTTPException(error.status_code, error.detail) from None
+    return {"terminal_id": info.id}
+```
+
+A plugin that uses `terminals()` states `"mindroom_plugin_api": "1.27"` in its manifest.
 
 ### Websocket routes
 
@@ -19472,6 +19525,7 @@ A target lives only in memory, so a plugin that lets people come back to somethi
 A tool that stores one, like `share_app` below, sets [`requires_primary_runtime=True`](#decorator-fields), since it reads its plugin's context and the call's runtime context.
 `load_worker_target` raises `ValueError` for data it does not know, such as data a later MindRoom stored, and for a target whose worker is not the one its own agent and requester resolve to.
 A loaded target reaches the agent's worker for the requester whose turn recorded it, for a private agent that requester's own, whoever calls the route later.
+A target that `resolve_worker_target()` returned in the turn of a delegated subagent with a worker of its own reaches that subagent's worker, in memory and once loaded; a plugin that relies on this states `"mindroom_plugin_api": "1.28"` in its manifest.
 So store a target with what it belongs to in the plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), load only what the plugin stored there itself, never a target a client sends, and before relaying a caller check that the record belongs to the room and agent the route serves and that the caller may use that agent there:
 
 ```python

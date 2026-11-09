@@ -8346,9 +8346,7 @@ depends_on = [
 path = "mindroom.api.agent_terminals"
 depends_on = [
     "mindroom.api.agent_streams",
-    "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
-    "mindroom.room_agent_access",
     "mindroom.terminal.client",
     "mindroom.terminal.session",
 ]
@@ -8422,6 +8420,8 @@ depends_on = [
     "mindroom.room_modes",
     "mindroom.room_reply_modes",
     "mindroom.room_thread_modes",
+    "mindroom.terminal.client",
+    "mindroom.terminal.session",
     "mindroom.tool_system.plugins",
 ]
 

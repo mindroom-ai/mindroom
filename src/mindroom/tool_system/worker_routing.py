@@ -6,10 +6,13 @@ import hashlib
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from urllib.parse import quote
+
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.placements import DedicatedWorkerPlacement
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -128,12 +131,23 @@ class ResolvedWorkerTarget:
     account_id: str | None
     worker_key: str | None
     private_agent_names: frozenset[str] | None = None
+    # The subagent's own worker the resolving turn ran its calls in, which its calls reach wherever they run later.
+    # Not compared: equality asks whether the agent, requester, and worker key match, not which worker calls run in.
+    placement: DedicatedWorkerPlacement | None = field(default=None, compare=False)
 
 
-_STORED_TARGET_VERSION = 1
-# The stored format of this version, spelled out so that a new field of either dataclass fails the round trip tests
+_STORED_TARGET_VERSION = 2
+# LEGACY_COMPAT: version 1 stored worker targets, which have no placement key.
+# Legacy format: a dump_worker_target object with "version": 1 and no "placement" key.
+# Last legacy release: every release from v2026.11.264 (which added stored targets) through the last one before
+# this change writes version 1, v2026.11.265 included; the release with this change writes version 2, which adds
+# "placement".
+# Handling: load_worker_target reads it with no placement, so it reaches the agent's normal worker as before.
+# Coverage: tests/test_worker_target_storage.py::test_a_version_1_target_loads_without_a_placement
+_LEGACY_STORED_TARGET_VERSION = 1
+# The stored format of each version, spelled out so that a new field of these dataclasses fails the round trip tests
 # instead of changing what plugins have stored.
-_STORED_TARGET_KEYS = frozenset(
+_LEGACY_STORED_TARGET_KEYS = frozenset(
     {
         "version",
         "worker_scope",
@@ -145,6 +159,7 @@ _STORED_TARGET_KEYS = frozenset(
         "private_agent_names",
     },
 )
+_STORED_TARGET_KEYS = _LEGACY_STORED_TARGET_KEYS | {"placement"}
 _STORED_IDENTITY_KEYS = frozenset(
     {
         "channel",
@@ -166,6 +181,7 @@ def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
     """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
     identity = target.execution_identity
     names = target.private_agent_names
+    placement = target.placement
     return {
         "version": _STORED_TARGET_VERSION,
         "worker_scope": target.worker_scope,
@@ -175,6 +191,7 @@ def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
         "account_id": target.account_id,
         "worker_key": target.worker_key,
         "private_agent_names": sorted(names) if names is not None else None,
+        "placement": asdict(placement) if placement is not None else None,
     }
 
 
@@ -184,21 +201,28 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
     It refuses a target whose worker key or private-agent visibility is not what its own scope, agent, and identity
     resolve, so stored data never pairs one person's or agent's identity with another's worker.
     """
-    if not isinstance(data, dict) or set(data) != _STORED_TARGET_KEYS:
-        msg = f"A stored worker target has exactly the keys {sorted(_STORED_TARGET_KEYS)}."
+    if not isinstance(data, dict) or "version" not in data:
+        msg = "A stored worker target is an object with a version key."
         raise ValueError(msg)
     stored = cast("dict[str, object]", data)
+    version = stored["version"]
     # ``type`` rather than ``==``, which takes ``true`` and ``1.0`` for ``1``.
-    if type(stored["version"]) is not int or stored["version"] != _STORED_TARGET_VERSION:
-        msg = f"Unknown stored worker target version: {stored['version']!r}."
+    if type(version) is not int or version not in (_LEGACY_STORED_TARGET_VERSION, _STORED_TARGET_VERSION):
+        msg = f"Unknown stored worker target version: {version!r}."
+        raise ValueError(msg)
+    keys = _STORED_TARGET_KEYS if version == _STORED_TARGET_VERSION else _LEGACY_STORED_TARGET_KEYS
+    if set(stored) != keys:
+        msg = f"A stored worker target of version {version} has exactly the keys {sorted(keys)}."
         raise ValueError(msg)
     scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]
+    placement = stored.get("placement")
     strings = {name: stored[name] for name in _STORED_TARGET_STRINGS}
     if (
         scope not in (None, *get_args(WorkerScope))
         or any(value is not None and not isinstance(value, str) for value in strings.values())
         or (names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)))
         or (identity is not None and not (isinstance(identity, dict) and set(identity) == _STORED_IDENTITY_KEYS))
+        or (placement is not None and not _is_stored_placement(placement))
     ):
         msg = "A stored worker target holds a value dump_worker_target never writes."
         raise ValueError(msg)
@@ -211,6 +235,7 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
         worker_scope=cast("WorkerScope | None", scope),
         execution_identity=identity,
         private_agent_names=frozenset(cast("list[str]", names)) if names is not None else None,
+        placement=DedicatedWorkerPlacement(**cast("dict[str, Any]", placement)) if placement is not None else None,
         **cast("dict[str, str | None]", strings),
     )
     agent = target.routing_agent_name
@@ -234,6 +259,19 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
         msg = "A stored worker target names another worker than its own scope, agent, and identity resolve."
         raise ValueError(msg)
     return target
+
+
+def _is_stored_placement(placement: object) -> bool:
+    """Return whether ``placement`` is a placement ``dump_worker_target`` writes."""
+    if not isinstance(placement, dict) or set(placement) != {"subagent_id", "resource_profile"}:
+        return False
+    fields = cast("dict[str, object]", placement)
+    subagent_id, profile = fields["subagent_id"], fields["resource_profile"]
+    return (
+        isinstance(subagent_id, str)
+        and _SUBAGENT_ID_PATTERN.fullmatch(subagent_id) is not None
+        and profile in (None, *SCRIPT_RESOURCE_PROFILE_NAMES)
+    )
 
 
 # The identity a runner without a Matrix conversation binds for the calls it runs; a conversation's context names
