@@ -519,6 +519,34 @@ async def test_relay_refuses_a_server_no_process_of_the_worker_holds(
 
 
 @pytest.mark.asyncio
+async def test_relay_refuses_a_port_where_another_process_holds_one_of_its_sockets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A port is the worker's only when its processes hold every socket listening there, as a sidecar on [::1] may not."""
+    monkeypatch.setattr(worker_preview, "_workers_sockets", {})
+    async with AsyncExitStack() as stack:
+        port = await stack.enter_async_context(_app())
+        try:
+            await stack.enter_async_context(_app("::1", port=port))
+        except OSError:
+            pytest.skip("No IPv6 on this host.")
+        sidecars = {
+            found.inode for found in listeners.listening_sockets() if (found.port, str(found.address)) == (port, "::1")
+        }
+        monkeypatch.setattr(
+            worker_preview,
+            "workers_sockets",
+            lambda sockets: listeners.workers_sockets(sockets) - sidecars,
+        )
+        runner = await stack.enter_async_context(_runner(tmp_path))
+        client = await stack.enter_async_context(aiohttp.ClientSession())
+        await _assert_refused(client, runner, port, 403, f"The server on port {port} is not one this worker runs.")
+        async with client.get(runner.root, headers=_AUTH) as response:
+            assert port not in await response.json()
+
+
+@pytest.mark.asyncio
 async def test_relay_refuses_every_port_when_proc_cannot_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without ``/proc`` to tell whose server listens on a port, the relay and the port list refuse and say why."""
     monkeypatch.setattr(listeners, "_PROC", tmp_path / "missing")
