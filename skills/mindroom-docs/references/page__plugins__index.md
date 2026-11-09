@@ -1527,7 +1527,7 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"]
 Neither call checks who may use the agent, so check that before you start a service for someone.
 `WorkerService(name, module, idle_timeout_seconds=600.0)` takes a `name` of 1-64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit, a `module` path relative to the plugin's folder, and a positive, finite `idle_timeout_seconds`.
 `WorkerServiceState` has `state`, `port`, and `exit_code`.
-`state` is `running` once the program accepts connections on its port, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
+`state` is `running` once the program, or a process it started in the program's process group, listens on its port and no other process does, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
 Each worker runs one instance of a service, so ensuring a running service returns the same port.
 A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
 The program's output goes to the worker's log.
@@ -1727,6 +1727,7 @@ A route on a [plugin host](#origins-of-your-own) may pass the browser's `Origin`
 A service gets its secret from the relay, and never one the route sends.
 The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.
 The marked 502 also answers a relay to a service that is still `starting`: ensure it again instead of stopping it.
+A marked 403 answers a relay to a service whose port a process other than the service's own holds: such a service cannot start on that port, so stop it and ensure it again.
 While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
 A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest, one that passes `headers` to `websocket()` states `"1.24"`, and one whose tool calls `worker_relay` states `"1.25"`.

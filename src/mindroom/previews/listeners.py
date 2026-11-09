@@ -1,4 +1,4 @@
-"""Which TCP sockets listen on this machine's ports, and whether only the worker's own processes hold them (Linux).
+"""Which TCP sockets listen on this machine's ports, and whether only the worker's, or one process group's, hold them (Linux).
 
 The kernel's socket diagnostics report only the listening sockets, however many connections the network namespace holds.
 Where the kernel offers none, as under gVisor, ``/proc/net`` answers instead: it lists every connection, and in a Linux
@@ -195,3 +195,29 @@ def workers_sockets(sockets: frozenset[int]) -> frozenset[int]:
         for inode, pids in _holders(sockets).items()
         if pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids)
     )
+
+
+def _in_group(pid: int, group: int) -> bool:
+    try:
+        return os.getpgid(pid) == group
+    except ProcessLookupError:  # It ended as the check looked.
+        return False
+
+
+def group_sockets(sockets: frozenset[int], group: int) -> frozenset[int]:
+    """Return those of ``sockets`` that processes of process group ``group``, and only they, hold.
+
+    Blocking: reads every process's descriptors once. Raises OSError when ``/proc`` cannot be read.
+    """
+    return frozenset(
+        inode for inode, pids in _holders(sockets).items() if pids and all(_in_group(pid, group) for pid in pids)
+    )
+
+
+def group_listens(port: int, group: int) -> bool:
+    """Return whether processes of process group ``group``, and only they, hold the sockets listening on ``port``.
+
+    Blocking. Raises OSError when neither the kernel nor ``/proc`` can say.
+    """
+    sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
+    return bool(sockets) and group_sockets(sockets, group) == sockets

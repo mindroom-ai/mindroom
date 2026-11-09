@@ -60,7 +60,7 @@ class WorkerService:
 
 @dataclass(frozen=True)
 class WorkerServiceState:
-    """A service as an ensure found it: ``running`` once its port accepts connections, ``exited`` once it ended."""
+    """A service as an ensure found it: ``running`` once its processes alone listen on its port, ``exited`` once it ended."""
 
     state: Literal["starting", "running", "exited"]
     port: int
