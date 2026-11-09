@@ -541,7 +541,7 @@ def load_plugin(
     ``config`` is what a ``config.yaml`` holds, such as ``agents``, ``access`` and ``administrators``, without
     ``plugins``; a config without ``models`` gets a ``default`` model, which nothing calls. Its data lives under
     ``tmp_dir``, and the environment is left alone. A config that does not validate, or a plugin that fails to load,
-    even only its routes or lifecycle module, raises, naming why. When the block ends, the plugins published before
+    even only its routes, origin, or lifecycle module, raises, naming why. When the block ends, the plugins published before
     it are published again.
     """
     root = Path(tmp_dir)
@@ -563,8 +563,12 @@ def load_plugin(
     update_matrix_state(runtime_paths, save_accounts)
     published = config_plugins(validated, runtime_paths).generation
     generation = prepare_plugins(validated, runtime_paths)
-    # MindRoom serves a plugin whose routes or lifecycle module fails without them; a test fails on it instead.
-    partly = (error for plugin in generation.plugins.values() for error in (plugin.routes_error, plugin.lifespan_error))
+    # MindRoom serves a plugin whose routes, origin, or lifecycle module fails without them; a test fails on it instead.
+    partly = (
+        error
+        for plugin in generation.plugins.values()
+        for error in (plugin.routes_error, plugin.origin_error, plugin.lifespan_error)
+    )
     if errors := [*(plugin.error for plugin in generation.skipped), *filter(None, partly)]:
         dispose_plugins(generation)
         raise errors[0]

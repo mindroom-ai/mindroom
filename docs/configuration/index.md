@@ -257,6 +257,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | `true` allows unauthenticated `/v1/*` access for local development only | _(unset)_ |
 | `OPENAI_COMPAT_API_KEY_REQUESTERS` | JSON object mapping `/v1` API keys to Matrix user IDs (see [Requester identities](../openai-api.md#requester-identities-and-delegation)) | _(none)_ |
 | `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip the automatic dashboard frontend build | _(enabled)_ |
+| `MINDROOM_PLUGIN_ORIGIN_PORT` | Port of a second listener that serves plugins' pages on [origins of their own](../plugins.md#origins-of-your-own); that page lists `MINDROOM_PLUGIN_ORIGIN_DOMAIN` and `MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT` | _(unset; off)_ |
 
 ### Workers and Background Scripts
 

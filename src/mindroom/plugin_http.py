@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 
+from mindroom.api import plugin_origins
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.auth import is_administrator
 from mindroom.api.client_sessions import (
@@ -33,6 +34,7 @@ from mindroom.hooks.types import format_hook_source
 from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
+from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces
@@ -46,6 +48,7 @@ from mindroom.room_thread_modes import (
     RoomThreadMode,
     resolve_room_thread_mode_override,
 )
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
@@ -68,9 +71,11 @@ __all__ = [
     "RoomPower",
     "RoomReader",
     "WorkerRelay",
+    "client_origins",
     "client_rooms",
     "client_stream",
     "plugin_context",
+    "plugin_origin_url",
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
@@ -363,13 +368,14 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     return await _room_reader(request, user, room_id)
 
 
-async def stream_room_reader(websocket: WebSocket, user: ClientUser, room_id: str) -> RoomReader:
-    """Return what a ``client_stream`` block for ``user`` may read and change about ``room_id`` now.
+async def stream_room_reader(websocket: HTTPConnection, user: ClientUser, room_id: str) -> RoomReader:
+    """Return what ``user`` may read and change about ``room_id`` now, for a route that established ``user`` itself.
 
-    It is ``require_room_reader`` for a websocket, which can't send a session's ``Authorization``: it reads the room's
-    members again, answering 403 once ``user`` left and 503 when they can't be read, and answers ``agents()`` and
-    ``agent()`` under the config the API serves now, or 409 when the API serves another runtime. A stream that keeps
-    checking what its caller may do calls it again for each check.
+    It is ``require_room_reader`` for a route that has no session's ``Authorization``: a ``client_stream`` block, whose
+    websocket can't send one, or an origin route, passing its request as ``websocket``, whose own gate names its user.
+    It reads the room's members again, answering 403 once ``user`` left and 503 when they can't be read, and answers
+    ``agents()`` and ``agent()`` under the config the API serves now, or 409 when the API serves another runtime. A
+    stream that keeps checking what its caller may do calls it again for each check.
     """
     rebind_current_request_snapshot(websocket)
     return await _room_reader(websocket, user, room_id)
@@ -596,6 +602,24 @@ async def worker_relay(connection: HTTPConnection, target: ResolvedWorkerTarget)
     """
     plugin_name = _route_plugin_name(connection, "worker_relay")
     return await open_worker_relay(require_api_state(connection.app).snapshot.runtime_paths, target, plugin_name)
+
+
+def plugin_origin_url(connection: HTTPConnection, label: str) -> str:
+    """Return the public URL of host ``label`` of the plugin whose route serves ``connection``.
+
+    ``label`` is one DNS label the plugin picks, else ``ValueError``; it answers 503 while plugin origins are off.
+    """
+    plugin_name = _route_plugin_name(connection, "plugin_origin_url")
+    url = plugin_origins.plugin_origin_url(require_api_state(connection.app).snapshot.runtime_paths, plugin_name, label)
+    if url is None:
+        raise HTTPException(503, "Plugin origins are off.")
+    return url
+
+
+def client_origins(connection: HTTPConnection) -> tuple[str, ...]:
+    """Return the chat's origins, those ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, under the config served now."""
+    paths = require_api_state(connection.app).snapshot.runtime_paths
+    return allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
 
 
 def _route_plugin_name(connection: HTTPConnection, helper: str) -> str:

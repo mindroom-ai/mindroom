@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import socket
 from contextlib import asynccontextmanager, contextmanager
-from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 from pydantic_core import PydanticCustomError
+from uvicorn.protocols.http.auto import AutoHTTPProtocol
 
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
@@ -36,6 +37,8 @@ from mindroom.script_runs.store import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
+    from starlette.types import ASGIApp
+
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.constants import RuntimePaths
 
@@ -44,7 +47,9 @@ __all__ = [
     "ScriptToolCallRequestModel",
     "bind_script_tool_broker",
     "get_script_call",
+    "listener_port",
     "router",
+    "serve_listener",
     "serve_script_gateway_listener",
     "submit_script_call",
 ]
@@ -53,7 +58,7 @@ logger = get_logger(__name__)
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _LISTENER_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
-# Matches the primary API's shutdown grace; Uvicorn cancels gateway requests still open after it.
+# Matches the primary API's shutdown grace; Uvicorn cancels listener requests still open after it.
 _LISTENER_SHUTDOWN_GRACE_SECONDS = 5
 
 
@@ -228,7 +233,7 @@ async def get_script_call(
     return ScriptCallReceiptResponse.from_domain(receipt)
 
 
-class _GatewayListenerServer(uvicorn.Server):
+class _ListenerServer(uvicorn.Server):
     """Uvicorn server that leaves process signals to the primary API server it runs beside."""
 
     def __init__(self, config: uvicorn.Config) -> None:
@@ -248,8 +253,20 @@ class _GatewayListenerServer(uvicorn.Server):
         return self.stop_requested or await super().on_tick(counter)
 
 
-def _listener_port(runtime_paths: RuntimePaths) -> int | None:
-    raw_port = (runtime_paths.env_value(_LISTENER_PORT_ENV) or "").strip()
+class _UnloggedHTTPProtocol(AutoHTTPProtocol):  # ty: ignore[unsupported-base] - Uvicorn's HTTP protocol for this install
+    """Uvicorn's HTTP protocol, writing no access log for its listener alone.
+
+    Uvicorn's own ``access_log=False`` empties the process-wide access logger, so the API's access log would stop too.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.access_log = False
+
+
+def listener_port(runtime_paths: RuntimePaths, env_name: str) -> int | None:
+    """Return the TCP port ``env_name`` sets, None while it is unset, or raise ``ValueError`` for any other value."""
+    raw_port = (runtime_paths.env_value(env_name) or "").strip()
     if not raw_port:
         return None
     try:
@@ -257,9 +274,44 @@ def _listener_port(runtime_paths: RuntimePaths) -> int | None:
     except ValueError:
         port = 0
     if not 1 <= port <= 65535:
-        msg = f"{_LISTENER_PORT_ENV} must be a TCP port from 1 to 65535."
+        msg = f"{env_name} must be a TCP port from 1 to 65535."
         raise ValueError(msg)
     return port
+
+
+@asynccontextmanager
+async def serve_listener(
+    app: ASGIApp,
+    *,
+    name: str,
+    host: str,
+    port: int,
+    log_level: str,
+    ws: Literal["none", "websockets-sansio"],
+    access_log: bool,
+) -> AsyncIterator[None]:
+    """Serve ``app`` on ``port`` beside the primary API server, as the listener ``name``, until the caller leaves."""
+    server = _ListenerServer(
+        uvicorn.Config(
+            app,
+            lifespan="off",
+            log_level=log_level.lower(),
+            http="auto" if access_log else _UnloggedHTTPProtocol,
+            ws=ws,
+            timeout_graceful_shutdown=_LISTENER_SHUTDOWN_GRACE_SECONDS,
+        ),
+    )
+    listener = socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET)
+    serve_task = asyncio.create_task(server.serve(sockets=[listener]), name=name)
+    logger.info(f"{name}_started", host=host, port=port)
+    try:
+        yield
+    finally:
+        server.stop_requested = True
+        # Uvicorn's shutdown closes the listener, then cancels requests still open after the grace period,
+        # so owner cancellation must not interrupt it.
+        await run_coroutine_until_complete(asyncio.wait({serve_task}))
+    serve_task.result()
 
 
 @asynccontextmanager
@@ -277,7 +329,7 @@ async def serve_script_gateway_listener(
     routers, both authenticated by short-lived capabilities, so a network path
     that reaches only this port cannot reach any other primary API route.
     """
-    port = _listener_port(runtime_paths)
+    port = listener_port(runtime_paths, _LISTENER_PORT_ENV)
     if port is None:
         yield
         return
@@ -286,23 +338,13 @@ async def serve_script_gateway_listener(
     gateway_app.include_router(agent_cli_router)
     bind_script_tool_broker(gateway_app, broker)
     bind_agent_cli_registry(gateway_app, agent_cli_registry)
-    server = _GatewayListenerServer(
-        uvicorn.Config(
-            gateway_app,
-            lifespan="off",
-            log_level=log_level.lower(),
-            ws="none",
-            timeout_graceful_shutdown=_LISTENER_SHUTDOWN_GRACE_SECONDS,
-        ),
-    )
-    listener = socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET)
-    serve_task = asyncio.create_task(server.serve(sockets=[listener]), name="script_gateway_listener")
-    logger.info("script_gateway_listener_started", host=host, port=port)
-    try:
+    async with serve_listener(
+        gateway_app,
+        name="script_gateway_listener",
+        host=host,
+        port=port,
+        log_level=log_level,
+        ws="none",
+        access_log=True,
+    ):
         yield
-    finally:
-        server.stop_requested = True
-        # Uvicorn's shutdown closes the listener, then cancels requests still open after the grace period,
-        # so owner cancellation must not interrupt it.
-        await run_coroutine_until_complete(asyncio.wait({serve_task}))
-    serve_task.result()
