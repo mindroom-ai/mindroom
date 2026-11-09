@@ -190,6 +190,6 @@ def held_by_this_worker(sockets: frozenset[int]) -> bool:
     """
     runner = os.getpid()
     cgroup = _read(_PROC / "self" / "cgroup")
-    return bool(sockets) and all(
+    return all(
         pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids) for pids in _holders(sockets).values()
     )

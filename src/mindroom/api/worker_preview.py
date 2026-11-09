@@ -140,7 +140,6 @@ def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None
     if _workers_sockets.get(port) == sockets:
         return None
     if not held_by_this_worker(sockets):
-        _workers_sockets.pop(port, None)
         return _refused(403, f"The server on port {port} is not one this worker runs.")
     _workers_sockets[port] = sockets
     return None
@@ -148,8 +147,6 @@ def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None
 
 def _refusal(port: int, own_ports: set[int]) -> HTTPException | None:
     """Return why the relay reaches no server on ``port``, or None when it does. Blocking, like ``_holders_refusal``."""
-    if not 0 < port < 65536:
-        return _no_app(port)
     if port in own_ports:
         return _refused(403, f"Port {port} is one of MindRoom's own, which the relay never reaches.")
     try:

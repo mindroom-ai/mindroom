@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import os
 import socket
+import struct
 import sys
 from typing import TYPE_CHECKING, NoReturn
 
@@ -142,6 +144,16 @@ def test_proc_net_lists_only_listening_sockets(proc: Path) -> None:
     # A network namespace without IPv6 has no tcp6 table.
     (proc / "net" / "tcp6").unlink()
     assert _found(5173) == [("127.0.0.1", 5173, 11)]
+
+
+def test_an_error_the_kernel_answers_a_dump_with_is_raised() -> None:
+    """A netlink error answer, as for a family without socket diagnostics, raises its error, so ``/proc/net`` answers."""
+    answer = struct.pack("=IHHII", 36, 2, 0, 0, 0) + (-errno.ENOENT).to_bytes(4, sys.byteorder, signed=True) + bytes(16)
+    kernel, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    with kernel, runner:
+        kernel.send(answer)
+        with pytest.raises(FileNotFoundError):
+            list(listeners._replies(runner))
 
 
 @pytest.mark.usefixtures("no_diagnostics")
