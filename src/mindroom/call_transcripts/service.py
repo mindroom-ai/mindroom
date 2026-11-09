@@ -49,7 +49,10 @@ _TRANSCRIPT_DELAY_SECONDS = 30.0
 _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
 _SPEAKING_RETRY_AFTER_SECONDS = 3
-_TRANSCRIBE_TIMEOUT_SECONDS = 60.0
+# How long one stretch's speech-to-text may take before the stretch becomes a gap. The person's upload slot is held
+# until then, and Chat gives up on an upload 30 seconds after it began, its one retry included, then sends the next
+# stretch: 20 seconds leaves it 10 to send the audio, so the answer comes, and the slot is free, while it still waits.
+_TRANSCRIBE_TIMEOUT_SECONDS = 20.0
 # Notes not written in this long count as failed notes, so a model that never answers holds up no other call for long.
 _NOTES_TIMEOUT_SECONDS = 90.0
 _MIN_TICK_SECONDS = 1.0
@@ -588,7 +591,7 @@ class CallTranscriptService:
         recent.append(now)
 
     async def _transcribe(self, audio: bytes, *, call_id: str, user_id: str, seconds: float) -> str | None:
-        """Transcribe a stretch, giving up after 60 seconds so a stuck speech service cannot hold back the call."""
+        """Transcribe a stretch, giving up after 20 seconds so a stuck speech service cannot hold back the call."""
         try:
             async with asyncio.timeout(_TRANSCRIBE_TIMEOUT_SECONDS):
                 return await self._transcriber.transcribe(audio, call_id=call_id, user_id=user_id, seconds=seconds)

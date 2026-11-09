@@ -523,6 +523,41 @@ async def test_a_second_upload_at_once_or_one_from_a_member_not_in_the_call_is_r
 
 
 @pytest.mark.asyncio
+async def test_a_stuck_transcription_frees_the_upload_slot_before_chat_gives_up(
+    api: Api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Speech-to-text stuck for 20 seconds answers a gap and frees the slot, so the person's next stretch is taken.
+
+    Chat gives up on an upload 30 seconds after it began, its one retry included, and then sends its next stretch.
+    The event loop's clock is moved on instead of waiting.
+    """
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    skipped = 0.0
+    monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
+    call_id = (await api.join(ANN)).json()["call"]["id"]
+    api.world.clock.advance(10)
+    api.world.transcriber.gate = asyncio.Event()
+    first = asyncio.create_task(api.speech(call_id, ANN))
+    await api.world.transcriber.started.wait()
+
+    skipped = 15.0
+    await asyncio.sleep(0.2)
+    still_waiting = not first.done()
+    skipped = 20.0
+    gap = await asyncio.wait_for(first, timeout=2)
+    api.world.transcriber.gate = None
+    second = await api.speech(call_id, ANN)
+
+    assert still_waiting
+    assert gap.status_code == 200, gap.text
+    assert (gap.json()["line"]["kind"], gap.json()["line"]["reason"]) == ("gap", "not-transcribed")
+    assert second.status_code == 200, second.text
+    assert second.json()["line"]["text"] == "Hello there"
+
+
+@pytest.mark.asyncio
 async def test_speech_is_never_written_to_disk(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
     """The audio goes from the request to speech-to-text in memory: no temporary file, spooled or not, is made."""
     call_id = (await api.join(ANN)).json()["call"]["id"]
