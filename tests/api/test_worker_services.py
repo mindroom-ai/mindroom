@@ -1074,6 +1074,25 @@ async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_on
 
 
 @pytest.mark.asyncio
+async def test_a_stop_while_a_service_fails_on_its_taken_port_keeps_it_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fresh start a taken port calls for never follows a stop that ended the service first."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "echo.py").write_text("import time\ntime.sleep(0.5)\n" + _ECHO)
+        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
+        echo = WorkerService("echo", "echo.py")
+        services = worker_services(sandbox_runner_app.app)
+        async with _other_server(monkeypatch, once=True):
+            ensure = asyncio.create_task(ensure_worker_service(context, echo, _TARGET))
+            await _until(lambda: services.instance("demo", "echo") is not None)
+            await stop_worker_service(context, echo, _TARGET)
+            assert (await ensure).state == "exited"
+            assert services.instance("demo", "echo") is None
+
+
+@pytest.mark.asyncio
 async def test_the_relay_never_reaches_another_server_on_the_port_of_a_service_that_is_still_starting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
