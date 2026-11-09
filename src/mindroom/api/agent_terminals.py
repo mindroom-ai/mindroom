@@ -43,6 +43,7 @@ router = APIRouter(prefix="/api/rooms/{room_id}", tags=["terminals"])
 
 # As often as the Computer's stream rechecks its viewer, and each check as long.
 _RECHECK_SECONDS = 15.0
+_NO_TERMINALS = "This agent has no terminals."
 _NO_TYPING = (
     "Typing in this agent's terminals needs `terminals: type` in its config, a shell in a worker that mounts its "
     "workspace, and power to post."
@@ -102,6 +103,8 @@ async def _workspace_terminals(
     create: bool,
 ) -> WorkerTerminals:
     """Return ``workspace``'s terminals as a turn of its agent for ``user_id`` in ``room_id`` resolves them."""
+    if workspace.terminal == "none":
+        raise HTTPException(403, _NO_TERMINALS)
     paths = bind_current_request_snapshot(connection).runtime_paths
     identity = room_execution_identity(workspace.name, user_id, room_id, workspace.config, paths)
     terminals = await asyncio.to_thread(
@@ -113,7 +116,7 @@ async def _workspace_terminals(
         create=create,
     )
     if terminals is None:
-        raise HTTPException(403, "This agent has no terminals.")
+        raise HTTPException(403, _NO_TERMINALS)
     return terminals
 
 

@@ -160,7 +160,10 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
 
 
 async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(tmp_path: Path, runner: str) -> None:
-    """With ``terminals: watch`` Alice sees the agent's terminal but may not open one; left unset, the agent has none."""
+    """With ``terminals: watch`` Alice watches the agent's terminal but may not open one; left unset, she sees nothing.
+
+    Unset, a stream of a terminal she knows the ID of closes as refused before it sends any of its output.
+    """
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
@@ -173,6 +176,13 @@ async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(
             assert (await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE))))[0] == 403
             _, seen = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
             assert [(t["id"], t["writable"]) for t in seen["terminals"]] == listed
+            stream = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
+            first = await stream.receive()
+            if listed:
+                assert json.loads(first.data) == {"type": "writable", "writable": False}
+                await stream.close()
+            else:
+                assert (first.type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
 
 
 async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
