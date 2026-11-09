@@ -2041,6 +2041,7 @@ These settings are global-only:
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
 | `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
+| `allow_shell_without_worker` | `false` | Let the [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) tool run commands in the MindRoom process for agents whose `shell` does not run in a worker; when `false`, each such call is refused with a message naming this setting. `mindroom config init` sets it to `true` |
 | `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
 | `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 
@@ -9156,7 +9157,7 @@ Set environment settings in the runtime's `.env` and restart MindRoom.
 
 ### Shell in MindRoom itself
 
-When the agent's shell runs in the MindRoom process, which is the default without a worker backend, nothing else is needed.
+When the agent's shell runs in the MindRoom process, which is the default without a worker backend, set [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults), because the shell refuses commands there otherwise.
 Such an agent is already fully trusted, as described in [the security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
 ### Shell in a worker
@@ -10360,6 +10361,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 ## [`shell`]
 
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
+It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
 With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
@@ -17206,6 +17208,7 @@ Tools that run arbitrary programs cannot be confined inside their own process, b
 MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure; it isolates them only by routing them to a worker with `worker_tools`.
 
 An agent whose code-execution tools run in the primary process is trusted with everything that process can reach, so restricting its other tools protects nothing.
+The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; `python` and the other code-execution tools have no such setting.
 
 An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
 Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive` run in the primary process by default even then, so they follow the agent's [`file_access`](#file-access) setting, which by default keeps them inside the agent workspace.
@@ -22419,6 +22422,7 @@ When routing is requested but cannot be satisfied, tool calls fail instead of ru
 `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` lets tools that default to workers run locally when `static_runner` routing is requested without a proxy URL.
 It never bypasses dedicated Docker or Kubernetes workers or a configured proxy URL.
 Do not set it in hosted or multi-tenant deployments.
+Neither it nor a local execution mode lets `shell` run commands in the primary runtime; that needs [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults).
 
 ## Worker scopes
 
@@ -24616,6 +24620,11 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to a shell that needs a worker
+
+The `shell` tool now refuses commands in the MindRoom process, so an agent with `shell` and no worker, such as one an earlier `mindroom config init` created with `worker_tools: []`, gets an error on every shell call.
+To keep running its commands in the MindRoom process, add `allow_shell_without_worker: true` under `defaults:` in `config.yaml`; otherwise route `shell` to a worker as in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ## Upgrading from Agent Vault
 

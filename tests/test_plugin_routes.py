@@ -8,6 +8,7 @@ import threading
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+import aiohttp
 import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -17,7 +18,8 @@ from starlette.testclient import WebSocketDenialResponse
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import ClientSessionStore, client_session_store
-from mindroom.api.plugin_routes import mount_plugin_routes
+from mindroom.api.plugin_routes import FramedWebsocketDenials, mount_plugin_routes
+from mindroom.api.script_gateway import serve_listener
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -111,6 +113,20 @@ async def root() -> dict:
     return {{"root": True}}
 """
 
+STREAM_ROUTES = """
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import client_stream
+
+router = APIRouter()
+
+
+@router.websocket("/stream")
+async def stream(websocket: WebSocket) -> None:
+    async with client_stream(websocket):
+        await websocket.send_text("hello")
+"""
+
 
 TOOLS = """
 from agno.tools import Toolkit
@@ -179,6 +195,7 @@ def _api_state(config: Config | None, runtime_paths: RuntimePaths) -> config_lif
 def _app(config: Config | None, runtime_paths: RuntimePaths) -> FastAPI:
     """Return an API app serving ``config`` with the plugin routes mounted, answering errors as the main app does."""
     app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
+    app.add_middleware(FramedWebsocketDenials)
     ensure_app_state(app).api_state = _api_state(config, runtime_paths)
     mount_plugin_routes(app)
     return app
@@ -529,3 +546,53 @@ def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.
     listed = client.get("/api/plugins", headers=_signed_in(main.app))
     assert listed.json()["plugins"] == [{"name": "demo", "mindroom_plugin_api": None}]
     assert (listed.headers["cache-control"], listed.headers["x-content-type-options"]) == ("no-store", "nosniff")
+
+
+@pytest.mark.asyncio
+async def test_a_real_client_reads_a_websocket_refused_before_accept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unused_tcp_port: int,
+) -> None:
+    """Served as ``mindroom run`` serves it, the API's refusal of a websocket handshake reaches an aiohttp client intact.
+
+    A core stream, a plugin's stream, and a plugin that does not exist each answer with a readable status and reason.
+    """
+    _write_plugin(tmp_path, STREAM_ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    monkeypatch.setattr(ensure_app_state(main.app), "api_state", _api_state(config, runtime_paths))
+    base = f"127.0.0.1:{unused_tcp_port}"
+    origin = "https://elsewhere.example"
+    # aiohttp's websocket error carries the status only, so a plain request with the same handshake reads the body.
+    handshake = {
+        "Origin": origin,
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+    }
+    refusals = {
+        f"/api/rooms/{quote(ROOM)}/agents/{quote(ALICE)}/terminals/t1": (403, "Origin is not allowed."),
+        "/api/plugins/demo/stream": (403, "Origin is not allowed."),
+        "/api/plugins/nope/stream": (404, "Not Found"),
+    }
+
+    async with (
+        serve_listener(
+            main.app,
+            name="api",
+            host="127.0.0.1",
+            port=unused_tcp_port,
+            log_level="WARNING",
+            ws="websockets-sansio",
+            access_log=False,
+        ),
+        aiohttp.ClientSession() as client,
+    ):
+        for path, (status, detail) in refusals.items():
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(f"ws://{base}{path}", origin=origin)
+            assert refused.value.status == status, path
+            async with client.get(f"http://{base}{path}", headers=handshake) as response:
+                assert (response.status, json.loads(await response.text())) == (status, {"detail": detail}), path
