@@ -14,6 +14,7 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.history_visibility import read_room_history
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import is_dm_room
 
@@ -36,10 +37,6 @@ _DIRECT_LOOKUP_FAILED = "Direct message lookup failed; try again."
 _HISTORY_READ_FAILED = "Room history read failed; try again."
 # As long as the computers API waits for the same membership check.
 _LOOKUP_TIMEOUT_SECONDS = 20
-# The bots' client refuses a member list with this when its sync applied a change of the room's members during the
-# read, as the join of someone who calls right after joining does; a read after that change answers.
-_MEMBERSHIP_CHANGED = "room membership changed during lookup"
-_MEMBER_READS = 3
 
 
 def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClient | None:
@@ -77,17 +74,6 @@ async def _read_in_room[T](
         raise HTTPException(503, failed) from None
 
 
-async def _joined_members(client: nio.AsyncClient, room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
-    """Return the room's joined members, read again while the client refuses them for a membership change."""
-    for _ in range(_MEMBER_READS - 1):
-        try:
-            return await client.joined_members(room_id)
-        except nio.LocalProtocolError as error:
-            if str(error) != _MEMBERSHIP_CHANGED:
-                raise
-    return await client.joined_members(room_id)
-
-
 def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     """Publish readers of a room's joined users and names, its state and history, and whether it is a direct message.
 
@@ -100,7 +86,12 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     lookups: dict[str, asyncio.Task[Mapping[str, str | None]]] = {}
 
     async def look_up(room_id: str) -> Mapping[str, str | None]:
-        response = await _read_in_room(bots, room_id, lambda client: _joined_members(client, room_id), _LOOKUP_FAILED)
+        response = await _read_in_room(
+            bots,
+            room_id,
+            lambda client: read_joined_members(client, room_id),
+            _LOOKUP_FAILED,
+        )
         if not isinstance(response, nio.JoinedMembersResponse):
             raise HTTPException(503, _LOOKUP_FAILED)
         # Read-only, since every caller sharing the lookup gets this one mapping.

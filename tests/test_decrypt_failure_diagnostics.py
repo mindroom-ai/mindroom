@@ -18,6 +18,7 @@ from mindroom.matrix import client_delivery, decrypt_failure
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from tests.access_schema_support import with_responder_access
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room, _runtime_paths
 from tests.test_durable_ingestion_admission import Session
@@ -87,7 +88,7 @@ async def test_waiting_diagnostic_cannot_settle_a_decrypted_request(
             InboundEvent("$cipher", ROOM, "$thread", EventKind.MESSAGE, EventClass.ACTIONABLE, SENDER, 10, clear.clear),
         )
         bot.orchestrator.response_admission_gate.reopen()
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert requests == [(ROOM, "$cipher")]
         assert notices == [ROOM]
         assert await bot.journal_principal().is_pending("$cipher")
@@ -130,7 +131,7 @@ async def test_diagnostic_uses_current_access_and_original_tenure(
         elif case == "join_fence":
             bot._room_lifecycle._decrypt_notice_fenced_room_ids.add(ROOM)
         bot.orchestrator.response_admission_gate.reopen()
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert requests == (["$cipher"] if case == "join_fence" else [])
         assert notices == []
     finally:
@@ -172,7 +173,7 @@ async def test_diagnostic_rechecks_access_after_requesting_key(
         else:
             with_responder_access(bot.config, bot.agent_name, users=[])
         release.set()
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert notices == []
         assert bot.orchestrator.response_admission_gate.close_if_idle()
     finally:
@@ -270,7 +271,7 @@ async def test_edit_notice_joins_the_edited_message_thread(
     content = {**record.source["content"], "m.relates_to": relation}
     try:
         bot._decryption_diagnostics.schedule(replace(record, source={**record.source, "content": content}))
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         expected = (
             {
                 "rel_type": "m.thread",

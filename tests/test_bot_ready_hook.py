@@ -48,6 +48,7 @@ from mindroom.tool_system.plugins import config_plugins
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
@@ -334,13 +335,13 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     ):
         bot.mark_sync_loop_started()
         await _complete_frame(bot)
-        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         await _complete_frame(bot)
-        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         bot.mark_sync_loop_started()
         await _complete_frame(bot)
-        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert call_manager.reconcile_joined_rooms.await_count == 2
     assert [request.args for request in call_manager.reconcile_joined_rooms.await_args_list] == [(), ()]
@@ -449,7 +450,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
 
     bot._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
     bot._before_ingestion_admission(second_departure, TimelineEventProvenance.LIVE)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert not bot._runtime_view.agent_reply_memberships.is_allowed(
         sender_id,
@@ -540,7 +541,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
 
     bot._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
     bot._before_ingestion_admission(rejoin, TimelineEventProvenance.LIVE)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     assert index.needs_refresh(bot.config)
@@ -568,7 +569,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     assert index.needs_refresh(bot.config)
@@ -600,7 +601,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     assert not index.needs_refresh(bot.config)
@@ -614,7 +615,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     call_manager.revoke_reply_authorization.assert_awaited_once_with()
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
     call_manager.reconcile_reply_authorization.assert_awaited_once_with()
 
 
@@ -637,7 +638,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     call_manager.revoke_reply_authorization.assert_not_awaited()
@@ -674,7 +675,7 @@ async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) 
     )
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
     call_manager.reconcile_reply_authorization.assert_not_awaited()
 
 
@@ -778,7 +779,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
 
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     assert call_manager.revoke_reply_authorization.await_count == 3
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
     assert call_manager.reconcile_reply_authorization.await_count == 3
 
 

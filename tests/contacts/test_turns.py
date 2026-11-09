@@ -68,6 +68,7 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import _hook_plugin, dispatch_reaction_durably, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     install_model_providers,
     install_runtime_journal_support,
@@ -975,7 +976,7 @@ async def test_a_contact_turn_writes_no_memory_and_teaches_no_skill(tmp_path: Pa
         ),
     ):
         await bot._response_runner.generate_response(_request(room_id))
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     expected = room_id == OTHER_ROOM
     assert store_memory.called is expected

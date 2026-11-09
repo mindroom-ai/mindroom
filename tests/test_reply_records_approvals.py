@@ -51,6 +51,7 @@ from tests.agent_tool_helpers import tool_policy
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     initialize_approval_store_for_test,
     message_origin,
     patch_response_runner_module,
@@ -376,7 +377,7 @@ async def _send_message(bot: AgentBot, event_id: str, body: str, *, thread_id: s
         ),
     )
     await bot._turn_ingress.handle_text_event(room, message)
-    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_ingress.deps.runtime)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._turn_ingress.deps.runtime)
 
 
 def _reactions(bot: AgentBot) -> list[dict[str, str]]:

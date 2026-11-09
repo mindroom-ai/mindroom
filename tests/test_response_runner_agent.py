@@ -117,6 +117,7 @@ from tests.bot_helpers import (
     unique_room_send_responses,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     delivered_matrix_event,
     delivered_matrix_side_effect,
     install_model_providers,
@@ -3238,7 +3239,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 raise
             result = None
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         sends = bot.client.room_send.await_args_list
         bodies = [call.kwargs["content"].get("body", "") for call in sends]
         stop_buttons = [
@@ -3320,7 +3321,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
         await bot._response_runner.generate_response(self._participation_request(bot, reaction=None, backend="model"))
 
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert thread_summary.await_count == (1 if action == "respond" else 0)
         assert memory_queued == (["stored"] if action == "respond" else [])
 
