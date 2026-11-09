@@ -98,7 +98,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
 ) -> None:
     """The terminal's shell sees what the agent's shell commands see, whether the runner runs them here or in a child.
 
-    That includes the call's own environment, and no startup file in the shell's home runs.
+    That includes the call's own environment, and no startup file in the shell's home runs, nor do the key bindings
+    of a readline settings file there, even one the call's environment names.
     """
     toolkit = _shell(primary_paths(tmp_path, runner))
     terminals = _terminals(toolkit)
@@ -106,8 +107,9 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     home.mkdir(parents=True, exist_ok=True)
     for startup_file in (".bashrc", ".bash_profile", ".profile"):
         (home / startup_file).write_text("export FROM_STARTUP_FILE=1\n")
+    (home / ".inputrc").write_text('"\\C-t": "touch from-inputrc\\n"\n')
     call_environment = ToolEnvironment(
-        values={"HOME": str(home), "FROM_THE_CALL": "1"},
+        values={"HOME": str(home), "FROM_THE_CALL": "1", "INPUTRC": str(home / ".inputrc")},
         path_prepend=("/opt/from-the-call/bin",),
     )
     with collected_tool_environment(call_environment):
@@ -116,7 +118,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     workspace = cwd_line.removeprefix("[cwd: ").removesuffix("]")
 
     async with terminals.attach(info.id) as stream:
-        await stream.send_input("env | sort > terminal.env; exit\r")
+        # Ctrl-T keeps its built-in binding, so it types nothing on the empty line.
+        await stream.send_input("\x14env | sort > terminal.env; exit\r")
         assert await _exit_code(stream) == 0
 
     terminal_env = _env((home / "terminal.env").read_text())
@@ -124,6 +127,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     assert (terminal_env["HOME"], terminal_env["FROM_THE_CALL"]) == (str(home), "1")
     assert terminal_env["PATH"].startswith("/opt/from-the-call/bin:")
     assert "FROM_STARTUP_FILE" not in terminal_env
+    assert not (home / "from-inputrc").exists()
+    assert (terminal_env.pop("INPUTRC"), command_env.pop("INPUTRC")) == ("/dev/null", str(home / ".inputrc"))
     assert terminal_env.pop("TERM") == "xterm-256color"
     # The shell marks its prompts and keeps its prompt command from the commands it starts.
     assert "PROMPT_COMMAND" not in terminal_env
