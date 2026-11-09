@@ -19384,7 +19384,7 @@ async def greeter(websocket: WebSocket, room_id: str, agent_user_id: str) -> Non
             await relay.relay_messages(websocket, upstream)
 ```
 
-The route relays only once the ensure reports `running`, since a service that reports `starting` does not listen yet, and one that reports `exited` starts again only after `stop_worker_service`.
+The route relays only once the ensure reports `running`, since a `starting` service does not listen yet and an `exited` one does not run.
 The relay ends with the client's stream, which `client_stream` closes when the session ends or the caller leaves the room, with its own close code; a route that must also notice the agent's access rules changing calls `stream_room_reader(...).agent()` again as often as it needs.
 Plugin routes answer JSON, never pages for a browser, so this HTTP route reads the status a server the agent started on port 5173 reports:
 
@@ -19419,7 +19419,7 @@ Each call names exactly one of `service`, the name of one of the calling plugin'
 It sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
 A service gets its secret from the relay, and never one the route sends.
 The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.
-A relay to a service that runs but does not listen yet gets the marked 502 too, so a route that meets it for its own service ensures the service again, which waits up to 10 seconds for it to listen, instead of stopping it.
+The marked 502 also answers a relay to a service that is still `starting`: ensure it again instead of stopping it.
 While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
 A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest.
