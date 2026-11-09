@@ -750,11 +750,12 @@ def _load_each_plugin(
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
     plugins: dict[Path, _LoadedPlugin] = {}
     replaced: dict[str, ModuleType] = {}
-    for plugin_base, plugin_entry in plugin_bases:
-        loaded = previous.plugins.get(plugin_base.root) if previous is not None else None
-        if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
-            plugins[plugin_base.root] = _with_current_manifest(loaded, plugin_base)
+    for collected, plugin_entry in plugin_bases:
+        loaded = previous.plugins.get(collected.root) if previous is not None else None
+        if loaded is not None and _loaded_from_current_source(loaded, collected):
+            plugins[collected.root] = _with_current_manifest(loaded, collected)
             continue
+        plugin_base = plugin_imports._outside_other_plugins(collected)
         # The plugin loads whole: each of its modules executes once, and the modules under its root's package names
         # leave with them, so they share one instance of each other and their tools register again.
         installed_modules, installed_cache = _evict_plugin_modules(plugin_base)

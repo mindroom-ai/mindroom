@@ -274,9 +274,7 @@ def _locate_python_plugin(plugin_path: str) -> tuple[Path, str | None] | None:
     if not resolved_root.exists() or not resolved_root.is_dir():
         return None
 
-    # A plugin inside another plugin's directory keeps names of its own, so that plugin's package names never reach it.
-    nested = any((parent / _PLUGIN_MANIFEST).exists() for parent in resolved_root.parents)
-    return resolved_root, None if nested else package
+    return resolved_root, package
 
 
 def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
@@ -490,6 +488,13 @@ def _package_parts(root: Path, module_path: Path) -> tuple[str, ...]:
     return parts[:-1] if parts[-1:] == ("__init__",) else parts
 
 
+def _outside_other_plugins(plugin: _PluginBase) -> _PluginBase:
+    """Return ``plugin``, keeping names of its own when it lies in another plugin's directory, a manifest above it."""
+    if plugin.package is None or not any((parent / _PLUGIN_MANIFEST).exists() for parent in plugin.root.parents):
+        return plugin
+    return replace(plugin, package=None)
+
+
 def _import_name(plugin: _PluginBase, module_path: Path) -> str | None:
     """Return the name Python's import system gives one of a package plugin's modules, or None when it gives none."""
     if plugin.package is None:
@@ -577,11 +582,7 @@ def _prepare_module(
 
 
 def _import_by_name(module: ModuleType) -> ModuleType:
-    """Import the name of ``module``, prepared ``by_name``, executing ``module`` for it, and return what it imports.
-
-    As any import, it runs the packages' ``__init__.py`` first and holds the name's import lock, so another thread
-    importing the name meanwhile waits for the module.
-    """
+    """Import ``module``'s name, executing it as any import does: the packages' ``__init__.py`` first, under its lock."""
     loader = module.__spec__.loader if module.__spec__ is not None else None
     assert isinstance(loader, _PreparedModuleLoader)
     # Replaced, never changed in place, so an import another thread runs through the finders skips none of them.
