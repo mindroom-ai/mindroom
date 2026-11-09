@@ -221,12 +221,14 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
+def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt, *, quiet: bool) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
     Each call waits in the slot ``pending_call_slot`` names, the rule the approval card anchors by too. The approval
     card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
-    its own id, and the resume finishes it there. Every other call waits under its own id.
+    its own id, and the resume finishes it there. Every other call waits under its own id. A ``quiet`` turn's waiting
+    document shows no slot's no-report lines, as its answer would not; the frozen document keeps them, so its resume
+    reads each run as it was.
     """
     member_ids = presentation.member_ids
     for requirement in paused.requirements:
@@ -236,9 +238,13 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         if member_id is not None:
             member_id = presentation.resolve_member_id(member_id, requirement.member_display_name)
         presentation.start_tool(requirement.tool_execution.call, member_id=member_id)
+    shown = presentation
+    if quiet:
+        shown = replace(presentation)
+        _strip_no_report_lines(shown)
     return replace(
         paused,
-        response_text=presentation.render_body(finished=False),
+        response_text=shown.render_body(finished=False),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
@@ -260,11 +266,16 @@ def settle_quiet_team_answer(
         is_silent_schedule_no_report_response(run.handover_content or "") for run in member_runs
     ):
         return answer
+    _strip_no_report_lines(presentation)
+    return None
+
+
+def _strip_no_report_lines(presentation: TeamStreamPresentation) -> None:
+    """Remove the no-report lines from each slot of ``presentation``, replacing its slot texts rather than editing them."""
     presentation.consensus = without_no_report_lines(presentation.consensus)
     presentation.per_member = {
         member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()
     }
-    return None
 
 
 async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
@@ -462,7 +473,7 @@ async def continue_paused_team_run(
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())
         if paused is not None:
-            return continued_team_pause(presentation, paused)
+            return continued_team_pause(presentation, paused, quiet=quiet)
         if continued.status is not RunStatus.completed:
             # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
             raise pause_without_approval_error(continued, entity_label="team")

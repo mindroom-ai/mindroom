@@ -22,7 +22,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import keys_to_text, prompt_after
+from mindroom.terminal.lines import prompt_after
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
@@ -38,9 +38,9 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 _MAX_TIMEOUT_SECONDS = 600.0
 # How long a viewer waits for the scrollback, which the runner sends first, and for more output to read.
 _SCROLLBACK_SECONDS = 1.0
+_OUTPUT_SECONDS = 0.5
 # How long a viewer waits after the scrollback for the exit, which follows it at once for an ended shell.
 _EXIT_SECONDS = 0.1
-_OUTPUT_SECONDS = 0.5
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
@@ -53,27 +53,61 @@ _READ_ONLY = (
     "run_shell_command. terminal_read shows a terminal's recent output; terminal_list shows them all."
 )
 _NOT_AT_PROMPT = (
-    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
-    "typing); nothing was typed. Read the terminal, send keys such as <ctrl-c> with terminal_send if needed, then run "
-    "it again."
+    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
+    "or keys typed while a command ran may be queued); nothing was typed. Send <ctrl-c> with terminal_send, which an "
+    "idle prompt needs too after such keys, then run it again."
 )
 # Keys that edit the line, complete, interrupt or end input, which a command line never holds.
 _KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
+_SHELL_EXITED = "[The terminal's shell has exited.]"
 _DETACHED = "Error: the connection to the terminal ended; read it again before typing more."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OTHER_ESCAPE = re.compile(r"\x1b[P^_X][^\x1b]*(?:\x1b\\)?|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]?")
-_CONTROL = re.compile(r"[\x00-\x07\x0b\x0c\x0e-\x1f\x7f]")
+_NAMED_KEYS = {
+    "enter": "\r",
+    "tab": "\t",
+    "esc": "\x1b",
+    "backspace": "\x7f",
+    "space": " ",
+    "up": "\x1b[A",
+    "down": "\x1b[B",
+    "right": "\x1b[C",
+    "left": "\x1b[D",
+    "home": "\x1b[H",
+    "end": "\x1b[F",
+    "delete": "\x1b[3~",
+}
+_KEY = re.compile(r"<([A-Za-z-]+)>")
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BACKSPACED = re.compile(r"[^\x08\n]\x08")
 
 
 def _plain_text(data: bytes) -> str:
-    """Return terminal output as the text a person reads on screen: escapes removed, carriage returns applied."""
+    """Return terminal output as a person reads it: escapes removed, carriage returns and backspaces applied."""
     text = data.decode("utf-8", errors="replace")
     for pattern in (_OSC, _CSI, _OTHER_ESCAPE):
         text = pattern.sub("", text)
-    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n")]
-    return _CONTROL.sub("", "\n".join(lines))
+    text = "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
+    while (erased := _BACKSPACED.sub("", text)) != text:
+        text = erased
+    return _CONTROL.sub("", text)
+
+
+def _keys_to_text(keys: str) -> str:
+    """Return what typing ``keys`` sends: text as written, with ``<enter>``, ``<up>``, ``<ctrl-c>`` and the like as keys."""
+
+    def key(match: re.Match[str]) -> str:
+        name = match.group(1).lower()
+        if name in _NAMED_KEYS:
+            return _NAMED_KEYS[name]
+        letter = name.removeprefix("ctrl-")
+        if letter != name and len(letter) == 1 and letter.isalpha():
+            return chr(ord(letter) - ord("a") + 1)
+        return match.group(0)
+
+    return _KEY.sub(key, keys)
 
 
 async def _ended(stream: TerminalStream) -> bool:
@@ -113,8 +147,8 @@ async def _output(
                 if len(kept) > _MAX_OUTPUT_BYTES:
                     del kept[: len(kept) - _MAX_OUTPUT_BYTES]
                     cut = True
-                if after is not None and stream.prompt is not None and stream.prompt > after:
-                    # Several prompts may arrive at once, as after a command someone typed while the run's ran.
+                if after is not None and stream.prompt > after:
+                    # Several prompts may arrive at once, as after a command someone typed while the run's command ran.
                     found = prompt_after(bytes(kept), after)
                     if found is not None:
                         return bytes(kept[: found[0]]), cut, True, found[1]
@@ -188,9 +222,10 @@ class TerminalTools(Toolkit):
     ) -> str:
         """Type one command line into a terminal, wait for its prompt, and return what it printed and its exit status.
 
-        It types only while the shell waits at an empty prompt. A command still running at the timeout keeps running:
-        read on with terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and
-        leave them running; a terminal nobody types in or watches ends 30 minutes after its last input.
+        It types only while the shell waits at an empty prompt; after keys typed while a command ran, such as an answer
+        to its prompt, send <ctrl-c> first. A command still running at the timeout keeps running: read on with
+        terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and leave them
+        running; a terminal nobody types in or watches ends 30 minutes after its last input.
 
         Args:
             session_id: The terminal, from terminal_open or terminal_list.
@@ -223,12 +258,12 @@ class TerminalTools(Toolkit):
         # The first line is the shell's echo of the command, unless it was dropped with older output.
         shown = (shown if cut else shown.partition("\n")[2]).strip("\n")[-_MAX_TEXT_CHARS:]
         if not finished:
-            status = f"Still running after {timeout:g} s."
+            status = f"[Still running after {timeout:g} s.]"
         elif exit_status is not None:
-            status = f"Exit status {exit_status}."
+            status = f"[Exit status {exit_status}.]"
         else:
-            status = "The terminal's shell has exited."
-        return f"{shown}\n[{status}]" if shown else f"[{status}]"
+            status = _SHELL_EXITED
+        return f"{shown}\n{status}" if shown else status
 
     async def terminal_send(self, session_id: str, keys: str) -> str:
         """Type keys into a terminal without waiting for a command: an answer to a prompt, or keys such as <ctrl-c>.
@@ -245,7 +280,7 @@ class TerminalTools(Toolkit):
             What the terminal printed right after, or why the keys were not typed.
 
         """
-        text = keys_to_text(keys)
+        text = _keys_to_text(keys)
         if "\x03" in text.rstrip("\x03"):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
         try:
@@ -259,7 +294,7 @@ class TerminalTools(Toolkit):
         except TerminalDetachedError:
             return _DETACHED
         shown = _plain_text(output).strip()[-_MAX_TEXT_CHARS:]
-        exited = "\n[The terminal's shell has exited.]" if ended else ""
+        exited = f"\n{_SHELL_EXITED}" if ended else ""
         return f"Sent. New output:\n{shown}{exited}" if shown else f"Sent.{exited}"
 
     async def terminal_read(self, session_id: str) -> str:
@@ -269,7 +304,7 @@ class TerminalTools(Toolkit):
             session_id: The terminal, from terminal_open or terminal_list.
 
         Returns:
-            Its recent output, and its shell's exit status once it has exited.
+            Its recent output, and whether its shell has exited.
 
         """
         try:
@@ -280,7 +315,7 @@ class TerminalTools(Toolkit):
         except TerminalDetachedError:
             return _DETACHED
         shown = _plain_text(output).strip("\n")[-_MAX_TEXT_CHARS:]
-        return f"{shown}\n[The terminal's shell has exited.]" if exited else shown or "[No output yet.]"
+        return f"{shown}\n{_SHELL_EXITED}" if exited else shown or "[No output yet.]"
 
     async def terminal_list(self) -> str:
         """List the terminals of your workspace, including ones people opened.

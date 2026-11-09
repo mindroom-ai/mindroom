@@ -3866,6 +3866,7 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
+A file is left out of the base and its file listing when its name, or the name of a folder above it, is not valid UTF-8; rename it to include it.
 Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
@@ -5306,7 +5307,7 @@ Raise `update_interval` to reduce load on the homeserver, or lower it for smooth
 Even when streaming is enabled, MindRoom streams a response only when the user who sent the message is `online` or `unavailable`; for an `offline` requester, the placeholder is replaced with the complete response.
 Everyone in the room sees the same edits.
 If the presence check fails, for example because the homeserver has presence disabled, MindRoom does not stream.
-A reply that continues after a restart always streams, even when streaming is off or the requester is offline, so the part it already showed stays in the message.
+A reply that continues after a restart keeps the part it already showed; the rest streams even when streaming is off or the requester is offline, except in a [silent schedule's](https://docs.mindroom.chat/scheduling/#silent-delivery) run.
 When no requester can be identified, MindRoom streams.
 
 ## Presence
@@ -5866,6 +5867,7 @@ What people see in MindRoom Chat:
 - Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
 - When the call ends, the router edits the row to `Call ended · N min`.
 - About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
+- With notes, the router then titles the row's thread from them, as an agent's reply titles its thread, unless someone pinned the thread's title or resolved the thread.
 - The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
 
@@ -5888,7 +5890,7 @@ The rules:
 
 Privacy:
 
-- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
+- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, the transcript goes to the `notes_model` provider when notes are on, and the notes go to the thread summary model that titles the thread.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
 - Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
 - A message that cannot be posted, because the router has left the room or may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
@@ -10465,7 +10467,7 @@ An agent has terminals only when it also has [`shell`] with `run_shell_command` 
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
 People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
-A shell started inside a terminal, such as `bash` or `nix-shell`, keeps `terminal_run` refusing until it exits, so the agent types into it with `terminal_send`.
+After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: no [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` may ask, including an approval script, and neither may `tool_approval.default` when no rule matches.
@@ -17583,7 +17585,7 @@ Do not report or "fix" these; they are deliberate.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
   A terminal's shell never gets it, because the shell outlives the response ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/)).
 - Approval rules judge the text of each command an agent runs, not what running it does, so files an earlier approved or allowed command left in the workspace can change what a later allowed command does, such as a [`.mindroom/worker-env.sh`](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) that sets `BASH_ENV`, whose file Bash then reads before each later shell command.
-  The same limit is why an agent whose `run_shell_command` calls may ask for approval is offered no terminal typing ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/#agent-typing)).
+  The terminal toolkit's typing rule above follows from the same limit.
 - A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, except that a terminal a `terminal_open` call starts keeps them in its shell, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - A shared agent's later turns in a conversation replay each earlier turn's context, including another requester's `persist=False` hook items such as a location, so it can repeat them to anyone in that conversation, like persisted items; private agents keep each requester's conversations apart.

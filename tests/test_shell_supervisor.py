@@ -378,11 +378,10 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert _extract_handle(cancelled) == cancelled_handle
             assert "Force-killed" in await _kill(socket_path, cancelled_handle, force=True)
             assert "FINISHED" in await _wait_for_finished(socket_path, cancelled_handle)
-            for _ in range(20):
-                if ready_path.exists():
-                    break
+            # The resistant process ignores SIGTERM once it has written its ready file; it must start within its 3 s runtime.
+            while not ready_path.exists():
+                assert "RUNNING" in await _check(socket_path, resistant_handle), "it ended before it was ready"
                 await asyncio.sleep(0.05)
-            assert ready_path.exists()
             assert "Terminated" in await _kill(socket_path, resistant_handle)
             await asyncio.sleep(0.1)
             assert "RUNNING" in await _check(socket_path, resistant_handle)

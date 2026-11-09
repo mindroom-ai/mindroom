@@ -487,7 +487,7 @@ Matrix sync callback
 | `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
 | `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
-| `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, and the row, its edits and the transcript message it posts, each at most once per call |
+| `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, the row, its edits and the transcript message it posts, each at most once per call, and the request that the router title the row's thread from the notes |
 | `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |
 | `call_transcripts/notes.py` | A finished call's notes from `calls.transcripts.notes_model`: what it was about, decisions, action items, and open questions |

@@ -71,12 +71,16 @@ def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
     return raw
 
 
-def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
+def _encode(value: Any, allowance: _FileAllowance, ancestors: frozenset[int]) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
+    if id(value) in ancestors:
+        # A container inside itself would never finish encoding.
+        msg = "it refers to itself"
+        raise ValueError(msg)
     if isinstance(value, ToolValue):
         media = (value.images, value.audios, value.videos, value.files)
         fields: dict[str, Any] = {"content": value.content}
         fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
-        return {"type": "ToolValue", "value": _encode(fields, allowance)}
+        return {"type": "ToolValue", "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, (Image, Audio, Video, File)):
         fields = asdict(value)
         if value.filepath is not None:
@@ -84,7 +88,7 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
             # Bytes the tool returned stand; its path is read only when they are missing.
             if value.content is None:
                 fields["content"] = _file_bytes(Path(value.filepath), allowance)
-        return {"type": type(value).__name__, "value": _encode(fields, allowance)}
+        return {"type": type(value).__name__, "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, bytes):
         return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
@@ -93,10 +97,12 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
         if not all(isinstance(key, str) for key in value):
             # Keys such as 1 and "1" would collide as text, so the whole mapping keeps the text the model reads inline.
             return str(value)
-        return {"type": "dict", "value": {key: _encode(item, allowance) for key, item in value.items()}}
+        inner = ancestors | {id(value)}
+        return {"type": "dict", "value": {key: _encode(item, allowance, inner) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        return {"type": kind, "value": [_encode(item, allowance) for item in value]}
+        inner = ancestors | {id(value)}
+        return {"type": kind, "value": [_encode(item, allowance, inner) for item in value]}
     if value is None or isinstance(value, (str, int, bool)) or (isinstance(value, float) and math.isfinite(value)):
         return value
     # Any other value, such as a datetime or a driver's own type, keeps the text the model reads for it inline.
@@ -136,7 +142,8 @@ def _media(kind: type[Image | Audio | Video | File], saved: dict[str, Any]) -> I
 def encode_tool_result(value: Any) -> dict[str, Any]:  # noqa: ANN401 - Public SDK value boundary.
     """Encode one supported value in a versioned envelope within the 64 MiB encoded-JSON limit."""
     # Base64 turns every 3 raw artifact bytes into 4 encoded bytes.
-    envelope = {"version": 1, "value": _encode(value, _FileAllowance(3 * (_MAX_ENCODED_RESULT_BYTES // 4)))}
+    allowance = _FileAllowance(3 * (_MAX_ENCODED_RESULT_BYTES // 4))
+    envelope = {"version": 1, "value": _encode(value, allowance, frozenset())}
     # Default JSON escapes every non-ASCII character, so its length is the saved byte count.
     if len(json.dumps(envelope, allow_nan=False)) > _MAX_ENCODED_RESULT_BYTES:
         raise _size_error()

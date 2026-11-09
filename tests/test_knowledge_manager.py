@@ -1001,6 +1001,65 @@ def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "indexed_count"), [("semantic", 1), ("files", 0)])
+async def test_refresh_publishes_a_base_holding_a_file_whose_name_is_not_utf8(
+    tmp_path: Path,
+    mode: str,
+    indexed_count: int,
+) -> None:
+    """A file whose name is not valid UTF-8 is left out, and the rest of the base still refreshes and publishes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("plain guide", encoding="utf-8")
+    (docs_path / os.fsdecode(b"odd-\xff.md")).write_text("odd guide", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], modes={"docs": mode})
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.indexed_count == indexed_count
+
+
+def _seed_git_remote(tmp_path: Path, files: Mapping[str, str]) -> Path:
+    """Commit ``files`` on ``main`` and return a bare clone a Git-backed base can sync from."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+    for name, content in files.items():
+        (remote_work / name).write_text(content, encoding="utf-8")
+    for args in (
+        ("init", "-b", "main"),
+        ("add", "."),
+        ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "seed"),
+    ):
+        subprocess.run(["git", *args], cwd=remote_work, check=True, capture_output=True)
+    remote_bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "--bare", str(remote_work), str(remote_bare)], check=True, capture_output=True)
+    return remote_bare
+
+
+@pytest.mark.asyncio
+async def test_git_refresh_publishes_a_checkout_tracking_a_file_whose_name_is_not_utf8(tmp_path: Path) -> None:
+    """A tracked file whose name is not valid UTF-8 is left out, and the rest of the checkout is indexed and published.
+
+    A forced reindex of a checkout already at the remote revision lists the tracked files itself: its sync finds nothing new and lists none.
+    """
+    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", os.fsdecode(b"odd-\xff.md"): "odd guide"})
+    docs_path = tmp_path / "checkout"
+    git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+
+    assert first.index_published is second.index_published is True
+    assert first.availability is second.availability is KnowledgeAvailability.READY
+    assert first.indexed_count == second.indexed_count == 1
+
+
+@pytest.mark.asyncio
 async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8991,8 +9050,6 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
     Earlier releases ran Git in such a checkout, which let whoever could write
     the pointer choose the repository whose config and hooks Git executed.
     """
-    remote_work = tmp_path / "remote-work"
-    remote_work.mkdir()
 
     async def _git(cwd: Path, *args: str) -> None:
         await asyncio.to_thread(
@@ -9004,20 +9061,7 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
             text=True,
         )
 
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
-    (remote_work / "doc.md").write_text("worktree checkout content", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "main")
-    remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    remote_bare = _seed_git_remote(tmp_path, {"doc.md": "worktree checkout content"})
     seed_checkout = tmp_path / "seed-checkout"
     await asyncio.to_thread(
         subprocess.run,

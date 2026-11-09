@@ -169,10 +169,22 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
 
+def is_utf8(name: str) -> bool:
+    """Return whether a name read from the filesystem is valid UTF-8; Python escapes the bytes of one that is not."""
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is managed by the base path filters."""
+    """Return whether a relative path is managed by the base path filters.
+
+    A path that is not valid UTF-8 is never managed: an index, a listing, and a search result all name files as text.
+    """
     path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj):
+    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj) or not is_utf8(relative_path):
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
@@ -433,6 +445,9 @@ def git_tracked_relative_paths_from_checkout(
             check=False,
             capture_output=True,
             text=True,
+            # Escape the bytes of a name that is not valid UTF-8, as a directory listing does, so the inclusion rule
+            # leaves that file out instead of the listing failing.
+            errors="surrogateescape",
             timeout=effective_timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:

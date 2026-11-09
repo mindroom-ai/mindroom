@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 import nio
 import pytest
 
-from mindroom.call_transcripts.service import CallRefusedError, CallTranscriptService
+from mindroom.call_transcripts.service import (
+    CallRefusedError,
+    CallTranscript,
+    CallTranscriptService,
+    TranscriptMessage,
+)
 from mindroom.call_transcripts.store import CallTranscriptStore
 from mindroom.config.calls import CallsConfig, CallTranscriptsConfig
 from mindroom.config.main import Config
@@ -144,6 +149,38 @@ async def test_the_service_reads_rooms_through_the_router_only_while_it_is_bound
     coordinator.unbind()
     assert await _room_cannot_be_checked(service)
     await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_calls_thread_is_titled_again_by_the_bound_router_only(tmp_path: Path) -> None:
+    """The router titles the thread now, whatever its count, as after its own replies; unbound, nobody does."""
+    config = _config(enabled=True)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), lambda: config, _Sleeps())
+    service = coordinator.service()
+    assert service is not None
+    router = _router()
+    transcript = CallTranscript(call_id="call1", room_id=ROOM, duration_seconds=60, turns=(), names={})
+    message = TranscriptMessage(
+        room_id=ROOM,
+        call_id="call1",
+        row_event_id="$row",
+        body="We planned the launch.",
+        transcript=transcript,
+    )
+
+    service._room.title_thread(message, "$notes")
+    coordinator.bind_if_ready(config, _bots(router))
+    service._room.title_thread(message, "$notes")
+    coordinator.unbind()
+    service._room.title_thread(message, "$notes")
+    await coordinator.stop()
+
+    router.post_response_effects.retitle_thread.assert_called_once_with(
+        ROOM,
+        "$row",
+        event_id="$notes",
+        body="We planned the launch.",
+    )
 
 
 @pytest.mark.asyncio

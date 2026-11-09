@@ -194,7 +194,7 @@ def _paused_with_committed_presentation(
 
 
 def _resumed_reply() -> UnfinishedStreamedReply | None:
-    """Return what the stopped attempt at the current span's reply showed, which this attempt streams below."""
+    """Return what the stopped attempt at the current span's reply showed, which this attempt continues below."""
     handle = current_span()
     return None if handle is None else handle.resumed
 
@@ -1087,8 +1087,8 @@ class ResponseRunner:
         A restart, whether a crash, an orderly shutdown, an entity replacement
         or an approved run cut short, leaves the reply streaming and its sources
         pending, so replay claims that reply. Its records say what the stopped
-        attempt may have shown, which stays in the message with the new attempt
-        streaming below it, and every tool call it made, shown or not. The same
+        attempt may have shown, which stays in the message with the new attempt's
+        answer below it, and every tool call it made, shown or not. The same
         account goes into the new attempt's prompt, where later turns keep it.
         """
         handle = current_span()
@@ -1718,10 +1718,10 @@ class ResponseRunner:
     async def _generate_and_settle(self, turn: _LockedTurn) -> None:
         """Generate a prepared turn's reply, streamed or delivered whole, and settle its lifecycle once."""
         request = turn.request
-        # A resumed reply is a stream, and a whole answer would replace what it already showed.
-        use_streaming = _resumed_reply() is not None or (
-            not request.quiet
-            and await should_use_streaming(
+        # A quiet turn never streams. Otherwise a resumed reply streams below what its stopped attempt showed.
+        use_streaming = not request.quiet and (
+            _resumed_reply() is not None
+            or await should_use_streaming(
                 self.locked.client(),
                 request.room_id,
                 requester_user_id=request.user_id,

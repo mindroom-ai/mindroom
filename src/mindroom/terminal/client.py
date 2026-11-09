@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal
 import aiohttp
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from mindroom.agent_cli.shell_contract import unbound_agent_cli_shell_env
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.http_error_detail import validation_error_detail
 from mindroom.logging_config import get_logger
@@ -93,11 +93,11 @@ class _TerminalInput:
 
     async def open(self, connect: _Connect, line: TerminalLine) -> aiohttp.ClientWebSocketResponse:
         """Return the open connection, first opening one; the runner may not have read what one it ended carried."""
-        if self._websocket is not None and not self._websocket.closed:
-            return self._websocket
         if self._websocket is not None:
+            if not self._websocket.closed:
+                return self._websocket
             line.lost()
-        await self.close()
+            await self.close()
         client, self._websocket = await connect()
         self._reader = asyncio.create_task(_drained(client, self._websocket), name="terminal-input-reader")
         return self._websocket
@@ -129,12 +129,19 @@ _inputs: weakref.WeakKeyDictionary[TerminalLine, _TerminalInput] = weakref.WeakK
 class TerminalStream:
     """One attached viewer: the scrollback, then live output, then the shell's exit; and its keys and size."""
 
-    def __init__(self, websocket: aiohttp.ClientWebSocketResponse, line: TerminalLine, connect: _Connect) -> None:
+    def __init__(
+        self,
+        websocket: aiohttp.ClientWebSocketResponse,
+        line: TerminalLine,
+        typing: _TerminalInput,
+        connect: _Connect,
+    ) -> None:
         self._websocket = websocket
+        self._typing = typing
         self._connect = connect
         self.line = line
         """The terminal's line, which this viewer's typing and the prompts it reads update."""
-        self.prompt: int | None = None
+        self.prompt = 0
         """The number of the last prompt mark this viewer read."""
         self._marks = PromptMarks()
 
@@ -160,7 +167,7 @@ class TerminalStream:
         if len(data) > MAX_INPUT_CHARS:
             raise TerminalError(413, f"Type at most {MAX_INPUT_CHARS} characters at once; send a long text in parts.")
         async with self.line.lock:
-            websocket = await _inputs[self.line].open(self._connect, self.line)
+            websocket = await self._typing.open(self._connect, self.line)
             if empty_line and not self.line.empty:
                 raise TerminalError(409, "The terminal's shell is not waiting at an empty prompt.")
             awaited = self.line.awaited
@@ -175,7 +182,7 @@ class TerminalStream:
     async def resize(self, cols: int, rows: int) -> None:
         """Change the terminal's size."""
         async with self.line.lock:
-            websocket = await _inputs[self.line].open(self._connect, self.line)
+            websocket = await self._typing.open(self._connect, self.line)
             await _typed(websocket, {"type": "resize", "cols": cols, "rows": rows})
 
 
@@ -259,7 +266,7 @@ class WorkerTerminals:
 
     async def _worker(self, *, start: bool) -> WorkerCall | None:
         try:
-            return await asyncio.to_thread(worker_call, self.stand_ins, "run_shell_command", start=start)
+            return await asyncio.to_thread(worker_call, self.stand_ins, SHELL_FUNCTION, start=start)
         except (RuntimeError, OSError) as error:
             raise TerminalError(503, f"The agent's worker is unavailable: {error}") from None
 
@@ -318,7 +325,7 @@ class WorkerTerminals:
         typing.viewers += 1
         keepalive = asyncio.create_task(self._keep_worker(), name="terminal-worker-keepalive")
         try:
-            yield TerminalStream(websocket, line, connect)
+            yield TerminalStream(websocket, line, typing, connect)
         finally:
             typing.viewers -= 1
             keepalive.cancel()
