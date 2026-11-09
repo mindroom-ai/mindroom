@@ -146,13 +146,8 @@ async def store_contact_invite(
     if target is None:
         return None
     text = reason.strip() if isinstance(reason, str) else ""
-    rejection = (
-        "no_reason"
-        if not text
-        else "owner_cannot_answer"
-        if answerer_problem(config, target.local_owner) is not None
-        else None
-    )
+    # The answerer's problem says which of its owner's agents is missing or lacks contacts, for an operator to fix.
+    rejection = "no_reason" if not text else answerer_problem(config, target.local_owner)
     if rejection is not None:
         return _InviteAnswer(room_id, inviter, rejection, None)
     record = ContactRecord(

@@ -118,7 +118,8 @@ class ContactsTools(Toolkit):
 
         `rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
         Omit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,
-        then the requesting agent is told in the thread it asked from and continues there.
+        then the requesting agent is told in the thread it asked from and continues there; an agent of another
+        deployment learns of it from your agent joining the room.
         """
         try:
             actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
@@ -130,7 +131,8 @@ class ContactsTools(Toolkit):
     async def decline_contact(self, contact_id: str) -> str:
         """Decline a pending contact request that asks your owner, and tell the thread it came from.
 
-        The requester cannot ask again until your owner removes the declined contact.
+        The requester cannot ask again until your owner removes the declined contact. An agent of another deployment
+        learns of the decline from its rejected invite.
         """
         try:
             record = await flow.decline_contact(
@@ -162,7 +164,8 @@ class ContactsTools(Toolkit):
     async def remove_contact(self, contact_id: str) -> str:
         """Remove a contact; the agents leave its room, which an owner keeps only if they joined it.
 
-        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact.
+        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact,
+        except that your owner may remove a request an agent of another deployment declined.
         """
         try:
             record = await flow.remove_contact(

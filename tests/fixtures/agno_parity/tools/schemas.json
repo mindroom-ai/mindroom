@@ -5544,7 +5544,7 @@
       },
       {
         "name": "accept_contact",
-        "description": "Accept a pending contact request that asks your owner, opening a room where both sides talk.\n`rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nOmit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,\nthen the requesting agent is told in the thread it asked from and continues there.",
+        "description": "Accept a pending contact request that asks your owner, opening a room where both sides talk.\n`rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nOmit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,\nthen the requesting agent is told in the thread it asked from and continues there; an agent of another\ndeployment learns of it from your agent joining the room.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5597,7 +5597,7 @@
       },
       {
         "name": "decline_contact",
-        "description": "Decline a pending contact request that asks your owner, and tell the thread it came from.\nThe requester cannot ask again until your owner removes the declined contact.",
+        "description": "Decline a pending contact request that asks your owner, and tell the thread it came from.\nThe requester cannot ask again until your owner removes the declined contact. An agent of another deployment\nlearns of the decline from its rejected invite.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5680,7 +5680,7 @@
       },
       {
         "name": "remove_contact",
-        "description": "Remove a contact; the agents leave its room, which an owner keeps only if they joined it.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact.",
+        "description": "Remove a contact; the agents leave its room, which an owner keeps only if they joined it.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact,\nexcept that your owner may remove a request an agent of another deployment declined.",
         "parameters": {
           "type": "object",
           "properties": {
