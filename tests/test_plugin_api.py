@@ -471,7 +471,15 @@ _MEMBERS = {
         "modes": "(self)",
         "set_modes": "(self, *, thread, reply)",
         "history": "(self)",
+        "terminals": "(self, workspace, *, create)",
     },
+    "mindroom.plugin_http.WorkerTerminals": {
+        "open": "(self, *, cols, rows, cwd)",
+        "sessions": "(self)",
+        "close": "(self, session_id)",
+        "attach": "(self, session_id)",
+    },
+    "mindroom.terminal.client.TerminalStream": {"send_input": "(self, data, *, empty_line)"},
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
     "mindroom.plugin_http.WorkerRelay": {
         "http": "(self, method, path, *, service, port, headers, body)",
@@ -577,7 +585,9 @@ _HTTP_EXPORTS = [
     "RoomModes",
     "RoomPower",
     "RoomReader",
+    "TerminalError",
     "WorkerRelay",
+    "WorkerTerminals",
     "client_origins",
     "client_rooms",
     "client_stream",
@@ -627,7 +637,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 25), "b83a38f4bba0e0a18ffff3fa97ee171861386ea989c4a35d148dd496f402bf84")
+_PINNED_VERSION = ((1, 26), "29dea8786d155d5f580910195e5efe34516497dd57d8dc94aa16fe09412a95e5")
 
 
 def _is_enum(obj: object) -> bool:
