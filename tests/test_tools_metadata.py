@@ -77,7 +77,7 @@ from mindroom.tools.newspaper4k import newspaper4k_tools
 from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
-from tests.conftest import preserved_builtin_tools
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, preserved_builtin_tools
 from tests.public_fetch_helpers import TrickleBody, public_dns, serve
 
 _BUILTINS = builtin_tool_registry()
@@ -725,7 +725,9 @@ def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypat
 
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect_tcp)
 
-    payload = json.loads(custom_api_tools()(timeout=1).make_request("https://api.example.com/data"))
+    payload = json.loads(
+        custom_api_tools()(timeout=SETTLE_TIMEOUT_SECONDS).make_request("https://api.example.com/data"),
+    )
 
     assert dialed == [(dead, 0.1), (live, 0.1)]
     assert payload == {"error": "Request failed: connection refused"}

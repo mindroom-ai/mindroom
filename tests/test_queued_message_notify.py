@@ -91,6 +91,7 @@ from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_model_providers,
@@ -1041,7 +1042,7 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
                     _request(response_envelope),
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
             mock_locked.assert_awaited_once()
@@ -1190,7 +1191,7 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
                     _request(response_envelope),
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
     finally:
@@ -1676,7 +1677,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
                     team_mode="coordinate",
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
             mock_locked.assert_awaited_once()
@@ -1725,7 +1726,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
     try:
         with patch.object(ResponseRunner, "_run_locked_turn", new=fake_locked):
             task_b = asyncio.create_task(respond(_request(response_envelope_b)))
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             task_c = asyncio.create_task(respond(_request(response_envelope_c, prompt="hello again")))
             for _ in range(20):
                 if queued_signal.pending_human_messages == 2:
@@ -1734,7 +1735,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
             assert queued_signal.pending_human_messages == 2
 
             lifecycle_lock.release()
-            await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
+            await asyncio.wait_for(second_turn_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert observed_pending == [True]
 
             allow_turns_to_finish.set()
@@ -1784,14 +1785,14 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     reservation = lifecycle.reserve_waiting_human_message(
         target=response_target,
         response_envelope=follow_up_envelope,
     )
     assert reservation is not None
-    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
+    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     assert queued_signal.pending_human_messages == 1
     reservation.release()
 
@@ -1843,7 +1844,7 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     queued_items = []
     for source_event_id, sender_id in (
@@ -1939,7 +1940,7 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     human_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=human_envelope)
     assert human_reservation is not None

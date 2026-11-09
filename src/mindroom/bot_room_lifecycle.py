@@ -593,13 +593,7 @@ class BotRoomLifecycle:
                 memberships,
             )
 
-        if allowed():
-            return True
-        memberships.reread_room(room_id)
-        # A refresh already in flight may have listed the router's rooms before this join, so a second one follows it.
-        for _ in range(2):
-            await self.deps.refresh_memberships()
-        return allowed()
+        return allowed() or await memberships.refresh_reading_room(room_id, self.deps.refresh_memberships, allowed)
 
     async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""

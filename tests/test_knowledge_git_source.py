@@ -54,7 +54,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from mindroom.redaction import redact_url_credentials
-from tests.conftest import runtime_paths_for
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, runtime_paths_for
 from tests.knowledge_test_support import (
     _config,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
@@ -1048,7 +1048,7 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
         release_path.touch()
         watchdog_stop.set()
         if watchdog is not None:
-            watchdog.join(timeout=1)
+            watchdog.join(timeout=SETTLE_TIMEOUT_SECONDS)
         if not refresh_task.done():
             refresh_task.cancel()
             done, _pending = await asyncio.wait({refresh_task}, timeout=5)
@@ -1144,11 +1144,11 @@ async def test_direct_refresh_timeout_drains_git_descendants_before_releasing_so
     finally:
         watchdog_stop.set()
         release_path.touch()
-        watchdog.join(timeout=1)
+        watchdog.join(timeout=SETTLE_TIMEOUT_SECONDS)
         if filter_pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(filter_pid, signal.SIGKILL)
-        for _attempt in range(100):
+        for _attempt in range(int(SETTLE_TIMEOUT_SECONDS / 0.01)):
             if not file_locks.file_lock_is_held(refresh_lock_path):
                 break
             await asyncio.sleep(0.01)

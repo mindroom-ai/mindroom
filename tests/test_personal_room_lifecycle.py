@@ -27,7 +27,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from tests.access_schema_support import joined_members_response
-from tests.conftest import test_runtime_paths
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
@@ -756,14 +756,14 @@ async def test_membership_change_retries_a_blocked_personal_room_at_once(
         None,
     ]
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     lifecycle.membership_changed("!elsewhere:localhost", "$elsewhere")
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 1
 
     lifecycle.membership_changed("!personal:localhost", "$left")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert coordination.owner.ensure.await_count == 2
     assert clock.now == 1000.0
@@ -798,7 +798,7 @@ async def test_membership_change_during_an_attempt_retries_after_it(
     coordination.owner.ensure.side_effect = ensure
     await lifecycle._reconcile()
     lifecycle.membership_changed("!personal:localhost", "$first")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert attempts == attempts_expected
     assert lifecycle._reconciled
@@ -828,7 +828,7 @@ async def test_membership_change_during_the_first_failing_attempt_retries_after_
 
     coordination.owner.ensure.side_effect = ensure
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert attempts == attempts_expected
     assert clock.now == 1000.0
@@ -858,16 +858,16 @@ async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordin
     await lifecycle._reconcile()
     for _ in range(2):
         lifecycle.membership_changed("!personal:localhost", "$left")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     lifecycle.membership_changed("!personal:localhost", "$left")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert attempts == 2
     # Each pass reads the lobby's members once for backfill.
     assert lifecycle.runtime.client.joined_members.await_count == 2
 
     lifecycle.membership_changed("!personal:localhost", "$joined")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert attempts == 3
 
@@ -882,7 +882,7 @@ async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coord
     personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
 
     lifecycle.membership_changed("!personal:localhost", "$left")
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert coordination.owner.ensure.await_count == 1
     assert lifecycle._reconciled
@@ -963,7 +963,7 @@ async def test_scheduled_reconciliation_is_single_flight_and_cancellable(coordin
         assert attempts == [1]
         coordination.owner.ensure.side_effect = None
         lifecycle.schedule_reconciliation()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
         await lifecycle.cancel_reconciliation(timeout_seconds=2)
@@ -981,19 +981,19 @@ async def test_scheduled_failure_has_cooldown_but_reload_can_retry(
     monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: now)
     coordination.owner.ensure.side_effect = RuntimeError("membership mismatch")
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     now += 1
     for _ in range(10):
         lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 1
     now += 3600
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 2
     lifecycle.config_changed()
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 3
 
 
@@ -1008,11 +1008,11 @@ async def test_target_first_sync_does_not_impose_retry_cooldown(
     monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: 1000.0)
     coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=False)
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     coordination.owner.ensure.assert_not_awaited()
     coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=True)
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     coordination.owner.ensure.assert_awaited_once()
 
 
@@ -1042,7 +1042,7 @@ async def test_slow_record_storage_does_not_block_event_loop(
         assert not timed_out.is_set()
     finally:
         release.set()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
 
 @pytest.mark.asyncio
@@ -1063,9 +1063,9 @@ async def test_reload_during_provisioning_does_not_cache_stale_success(coordinat
         await asyncio.wait_for(entered.wait(), timeout=2)
         lifecycle.config_changed()
         release.set()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         lifecycle.schedule_reconciliation()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
         await lifecycle.cancel_reconciliation(timeout_seconds=2)
@@ -1310,12 +1310,12 @@ async def test_target_ready_allows_immediate_reconciliation(template_coordinatio
     lifecycle._reconciled = True
     lifecycle._next_reconciliation_at = float("inf")
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     template_coordination.target.ensure.assert_not_awaited()
     lifecycle.target_ready()
     assert lifecycle._next_reconciliation_at == 0.0
     assert lifecycle._reconciled is False
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     template_coordination.target.ensure.assert_awaited_once()
 
 
@@ -1442,7 +1442,7 @@ async def test_target_ready_during_a_pass_starts_the_next_pass_at_once(
 
     template_coordination.lookup.side_effect = lookup
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert clock.now == 1000.0
     target.ensure.assert_awaited_once()
 

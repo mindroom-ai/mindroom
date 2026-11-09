@@ -477,6 +477,7 @@ Matrix sync callback
 | `matrix/projected_thread_membership.py` | Thread-root proofs for tools and outbound mutations, read from the conversation projection like turns |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
+| `matrix/joined_members.py` | A room's joined members, read again while the durable client refuses a read that a membership change raced |
 | `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |

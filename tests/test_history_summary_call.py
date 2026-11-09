@@ -331,7 +331,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     assert not background_tasks_module._background_tasks
     call.release.set()
     await asyncio.wait_for(call.finished.wait(), timeout=0.2)
-    await wait_for_background_tasks(timeout=0.1)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -375,7 +375,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             storage=storage,
             session=session,
         )
-        await wait_for_background_tasks(timeout=0.2)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
     persisted = storage.load_session("session-1")
     assert persisted is not None

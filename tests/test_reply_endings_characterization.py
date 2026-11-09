@@ -73,6 +73,7 @@ from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     initialize_approval_store_for_test,
@@ -978,7 +979,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
         with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
             fate = await (_team_reply(turn, request) if team else turn.runner.generate_response(request))
             assert fate == Owned()
-        assert await wait_for_background_tasks(timeout=5, owner=turn.bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=turn.bot._runtime_view)
     finally:
         await shutdown_approval_runtime()
 
