@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -22,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.plugin_check import check_plugin
 from mindroom.plugin_lifecycle import PluginLifespans
+from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import bind_runtime_paths, publish_test_plugins
@@ -142,6 +145,15 @@ def _api_app(tmp_path: Path, *names: str, **env: str) -> FastAPI:
     )
     mount_plugin_routes(app)
     return app
+
+
+class _Records(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 def _client(app: FastAPI, host: str) -> TestClient:
@@ -355,6 +367,14 @@ def test_a_broken_origin_module_costs_only_the_origins(tmp_path: Path, source: s
     assert _client(app, "localhost").get("/ask", params={"domain": "yes.demo.localhost"}).status_code == 404
 
 
+def test_the_testing_kit_fails_on_a_broken_origin_module(tmp_path: Path) -> None:
+    """A plugin's own tests fail on an origin module MindRoom would serve without."""
+    root = _write(tmp_path, "demo", origin="x = 1\n")
+
+    with pytest.raises(PluginValidationError, match="must define router"), load_plugin(root, tmp_path / "kit"):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
     """With ``MINDROOM_PLUGIN_ORIGIN_PORT`` unset, no listener starts."""
@@ -370,7 +390,11 @@ async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: Path) -> None:
-    """The listener serves an origin websocket, which closes with 1012 once a reload replaces its plugin."""
+    """The listener serves an origin websocket, which closes with 1012 once a reload replaces its plugin.
+
+    Another host's handshake gets a plain 404, and the listener logs no request line, whose query may hold a one-use link,
+    while the API's access log stays on.
+    """
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -382,13 +406,19 @@ async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: 
     lifespans = PluginLifespans(snapshot.runtime_paths, lambda: config)
     await lifespans.apply_published()
     url = f"ws://127.0.0.1:{port}/live"
+    # The API's server, configured first, writes an access log.
+    uvicorn.Config(app, log_level="info")
 
     async with (
         serve_plugin_origins(snapshot.runtime_paths, host="127.0.0.1", api_app=app, log_level="INFO"),
         aiohttp.ClientSession() as client,
     ):
+        assert logging.getLogger("uvicorn.access").handlers
         websocket = await client.ws_connect(url, headers={"Host": "x.demo.localhost"})
         assert await websocket.receive_str(timeout=5) == "v1"
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(url, headers={"Host": "x.missing.localhost"})
+        assert refused.value.status == 404
 
         _write(tmp_path, "demo", origin=ORIGIN.replace("VERSION = 1", "VERSION = 2"))
         publish_test_plugins(config, snapshot.runtime_paths)
@@ -399,5 +429,16 @@ async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: 
         websocket = await client.ws_connect(url, headers={"Host": "x.demo.localhost"})
         assert await websocket.receive_str(timeout=5) == "v2"
         await websocket.close()
+        access = _Records()
+        logging.getLogger("uvicorn.access").addHandler(access)
+        try:
+            async with client.get(
+                f"http://127.0.0.1:{port}/?link=secret",
+                headers={"Host": "x.demo.localhost"},
+            ) as page:
+                assert page.status == 200
+        finally:
+            logging.getLogger("uvicorn.access").removeHandler(access)
+        assert [record.getMessage() for record in access.records] == []
         assert config_plugins(config, snapshot.runtime_paths).loaded_plugins[0].origin_app is not None
     await lifespans.stop()

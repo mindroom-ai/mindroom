@@ -1809,7 +1809,7 @@ async def enter(request: Request, link: str) -> Response:
     SESSIONS[session] = app
     # The app's first page loads from this host's own page, so it is a same-origin navigation too.
     response = HTMLResponse('<meta http-equiv="refresh" content="0;url=/">')
-    response.set_cookie(COOKIE, session, secure=True, httponly=True, samesite="none", partitioned=True)
+    response.headers.append("set-cookie", f"{COOKIE}={session}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
     return response
 
 
@@ -2030,7 +2030,7 @@ async def test_hook(plugin):
 
 | Call | What it does |
 | --- | --- |
-| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
+| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes, origin, or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
 | `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room the router is joined to and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's. The router is a member too and test rooms have no name, so MindRoom also counts a room where one member is alone with the router as direct. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
 | `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given, which works until the block ends. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
 | `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |

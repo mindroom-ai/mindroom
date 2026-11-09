@@ -572,8 +572,8 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     Unchanged plugins stay as installed, and each module of a plugin whose tools, hooks, or OAuth module changed
     executes again, on every worker request, ending the tasks of the modules they replace. The generation only grows
     or refreshes, so another request's config keeps the plugins it loaded; a plugin that fails to load leaves it until
-    it loads again. Workers serve no HTTP routes and run no lifespans, so they never load routes or lifecycle modules
-    themselves.
+    it loads again. Workers serve no HTTP routes or origins and run no lifespans, so they never load routes, origin, or
+    lifecycle modules themselves.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 

@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 from pydantic_core import PydanticCustomError
+from uvicorn.protocols.http.auto import AutoHTTPProtocol
 
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
@@ -252,6 +253,17 @@ class _GatewayListenerServer(uvicorn.Server):
         return self.stop_requested or await super().on_tick(counter)
 
 
+class _UnloggedHTTPProtocol(AutoHTTPProtocol):  # ty: ignore[unsupported-base] - Uvicorn's HTTP protocol for this install
+    """Uvicorn's HTTP protocol, writing no access log for its listener alone.
+
+    Uvicorn's own ``access_log=False`` empties the process-wide access logger, so the API's access log would stop too.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.access_log = False
+
+
 def listener_port(runtime_paths: RuntimePaths, env_name: str) -> int | None:
     """Return the TCP port ``env_name`` sets, None while it is unset, or raise ``ValueError`` for any other value."""
     raw_port = (runtime_paths.env_value(env_name) or "").strip()
@@ -284,8 +296,8 @@ async def serve_listener(
             app,
             lifespan="off",
             log_level=log_level.lower(),
+            http="auto" if access_log else _UnloggedHTTPProtocol,
             ws=ws,
-            access_log=access_log,
             timeout_graceful_shutdown=_LISTENER_SHUTDOWN_GRACE_SECONDS,
         ),
     )
