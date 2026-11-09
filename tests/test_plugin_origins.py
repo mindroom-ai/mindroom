@@ -26,7 +26,7 @@ from mindroom.plugin_check import check_plugin
 from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
-from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepare_plugins, refresh_plugins
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 
 if TYPE_CHECKING:
@@ -208,6 +208,7 @@ def test_a_raising_origin_route_answers_500_without_its_detail(tmp_path: Path) -
         "localhost",
         "x.demo.example.org",  # another domain
         "x_y.demo.localhost",  # not a DNS label
+        "x.demo",  # outside the domain
     ],
 )
 def test_hosts_that_are_no_published_plugins_origin_answer_404(tmp_path: Path, host: str) -> None:
@@ -302,12 +303,12 @@ def test_ask_is_answered_only_off_plugin_hosts(tmp_path: Path) -> None:
 
 def test_plugin_origin_url_names_the_calling_plugins_host(tmp_path: Path) -> None:
     """An API route links to its own plugin's host, and answers 503 while origins are off."""
-    _write(tmp_path, "demo", routes=ROUTES)
+    _write(tmp_path, "linker", routes=ROUTES)
 
-    on = TestClient(_api_app(tmp_path, "demo")).get("/api/plugins/demo/link")
-    off = TestClient(_api_app(tmp_path, "demo", MINDROOM_PLUGIN_ORIGIN_PORT="")).get("/api/plugins/demo/link")
+    on = TestClient(_api_app(tmp_path, "linker")).get("/api/plugins/linker/link")
+    off = TestClient(_api_app(tmp_path, "linker", MINDROOM_PLUGIN_ORIGIN_PORT="")).get("/api/plugins/linker/link")
 
-    assert (on.status_code, on.json()) == (200, {"url": "http://item-1.demo.localhost:9100"})
+    assert (on.status_code, on.json()) == (200, {"url": "http://item-1.linker.localhost:9100"})
     assert (off.status_code, off.json()) == (503, {"detail": "Plugin origins are off."})
 
 
@@ -365,6 +366,21 @@ def test_a_broken_origin_module_costs_only_the_origins(tmp_path: Path, source: s
     assert TestClient(app).get("/api/plugins/demo/link").status_code == 200
     assert _client(app, "x.demo.localhost").get("/").status_code == 404
     assert _client(app, "localhost").get("/ask", params={"domain": "yes.demo.localhost"}).status_code == 404
+
+
+def test_a_worker_load_never_imports_the_origin_module(tmp_path: Path) -> None:
+    """Only the primary serves origins, so a worker's load leaves the module alone, which the primary's imports."""
+    _write(tmp_path, "demo", origin="raise RuntimeError('origin module imported')\n")
+    runtime_paths = _paths(tmp_path)
+    config = bind_runtime_paths(Config(plugins=["./plugins/demo"]), runtime_paths)
+
+    [plugin] = refresh_plugins(config, runtime_paths).loaded_plugins
+    assert (plugin.origin_app, plugin.origin_error) == (None, None)
+
+    generation = prepare_plugins(config, runtime_paths)
+    dispose_plugins(generation)
+    [plugin] = generation.plugins.values()
+    assert "origin module imported" in str(plugin.origin_error)
 
 
 def test_the_testing_kit_fails_on_a_broken_origin_module(tmp_path: Path) -> None:

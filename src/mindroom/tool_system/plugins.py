@@ -853,7 +853,6 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
                 plugin_name=plugin.name,
                 error=str(error),
             )
-            origin_serves = None
             origin_error = error
     lifespan: PluginLifespan | None = None
     lifespan_error: plugin_imports.PluginValidationError | None = None
