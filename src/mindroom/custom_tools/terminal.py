@@ -197,11 +197,11 @@ class TerminalTools(Toolkit):
             if runtime_config is None or identity is None or agent_name is None
             else agent_terminals(agent_name, runtime_config, runtime_paths, identity, create=True)
         )
-        restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
-        typing = () if restricted else (self.terminal_open, self.terminal_run, self.terminal_send)
+        self._restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
+        typing = () if self._restricted else (self.terminal_open, self.terminal_run, self.terminal_send)
         super().__init__(
             tools=(*typing, self.terminal_read, self.terminal_list) if self._terminals is not None else (),
-            instructions=_READ_ONLY if restricted else None,
+            instructions=_READ_ONLY if self._restricted else None,
         )
 
     @property
@@ -340,7 +340,9 @@ class TerminalTools(Toolkit):
         except TerminalError as error:
             return _refused(error)
         if not sessions:
-            return "No terminals are open. Open one with terminal_open."
+            return (
+                "No terminals are open." if self._restricted else "No terminals are open. Open one with terminal_open."
+            )
         return "\n".join(
             f"- {info.id}: {'running' if info.alive else f'exited with status {info.exit_code}'}" for info in sessions
         )

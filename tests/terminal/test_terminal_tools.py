@@ -78,6 +78,7 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     """A run waits for the shell's prompt and reports the exit status; keys reach whatever runs in the terminal."""
     paths = primary_paths(tmp_path, runner)
     functions = _functions(_config(paths, ["shell", "terminal"]), paths)
+    assert await _call(functions["terminal_list"]) == "No terminals are open. Open one with terminal_open."
     session_id = await _open(functions)
 
     assert await _call(functions["terminal_run"], session_id=session_id, command="echo hi; false") == (
@@ -187,6 +188,8 @@ async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve
     config = _config(paths, ["shell", "terminal"], {"default": "require_approval"})
     functions = _functions(config, paths)
     assert sorted(functions) == ["terminal_list", "terminal_read"]
+    # Nor is it told to open one.
+    assert await _call(functions["terminal_list"]) == "No terminals are open."
 
     # The agent CLI, through the catalog of the response it belongs to.
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
