@@ -9854,7 +9854,9 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "openbb"
+        "openbb",
+        "polars",
+        "pyarrow"
       ],
       "description": "Get stock prices, company news, price targets, and company profiles from OpenBB financial platform",
       "display_name": "OpenBB",

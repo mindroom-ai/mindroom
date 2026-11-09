@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from importlib import metadata as importlib_metadata
+from importlib import util as importlib_util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -43,7 +45,6 @@ from mindroom.tool_system.dependencies import (
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, plugin_module_registrations
-from mindroom.tools.openbb import openbb_tools
 from tests.conftest import register_test_tool
 
 _BUILTINS = builtin_tool_registry()
@@ -69,30 +70,60 @@ def _base_dependency_names() -> set[str]:
     return {canonicalize_name(Requirement(dependency).name) for dependency in pyproject["project"]["dependencies"]}
 
 
-@pytest.mark.parametrize("existing_value", [None, "true"])
-def test_openbb_tool_import_disables_auto_build(monkeypatch: pytest.MonkeyPatch, existing_value: str | None) -> None:
-    """OpenBB imports should disable upstream auto-build to avoid cross-process lock races."""
+_OPENBB_FIRST_CALL = textwrap.dedent(
+    """
+    from concurrent.futures import ThreadPoolExecutor
 
-    class DummyOpenBBTools:
-        pass
+    from openbb_core.app.model.obbject import OBBject
+    from openbb_core.provider.abstract.data import Data
 
-    def fake_import_module(module_name: str) -> SimpleNamespace:
-        assert module_name == "agno.tools.openbb"
-        assert os.environ["OPENBB_AUTO_BUILD"] == "false"
-        return SimpleNamespace(OpenBBTools=DummyOpenBBTools)
+    from mindroom.tools.openbb import openbb_tools
 
-    if existing_value is None:
-        monkeypatch.delenv("OPENBB_AUTO_BUILD", raising=False)
-    else:
-        monkeypatch.setenv("OPENBB_AUTO_BUILD", existing_value)
+    # Agents are built off the event loop, in a worker thread.
+    with ThreadPoolExecutor(1) as pool:
+        toolkit = pool.submit(lambda: openbb_tools()()).result()
+    assert hasattr(toolkit.obb, "equity"), "OpenBB command package was not built"
+    # The toolkit converts every result to polars, which needs pyarrow for text columns.
+    quotes = OBBject(results=[Data(symbol="AAPL", name="Apple"), Data(symbol="MSFT", name="Microsoft")])
+    print(quotes.to_polars().shape)
+    """,
+)
 
-    monkeypatch.setattr("mindroom.tools.openbb.importlib.import_module", fake_import_module)
 
-    assert openbb_tools() is DummyOpenBBTools
-    if existing_value is None:
-        assert "OPENBB_AUTO_BUILD" not in os.environ
-    else:
-        assert os.environ["OPENBB_AUTO_BUILD"] == existing_value
+def test_openbb_tool_builds_on_first_use_in_concurrent_processes(tmp_path: Path) -> None:
+    """Processes that load the OpenBB tool together from worker threads on a fresh install all reach its commands."""
+    installed = importlib_util.find_spec("openbb")
+    if installed is None or installed.origin is None:
+        pytest.skip("openbb extra is not installed")
+    # A copy of only the package's entry module is an OpenBB install that has never been built.
+    fresh_package = tmp_path / "openbb"
+    fresh_package.mkdir()
+    shutil.copy(installed.origin, fresh_package / "__init__.py")
+    env = {key: value for key, value in os.environ.items() if key != "OPENBB_AUTO_BUILD"}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    # Processes sharing one install can have different temporary directories, as worker tool subprocesses do.
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for index in range(2):
+            temp_dir = tmp_path / f"tmp-{index}"
+            temp_dir.mkdir()
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _OPENBB_FIRST_CALL],
+                    env={**env, "TMPDIR": str(temp_dir)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ),
+            )
+        outputs = [process.communicate(timeout=300)[0] for process in processes]
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
+
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    assert all(output.rstrip().endswith("(2, 2)") for output in outputs), outputs
 
 
 def test_tool_extras_in_sync_with_pyproject() -> None:
