@@ -59,7 +59,8 @@ def atomic_write_file_at(
         if replace:
             os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         else:
-            os.link(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            # Never through a link swapped in for the temporary file meanwhile.
+            os.link(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
         with suppress(OSError):
             os.fsync(directory_fd)
     finally:

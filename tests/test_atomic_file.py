@@ -70,3 +70,21 @@ def test_publishing_without_replace_makes_a_free_name_whole(tmp_path: Path) -> N
     assert (tmp_path / "artifact").read_bytes() == b"new"
     assert (tmp_path / "artifact").stat().st_nlink == 1
     assert sorted(p.name for p in tmp_path.iterdir()) == ["artifact"]
+
+
+def test_publishing_without_replace_never_links_what_a_swapped_in_link_leads_to(tmp_path: Path) -> None:
+    """A temporary file swapped for a link meanwhile is published as that link, never as the file it leads to."""
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"secret")
+    with (
+        open_directory_within_root(folder) as directory,
+        atomic_write_file_at(directory, "artifact", replace=False) as output,
+    ):
+        output.write(b"new")
+        (temp,) = folder.iterdir()
+        temp.unlink()
+        temp.symlink_to(secret)
+    assert (folder / "artifact").lstat().st_ino != secret.stat().st_ino
+    assert secret.stat().st_nlink == 1
