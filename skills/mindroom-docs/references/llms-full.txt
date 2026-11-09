@@ -5882,7 +5882,7 @@ The rules:
 - A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
 - A call's length runs to the last check-in or leave MindRoom recorded from anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down shows as shorter than it really was.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
-- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 240 a minute.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed or, once all of it has arrived, until 25 seconds after its upload began, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
 - A stretch said before the call ended is still added when it arrives within 30 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.
@@ -19420,6 +19420,7 @@ async def build_status(request: Request, agent_user_id: str, room: RoomReader = 
 Each call names exactly one of `service`, the name of one of the calling plugin's own worker services, or `port`, a port on the worker's loopback, and raises `ValueError` otherwise.
 `path` is percent-encoded and may carry a query; it always stays below the service or port, `..` included.
 `http()` never follows redirects or decompresses, and the relay keeps no cookies, so a route can pass an answer through as it came.
+`websocket()` never follows a redirect either: a handshake the app redirects raises `aiohttp.WSServerHandshakeError` with the app's status and headers, `Location` included.
 It sends only the `headers` and `protocols` the route passes: never pass on the client's `Authorization` header or its `mindroom-session.<session_token>` subprotocol, which carry its MindRoom session.
 A service gets its secret from the relay, and never one the route sends.
 The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.

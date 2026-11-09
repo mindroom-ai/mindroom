@@ -1748,13 +1748,14 @@ async def test_speech_must_be_a_wav_of_at_most_30_seconds_and_1_mb(world: World,
 
 
 @pytest.mark.asyncio
-async def test_one_stretch_in_flight_per_person(world: World) -> None:
+async def test_one_upload_at_a_time_per_person(world: World) -> None:
     """A second upload while the first is being transcribed is refused with when to try again."""
     world.transcriber.gate = asyncio.Event()
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
-    await world.service.reserve_upload(call.id, ANN)
+    reserved = await world.service.reserve_upload(call.id, ANN)
+    reserved.sent = True
     first = asyncio.create_task(world.say(call.id, ANN))
     await world.transcriber.started.wait()
 
@@ -1764,8 +1765,65 @@ async def test_one_stretch_in_flight_per_person(world: World) -> None:
     world.transcriber.gate.set()
 
     assert (await first).user_id == ANN
-    world.service.release_upload(ANN)
+    world.service.release_upload(ANN, reserved)
     await world.service.reserve_upload(call.id, ANN)
+
+
+@pytest.mark.asyncio
+async def test_an_upload_slot_is_free_again_25_seconds_after_it_was_taken(world: World) -> None:
+    """Chat gives up on an upload after 30 seconds, so a slot held 25 seconds is taken by the person's next stretch.
+
+    The stretch still being transcribed is written once it is, and giving its slot back frees none taken since.
+    """
+    world.transcriber.gate = asyncio.Event()
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(30)
+    stuck = await world.service.reserve_upload(call.id, ANN)
+    stuck.sent = True
+    first = asyncio.create_task(world.say(call.id, ANN))
+    await world.transcriber.started.wait()
+
+    world.clock.advance(24.9)
+    await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
+    world.clock.advance(0.1)
+    taken = await world.service.reserve_upload(call.id, ANN)
+    taken.sent = True
+    second = asyncio.create_task(world.say(call.id, ANN))
+    world.transcriber.gate.set()
+    lines = await asyncio.gather(first, second)
+    world.service.release_upload(ANN, stuck)
+
+    assert [line.text for line in lines] == ["Hello there", "Hello there"]
+    await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
+    world.service.release_upload(ANN, taken)
+    await world.service.reserve_upload(call.id, ANN)
+
+
+@pytest.mark.asyncio
+async def test_the_message_waits_for_each_of_a_persons_stretches_in_flight(world: World) -> None:
+    """With two of one person's stretches in flight, the first one written still leaves the message waiting."""
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(10)
+    first_gate = world.transcriber.gate = asyncio.Event()
+    first = asyncio.create_task(world.say(call.id, ANN))
+    await world.transcriber.started.wait()
+    world.transcriber.started.clear()
+    second_gate = world.transcriber.gate = asyncio.Event()
+    second = asyncio.create_task(world.say(call.id, ANN))
+    await world.transcriber.started.wait()
+
+    first_gate.set()
+    await first
+    await world.service.leave(call.id, ANN)
+    world.clock.advance(DELAY)
+    await world.tick()
+    assert world.room.transcripts == []
+    second_gate.set()
+    await second
+    await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.transcript.turns == (_Turn(sender=ANN, text="Hello there Hello there"),)
 
 
 @pytest.mark.asyncio
