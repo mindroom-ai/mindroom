@@ -15,7 +15,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
-- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent allows it.
+- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
