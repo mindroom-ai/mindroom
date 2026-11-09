@@ -1,10 +1,11 @@
-"""Public helpers for plugin HTTP routes."""
+"""Public helpers that plugin HTTP routes and plugin tools import."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager, suppress
+from collections import Counter
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, overload
@@ -56,7 +57,7 @@ from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
     from types import EllipsisType
 
     from mindroom.api.client_sessions import ClientSession
@@ -93,6 +94,11 @@ __all__ = [
 
 # A stream in a room rechecks its user's membership this long after each check.
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
+# Each stream holds a membership recheck and whatever its route attaches, such as a terminal or a workspace watcher;
+# a client opens a few streams for each room it shows, so a user rarely needs more than this many at once.
+_STREAMS_PER_USER = 16
+# Each user's open streams in this process, across every route on client_stream.
+_open_streams: Counter[str] = Counter()
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 _ROUTER_NOT_RUNNING = "The router is not running in this room."
@@ -136,10 +142,10 @@ async def client_stream(
     ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Given
     ``admit``, the route's own rule, sync or async, is then asked whether to let the user in. Before accepting, a
     refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for another origin or a
-    non-member, 503 when membership is unavailable or ``admit`` returns false. Once accepted with
-    ``mindroom-session``, the block is cancelled where it waits and the websocket closed with 4401 when the session
-    expires or is revoked, and given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails;
-    code after the block runs.
+    non-member, 503 when membership is unavailable, ``admit`` returns false, or the user already holds 16 open streams
+    across every route on ``client_stream``. Once accepted with ``mindroom-session``, the block is cancelled where it
+    waits and the websocket closed with 4401 when the session expires or is revoked, and given ``room_id``, with 1008
+    when a recheck finds the user gone or 1013 when one fails; code after the block runs.
     """
     if not allowed_client_origin(websocket):
         raise HTTPException(403, "Origin is not allowed.")
@@ -155,27 +161,42 @@ async def client_stream(
             raise HTTPException(503, "The route refused this stream; try again later.")
     # The session may have ended while membership was read or the route's check ran.
     offered_session(websocket)
-    await websocket.accept(subprotocol=SESSION_PROTOCOL)
-    stream = asyncio.timeout(None)
+    with _stream_slot(user.user_id):
+        await websocket.accept(subprotocol=SESSION_PROTOCOL)
+        stream = asyncio.timeout(None)
 
-    async def watch() -> tuple[int, str]:
-        end = await _stream_end(websocket, session, room_id)
-        # Cancels the block where it waits.
-        stream.reschedule(asyncio.get_running_loop().time())
-        return end
+        async def watch() -> tuple[int, str]:
+            end = await _stream_end(websocket, session, room_id)
+            # Cancels the block where it waits.
+            stream.reschedule(asyncio.get_running_loop().time())
+            return end
 
-    watcher = asyncio.create_task(watch())
+        watcher = asyncio.create_task(watch())
+        try:
+            async with stream:
+                yield user
+        except TimeoutError:
+            if not stream.expired():
+                raise
+            # The client may be gone already.
+            with suppress(RuntimeError, WebSocketDisconnect):
+                await websocket.close(*watcher.result())
+        finally:
+            watcher.cancel()
+
+
+@contextmanager
+def _stream_slot(user_id: str) -> Iterator[None]:
+    """Hold one of ``user_id``'s open streams, answering 503 when they hold the limit already."""
+    if _open_streams[user_id] >= _STREAMS_PER_USER:
+        raise HTTPException(503, "This user has too many open streams; close one and try again.")
+    _open_streams[user_id] += 1
     try:
-        async with stream:
-            yield user
-    except TimeoutError:
-        if not stream.expired():
-            raise
-        # The client may be gone already.
-        with suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.close(*watcher.result())
+        yield
     finally:
-        watcher.cancel()
+        _open_streams[user_id] -= 1
+        if not _open_streams[user_id]:
+            del _open_streams[user_id]
 
 
 async def _stream_end(websocket: WebSocket, session: ClientSession, room_id: str | None) -> tuple[int, str]:

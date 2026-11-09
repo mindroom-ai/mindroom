@@ -65,7 +65,7 @@ Routes under `/api/rooms/{room_id}` sign the caller in with a client session as 
 | `DELETE /agents/{agent_user_id}/terminals/{id}` | none | `204`; `403` without `type`; `404` for an ID that is not one of the workspace's terminals |
 | `WS /agents/{agent_user_id}/terminals/{id}` | none | the stream below |
 
-The stream signs in with `client_stream`, sends `{"type": "writable", "writable"}` first and whenever it changes, the scrollback and live output as binary frames, and `{"type": "exit", "code"}` before it closes with 1000 when the shell exits.
+The stream signs in with `client_stream`, holding one of the user's 16 open streams, sends `{"type": "writable", "writable"}` first and whenever it changes, the scrollback and live output as binary frames, and `{"type": "exit", "code"}` before it closes with 1000 when the shell exits.
 It takes `{"type": "input", "data"}` with at most 16384 characters, so a client sends a long paste in parts, and `{"type": "resize", "cols", "rows"}`, dropping both while the viewer may only watch, and closes with 1003 on any other frame.
 Every 15 seconds, as the Computer's stream does, it rechecks `agent()` under the config served then: losing `type` sends `writable: false`, an agent no longer open to the caller or a moved `root` closes it with 1008, and a check that cannot be answered closes it with 1013, which the client may retry.
 It also closes with 1008 for an agent whose `terminal` is `none` and for a terminal the workspace does not have, and with 1013 when the terminal's own stream ended, after which the client attaches again.
