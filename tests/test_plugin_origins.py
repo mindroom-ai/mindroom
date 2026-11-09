@@ -332,11 +332,12 @@ def test_plugin_origin_url_names_the_calling_plugins_host(tmp_path: Path) -> Non
 
 
 def test_plugin_origin_url_refuses_a_plugin_without_origins(tmp_path: Path) -> None:
-    """A plugin without an origin module gets no URL, which nothing would serve."""
+    """A plugin without an origin module gets no URL, which nothing would serve, though another plugin has one."""
     _write(tmp_path, "linker", routes=ROUTES)
+    _write(tmp_path, "demo", origin=EMPTY_ORIGIN)
 
     with pytest.raises(RuntimeError, match="Plugin 'linker' has no origin_module"):
-        TestClient(_api_app(tmp_path, "linker")).get("/api/plugins/linker/link")
+        TestClient(_api_app(tmp_path, "linker", "demo")).get("/api/plugins/linker/link")
 
 
 @pytest.mark.parametrize(
