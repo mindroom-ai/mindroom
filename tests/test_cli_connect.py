@@ -1519,8 +1519,9 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
     # A server name that is also an emoji code, such as `office`, is part of a valid Matrix user ID.
     lan_owner = "@alice:office:8448"
 
-    provisioning_url = f"https://provisioning.example/:rocket:/{'a-long-path-segment-' * 3}"
-    approve_url = f"https://chat.example/connect?code=ABCD-EFGH&from=:rocket:{'-a-long-query-value' * 3}"
+    # After a port, Rich would read `:rocket:` in a URL as an emoji code.
+    provisioning_url = f"https://provisioning.example:8443/:rocket:/{'a-long-path-segment-' * 3}"
+    approve_url = f"https://chat.example:8443/connect?code=ABCD-EFGH&from=:rocket:{'-a-long-query-value' * 3}"
 
     def pair(owner_user_id: str, *first: httpx.Response, persist_env: bool = True) -> list[str]:
         out = io.StringIO()
