@@ -1,4 +1,4 @@
-"""Runner-authenticated computer routes and filtered private RFB transport."""
+"""A dedicated worker's Computer routes: its status and control, its desktop stream, and the agent's browser bridge."""
 
 import asyncio
 import secrets

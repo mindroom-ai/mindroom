@@ -173,6 +173,9 @@ def _refresh_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     return value
 
 
+# How long a stopped refresh child, and every process it started, gets to end before the rest is killed.
+_TERMINATE_GRACE_SECONDS = 10.0
+
 _REFRESH_SUBPROCESS_THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -512,13 +515,17 @@ def _process_group_exists(process_group_id: int) -> bool:
     return True
 
 
-async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+async def _process_group_outlives(process_group_id: int, seconds: float) -> bool:
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + wait_seconds
+    deadline = loop.time() + seconds
     # There is no asyncio readiness primitive for POSIX process-group exit.
     while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
         await asyncio.sleep(0.01)
-    if _process_group_exists(process_group_id):
+    return _process_group_exists(process_group_id)
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+    if await _process_group_outlives(process_group_id, wait_seconds):
         logger.warning(
             "Knowledge refresh process group survived termination wait",
             process_group_id=process_group_id,
@@ -532,7 +539,7 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
             return
         process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=10)
+            await asyncio.wait_for(process.wait(), timeout=_TERMINATE_GRACE_SECONDS)
         except TimeoutError:
             process.kill()
             await process.wait()
@@ -541,16 +548,8 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
     process_group_id = process.pid
     with suppress(ProcessLookupError):
         os.killpg(process_group_id, signal.SIGTERM)
-    if process.returncode is None:
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10)
-        except TimeoutError:
-            with suppress(ProcessLookupError):
-                os.killpg(process_group_id, signal.SIGKILL)
-            await process.wait()
-            await _wait_for_process_group_exit(process_group_id)
-            return
-    if _process_group_exists(process_group_id):
+    # The group outlives its leader while a process the leader started runs, and that process gets the grace period too.
+    if await _process_group_outlives(process_group_id, _TERMINATE_GRACE_SECONDS):
         with suppress(ProcessLookupError):
             os.killpg(process_group_id, signal.SIGKILL)
         await _wait_for_process_group_exit(process_group_id)

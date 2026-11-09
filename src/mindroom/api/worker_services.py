@@ -47,7 +47,7 @@ _STOP_SECONDS = 5.0
 
 class _Ensure(WorkerRoute):
     module: str = Field(min_length=1, max_length=4096)
-    idle_timeout_seconds: float = Field(gt=0)
+    idle_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
 
 
 @dataclass(frozen=True)
