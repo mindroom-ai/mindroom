@@ -23,12 +23,15 @@ from typing import TYPE_CHECKING
 import watchfiles
 from fastapi import HTTPException
 
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.workspace_files.operations import ENTRY_KINDS, is_hidden
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+logger = get_logger(__name__)
 
 _INTERVAL_SECONDS = 0.15
 # A scan rests at least this many times as long as it took, so following a large workspace costs a bounded share of
@@ -56,24 +59,28 @@ class _Follower:
 
     pending: set[str] = field(default_factory=set)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
-    # Set once more changes wait than one scan examines, as for a client that stopped reading: it lists again once it
-    # connects again, so what waited is dropped.
-    overflowed: bool = False
+    # Why the stream ends, set once more changes wait than one scan examines, as for a client that stopped reading, or
+    # once the scanner fails. The client lists again once it connects again, so what waited is dropped.
+    ended: str | None = None
 
     def add(self, paths: set[str]) -> None:
-        if not self.overflowed:
+        if self.ended is None:
             self.pending |= paths
             if len(self.pending) > _MAX_ENTRIES:
-                self.overflowed = True
-                self.pending.clear()
+                self.end("Too many changes to follow; connect again.")
+        self.ready.set()
+
+    def end(self, reason: str) -> None:
+        self.ended = reason
+        self.pending.clear()
         self.ready.set()
 
     async def next(self) -> list[str]:
-        """Wait for changes and return them sorted; answer 503 once too many waited."""
+        """Wait for changes and return them sorted; answer 503 once the stream ended."""
         await self.ready.wait()
         self.ready.clear()
-        if self.overflowed:
-            raise HTTPException(503, "Too many changes to follow; connect again.")
+        if self.ended is not None:
+            raise HTTPException(503, self.ended)
         paths, self.pending = sorted(self.pending), set()
         return paths
 
@@ -85,6 +92,8 @@ class _Watch:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     # Set once the first scan is done, so whatever changes from then on is reported.
     following: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once the scanner failed, for the streams that still join it.
+    ended: str | None = None
     task: asyncio.Task[None] | None = None
 
 
@@ -104,6 +113,8 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
         watch.task = asyncio.create_task(_run(watch))
     follower = _Follower()
     watch.followers.add(follower)
+    if watch.ended is not None:
+        follower.end(watch.ended)
     try:
         await watch.following.wait()
         yield follower.next
@@ -165,14 +176,20 @@ async def _run(watch: _Watch) -> None:
     loop = asyncio.get_running_loop()
     try:
         before = await asyncio.to_thread(_scan, watch.root)
+        watch.following.set()
+        while not watch.stop.is_set():
+            started = loop.time()
+            after = await asyncio.to_thread(_scan, watch.root)
+            if paths := _changed(before, after):
+                for follower in watch.followers:
+                    follower.add(paths)
+            before = after
+            await _rest(watch, max(_INTERVAL_SECONDS, (loop.time() - started) * _REST_FACTOR))
+    except Exception:
+        logger.exception("Workspace changes can't be scanned", root=str(watch.root))
+        watch.ended = "The workspace's changes can't be followed now; connect again."
+        for follower in watch.followers:
+            follower.end(watch.ended)
     finally:
         # Followers wait for the first scan; one that fails must not keep them waiting.
         watch.following.set()
-    while not watch.stop.is_set():
-        started = loop.time()
-        after = await asyncio.to_thread(_scan, watch.root)
-        if paths := _changed(before, after):
-            for follower in watch.followers:
-                follower.add(paths)
-        before = after
-        await _rest(watch, max(_INTERVAL_SECONDS, (loop.time() - started) * _REST_FACTOR))
