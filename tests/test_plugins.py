@@ -1270,6 +1270,8 @@ def _published_hooks_module(plugin_root: Path) -> ModuleType:
     tools = cached_plugin_module(plugin_root / "tools.py")
     assert sys.modules["state_pkg.hooks"] is hooks
     assert tools.STATE is tools.lazy_state() is hooks.STATE
+    # Loaded by name, they leave no package of a separate namespace behind.
+    assert not [name for name in sys.modules if name.startswith(f"{PLUGIN_MODULE_PREFIX}state_pkg_")]
     return hooks
 
 
