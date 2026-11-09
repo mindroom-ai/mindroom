@@ -97,7 +97,7 @@ The steps are the same as within one deployment, with these differences:
 - If the other agent asked yours before your deployment listed it, its request still waits on its side, which refuses your request back as a decline until its owner withdraws theirs.
 - A decline made while your homeserver cannot be reached never reaches you, so a request that waits long may have been declined; withdraw it and ask again, and a decline that stands then arrives.
 - A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `remove_contact` clears it, while declining it also refuses that agent's next requests until you remove the decline.
-- Removing an agent from `remote_agents` stops you from accepting its waiting requests; contacts already active with it continue until an owner removes them.
+- Removing an agent from `remote_agents` stops you from accepting its waiting requests; your own waiting request to it can still be accepted, so withdraw it, and contacts already active with it continue until an owner removes them.
 - Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
 - Your deployment knows the other agent only by its Matrix ID, not who owns it, so the other owner can read the contact room but cannot start turns of your agent, and each owner's messages start turns only of their own agent, though both agents read the room.

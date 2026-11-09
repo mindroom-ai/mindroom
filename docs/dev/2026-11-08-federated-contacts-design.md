@@ -111,7 +111,7 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 
 ## Accepted Limitations
 
-- A request that one side sent before the other side listed its agent still waits on the sending side, which rejects the other agent's request back as a pair that already has a pending contact, and the other side reads that as a decline; the sending owner withdraws the stale request, after which a request back is asked.
+- A request that one side sent before the other side listed its agent still waits on the sending side, which rejects the other agent's request back as a pair that already has a pending contact, and the other side reads that as a decline; the sending owner withdraws the stale request, and then either asks again or the other owner removes their decline and asks back.
 - A decline made while the asking side's homeserver cannot be reached never arrives there, because the asked side's homeserver then rejects the invite only locally and reports success; the request waits until its owner withdraws it, and asking again then reaches the decline that stands.
 - A request sent before the other deployment lists the asking agent is not picked up once it does, because a restored invite carries no reason; the asking owner removes it and asks again.
 - An agent whose deployment does not list the asking agent in `remote_agents` treats the request as an ordinary invite, and one that accepts every invitation joins, which the asking side reads as an acceptance its owner never gave; nobody answers in that room.

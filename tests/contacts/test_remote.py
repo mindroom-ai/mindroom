@@ -1281,3 +1281,20 @@ async def test_a_request_back_while_ours_waits_names_why_it_is_rejected(tmp_path
     assert answer is not None
     assert (answer.rejection, answer.notice) == ("own_request_pending", None)
     assert _statuses(paths) == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_while_a_contact_is_active_names_the_contact(tmp_path: Path) -> None:
+    """Nothing waits once the pair's contact is active, so the rejection names that contact instead."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing(status="active"))
+    answer = await federation.store_contact_invite(
+        config,
+        paths,
+        "mind_alice",
+        room_id="!theirs:other.org",
+        inviter=REMOTE,
+        reason="Lunch?",
+    )
+    assert answer is not None
+    assert answer.rejection == "pair_has_a_contact"

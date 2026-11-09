@@ -92,9 +92,10 @@ def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str)
 
     Return why the invite is rejected instead, storing no new request, for a room whose request was declined or
     removed, for a pair with an active contact or this agent's own pending request in another room, or one this side
-    declined, which blocks the pair until the owner removes the declined contact. A decline of this agent's own request by the other side blocks only that side,
-    and the other side keeps one pending request per pair, so the other agent asking now clears that decline and
-    replaces its own earlier request, whose withdrawal this side does not see.
+    declined, which blocks the pair until the owner removes the declined contact. A decline of this agent's own
+    request by the other side blocks only that side, and the other side keeps one pending request per pair, so the
+    other agent asking now clears that decline and replaces its own earlier request, whose withdrawal this side does
+    not see.
     """
     for stored in book.contacts:
         if stored.room_id == record.room_id and stored.agent_side(agent_name) is not None:
@@ -111,7 +112,8 @@ def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str)
         return "declined_here"
     if found is not None:
         # This agent's own request still waits on the other side, which then reads this rejection as a decline.
-        return "own_request_pending" if found.requester.id == agent_name else "pair_has_a_contact"
+        waiting = found.status == "pending" and found.requester.id == agent_name
+        return "own_request_pending" if waiting else "pair_has_a_contact"
     book.contacts.append(record)
     return record.model_copy(deep=True), True
 
@@ -308,7 +310,8 @@ async def _accepted(actor: ContactActor, record: ContactRecord, agent_name: str)
         return
     bot = actor.agent_bot(agent_name)
     client = None if bot is None else bot.client
-    # The other agent then invites and withdraws its own owner; where creators have no unlimited power, neither agent can remove the other.
+    # The other agent then invites and withdraws its own owner; where creators have no unlimited power, neither agent
+    # can remove the other.
     if client is None or not await ensure_managed_room_power_levels(client, accepted.room_id, [accepted.target.id]):
         logger.warning("contact_room_power_grant_failed", contact_id=record.id, user_id=accepted.target.id)
     if client is None or not await invite_to_room(client, accepted.room_id, actor.owner):
