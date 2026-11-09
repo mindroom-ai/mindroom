@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import itertools
 import json
 import re
 import shutil
@@ -166,7 +167,7 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
     (plugin_root / "hello.py").write_text(_HELLO)
-    (plugin_root / "crash.py").write_text("import sys\nsys.exit(3)\n")
+    (plugin_root / "crash.py").write_text("import sys\nopen('crash.log', 'a').write('ran\\n')\nsys.exit(3)\n")
     (plugin_root / "stubborn.py").write_text(_STUBBORN)
     # The worker's Python, without building a virtualenv.
     venv_python = tmp_path / "venv" / "bin" / "python"
@@ -342,6 +343,7 @@ async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -
         _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert again == state
         assert worker_services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
+        assert (runner.workspace / "crash.log").read_text() == "ran\n"
 
 
 @pytest.mark.asyncio
@@ -991,10 +993,14 @@ async def test_a_route_gets_its_services_websocket_redirect_without_following_it
 
 
 @asynccontextmanager
-async def _other_server(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[object]]:
-    """Serve on the next port probed for a service, as another socket can take it before the service binds it.
+async def _other_server(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    once: bool = False,
+) -> AsyncIterator[tuple[int, list[object]]]:
+    """Serve on every port probed for a service, or ``once`` on the next, as another socket can take it before the service binds it.
 
-    Yields the connections it gets.
+    Yields its port and the connections it gets.
     """
     connections: list[object] = []
 
@@ -1006,8 +1012,10 @@ async def _other_server(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[o
         writer.close()
 
     async with await asyncio.start_server(answer, "127.0.0.1", 0) as other:
-        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: other.sockets[0].getsockname()[1])
-        yield connections
+        port = other.sockets[0].getsockname()[1]
+        probes, probe = iter([port]) if once else itertools.repeat(port), worker_services_module._free_loopback_port
+        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: next(probes, None) or probe())
+        yield port, connections
 
 
 async def _websocket_refusal(relay: WorkerRelay, service: str) -> int:
@@ -1024,15 +1032,44 @@ async def test_a_service_whose_port_another_server_took_exits_and_the_relay_neve
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Another server that listens on the port probed for a service is never reported as it nor relayed to."""
+    """Another server that listens on every port probed for a service is never reported as it nor relayed to.
+
+    Once the service's fresh start fails too, it stays exited.
+    """
     async with _runner(tmp_path) as runner:
         (runner.plugin_root / "echo.py").write_text(_ECHO)
         context, _, relay = await _relay(tmp_path, runner, monkeypatch)
-        async with _other_server(monkeypatch) as connections:
-            state = await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)
+        async with _other_server(monkeypatch) as (_, connections):
+            echo = WorkerService("echo", "echo.py")
+            state = await ensure_worker_service(context, echo, _TARGET)
             assert (state.state, state.exit_code) == ("exited", 1)
+            instance = worker_services(sandbox_runner_app.app).instance("demo", "echo")
+            assert await ensure_worker_service(context, echo, _TARGET) == state
+            assert worker_services(sandbox_runner_app.app).instance("demo", "echo") is instance
             assert (await _get(relay, "/", service="echo"))[::2] == (503, True)
             assert await _websocket_refusal(relay, "echo") == 503
+            assert connections == []
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service whose probed port another socket took before it bound it starts once more, and every ensure reports that."""
+    async with _runner(tmp_path) as runner:
+        # It binds late, so the second ensure finds the instance that will fail to bind.
+        (runner.plugin_root / "echo.py").write_text("import time\ntime.sleep(0.5)\n" + _ECHO)
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        echo = WorkerService("echo", "echo.py")
+        async with _other_server(monkeypatch, once=True) as (taken, connections):
+            first, second = await asyncio.gather(*(ensure_worker_service(context, echo, _TARGET) for _ in range(2)))
+            assert first == second
+            assert first.state == "running"
+            assert first.port != taken
+            async with relay.websocket("/a", service="echo") as upstream:
+                await upstream.send_str("one")
+                assert (await upstream.receive_str()).endswith(":/a:one")
             assert connections == []
 
 
@@ -1050,7 +1087,7 @@ async def test_the_relay_never_reaches_another_server_on_the_port_of_a_service_t
         assert (await ensure_worker_service(context, waiting, _TARGET)).state == "starting"
         assert (await _get(relay, "/", service="waiting"))[::2] == (502, True)
         await stop_worker_service(context, waiting, _TARGET)
-        async with _other_server(monkeypatch) as connections:
+        async with _other_server(monkeypatch) as (_, connections):
             state = await ensure_worker_service(context, waiting, _TARGET)
             assert state.state == "starting"
             status, text, marked = await _get(relay, "/", service="waiting")

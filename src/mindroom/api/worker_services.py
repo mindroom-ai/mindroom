@@ -71,6 +71,8 @@ class _ServiceInstance:
     idle_timeout_seconds: float
     idle_until: float = 0.0
     expiry: asyncio.Task[None] | None = None
+    # Whether an exit while another socket holds its port starts the service once more on a fresh one.
+    retries: bool = True
 
 
 class _WorkerServices:
@@ -115,10 +117,20 @@ class _WorkerServices:
                 await self._end(key, instance)
                 instance = None
             if instance is None:
-                instance = self._instances[key] = await _start(program)
-                instance.expiry = asyncio.create_task(self._expire(key, instance), name="worker-service-idle")
+                instance = await self._add(key, program)
             self.touch(plugin, name)
-        return await _settled(instance)
+        state = await _settled(instance)
+        if state.state != "exited" or not instance.retries or not _port_taken(instance.port):
+            return state
+        # Another socket took the probed port before the service bound it, as one can between the probe and the bind.
+        async with self._lock:
+            if self._instances.get(key) is instance:
+                await self._end(key, instance)
+                (await self._add(key, program)).retries = False
+                self.touch(plugin, name)
+            current = self._instances.get(key)
+        # A concurrent ensure may have started it once more already, and a stop may have ended it.
+        return state if current is None else await _settled(current)
 
     async def stop(self, plugin: str, name: str) -> None:
         """End the service's instance, if any, and refuse the starts that arrived before this stop."""
@@ -133,6 +145,11 @@ class _WorkerServices:
         async with self._lock:
             for key, instance in list(self._instances.items()):
                 await self._end(key, instance)
+
+    async def _add(self, key: tuple[str, str], program: _Program) -> _ServiceInstance:
+        instance = self._instances[key] = await _start(program)
+        instance.expiry = asyncio.create_task(self._expire(key, instance), name="worker-service-idle")
+        return instance
 
     async def _end(self, key: tuple[str, str], instance: _ServiceInstance) -> None:
         del self._instances[key]
@@ -194,6 +211,16 @@ def _free_loopback_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _port_taken(port: int) -> bool:
+    """Return whether a socket holds the loopback port, as one that took it before a service bound it does."""
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+        return False
 
 
 async def _start(program: _Program) -> _ServiceInstance:
