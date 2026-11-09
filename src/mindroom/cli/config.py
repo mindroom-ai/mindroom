@@ -65,10 +65,11 @@ console = Console()
 _err_console = Console(stderr=True)
 
 
-def print_literal(markup: str, text: object, suffix: str = "") -> None:
+def print_literal(markup: str, text: object, suffix: str = "", *, console: Console = console) -> None:
     """Print fixed Rich markup, then text shown as is, then optional fixed markup, with no markup or emoji codes read from the text.
 
     The line is not wrapped at the terminal width, so a path or error in it stays whole in logs read at any width.
+    It prints on the shared console unless the caller passes its own, such as a stderr console.
     """
     console.print(markup, console.highlighter(str(text)), suffix, sep="", soft_wrap=True)
 
@@ -420,11 +421,14 @@ def _print_local_model_commands(selected_preset: _ProviderPreset) -> None:
         console.print(f"  [cyan]ollama pull {OLLAMA_GEMMA}[/cyan]         Pull the default local model")
         console.print(f"  [cyan]ollama pull {OLLAMA_QWEN}[/cyan]   Pull the larger local model option")
     if selected_preset == "llama_cpp":
+        # Each command is longer than a narrow terminal; a wrapped one breaks when copied.
         console.print(
             f"  [cyan]{llama_cpp_server_command(LLAMA_CPP_GEMMA)}[/cyan]  Start the default local model server",
+            soft_wrap=True,
         )
         console.print(
             f"  [cyan]{llama_cpp_server_command(LLAMA_CPP_QWEN)}[/cyan]  Start the larger local model option",
+            soft_wrap=True,
         )
 
 

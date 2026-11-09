@@ -54,8 +54,9 @@ _READ_ONLY = (
 )
 _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
-    "or keys typed while a command ran may be queued); nothing was typed. Send <ctrl-c> with terminal_send, which an "
-    "idle prompt needs too after such keys, then run it again."
+    "or keys typed while a command ran may be queued); nothing was typed. To keep a running command, run this in "
+    "another terminal from terminal_open; otherwise send <ctrl-c> with terminal_send, which an idle prompt needs too "
+    "after such keys, then run it again."
 )
 # Keys that edit the line, complete, interrupt or end input, which a command line never holds.
 _KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -81,7 +82,6 @@ _NAMED_KEYS = {
 }
 _KEY = re.compile(r"<([A-Za-z-]+)>")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_BACKSPACED = re.compile(r"[^\x08\n]\x08")
 
 
 def _plain_text(data: bytes) -> str:
@@ -89,10 +89,21 @@ def _plain_text(data: bytes) -> str:
     text = data.decode("utf-8", errors="replace")
     for pattern in (_OSC, _CSI, _OTHER_ESCAPE):
         text = pattern.sub("", text)
-    text = "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
-    while (erased := _BACKSPACED.sub("", text)) != text:
-        text = erased
-    return _CONTROL.sub("", text)
+    lines = (_erased(line.rstrip("\r").rsplit("\r", 1)[-1]) for line in text.split("\n"))
+    return _CONTROL.sub("", "\n".join(lines))
+
+
+def _erased(line: str) -> str:
+    """Return ``line`` with each backspace and the character before it removed, in one pass."""
+    if "\x08" not in line:
+        return line
+    kept: list[str] = []
+    for char in line:
+        if char != "\x08":
+            kept.append(char)
+        elif kept:
+            kept.pop()
+    return "".join(kept)
 
 
 def _keys_to_text(keys: str) -> str:
