@@ -107,21 +107,18 @@ def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
 def _proc_net_listeners() -> list[_Listener]:
     """Read the TCP sockets listening on any port from ``/proc/net``."""
     found: list[_Listener] = []
-    read = False
     for table in ("tcp", "tcp6"):
         try:
             lines = (_PROC / "net" / table).read_text(encoding="ascii").splitlines()[1:]
-        except OSError:  # No IPv6 in this network namespace.
-            continue
-        read = True
+        except FileNotFoundError:
+            if table == "tcp":
+                raise
+            continue  # No IPv6 in this network namespace.
         for line in lines:
             _, local, _, state, _, _, _, _, _, inode, *_ = line.split()
             hex_address, _, hex_port = local.partition(":")
             if state == f"{_TCP_LISTEN:02X}":
                 found.append(_Listener(_address(hex_address), int(hex_port, 16), int(inode)))
-    if not read:
-        msg = "No source names this machine's listening sockets."
-        raise OSError(msg)
     return found
 
 

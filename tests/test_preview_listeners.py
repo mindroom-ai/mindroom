@@ -163,10 +163,13 @@ def test_an_error_the_kernel_answers_a_dump_with_is_raised(kind: int, length: in
 
 
 @pytest.mark.usefixtures("no_diagnostics")
-def test_no_diagnostics_and_no_proc_net_cannot_say(proc: Path) -> None:
-    """Without socket diagnostics or ``/proc/net``, finding the listeners fails instead of finding none."""
-    assert not (proc / "net").exists()
-    with pytest.raises(OSError, match="No source"):
+@pytest.mark.parametrize("tcp6", [False, True], ids=["no tables", "only tcp6"])
+def test_no_diagnostics_and_no_ipv4_table_cannot_say(proc: Path, tcp6: bool) -> None:
+    """Without socket diagnostics or ``/proc/net/tcp``, finding the listeners fails instead of finding only some."""
+    if tcp6:
+        (proc / "net").mkdir()
+        (proc / "net" / "tcp6").write_text(_HEADER + _table_line("::1", 5173, "0A", 14))
+    with pytest.raises(FileNotFoundError):
         listening_sockets()
 
 
