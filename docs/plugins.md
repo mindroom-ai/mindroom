@@ -1679,7 +1679,7 @@ While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
 A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest, and `"1.24"` when a tool calls `worker_relay`.
 
-This tool tells the agent whether its app on port 5173 answers yet, and once it does, links to it on one of the plugin's [hosts](#origins-of-your-own), whose origin module relays to the app:
+This tool tells the agent whether its app on port 5173 answers yet, and once it does, returns the URL of the plugin's host `demo`, which serves nothing until the plugin's origin module decides who may open it and relays to the app, as in [A gate for an agent's app](#a-gate-for-an-agents-app):
 
 ```python
 # tools.py
