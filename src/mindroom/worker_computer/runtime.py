@@ -112,8 +112,8 @@ class WorkerComputerRuntime:
         return await self._run_browser_action(action)
 
     def agent_page(self) -> "Page | None":
-        """Return the page the agent's browser shows while it runs in this computer, else None."""
-        if self._browser is None or self.status()["state"] != "ready":
+        """Return the page the agent's browser shows on this Computer's display while the Computer is ready."""
+        if self._browser is None or self._browser.page is None or self.status()["state"] != "ready":
             return None
         return self._browser.page()
 

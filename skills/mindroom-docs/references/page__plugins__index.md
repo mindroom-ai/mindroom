@@ -1542,7 +1542,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A plugin that uses the bridge states `"mindroom_plugin_api": "1.19"` in its manifest.
+A plugin that uses the bridge states `"mindroom_plugin_api": "1.20"` in its manifest.
 
 ## People, agents, and administrators
 

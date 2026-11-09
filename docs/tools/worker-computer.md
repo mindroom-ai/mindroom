@@ -147,7 +147,7 @@ Expose only this gateway; the worker's display has no public listener.
   <source src="https://github.com/user-attachments/assets/db2b13b5-35c0-4b15-bbc9-93dec148f666" type="video/mp4">
 </video>
 
-- **Watch** shows the browser without input rights.
+- **Watch** shows the worker's desktop and its browser without input rights.
 - **Take control** waits for the agent's current browser action to finish, then gives input to one viewer.
   While the user holds control, the agent's browser calls return a blocked result; background shell processes keep running.
 - **Resume agent** releases control, returns the screen to watch mode, and sends one ordinary message mentioning the agent in the originating room or thread.
@@ -168,45 +168,6 @@ Keyboard input over a controlled screen goes to the browser, not the composer.
 The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
 The `browser` provider identifies tabs by stable target IDs, while `browser_mcp` uses tab indices that can change.
-
-## Page stream
-
-Instead of the whole desktop, a client can show just the agent's browser page as a stream of JPEG frames, which is lighter and fits a side panel.
-The stream shows the tab the agent's `browser` tool works in, and moves within about a second when the agent switches tabs or profiles, without reconnecting.
-Until the agent's browser starts, and after it closes, the stream has no page and sends no frames.
-A tab or window that a page opens itself, such as a sign-in popup, appears in the stream only once the agent switches to it; until then, use the desktop stream to work in it.
-The browser's own menus and pickers, such as the open list of a `<select>` element, a right-click menu, or a file chooser, do not show in the stream either; choose a `<select>` option with the arrow keys and Enter, or use the desktop stream.
-`browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
-Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop, and input sent without it is dropped.
-
-Open the WebSocket `GET /api/computers/sessions/{session_id}/screencast` with the subprotocols `mindroom-screencast` and `mindroom-ticket.<ticket>`, where the ticket comes from `POST /api/computers/sessions/{session_id}/stream-ticket`.
-As for the desktop stream, the `Origin` must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, each ticket opens one stream, and room access is rechecked while it runs.
-A session has one live stream: opening the page stream closes its desktop stream, and the reverse.
-Releasing control closes the stream; reconnect with a new ticket to keep watching.
-Stopping the Computer also ends the session, so create a new session to watch again.
-
-The server sends:
-
-| Message | Meaning |
-| --- | --- |
-| binary | One JPEG frame of the page, scaled to fit 1920×1200 pixels. |
-| `{"type": "viewport", "width": w, "height": h}` | The page's size in CSS pixels, sent before the first frame and whenever it changes. Map pointer positions from the frame to these coordinates. |
-| `{"type": "url-changed", "url": "...", "title": "..."}` | The shown page's address and title, sent on connect and on each change; both are empty while there is no page. |
-| `{"type": "error", "detail": "..."}` | A malformed or unknown message from the client. |
-
-The client sends JSON text messages of at most 64 KiB; a binary message closes the stream:
-
-| Message | Effect |
-| --- | --- |
-| `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`, which may lie outside the page, as when a drag leaves the panel. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask; `clicks` is the click count, 2 on the second press of a double click. |
-| `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
-| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; send any other character, such as one typed with AltGr, which browsers report with Control held, as a `text` message. |
-| `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
-
-`modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
-Each input waits for the page to handle it, so send pointer moves at most once per animation frame, or input falls behind the pointer.
-The browser runs on Linux, so editing shortcuts use Control; a client on macOS sends Control for Command.
-When a viewer disconnects, buttons and keys it still held are released.
 
 ## Native Playwright MCP provider
 

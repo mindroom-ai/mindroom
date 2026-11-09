@@ -340,11 +340,11 @@ class _BrowserSession:
     """
 
     profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
-    # The profile whose tab a worker display shows in front, which the agent used last.
-    front: _BrowserProfileState | None = None
     startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The page the agent last brought to the front of a worker display.
+    shown: Page | None = None
 
 
 # Chromium holds a profile directory for its whole process, and every reply or call builds a fresh toolkit, so a
@@ -713,16 +713,10 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
-    def worker_active_page(self) -> Page | None:
-        """Return the page a worker computer's browser shows: the active tab of the profile the agent used last."""
-        session = self._worker_session
-        # Before the agent uses a tab, or once it stops the profile it used last, which leaves that profile no tabs,
-        # the active tab of the profile started last stands in.
-        for state in (session.front, *reversed(session.profiles.values())):
-            tab = None if state is None else state.tabs.get(state.active_target_id or "")
-            if tab is not None:
-                return tab.page
-        return None
+    def worker_shown_page(self) -> Page | None:
+        """Return the open page the agent last brought to the front of its worker display."""
+        page = self._worker_session.shown
+        return None if page is None or page.is_closed() else page
 
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._worker_session.profiles:
@@ -1905,10 +1899,10 @@ class BrowserTools(Toolkit):
         return tab.target_id, tab
 
     async def _activate_tab(self, state: _BrowserProfileState, target_id: str, page: Page) -> None:
-        """Make a tab its profile's active one, and on a worker display bring it and its profile to the front."""
+        """Make a tab its profile's active one, and on a worker display bring it to the front."""
         if self._worker_display is not None:
             await page.bring_to_front()
-            self._worker_session.front = state
+            self._worker_session.shown = page
         state.active_target_id = target_id
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:

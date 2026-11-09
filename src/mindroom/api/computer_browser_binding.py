@@ -73,8 +73,8 @@ class _ComputerBrowserProvider:
             return await invoke(toolkit, function.entrypoint, list(args), kwargs)
 
         if isinstance(toolkit, BrowserTools):
-            # The browser tool runs its browser in this process, so a screencast can show its page.
-            return key, BrowserSession(execute=execute, close=toolkit.aclose, page=toolkit.worker_active_page)
+            # The agent's browser bridge reaches this browser's page because it runs in this process.
+            return key, BrowserSession(execute=execute, close=toolkit.aclose, page=toolkit.worker_shown_page)
         return key, BrowserSession(execute=execute, close=toolkit.aclose)
 
 

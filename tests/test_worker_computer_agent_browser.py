@@ -25,7 +25,7 @@ from mindroom.worker_computer.agent_browser import AgentBrowserBridge
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 from tests.api.test_worker_services import _AUTH, _body, _call, _runner
-from tests.test_worker_computer_runtime import FakeDisplay, unused
+from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -39,6 +39,10 @@ window.released = [];
 document.addEventListener("keyup", (event) => released.push(event.key));
 document.addEventListener("mouseup", (event) => released.push("button " + event.button));
 </script>"""
+
+
+async def unused(*_args: object, **_kwargs: object) -> None:
+    """Stand in for a browser entrypoint or closer the bridge never calls."""
 
 
 @dataclass

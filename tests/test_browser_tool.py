@@ -3236,43 +3236,6 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
 
 
 @pytest.mark.asyncio
-async def test_worker_active_page_is_the_active_tab_of_the_profile_the_agent_used_last(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A computer's screencast shows the tab the agent made active, in the profile it used last, while it is open."""
-    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
-    browser = BrowserTools(paths)
-    browser.bind_worker_display(":99", tmp_path / "workspace")
-    adapters = [LifecycleBrowser(), LifecycleBrowser()]
-    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapters.pop(0))
-
-    def shown_url() -> str | None:
-        page = browser.worker_active_page()
-        return None if page is None else page.url
-
-    assert shown_url() is None
-    first = json.loads(await browser.browser("open", targetUrl="https://example.org/first"))
-    await browser.browser("open", targetUrl="https://example.org/second")
-    assert shown_url() == "https://example.org/second"
-    await browser.browser("focus", targetId=first["targetId"])
-    assert shown_url() == "https://example.org/first"
-    work = json.loads(await browser.browser("open", profile="work", targetUrl="https://example.org/work"))
-    assert shown_url() == "https://example.org/work"
-    await browser.browser("focus", targetId=first["targetId"])
-    assert shown_url() == "https://example.org/first"
-    await browser.browser("focus", profile="work", targetId=work["targetId"])
-    assert shown_url() == "https://example.org/work"
-    await browser.browser("stop", profile="work")
-    assert shown_url() == "https://example.org/first"
-    await browser.browser("close", targetId=first["targetId"])
-    # Closing the active tab makes the profile's first remaining tab, its start page, active.
-    assert shown_url() == "about:blank"
-    await browser.browser("stop")
-    assert shown_url() is None
-
-
-@pytest.mark.asyncio
 async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4019,3 +3982,36 @@ async def test_worker_browser_accepts_host_override_of_desktop_default(tmp_path:
                 await browser.browser("status", target=target)
     finally:
         await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_worker_shown_page_is_the_open_tab_the_agent_last_brought_to_the_front(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's browser bridge shows the tab the agent last brought to the front of its display, while it is open."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapters = [LifecycleBrowser(), LifecycleBrowser()]
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapters.pop(0))
+
+    def shown_url() -> str | None:
+        page = browser.worker_shown_page()
+        return None if page is None else page.url
+
+    assert shown_url() is None
+    first = json.loads(await browser.browser("open", targetUrl="https://example.org/first"))
+    await browser.browser("open", targetUrl="https://example.org/second")
+    assert shown_url() == "https://example.org/second"
+    await browser.browser("focus", targetId=first["targetId"])
+    assert shown_url() == "https://example.org/first"
+    await browser.browser("open", profile="work", targetUrl="https://example.org/work")
+    assert shown_url() == "https://example.org/work"
+    await browser.browser("stop", profile="work")
+    assert shown_url() is None
+    await browser.browser("focus", targetId=first["targetId"])
+    assert shown_url() == "https://example.org/first"
+    await browser.browser("close", targetId=first["targetId"])
+    assert shown_url() is None
+    await browser.browser("stop")
