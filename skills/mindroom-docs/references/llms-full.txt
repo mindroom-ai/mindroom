@@ -9630,6 +9630,7 @@ Before that, and on phones, open it from the room's More menu with **Show Comput
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
 Keyboard input over a controlled screen goes to the browser, not the composer.
+The desktop has no menu: right-clicking it opens nothing, and no key or click on it starts a program.
 
 The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
