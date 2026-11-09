@@ -564,7 +564,7 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
   # openbb-core 1.6 declares uvicorn<0.41 for its own API server, which MindRoom does not run.
-  # MindRoom's websocket streams need the keepalive pings and denial framing of uvicorn 0.52.1+.
+  # MindRoom's websocket streams need the keepalive pings uvicorn 0.44 added; 0.52.1 also frames websocket denials.
   # An override replaces every requirement's extras, so it names chromadb's standard extras.
   "uvicorn[standard]>=0.52.1",
 ]
