@@ -1240,7 +1240,7 @@ async def test_a_withdrawal_that_raises_still_lets_the_agent_leave(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A withdrawal that fails is only logged, so an agent that loses contacts still leaves its rooms."""
-    config, paths = _remote_setup(tmp_path)
+    _, paths = _remote_setup(tmp_path)
     _store(paths, _outgoing())
     without, _ = _setup(tmp_path, contacts=False)
     left: list[str] = []
