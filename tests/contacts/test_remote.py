@@ -1213,3 +1213,45 @@ async def test_a_stopped_agent_cannot_decline_another_deployments_request(tmp_pa
         await flow.decline_contact(_bob(config, paths, runtime), "in")
     runtime.clients["mind_bob"].room_leave.assert_not_awaited()
     assert _statuses(paths) == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_contact_whose_catch_up_fails_stops_no_other(tmp_path: Path) -> None:
+    """Each contact moves only from the status it is in, so one that fails at start is retried next time."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing())
+    _store(paths, _outgoing().model_copy(update={"id": "later", "room_id": "!later:other.org"}))
+    runtime = _runtime()
+
+    async def read(_client: object, room_id: str, _user_id: str) -> str:
+        if room_id == REMOTE_ROOM:
+            msg = "unreadable"
+            raise RuntimeError(msg)
+        return "join"
+
+    with _matrix(), patch("mindroom.contacts.federation.get_room_membership", new=AsyncMock(side_effect=read)):
+        await federation.reconcile_remote_contacts(config, paths, "mind_alice", runtime.bots.get)
+    assert _statuses(paths) == ["pending", "active"]
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_that_raises_still_lets_the_agent_leave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withdrawal that fails is only logged, so an agent that loses contacts still leaves its rooms."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing())
+    without, _ = _setup(tmp_path, contacts=False)
+    left: list[str] = []
+
+    async def record_left(_client: object, room_ids: list[str], **_kwargs: object) -> None:
+        left.extend(room_ids)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[REMOTE_ROOM]))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_left)
+    with _matrix() as matrix:
+        matrix["kick"].side_effect = RuntimeError("homeserver unreachable")
+        await _room_lifecycle(without, paths, "mind_alice").leave_unconfigured_rooms()
+    assert _statuses(paths) == ["removed"]
+    assert left == [REMOTE_ROOM]

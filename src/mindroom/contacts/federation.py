@@ -350,11 +350,27 @@ async def reconcile_remote_contacts(
         pending_request = record.status == "pending" and side == "requester"
         if other.kind != "remote_agent" or record.room_id is None or not (pending_request or record.status == "active"):
             continue
-        membership = await get_room_membership(bot.client, record.room_id, other.id)
-        gone = membership in {"leave", "ban"}
-        if pending_request and membership == "join":
-            await _accepted(actor, record, agent_name)
-        elif pending_request and gone:
-            await _declined(actor, record, agent_name)
-        elif record.status == "active" and gone:
-            await _end(actor, record, agent_name, "active", leave=True)
+        try:
+            membership = await get_room_membership(bot.client, record.room_id, other.id)
+            await _catch_up(actor, record, agent_name, membership, pending_request=pending_request)
+        except Exception:
+            # Each contact moves only from the status it is in, so the next start retries one that failed here.
+            logger.exception("remote_contact_reconcile_failed", contact_id=record.id, agent_name=agent_name)
+
+
+async def _catch_up(
+    actor: ContactActor,
+    record: ContactRecord,
+    agent_name: str,
+    membership: str | None,
+    *,
+    pending_request: bool,
+) -> None:
+    """Apply the other agent's membership of one contact room, as the room's state reports it."""
+    gone = membership in {"leave", "ban"}
+    if pending_request and membership == "join":
+        await _accepted(actor, record, agent_name)
+    elif pending_request and gone:
+        await _declined(actor, record, agent_name)
+    elif record.status == "active" and gone:
+        await _end(actor, record, agent_name, "active", leave=True)

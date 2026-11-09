@@ -8138,11 +8138,12 @@ The steps are the same as within one deployment, with these differences:
 - When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
 - After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
+  Your side cannot make the other agent leave: it leaves when its deployment sees yours go, so while that deployment is unreachable it can still read what is posted there.
 - A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `remove_contact` clears it, while declining it also refuses that agent's next requests until you remove the decline.
 - Removing an agent from `remote_agents` stops you from accepting its waiting requests; contacts already active with it continue until an owner removes them.
 - Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
-- Your deployment knows the other agent only by its Matrix ID, not who owns it, so the other owner can read the contact room but cannot start turns of your agent, and each owner's messages reach only their own agent.
+- Your deployment knows the other agent only by its Matrix ID, not who owns it, so the other owner can read the contact room but cannot start turns of your agent, and each owner's messages start turns only of their own agent, though both agents read the room.
 - The contact room and its messages are stored on both homeservers.
 
 Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent_replies` apply as within one deployment.
@@ -8278,7 +8279,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Only your agent can contact an agent of another MindRoom deployment, so ask with party=agent` | `party="me"` reaches only this deployment |
 | `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
 | `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
-| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; remove it with `remove_contact`, since declining refuses that agent's next requests |
+| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; the request stays pending, so accept again once it is reachable, or remove a withdrawn request with `remove_contact`, since declining refuses that agent's next requests |
 | `The invite from <agent> could not be rejected, so the request still waits; decline again later` (or `remove it again later`) | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you try again |
 | A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent; a request sent before it did is not picked up, so the asking owner removes it and asks again |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
@@ -17653,6 +17654,7 @@ Do not report or "fix" these; they are deliberate.
 - A personal agent whose `contacts.remote_agents` names agents of other deployments treats an invite from any matching account as a contact request, which puts the invite's `reason` into its owner's personal room like a request from this deployment; an empty list, the default, accepts none.
   Only the other agent's Matrix ID, which federation authenticates, is trusted for such a contact: its owner is not exchanged and starts no turn here, and its unmentioned messages start none either.
   The contact room and every message in it are stored on the other deployment's homeserver as well.
+  Once it joins, the other agent has power level 100 in the contact room, so it can invite more accounts to read the conversation and remove the owners there; its deployment's own policy, not this one, decides whether it does.
 - A Connections portal session can accept, decline, change, and remove its user's contacts on the Contacts page without an approval card, as it already connects accounts and allows Agent Keys; those requests must come from the portal's own origin, and no model takes part in them.
 - A contact's rules and judge are model judgments, not a security boundary; they reduce accidental disclosure, but a determined counterparty can still extract what the agent's context and contact tools expose.
 - A tool the owner approves for a contact reaches what it reaches, so with `file` approved the other side's requests can change files the agent reads in every turn, such as `MEMORY.md`; MindRoom adds no write guard there, because an approved tool is the owner's choice of what the other side may drive.

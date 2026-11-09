@@ -622,17 +622,21 @@ async def _withdraw_owner_invites(
     """
     owners = record.owners()
     for user_id in invited:
-        if user_id not in owners:
-            continue
-        try:
-            await kick_from_room(client, room_id, user_id)
-        except Exception:
-            logger.exception(
-                "contact_room_invite_withdrawal_failed",
-                contact_id=record.id,
-                user_id=user_id,
-                room_id=room_id,
-            )
+        if user_id in owners:
+            await _withdraw_invite(client, record, room_id, user_id)
+
+
+async def _withdraw_invite(client: nio.AsyncClient, record: ContactRecord, room_id: str, user_id: str) -> None:
+    """Withdraw one invitation to a contact room; a withdrawal that fails or raises is only logged."""
+    try:
+        await kick_from_room(client, room_id, user_id)
+    except Exception:
+        logger.exception(
+            "contact_room_invite_withdrawal_failed",
+            contact_id=record.id,
+            user_id=user_id,
+            room_id=room_id,
+        )
 
 
 async def withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: ContactRecord, room_id: str) -> None:
@@ -668,7 +672,7 @@ async def withdraw_removed_contact_invites(
             continue
         if record.target.kind == "remote_agent" and record.decided_at is None:
             # A request never answered invited only the other agent, so the agent cannot join a room nobody is left in.
-            await kick_from_room(client, room_id, record.target.id)
+            await _withdraw_invite(client, record, room_id, record.target.id)
         else:
             await withdraw_unjoined_owner_invites(client, record, room_id)
 
@@ -1075,7 +1079,7 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
                 await withdraw_unjoined_owner_invites(client, record, record.room_id)
             elif record.target.kind == "remote_agent":
                 # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
-                await kick_from_room(client, record.room_id, record.target.id)
+                await _withdraw_invite(client, record, record.room_id, record.target.id)
         if not (was_pending and record.requester.kind == "remote_agent"):
             # The invite of a request from another deployment was rejected first, and the agent never joined its room.
             await leave_contact_room(actor, record, record.room_id)
