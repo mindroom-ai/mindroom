@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import ssl
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -675,11 +676,26 @@ def with_user_services(operator: EgressBrokerConfig, **user: EgressService) -> E
     return EgressRules(operator=operator, effective=effective)
 
 
+# Bound for the rest of the test process, so the kernel gives these ports to no other socket.
+_reserved_ports: list[socket.socket] = []
+
+
 def free_port() -> int:
-    """Return a loopback port nothing listens on."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    """Return a loopback port nothing listens on, held for this test process on Linux.
+
+    A released probe's port can go to any other socket on a busy machine before the broker binds it. The held socket
+    never listens, so a connection to the port is refused, and on Linux a server that sets ``SO_REUSEADDR``, as
+    asyncio's do, still binds it; BSD and macOS refuse that bind, so there the probe is released.
+    """
+    probe = socket.socket()
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    if sys.platform == "linux":
+        _reserved_ports.append(probe)
+    else:
+        probe.close()
+    return port
 
 
 def proxy_authorization(token: str) -> str:

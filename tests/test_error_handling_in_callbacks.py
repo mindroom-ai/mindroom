@@ -9,6 +9,7 @@ from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import _create_best_effort_task_wrapper
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -24,7 +25,7 @@ async def test_best_effort_callback_error_is_logged_not_raised() -> None:
 
     with capture_logs() as logs:
         await wrapped()
-        await wait_for_background_tasks(timeout=1.0, owner=owner)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=owner)
 
     assert [entry for entry in logs if entry["event"] == "Error in event callback"]
 
@@ -42,6 +43,6 @@ async def test_cancelled_error_is_handled_silently() -> None:
 
     with capture_logs() as logs:
         await wrapped()
-        await wait_for_background_tasks(timeout=1.0, owner=owner)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=owner)
 
     assert not [entry for entry in logs if entry["event"] == "Error in event callback"]

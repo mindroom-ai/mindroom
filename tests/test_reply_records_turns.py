@@ -2241,7 +2241,7 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
         await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     # A reply whose row resolves after the button was recorded redacts the button in a settlement task.
-    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     sends = bot.client.room_send.await_args_list
     buttons = [
@@ -2271,7 +2271,7 @@ async def test_a_stop_button_decided_after_its_reply_ended_is_never_sent(tmp_pat
 
     with patch("mindroom.response_attempt.is_user_online", new=online_once_answered):
         await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
-    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED

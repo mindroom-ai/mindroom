@@ -120,15 +120,13 @@ async def _bring_memberships_current(
 ) -> None:
     """Refresh ``memberships`` when they need it, and read the room again while they lack ``requester_id``.
 
-    The room's live roster just showed the requester joined, and the router applies a join from its own sync, which can
-    trail that roster. A refresh already in flight may have read the room before the join, so one more follows it.
+    The room's live roster just showed the requester joined.
     """
-    for _ in range(2):
-        if memberships.misses_member(requester_id, room_id, config, runtime_paths):
-            memberships.reread_room(room_id)
-        await refresh_memberships()
-        if not memberships.misses_member(requester_id, room_id, config, runtime_paths):
-            return
+    await memberships.refresh_reading_room(
+        room_id,
+        refresh_memberships,
+        lambda: not memberships.misses_member(requester_id, room_id, config, runtime_paths),
+    )
 
 
 async def admit_room_agent(

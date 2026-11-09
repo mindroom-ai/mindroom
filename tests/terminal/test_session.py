@@ -277,7 +277,9 @@ async def test_typing_is_refused_when_too_much_comes_at_once_or_the_shell_stops_
     """One write holds at most the input limit, and typing the shell does not read piles up only so far."""
     session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     _, viewer = session.attach()
-    session.write(b"echo $((2*2))asleep; sleep 600\n")
+    # In canonical mode the kernel takes, and drops, a line that never ends however long it grows, so only how fast it
+    # drains would decide whether typing piles up; without it, the terminal takes a few KiB and then stops reading.
+    session.write(b"stty -icanon; echo $((2*2))asleep; sleep 600\n")
     await _read_until(viewer, b"4asleep")
 
     with pytest.raises(TerminalError) as too_much:
