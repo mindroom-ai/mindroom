@@ -210,5 +210,6 @@ def group_listens(port: int, group: int) -> bool:
     Blocking. Raises OSError when neither the kernel nor ``/proc`` can say.
     """
     sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
-    holders = _holders(sockets).values()
-    return bool(sockets) and all(pids and all(_in_group(pid, group) for pid in pids) for pids in holders)
+    if not sockets:
+        return False
+    return all(pids and all(_in_group(pid, group) for pid in pids) for pids in _holders(sockets).values())
