@@ -513,7 +513,7 @@ class _StagedUpload:
 
 async def _stage_upload(root_fd: int, target: _UploadTarget) -> _StagedUpload:
     _validate_upload_size_hint(target.upload, target.filename)
-    # Fail on a name the folder cannot hold, such as one too long, before any upload of the batch is published.
+    # Fail on a name too long for the folder before any upload of the batch is published.
     with suppress(FileNotFoundError):
         os.lstat(target.relative_path, dir_fd=root_fd)
     # The name leaves out the target's, so any name the folder accepts can be staged beside it.
