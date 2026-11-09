@@ -7,7 +7,7 @@ import json
 import socket
 import sys
 import time
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from types import ModuleType
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -683,6 +683,8 @@ def test_closing_a_stream_lets_the_users_next_one_in(app: FastAPI, client: TestC
             websocket.send_text("hi")
             assert websocket.receive_text() == f"{ALICE}: hi"
 
+    assert ALICE not in plugin_http._open_streams
+
 
 def test_a_refused_or_failed_handshake_takes_no_place(
     app: FastAPI,
@@ -770,6 +772,20 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(ap
             lines, body = await _handshake(port, path, origin, protocols)
             _assert_well_formed_denial(lines, body, status)
             assert token.encode() not in body
+
+
+@pytest.mark.asyncio
+async def test_a_client_reads_the_too_many_streams_refusal_on_the_embedded_servers_transport(app: FastAPI) -> None:
+    """Under the transport `mindroom run` uses, a real client sees the 17th stream refused with 503, never open."""
+    token = client_session_store(app).create(ALICE).token
+    async with _serving(app) as port, aiohttp.ClientSession() as session, AsyncExitStack() as streams:
+        url = f"http://127.0.0.1:{port}/api/plugins/demo/echo"
+        for _ in range(STREAMS_PER_USER):
+            await streams.enter_async_context(session.ws_connect(url, protocols=_offers(token), origin=CLIENT_ORIGIN))
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await session.ws_connect(url, protocols=_offers(token), origin=CLIENT_ORIGIN)
+
+    assert refused.value.status == 503
 
 
 @pytest.mark.asyncio
