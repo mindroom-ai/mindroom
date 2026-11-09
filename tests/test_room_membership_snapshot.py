@@ -355,8 +355,8 @@ async def test_snapshots_are_scoped_to_account_and_room_lifetime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queued_lookup_can_refresh_after_inflight_lookup_is_invalidated() -> None:
-    """An invalidated lookup reads fresh members again, and a turn waiting behind it uses them."""
+async def test_queued_lookup_uses_the_fresh_members_an_invalidated_lookup_read_again() -> None:
+    """An invalidated lookup reads fresh members again, and a turn waiting behind it uses them without a read."""
     room = nio.MatrixRoom(ROOM, ACCOUNT)
     room.add_member(ACCOUNT, "Bot", None)
     client = AsyncMock(spec=nio.AsyncClient)

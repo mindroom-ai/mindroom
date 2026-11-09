@@ -850,15 +850,16 @@ async def test_sweep_skips_rooms_without_joined_responders(room_state: RoomState
 
 @pytest.mark.asyncio
 async def test_membership_lookup_race_logs_debug(room_state: RoomState) -> None:
-    """An invalidated lookup is observable and leaves publication to a later trigger."""
+    """A lookup that a join interrupts on every read is observable and leaves publication to a later trigger."""
     config, paths, _, _, client = room_state
     for agent in config.agents.values():
         agent.rooms = []
     read = client.joined_members.side_effect
+    joins = iter(range(3))
 
     async def human_joins(room_id: str) -> nio.JoinedMembersResponse:
         response = await read(room_id)
-        client.rooms[room_id].add_member("@human:localhost", None, None)
+        client.rooms[room_id].add_member(f"@human{next(joins)}:localhost", None, None)
         return response
 
     client.joined_members.side_effect = human_joins

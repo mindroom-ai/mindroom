@@ -147,7 +147,7 @@ async def ensure_room_membership_synced(
         return True
     lookup = _lookups.setdefault(room, _MembershipLookup())
     async with lookup.lock:
-        # A membership change synced during a read makes its answer stale, so the room is read again, 3 reads at most.
+        # A membership change synced during a lookup makes its answer stale; the lookup runs again, 3 times at most.
         for _ in range(3):
             if room_membership_is_complete(room):
                 return True
