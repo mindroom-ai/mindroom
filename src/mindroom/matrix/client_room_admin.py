@@ -803,7 +803,7 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | 
     try:
         response = await read_joined_members(client, room_id)
     except nio.LocalProtocolError as error:
-        # The durable client refused the member list each time a concurrent membership change made it stale.
+        # The durable client refuses a member list, as one that concurrent membership changes kept making stale.
         logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(error))
         return None
     if isinstance(response, nio.JoinedMembersResponse):

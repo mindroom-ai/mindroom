@@ -1,7 +1,7 @@
 """Matrix OpenID trust boundary and live Computer policy."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import DEFAULT, AsyncMock
 
 import aiohttp
 import nio
@@ -137,47 +137,6 @@ async def test_live_membership_policy_and_canonical_browser_scope(
         target = await call
         assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
         assert target.spec.private_agent_names == (frozenset({"writer"}) if private else frozenset())
-
-
-@pytest.mark.asyncio
-async def test_a_member_list_raced_by_a_membership_change_is_read_again(tmp_path: Path) -> None:
-    """A joiner's first Computer call, whose member read the client refuses for that join, reads again and passes."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MATRIX_HOMESERVER": "https://example.org", "MINDROOM_WORKER_BACKEND": "docker"},
-    )
-    config = Config(
-        agents={
-            "writer": AgentConfig(
-                display_name="Writer",
-                tools=["browser"],
-                worker_tools=["browser"],
-                worker_scope="user_agent",
-                access=ResponderAccessConfig(users=["@alice:example.org"]),
-            ),
-        },
-    )
-    persist_entity_accounts(config, paths)
-    agent_id = entity_ids(config, paths)["writer"].full_id
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.joined_members.side_effect = [
-        nio.LocalProtocolError("room membership changed during lookup"),
-        joined_members_response("!room:example.org", "@alice:example.org", agent_id),
-    ]
-    memberships = AgentReplyMembershipIndex()
-    target = await _authorize_computer(
-        "@alice:example.org",
-        "!room:example.org",
-        agent_id,
-        config=config,
-        runtime_paths=paths,
-        client=client,
-        memberships=memberships,
-        refresh_memberships=AsyncMock(),
-    )
-    assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
-    assert client.joined_members.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -371,6 +330,25 @@ async def test_computer_checks_read_only_their_room_once_grants_are_current(
         await computer.authorize(ALICE, ROOM, agent_id)
         assert client.joined_members.await_count - before == 1
     assert client.joined_rooms.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_member_list_raced_by_a_membership_change_is_read_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A joiner's first Computer call, whose member read the client refuses for that join, reads again and passes."""
+    computer, client, agent_id, _paths = _bound_computer(tmp_path, monkeypatch, [ROOM])
+    # The Computer's own read is refused once; its re-read and the grant refresh's read of the room answer.
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        DEFAULT,
+        DEFAULT,
+    ]
+
+    target = await computer.authorize(ALICE, ROOM, agent_id)
+
+    assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
 
 
 @pytest.mark.asyncio

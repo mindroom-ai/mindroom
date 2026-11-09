@@ -593,10 +593,7 @@ class BotRoomLifecycle:
                 memberships,
             )
 
-        if allowed():
-            return True
-        await memberships.refresh_reading_room(room_id, self.deps.refresh_memberships, allowed)
-        return allowed()
+        return allowed() or await memberships.refresh_reading_room(room_id, self.deps.refresh_memberships, allowed)
 
     async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""

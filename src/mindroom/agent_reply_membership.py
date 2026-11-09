@@ -109,9 +109,7 @@ class AgentReplyMembershipIndex:
         self._refresh_transitions: list[_LiveTransition] | None = None
         # (room ID, requester) to when a denial first waited for the router's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
-        # Rooms whose ready rows may trail a join the router has not applied yet, which the next refresh reads again:
-        # an access check saw the requester in the room's live roster, or the router's welcome was about to deny its
-        # inviter.
+        # Rooms whose ready rows may trail a join the router has not applied yet, which the next refresh reads again.
         self._reread_room_ids: set[str] = set()
         self._clock = clock
 
@@ -198,19 +196,20 @@ class AgentReplyMembershipIndex:
         room_id: str,
         refresh: Callable[[], Awaitable[None]],
         current: Callable[[], bool],
-    ) -> None:
+    ) -> bool:
         """Refresh through ``refresh`` until ``current`` holds, twice at most, reading ``room_id`` again while it fails.
 
         Only that room is read again; the other ready rooms stay. The router applies a join from its own sync, which
         can trail the room's live roster, and a refresh already in flight may have read the room before the join, so
-        one more follows it.
+        one more follows it. Return whether ``current`` holds at the end.
         """
         for _ in range(2):
             if not current():
                 self._reread_room_ids.add(room_id)
             await refresh()
             if current():
-                return
+                return True
+        return False
 
     def awaits_router_join(
         self,

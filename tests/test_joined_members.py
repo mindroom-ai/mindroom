@@ -56,7 +56,7 @@ async def test_the_durable_clients_refusal_for_a_membership_change_is_read_again
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusals", [1, 2, 3])
-async def test_a_member_read_refused_for_a_membership_change_is_read_again_3_times_at_most(refusals: int) -> None:
+async def test_a_member_read_refused_for_a_membership_change_is_read_3_times_at_most(refusals: int) -> None:
     """Each refusal for a membership change is read again, until the third read, whose refusal raises."""
     answer = joined_members_response(ROOM, "@alice:example.org")
     client = MagicMock(spec=nio.AsyncClient)
