@@ -435,12 +435,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """Return an interactive Bash in the environment and workspace this toolkit's commands get.
 
             Not a function the agent calls: the sandbox runner starts it in a pty beside the commands it runs. It
-            reads no startup files, so it starts with exactly that environment. ``process_environ`` is the
-            environment of the process a command runs from there, None for this one's.
+            reads no startup files, so it starts with exactly that environment, and no readline settings, so it
+            starts with Bash's built-in key bindings. ``process_environ`` is the environment of the process a
+            command runs from there, None for this one's.
             The shell marks each prompt, which ``terminal_run`` waits for (``mindroom.terminal.lines``).
             """
             env = self._command_env(process_environ)
-            env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND)
+            env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND, INPUTRC="/dev/null")
             return TerminalLaunch(
                 argv=("bash", "--noprofile", "--norc", "-i"),
                 env=env,
