@@ -1698,7 +1698,7 @@ The manifest's `origin_module` names a module defining `router`, a FastAPI `APIR
 MindRoom loads it as it loads a routes module: `request.app` is MindRoom's API app, so the helpers of `mindroom.plugin_http` work in its routes, except `client_stream`, which admits only MindRoom Chat's origins, a reload closes its open websockets with 1012, and a module that fails to load costs the plugin only its origins, logging `Plugin origin module failed to load; serving no origins`.
 A route reads which host it serves from `request.url.hostname`.
 A host whose plugin is not loaded or has no `origin_module` answers 404, and a route that raises answers 500 without the error's detail.
-A request body over 16 MiB answers 413 before the route runs, as on MindRoom's API.
+A request body over 16 MiB answers 413, as on MindRoom's API.
 A plugin name with `_` is not a valid DNS label, so a plugin with such a name and an `origin_module` fails to load, and `mindroom plugins check` says `Plugin 'my_plugin' cannot serve origins`.
 
 MindRoom authenticates nothing on these hosts: the plugin's router decides who sees each page.
