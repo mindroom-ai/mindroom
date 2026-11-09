@@ -821,10 +821,10 @@ def get_tool_by_name(
         init_kwargs = dict(settings.values)
         extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
         proxy_tool_init_overrides = dict(settings.tool_init_overrides or {})
-        shell_path_prepend = init_kwargs.get("shell_path_prepend")
-        if tool_name == "shell" and isinstance(shell_path_prepend, str):
-            proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
         if tool_name == "shell":
+            shell_path_prepend = init_kwargs.get("shell_path_prepend")
+            if isinstance(shell_path_prepend, str):
+                proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
             init_kwargs["allow_without_worker"] = (
                 runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
             )

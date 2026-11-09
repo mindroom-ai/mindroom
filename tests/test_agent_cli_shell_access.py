@@ -17,7 +17,6 @@ import pytest_asyncio
 import uvicorn
 from fastapi import FastAPI
 
-import mindroom.agent_cli.shell_access as shell_access_module
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
@@ -29,7 +28,6 @@ from mindroom.runtime_state import clear_api_server_address, set_api_server_addr
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tools.shell import shell_refuses_commands
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -234,22 +232,14 @@ def test_worker_shells_use_only_this_primarys_isolated_gateway_listener(
     assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_AGENT_CLI_PRIMARY_URL"]
 
 
-@pytest.mark.usefixtures("api_address")
+@pytest.mark.usefixtures("api_address", "real_shell_refusal")
 @pytest.mark.parametrize("allowed", [False, True])
-def test_minimal_bash_without_a_worker_needs_the_shell_allowed_there(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    allowed: bool,
-) -> None:
+def test_minimal_bash_without_a_worker_needs_the_shell_allowed_there(tmp_path: Path, *, allowed: bool) -> None:
     """A shell in MindRoom's own process refuses its commands unless `defaults.allow_shell_without_worker` is on."""
-    monkeypatch.setattr(shell_access_module, "shell_refuses_commands", shell_refuses_commands)
     runtime = _runtime_context(tmp_path)
-    config = runtime.config.model_copy(
-        update={"defaults": runtime.config.defaults.model_copy(update={"allow_shell_without_worker": allowed})},
-    )
+    runtime.config.defaults.allow_shell_without_worker = allowed
 
-    assert minimal_shell_problems(config, runtime.runtime_paths, "helper") == (
+    assert minimal_shell_problems(runtime.config, runtime.runtime_paths, "helper") == (
         []
         if allowed
         else [

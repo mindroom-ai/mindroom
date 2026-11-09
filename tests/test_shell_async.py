@@ -22,11 +22,9 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
-from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import (
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
-    shell_refuses_commands,
     shell_tools,
 )
 
@@ -63,17 +61,10 @@ def _get_toolkit(tmp_path: Path) -> AnyToolkit:
     )
 
 
-def _agent_shell(tmp_path: Path, defaults: dict[str, object]) -> AnyToolkit:
-    """Build the shell of an agent of a config with these ``defaults``, placed as its turns place it."""
+def _shell_for_config(tmp_path: Path, defaults: dict[str, object]) -> AnyToolkit:
+    """Build the shell for a config with these ``defaults``, placed where the sandbox settings place it."""
     runtime_paths = _make_runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-            "agents": {"helper": {"display_name": "Helper", "tools": ["shell"]}},
-            "defaults": defaults,
-        },
-        runtime_paths,
-    )
+    config = Config.validate_with_runtime({"defaults": defaults}, runtime_paths)
     return get_tool_by_name(
         "shell",
         runtime_paths,
@@ -84,16 +75,12 @@ def _agent_shell(tmp_path: Path, defaults: dict[str, object]) -> AnyToolkit:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
 @pytest.mark.parametrize("defaults", [{}, {"allow_shell_without_worker": False}], ids=["unset", "off"])
-async def test_shell_without_a_worker_refuses_each_command(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    defaults: dict[str, object],
-) -> None:
+async def test_shell_without_a_worker_refuses_each_command(tmp_path: Path, defaults: dict[str, object]) -> None:
     """Without a worker, and without the setting that allows it, a command never runs in MindRoom's process."""
-    monkeypatch.setattr(shell_module, "shell_refuses_commands", shell_refuses_commands)
     marker = tmp_path / "ran"
-    tool = _agent_shell(tmp_path, defaults)
+    tool = _shell_for_config(tmp_path, defaults)
 
     result = await tool.functions["run_shell_command"](["touch", str(marker)])
 
@@ -105,14 +92,11 @@ async def test_shell_without_a_worker_refuses_each_command(
 
 
 @pytest.mark.asyncio
-async def test_shell_without_a_worker_runs_commands_when_the_config_allows_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_shell_without_a_worker_runs_commands_when_the_config_allows_it(tmp_path: Path) -> None:
     """`defaults.allow_shell_without_worker: true` lets the shell run commands in MindRoom's process."""
-    monkeypatch.setattr(shell_module, "shell_refuses_commands", shell_refuses_commands)
     marker = tmp_path / "ran"
-    tool = _agent_shell(tmp_path, {"allow_shell_without_worker": True})
+    tool = _shell_for_config(tmp_path, {"allow_shell_without_worker": True})
 
     result = await tool.functions["run_shell_command"](f"touch {marker} && echo ran-here")
 

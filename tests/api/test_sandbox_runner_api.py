@@ -44,7 +44,6 @@ import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
-import mindroom.tools.shell as shell_module
 from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -98,7 +97,6 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
     worker_root_path,
 )
-from mindroom.tools.shell import shell_refuses_commands
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
@@ -6692,7 +6690,7 @@ def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
     assert workspace.is_dir()
 
 
-@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+@pytest.mark.usefixtures("real_shell_refusal")
 @pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
 def test_a_runner_runs_shell_commands_without_the_setting_for_shells_outside_workers(
     monkeypatch: pytest.MonkeyPatch,
@@ -6700,14 +6698,12 @@ def test_a_runner_runs_shell_commands_without_the_setting_for_shells_outside_wor
     execution_mode: str,
 ) -> None:
     """A runner started as in deployments runs shell commands; `defaults.allow_shell_without_worker` is off."""
-    monkeypatch.setattr(shell_module, "shell_refuses_commands", shell_refuses_commands)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
     monkeypatch.delenv("MINDROOM_SANDBOX_RUNNER_MODE", raising=False)
@@ -6734,6 +6730,7 @@ def test_a_runner_runs_shell_commands_without_the_setting_for_shells_outside_wor
     assert payload["result"] == "ran-in-runner"
 
 
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_worker_routed_shell_uses_agent_workspace_as_home(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
