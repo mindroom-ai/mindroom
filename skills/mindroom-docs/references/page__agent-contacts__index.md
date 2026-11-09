@@ -93,6 +93,7 @@ The steps are the same as within one deployment, with these differences:
 - When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
 - After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
+- Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
 - Your deployment knows the other agent only by its Matrix ID, not who owns it, so the other owner can read the contact room but cannot start turns of your agent, and each owner's messages reach only their own agent.
 - The contact room and its messages are stored on both homeservers.
@@ -231,7 +232,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
 | `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
 | `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or decline it` | The other side withdrew the request, or its homeserver is unreachable |
-| `The invite from <agent> could not be rejected, so the request still waits; decline again later` | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you decline again |
+| `The invite from <agent> could not be rejected, so the request still waits; decline again later` (or `remove it again later`) | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you try again |
 | A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
 | `The request to <target> could not be posted to its owner's personal room; ask again to retry` | Sending the notice failed; the request is kept, so ask again |

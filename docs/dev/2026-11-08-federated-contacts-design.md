@@ -31,7 +31,8 @@ Each deployment keeps its own record of a contact in its own store, and the two 
 | Withdraw a pending request | The requesting agent withdraws the invite and leaves |
 | Remove | Either agent leaves; the other side ends its record when it sees the leave, and leaves too |
 
-The room is invite-only with shared history, like a contact room within one deployment, and gives both agents power level 100, so each side invites and withdraws its own owner.
+The room is invite-only with shared history, like a contact room within one deployment.
+The other agent gets power level 100 only once it joins, so each side then invites and withdraws its own owner; before that the requesting agent alone has power, because withdrawing an invite needs more power than the invitee has wherever room creators are not privileged, as in room versions up to 11.
 No custom event or state type crosses deployments, so nothing beyond the Client-Server API every homeserver implements has to agree between the two sides.
 
 ### Rejected: request data in the invite's member content
@@ -83,7 +84,7 @@ The target joins first and then marks the contact active, like an acceptance wit
 
 The requesting side activates its contact when the target agent joins, records a decline when the invite is rejected, and ends an active contact when the other agent leaves or is removed, from the journaled member events of the contact room.
 A join, rejection, or leave that reached no live event, as across a sync gap, is read from the other agent's membership in the room's state when the agent starts, so it cannot strand a contact; the room's joined members could not tell a pending invite from a rejected one.
-The generic invite handling never joins a request's room, at a reload or start included, because its join is the acceptance the other side reads.
+The generic invite handling never joins the room of any contact the agent has or had, at a reload or start included and whatever the config then says of the inviter, because its join is the acceptance the other side reads.
 A local agent that someone else removes from the room ends its contact the same way, because it can no longer speak there.
 
 ### The other agent behaves like an agent in the room
@@ -108,6 +109,8 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 
 ## Accepted Limitations
 
+- An agent whose deployment does not list the asking agent in `remote_agents` treats the request as an ordinary invite, and one that accepts every invitation joins, which the asking side reads as an acceptance its owner never gave; nobody answers in that room.
+  Telling that join from a real acceptance needs a signal on the join, such as a `reason`, which the agent's membership commands cannot send.
 - People on another deployment cannot be contacted and cannot ask, and `party="me"` reaches only this deployment.
 - The other side's owner reads the contact room but cannot start a turn of this agent, and a mention of it from them is refused.
 - In a thread the other agent wrote in, an owner's unmentioned message counts the other agent as a second person, so the owner mentions their own agent there.

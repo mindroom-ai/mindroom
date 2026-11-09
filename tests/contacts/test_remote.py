@@ -130,16 +130,23 @@ def _matrix(*, room_id: str | None = REMOTE_ROOM, invited: bool = True) -> Itera
         patch("mindroom.contacts.federation.invite_to_room", new=invite),
         patch("mindroom.contacts.flow.kick_from_room", new=AsyncMock(return_value=True)) as kick,
         patch(
+            "mindroom.contacts.federation.ensure_managed_room_power_levels",
+            new=AsyncMock(return_value=True),
+        ) as power,
+        patch(
             "mindroom.contacts.flow.get_room_members",
             new=AsyncMock(return_value={"@mindroom_mind_alice:localhost", "@mindroom_mind_bob:localhost", REMOTE}),
         ),
     ):
-        yield {"create": create, "invite": invite, "kick": kick}
+        yield {"create": create, "invite": invite, "kick": kick, "power": power}
 
 
 @pytest.mark.asyncio
 async def test_a_request_to_another_deployment_is_an_invite_to_its_room(tmp_path: Path) -> None:
-    """The asking agent opens the contact room, makes the other agent an administrator, and invites it with the reason."""
+    """The asking agent opens the contact room and invites the other agent with the reason, giving it no power yet.
+
+    Until the other agent joins, the asking agent must be able to withdraw its invite, which needs more power.
+    """
     config, paths = _remote_setup(tmp_path)
     runtime = _runtime()
     with _matrix() as matrix:
@@ -149,7 +156,6 @@ async def test_a_request_to_another_deployment_is_an_invite_to_its_room(tmp_path
     matrix["create"].assert_awaited_once_with(
         client,
         f"Alice's Mind ↔ {REMOTE}",
-        admin_users=[REMOTE],
         initial_state=flow._CONTACT_ROOM_STATE,
     )
     matrix["invite"].assert_awaited_once_with(client, REMOTE_ROOM, REMOTE, reason="Find a slot")
@@ -595,6 +601,8 @@ async def test_the_other_agent_joining_is_the_acceptance(tmp_path: Path) -> None
         await _member(config, paths, runtime, "mind_alice", membership="join")
     assert _statuses(paths) == ["active"]
     assert _stored(paths)[0].decided_at is not None
+    # Once joined, the other agent gets the power to invite and withdraw its own owner.
+    matrix["power"].assert_awaited_once_with(runtime.clients["mind_alice"], REMOTE_ROOM, [REMOTE])
     matrix["invite"].assert_awaited_once_with(runtime.clients["mind_alice"], REMOTE_ROOM, OWNER)
     kickoff = runtime.sent("mind_alice")
     kickoff.assert_awaited_once()
@@ -793,9 +801,17 @@ async def test_two_deployments_ask_accept_talk_and_end_a_contact(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_invite_reconciliation_never_joins_a_request_room(tmp_path: Path) -> None:
-    """A request waits for its owner, so even accept_invites: true never joins its room at a reload or start."""
+@pytest.mark.parametrize("drift", ["none", "contacts_removed", "remote_agents_emptied"])
+async def test_invite_reconciliation_never_joins_a_request_room(tmp_path: Path, drift: str) -> None:
+    """A request waits for its owner, so even accept_invites: true never joins its room at a reload or start.
+
+    That holds after the config stops naming its inviter too, since the other side would read the join as acceptance.
+    """
     config, paths = _remote_setup(tmp_path)
+    if drift == "contacts_removed":
+        config, _ = _setup(tmp_path, contacts=False)
+    elif drift == "remote_agents_emptied":
+        config, _ = _setup(tmp_path)
     assert config.agents["mind_bob"].accept_invites is True
     _store(paths, _incoming_with_notice())
     lifecycle = _room_lifecycle(config, paths, "mind_bob")
@@ -1010,3 +1026,43 @@ async def test_an_agent_that_loses_contacts_withdraws_its_unanswered_request_els
     assert _statuses(paths) == ["removed"]
     matrix["kick"].assert_awaited_once_with(lifecycle.deps.runtime.client, REMOTE_ROOM, REMOTE)
     assert left == [REMOTE_ROOM]
+
+
+@pytest.mark.asyncio
+async def test_removing_a_pending_request_whose_rejection_fails_keeps_it(tmp_path: Path) -> None:
+    """Removing a request from another deployment rejects its invite first, so a failed rejection removes nothing."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    runtime.clients["mind_bob"].room_leave = AsyncMock(return_value=nio.RoomLeaveError("unreachable"))
+    refusal = rf"^The invite from {re.escape(REMOTE)} could not be rejected, so the request still waits; remove it again later$"
+    with _matrix(), pytest.raises(ValueError, match=refusal):
+        await flow.remove_contact(_bob(config, paths, runtime), "in")
+    assert _statuses(paths) == ["pending"]
+    runtime.bots["mind_bob"].change_local_membership.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_declining_a_request_whose_invite_is_gone_declines_it(tmp_path: Path) -> None:
+    """A leave the homeserver refuses finds no invite left, as after the other side withdrew it, so nothing waits."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    gone = nio.RoomLeaveError("You are not invited to this room.", status_code="M_FORBIDDEN")
+    runtime.clients["mind_bob"].room_leave = AsyncMock(return_value=gone)
+    with _delivered():
+        declined = await flow.decline_contact(_bob(config, paths, runtime), "in")
+    assert declined.status == "declined"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_agent_cannot_decline_another_deployments_request(tmp_path: Path) -> None:
+    """A stopped agent's client cannot reject the invite, so the decline waits for the agent to run."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    runtime.bots["mind_bob"].running = False
+    with _delivered(), pytest.raises(ValueError, match=r"^The invite from .* could not be rejected"):
+        await flow.decline_contact(_bob(config, paths, runtime), "in")
+    runtime.clients["mind_bob"].room_leave.assert_not_awaited()
+    assert _statuses(paths) == ["pending"]

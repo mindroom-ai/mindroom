@@ -35,7 +35,7 @@ from mindroom.contacts.store import (
 )
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_room_membership, invite_to_room
+from mindroom.matrix.client_room_admin import ensure_managed_room_power_levels, get_room_membership, invite_to_room
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -236,13 +236,17 @@ async def contact_member_event(
 
 
 async def _accepted(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
-    """Make the request active, invite the owner to read along, and let the agent continue its task."""
+    """Make the request active, give the other agent the power to seat its owner, invite this owner, and continue."""
     change = _settle(record.id, "pending", "active")
     accepted = await run_blocking_until_complete(update_contacts, actor.runtime_paths, change)
     if accepted is None or accepted.room_id is None:
         return
     bot = actor.agent_bot(agent_name)
-    if bot is None or bot.client is None or not await invite_to_room(bot.client, accepted.room_id, actor.owner):
+    client = None if bot is None else bot.client
+    # Equal power lets each agent invite and withdraw its own owner, and neither remove the other.
+    if client is None or not await ensure_managed_room_power_levels(client, accepted.room_id, [accepted.target.id]):
+        logger.warning("contact_room_power_grant_failed", contact_id=record.id, user_id=accepted.target.id)
+    if client is None or not await invite_to_room(client, accepted.room_id, actor.owner):
         logger.warning("contact_room_owner_invite_failed", contact_id=record.id, user_id=actor.owner)
     await announce_acceptance(actor, accepted, agent_name)
 

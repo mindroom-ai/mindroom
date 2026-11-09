@@ -16,6 +16,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
+import nio
 import yaml
 
 from mindroom.background_tasks import run_blocking_until_complete
@@ -52,15 +53,12 @@ from mindroom.matrix.client_room_admin import (
     get_room_members,
     invite_to_room,
     kick_from_room,
-    leave_room,
 )
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
-
-    import nio
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -414,11 +412,10 @@ async def _request_remote(
         msg = f"{agent_name} is not running, so it cannot send the request; ask again later"
         raise ValueError(msg)
     bot, client = running
+    # The other agent gets its power once it joins, so until then this agent can still withdraw the invite.
     room_id = await create_room(
         client,
         f"{party_name(actor.config, requester)} ↔ {target.id}",
-        # Each agent invites and withdraws its own owner.
-        admin_users=[target.id],
         initial_state=_CONTACT_ROOM_STATE,
     )
     if room_id is None:
@@ -677,13 +674,20 @@ async def reject_contact_invite(actor: ContactActor, agent_name: str, room_id: s
     """Reject the invite into another deployment's contact room, which the other side reads as a decline.
 
     The agent is only invited there, and its membership commands read an invite as already left, so they would send
-    nothing; leaving the room on the homeserver directly rejects the invite. Return whether it was rejected.
+    nothing; leaving the room on the homeserver directly rejects the invite. A leave the homeserver refuses finds no
+    invite left, as when the other side withdrew it, so nothing waits on it. Return whether no invite is left.
     """
-    bot = actor.agent_bot(agent_name)
-    if bot is None or bot.client is None:
+    if (running := _running_bot(actor, agent_name)) is None:
         logger.warning("contact_invite_reject_skipped", agent_name=agent_name, room_id=room_id)
         return False
-    return await leave_room(bot.client, room_id)
+    _, client = running
+    response = await client.room_leave(room_id)
+    if isinstance(response, nio.RoomLeaveResponse):
+        return True
+    gone = isinstance(response, nio.RoomLeaveError) and response.status_code in {"M_FORBIDDEN", "M_NOT_FOUND"}
+    log = logger.info if gone else logger.error
+    log("contact_invite_reject_failed", agent_name=agent_name, room_id=room_id, error=str(response), gone=gone)
+    return gone
 
 
 async def announce_acceptance(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
@@ -969,7 +973,18 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
 
     The contact's agents leave its room and stop keeping it across restarts, its creating agent first withdrawing the
     invitations of owners who never joined; a creator that is not running does so when it leaves at its next start.
+    A pending request from another deployment is removed by rejecting its invite first, as a decline is.
     """
+    asked, side = _owned(await run_blocking_until_complete(read_contacts, actor.runtime_paths), contact_id, actor.owner)
+    if (
+        side == "target"
+        and asked.status == "pending"
+        and asked.requester.kind == "remote_agent"
+        and asked.room_id is not None
+        and not await reject_contact_invite(actor, asked.target.id, asked.room_id)
+    ):
+        msg = f"The invite from {asked.requester.id} could not be rejected, so the request still waits; remove it again later"
+        raise ValueError(msg)
 
     def remove(book: ContactBook) -> tuple[ContactRecord, bool]:
         record, side = _owned(book, contact_id, actor.owner)
@@ -994,10 +1009,8 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
             elif record.target.kind == "remote_agent":
                 # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
                 await kick_from_room(client, record.room_id, record.target.id)
-        if was_pending and record.requester.kind == "remote_agent":
-            # The agent was only invited to the room of the request it never accepted.
-            await reject_contact_invite(actor, record.target.id, record.room_id)
-        else:
+        if not (was_pending and record.requester.kind == "remote_agent"):
+            # The invite of a request from another deployment was rejected above, and the agent never joined its room.
             await leave_contact_room(actor, record, record.room_id)
     return record
 

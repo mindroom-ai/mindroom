@@ -727,6 +727,12 @@ class BotRoomLifecycle:
                 self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
                 return
             joined = self._client_has_joined_room(room.room_id)
+            if not joined and await self._is_contact_room(room.room_id):
+                # Joining a contact's room is the acceptance the other side reads, so only accepting it may join,
+                # whatever the current config says of its inviter.
+                self._logger().info("ignoring_invite_to_contact_room", room_id=room.room_id, sender=sender)
+                await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+                return
             allowed_sender = (
                 self._pending_room_invites.get(room.room_id) if joined else self._allowed_current_inviter(room.room_id)
             )
@@ -758,6 +764,11 @@ class BotRoomLifecycle:
                 await self._send_managed_room_notice(room, sender)
             await self._room_joined(room.room_id)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+
+    async def _is_contact_room(self, room_id: str) -> bool:
+        """Return whether a contact this agent has or had uses the room."""
+        config, paths, name = self._config(), self.deps.runtime_paths, self.deps.agent_name
+        return room_id in await asyncio.to_thread(contact_room_ids, config, paths, name, any_status=True)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
         """Authorize a new join at the point Nio takes command ownership."""
