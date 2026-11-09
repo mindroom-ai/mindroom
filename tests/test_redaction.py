@@ -872,6 +872,7 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
         ('grep -rn "token=" src | grep -v test', f'grep -rn "token=" {REDACTED} | grep -v test'),
         ('grep -rn "password=" "src/" | grep "x"', f'grep -rn "password=" "{REDACTED}" | grep "x"'),
         ('echo "password:" hunter2 > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
+        ('echo "password:" hunter2>config.yaml', f'echo "password:" {REDACTED}>config.yaml'),
         ('echo "password:" \\\n  hunter2 > config.yaml', f'echo "password:" \\\n  {REDACTED} > config.yaml'),
         ('grep -rn "password="; echo done', 'grep -rn "password="; echo done'),
     ],
