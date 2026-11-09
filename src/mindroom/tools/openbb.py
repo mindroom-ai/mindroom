@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
-from importlib import util as importlib_util
+import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -22,12 +24,18 @@ def _load_openbb_tools() -> type[OpenBBTools]:
     of any other process that starts while the build holds its non-blocking lock, so every process
     using that install waits on a lock beside it instead.
     """
-    spec = importlib_util.find_spec("openbb")
+    spec = importlib.util.find_spec("openbb")
     if spec is None or spec.origin is None:
         msg = "No module named 'openbb'"
         raise ModuleNotFoundError(msg, name="openbb")
     with advisory_file_lock(Path(spec.origin).parent / ".mindroom-build.lock"):
-        module = importlib.import_module("agno.tools.openbb")
+        try:
+            module = importlib.import_module("agno.tools.openbb")
+        except ValueError:
+            # OpenBB's build installs a signal handler, which only the main thread may do,
+            # so a build needed off the main thread runs in a child process before the import retries.
+            subprocess.run([sys.executable, "-c", "import openbb"], check=True)
+            module = importlib.import_module("agno.tools.openbb")
     return cast("type[OpenBBTools]", module.OpenBBTools)
 
 

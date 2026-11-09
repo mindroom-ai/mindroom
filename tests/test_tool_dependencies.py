@@ -72,12 +72,16 @@ def _base_dependency_names() -> set[str]:
 
 _OPENBB_FIRST_CALL = textwrap.dedent(
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     from openbb_core.app.model.obbject import OBBject
     from openbb_core.provider.abstract.data import Data
 
     from mindroom.tools.openbb import openbb_tools
 
-    toolkit = openbb_tools()()
+    # Agents are built off the event loop, in a worker thread.
+    with ThreadPoolExecutor(1) as pool:
+        toolkit = pool.submit(lambda: openbb_tools()()).result()
     assert hasattr(toolkit.obb, "equity"), "OpenBB command package was not built"
     # The toolkit converts every result to polars, which needs pyarrow for text columns.
     quotes = OBBject(results=[Data(symbol="AAPL", name="Apple"), Data(symbol="MSFT", name="Microsoft")])
@@ -87,7 +91,7 @@ _OPENBB_FIRST_CALL = textwrap.dedent(
 
 
 def test_openbb_tool_builds_on_first_use_in_concurrent_processes(tmp_path: Path) -> None:
-    """Processes that load the OpenBB tool together on a fresh install all reach its commands."""
+    """Processes that load the OpenBB tool together from worker threads on a fresh install all reach its commands."""
     installed = importlib_util.find_spec("openbb")
     if installed is None or installed.origin is None:
         pytest.skip("openbb extra is not installed")
