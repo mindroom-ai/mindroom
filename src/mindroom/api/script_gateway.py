@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = [
+    "SCRIPT_GATEWAY_PORT_ENV",
     "ScriptCallReceiptResponse",
     "ScriptToolCallRequestModel",
     "bind_script_tool_broker",
@@ -57,7 +58,7 @@ __all__ = [
 logger = get_logger(__name__)
 
 _MAX_REQUEST_BYTES = 64 * 1024
-_LISTENER_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
+SCRIPT_GATEWAY_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
 # Matches the primary API's shutdown grace; Uvicorn cancels listener requests still open after it.
 _LISTENER_SHUTDOWN_GRACE_SECONDS = 5
 
@@ -329,7 +330,7 @@ async def serve_script_gateway_listener(
     routers, both authenticated by short-lived capabilities, so a network path
     that reaches only this port cannot reach any other primary API route.
     """
-    port = listener_port(runtime_paths, _LISTENER_PORT_ENV)
+    port = listener_port(runtime_paths, SCRIPT_GATEWAY_PORT_ENV)
     if port is None:
         yield
         return

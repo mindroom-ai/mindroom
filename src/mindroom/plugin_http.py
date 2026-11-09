@@ -607,10 +607,19 @@ async def worker_relay(connection: HTTPConnection, target: ResolvedWorkerTarget)
 def plugin_origin_url(connection: HTTPConnection, label: str) -> str:
     """Return the public URL of host ``label`` of the plugin whose route serves ``connection``.
 
-    ``label`` is one DNS label the plugin picks, else ``ValueError``; it answers 503 while plugin origins are off.
+    ``label`` is one DNS label the plugin picks, else ``ValueError``; it answers 503 while plugin origins are off. It
+    raises ``RuntimeError`` for a plugin without an ``origin_module``, whose hosts answer only 404.
     """
     plugin_name = _route_plugin_name(connection, "plugin_origin_url")
-    url = plugin_origins.plugin_origin_url(require_api_state(connection.app).snapshot.runtime_paths, plugin_name, label)
+    snapshot = require_api_state(connection.app).snapshot
+    # A staged load sets one of these exactly when the manifest names an origin module.
+    if snapshot.runtime_config is None or not any(
+        plugin.name == plugin_name and (plugin.origin_app is not None or plugin.origin_error is not None)
+        for plugin in config_plugins(snapshot.runtime_config, snapshot.runtime_paths).loaded_plugins
+    ):
+        msg = f"Plugin {plugin_name!r} has no origin_module, so plugin_origin_url() has no host of it to name"
+        raise RuntimeError(msg)
+    url = plugin_origins.plugin_origin_url(snapshot.runtime_paths, plugin_name, label)
     if url is None:
         raise HTTPException(503, "Plugin origins are off.")
     return url

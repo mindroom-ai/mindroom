@@ -1654,7 +1654,13 @@ async def _run_api_server(
                     log_level=log_level,
                     agent_cli_registry=orchestrator.agent_cli_registry,
                 ),
-                serve_plugin_origins(runtime_paths, host=host, api_app=api_main.app, log_level=log_level),
+                serve_plugin_origins(
+                    runtime_paths,
+                    host=host,
+                    api_port=port,
+                    api_app=api_main.app,
+                    log_level=log_level,
+                ),
             ):
                 await server.serve()
         except SystemExit as exc:

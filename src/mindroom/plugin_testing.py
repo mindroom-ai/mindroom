@@ -541,8 +541,8 @@ def load_plugin(
     ``config`` is what a ``config.yaml`` holds, such as ``agents``, ``access`` and ``administrators``, without
     ``plugins``; a config without ``models`` gets a ``default`` model, which nothing calls. Its data lives under
     ``tmp_dir``, and the environment is left alone. A config that does not validate, or a plugin that fails to load,
-    even only its routes, origin, or lifecycle module, raises, naming why. When the block ends, the plugins published before
-    it are published again.
+    even only its routes, origin, or lifecycle module, raises, naming why. When the block ends, the plugins published
+    before it are published again.
     """
     root = Path(tmp_dir)
     runtime_paths = resolve_runtime_paths(

@@ -7483,7 +7483,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
+expose = ["SCRIPT_GATEWAY_PORT_ENV", "bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]

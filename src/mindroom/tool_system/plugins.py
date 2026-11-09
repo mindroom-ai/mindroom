@@ -733,9 +733,9 @@ def _load_plugins(
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...], dict[str, ModuleType]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
 
-    Their routes, origin, and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
-    plugins loading afresh replaced. A structural error raises with the canonical modules as they were before the load
-    and stops what it executed.
+    Their routes, origin, and lifecycle modules are imported only with ``primary_modules``. Also returns the modules
+    that the plugins loading afresh replaced. A structural error raises with the canonical modules as they were before
+    the load and stops what it executed.
     """
     installed_modules = _canonical_plugin_modules()
     installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
