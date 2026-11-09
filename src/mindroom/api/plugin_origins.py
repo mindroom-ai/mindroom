@@ -59,12 +59,12 @@ def plugin_origin_url(paths: RuntimePaths, plugin_name: str, label: str) -> str 
 
     It raises ``ValueError`` when ``label`` is not one DNS label.
     """
-    port = listener_port(paths, _PORT_ENV)
-    if port is None:
-        return None
     if not DNS_LABEL.fullmatch(label):
         msg = f"A plugin origin's label is one DNS label of lowercase letters, digits, and hyphens, not {label!r}."
         raise ValueError(msg)
+    port = listener_port(paths, _PORT_ENV)
+    if port is None:
+        return None
     domain = _domain(paths)
     local = domain == "localhost" or domain.endswith(".localhost")
     # Browsers reach a local listener directly, so its own port is the one in its URLs.
@@ -158,6 +158,8 @@ async def serve_plugin_origins(
     if port is None:
         yield
         return
+    # An invalid public port fails the start, rather than each link a route makes.
+    listener_port(runtime_paths, _PUBLIC_PORT_ENV)
     async with serve_listener(
         _PluginOrigins(api_app),
         name="plugin_origins_listener",

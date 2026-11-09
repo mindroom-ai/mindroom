@@ -168,6 +168,7 @@ def _root_tests(plugin_root: Path) -> set[Path]:
         base.oauth_module_path,
         base.routes_module_path,
         base.lifecycle_module_path,
+        base.origin_module_path,
     }
     return {path for path in candidates if path.resolve() not in named_modules}
 

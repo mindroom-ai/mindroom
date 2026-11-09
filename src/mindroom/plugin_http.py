@@ -371,12 +371,11 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
 async def stream_room_reader(websocket: HTTPConnection, user: ClientUser, room_id: str) -> RoomReader:
     """Return what ``user`` may read and change about ``room_id`` now, for a route that established ``user`` itself.
 
-    It is ``require_room_reader`` for a ``client_stream`` block, whose websocket can't send a session's
-    ``Authorization``, or for an origin route, ``websocket`` then being its request, whose own gate names its user: it
-    reads the room's members again,
-    answering 403 once ``user`` left and 503 when they can't be read, and answers ``agents()`` and ``agent()`` under the
-    config the API serves now, or 409 when the API serves another runtime. A stream that keeps checking what its caller
-    may do calls it again for each check.
+    It is ``require_room_reader`` for a route that has no session's ``Authorization``: a ``client_stream`` block, whose
+    websocket can't send one, or an origin route, passing its request as ``websocket``, whose own gate names its user.
+    It reads the room's members again, answering 403 once ``user`` left and 503 when they can't be read, and answers
+    ``agents()`` and ``agent()`` under the config the API serves now, or 409 when the API serves another runtime. A
+    stream that keeps checking what its caller may do calls it again for each check.
     """
     rebind_current_request_snapshot(websocket)
     return await _room_reader(websocket, user, room_id)

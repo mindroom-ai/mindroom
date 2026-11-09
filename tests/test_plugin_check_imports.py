@@ -126,7 +126,10 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
     ]
 
 
-@pytest.mark.parametrize("field", ["tools_module", "hooks_module", "oauth_module", "routes_module", "lifecycle_module"])
+@pytest.mark.parametrize(
+    "field",
+    ["tools_module", "hooks_module", "oauth_module", "routes_module", "lifecycle_module", "origin_module"],
+)
 def test_imports_outside_plugin_api_reads_a_root_test_file_the_manifest_names(tmp_path: Path, field: str) -> None:
     """A root-level test file that the manifest names is a module MindRoom loads, so its imports count."""
     _write_plugin(

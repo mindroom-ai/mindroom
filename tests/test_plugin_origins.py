@@ -333,10 +333,11 @@ def test_plugin_origin_urls(tmp_path: Path, env: dict[str, str], url: str | None
 
 
 @pytest.mark.parametrize("label", ["", "a.b", "A", "-a", "a_b", "a" * 64])
-def test_a_label_is_one_dns_label(tmp_path: Path, label: str) -> None:
-    """A label that is not one lowercase DNS label is refused, so it never names another host."""
+@pytest.mark.parametrize("port", ["9100", ""])
+def test_a_label_is_one_dns_label(tmp_path: Path, label: str, port: str) -> None:
+    """A label that is not one lowercase DNS label is refused, so it never names another host, with origins on or off."""
     with pytest.raises(ValueError, match="one DNS label"):
-        plugin_origin_url(_paths(tmp_path), "demo", label)
+        plugin_origin_url(_paths(tmp_path, MINDROOM_PLUGIN_ORIGIN_PORT=port), "demo", label)
 
 
 def test_a_plugin_whose_name_is_no_dns_label_cannot_have_an_origin_module(tmp_path: Path) -> None:
@@ -402,6 +403,15 @@ async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
             api_app=FastAPI(),
             log_level="INFO",
         ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_public_port_fails_the_start(tmp_path: Path) -> None:
+    """A mistyped ``MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT`` stops MindRoom from starting rather than break every link."""
+    paths = _paths(tmp_path, MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT="https")
+    with pytest.raises(ValueError, match="MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT must be a TCP port"):
+        async with serve_plugin_origins(paths, host="127.0.0.1", api_app=FastAPI(), log_level="INFO"):
             pass
 
 

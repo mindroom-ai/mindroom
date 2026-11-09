@@ -1682,7 +1682,7 @@ The manifest's `origin_module` names a module defining `router`, a FastAPI `APIR
 MindRoom loads it as it loads a routes module: `request.app` is MindRoom's API app, so the helpers of `mindroom.plugin_http` work in its routes, a reload closes its open websockets with 1012, and a module that fails to load costs the plugin only its origins, logging `Plugin origin module failed to load; serving no origins`.
 A route reads which host it serves from `request.url.hostname`.
 A host whose plugin is not loaded or has no `origin_module` answers 404, and a route that raises answers 500 without the error's detail.
-A plugin name with `_` is no DNS label, so a plugin with such a name and an `origin_module` fails to load, and `mindroom plugins check` says `Plugin 'my_plugin' cannot serve origins`.
+A plugin name with `_` is not a valid DNS label, so a plugin with such a name and an `origin_module` fails to load, and `mindroom plugins check` says `Plugin 'my_plugin' cannot serve origins`.
 
 MindRoom authenticates nothing on these hosts: the plugin's router decides who sees each page.
 Every answer carries `Content-Security-Policy: frame-ancestors 'self'` followed by the origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, as a policy of its own beside any the route sets, so only MindRoom Chat and the host's own pages may frame it, and a route can tighten that but never loosen it.
@@ -1691,7 +1691,7 @@ MindRoom adds no other header, so the route sets its own caching and content-typ
 | Helper (`mindroom.plugin_http`) | Returns |
 | --- | --- |
 | `plugin_origin_url(connection, label)` | The public URL of host `label` of the plugin whose route serves `connection`, on the API or on one of its hosts; it raises `ValueError` for a `label` that is not one DNS label, and answers 503 with `Plugin origins are off.` while `MINDROOM_PLUGIN_ORIGIN_PORT` is unset |
-| `client_origins(connection)` | The origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, MindRoom Chat's |
+| `client_origins(connection)` | The origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, MindRoom Chat's, such as for the target origin of a page's `postMessage` to the chat that frames it |
 | `await stream_room_reader(request, ClientUser(user_id), room_id)` | The `RoomReader` for a user the route's own gate established, once they are joined to `room_id`, as in [Websocket routes](#websocket-routes) |
 
 ### Certificates on demand
@@ -1750,7 +1750,7 @@ def mint(app: App) -> str:
 
 ```python
 # routes.py
-import secrets
+import hashlib
 
 from fastapi import APIRouter, Depends, Request
 
@@ -1766,7 +1766,9 @@ async def open_app(
     request: Request, room_id: str, agent_user_id: str, room: RoomReader = Depends(require_room_reader)
 ) -> dict[str, str]:
     await room.agent(agent_user_id)
-    app = App(secrets.token_hex(8), room.user.user_id, room_id, agent_user_id, 5173)
+    # One host per person, room, and agent, so opening the app again needs no new certificate.
+    label = hashlib.sha256(f"{room.user.user_id} {room_id} {agent_user_id}".encode()).hexdigest()[:16]
+    app = App(label, room.user.user_id, room_id, agent_user_id, 5173)
     return {"url": f"{plugin_origin_url(request, app.label)}/enter?link={mint(app)}"}
 ```
 
@@ -1812,28 +1814,23 @@ async def enter(request: Request, link: str) -> Response:
 @router.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
 async def relay(request: Request) -> Response:
     app = SESSIONS.get(request.cookies.get(COOKIE, ""))
-    origin = request.headers.get("origin")
-    if (
-        app is None
-        or app.label != own_label(request)
-        or request.headers.get("sec-fetch-site") != "same-origin"
-        or (origin is not None and origin != f"{request.url.scheme}://{request.url.netloc}")
-    ):
+    if app is None or app.label != own_label(request) or request.headers.get("sec-fetch-site") != "same-origin":
         raise HTTPException(403, "Open this app from its room.")
     room = await stream_room_reader(request, ClientUser(app.user_id), app.room_id)
     target = (await room.agent(app.agent_user_id)).worker_target
-    path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    # The path as the browser sent it, still percent-encoded, and only the headers the app needs, never the cookie.
+    path = request.scope["raw_path"].decode() + (f"?{request.url.query}" if request.url.query else "")
+    headers = [("content-type", request.headers["content-type"])] if "content-type" in request.headers else []
     async with (await worker_relay(request, target)).http(
-        request.method, path, port=app.port, body=await request.body()
+        request.method, path, port=app.port, headers=headers, body=await request.body()
     ) as answer:
         headers = {name: answer.headers[name] for name in ("content-type", "location") if name in answer.headers}
         return Response(await answer.read(), answer.status, headers=headers)
 ```
 
 Every host of the domain is same-site with every other, so a browser sends a host's cookies with requests that pages on its sibling hosts make to it.
-A gate therefore checks `Sec-Fetch-Site` and `Origin`, as `relay` does, and never trusts its cookie alone.
+A gate therefore admits only requests whose `Sec-Fetch-Site` is `same-origin`, as `relay` does, and never trusts its cookie alone; a websocket route checks that its `Origin` is the host's own, `plugin_origin_url(websocket, label)`.
 The `__Host-` prefix keeps a page on another host from setting the cookie, and `SameSite=None` with `Partitioned` lets MindRoom Chat's frames, which are cross-site, keep it while no other site's frames get it.
-Pass on to the app only the headers it needs, never the cookie.
 A plugin that uses `origin_module`, `plugin_origin_url`, or `client_origins` states `"mindroom_plugin_api": "1.23"` in its manifest.
 
 ## People, agents, and administrators
