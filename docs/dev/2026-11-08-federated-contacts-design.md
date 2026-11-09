@@ -114,6 +114,15 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 - A withdrawn request whose withdrawal the target never saw is found only when its owner accepts it, which then fails.
 - An agent that restarts between joining a remote contact's room and marking it active leaves the room, so the other side activates and then ends the contact.
 
+## Evidence
+
+A live run on 2026-11-09 used two Tuwunel homeservers federating over TLS, one deployment on each, and a third deployment on the first homeserver, with a real model driving every tool call.
+Across the federated pair it covered a request, its notice, acceptance in the owner's thread, both agents talking through mentions, a refused turn from the other side's owner, `max_consecutive_agent_replies` counting the other agent's messages, `update_contact`, removal, withdrawal of a pending request, a decline, a refusal of a pair the other side had declined, and a restart that missed an acceptance and one that missed a removal.
+Across the pair on one homeserver it covered a request, acceptance, conversation, and removal.
+
+The run found that declining, refusing, and removing a pending request from another deployment sent nothing to the homeserver, because the bot's membership commands read an invite as already left, so the asking side stayed pending.
+Rejecting the invite therefore leaves the room on the homeserver directly.
+
 ## Open Questions
 
-- No live run with two deployments has happened yet.
+- The Contacts page has not been exercised in a live run with a request from another deployment.
