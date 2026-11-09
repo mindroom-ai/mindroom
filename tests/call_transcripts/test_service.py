@@ -1754,7 +1754,7 @@ async def test_one_stretch_in_flight_per_person(world: World) -> None:
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
-    await world.service.reserve_upload(call.id, ANN)
+    reserved = await world.service.reserve_upload(call.id, ANN)
     first = asyncio.create_task(world.say(call.id, ANN))
     await world.transcriber.started.wait()
 
@@ -1764,7 +1764,35 @@ async def test_one_stretch_in_flight_per_person(world: World) -> None:
     world.transcriber.gate.set()
 
     assert (await first).user_id == ANN
-    world.service.release_upload(ANN)
+    world.service.release_upload(ANN, reserved)
+    await world.service.reserve_upload(call.id, ANN)
+
+
+@pytest.mark.asyncio
+async def test_an_upload_slot_is_free_again_25_seconds_after_it_was_taken(world: World) -> None:
+    """Chat gives up on an upload after 30 seconds, so a slot held 25 seconds is taken by the person's next stretch.
+
+    The stretch still being transcribed is written once it is, and giving its slot back frees none taken since.
+    """
+    world.transcriber.gate = asyncio.Event()
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(30)
+    stuck = await world.service.reserve_upload(call.id, ANN)
+    first = asyncio.create_task(world.say(call.id, ANN))
+    await world.transcriber.started.wait()
+
+    world.clock.advance(24.9)
+    await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
+    world.clock.advance(0.1)
+    taken = await world.service.reserve_upload(call.id, ANN)
+    second = asyncio.create_task(world.say(call.id, ANN))
+    world.transcriber.gate.set()
+    lines = await asyncio.gather(first, second)
+    world.service.release_upload(ANN, stuck)
+
+    assert [line.text for line in lines] == ["Hello there", "Hello there"]
+    await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
+    world.service.release_upload(ANN, taken)
     await world.service.reserve_upload(call.id, ANN)
 
 

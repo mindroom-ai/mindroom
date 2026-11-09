@@ -49,10 +49,11 @@ _TRANSCRIPT_DELAY_SECONDS = 30.0
 _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
 _SPEAKING_RETRY_AFTER_SECONDS = 3
-# How long one stretch's speech-to-text may take before the stretch becomes a gap. The person's upload slot is held
-# until then, and Chat gives up on an upload 30 seconds after it began, its one retry included, then sends the next
-# stretch: 20 seconds leaves it 10 to send the audio, so the answer comes, and the slot is free, while it still waits.
-_TRANSCRIBE_TIMEOUT_SECONDS = 20.0
+# How long a person's upload slot is held at most. Chat gives up on an upload 30 seconds after it began, its one retry
+# included, and then sends the next stretch, so a slot held longer would refuse that stretch and its retry, losing it,
+# for a stretch Chat no longer waits on. The slow stretch is still transcribed and written.
+_UPLOAD_SLOT_SECONDS = 25.0
+_TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 # Notes not written in this long count as failed notes, so a model that never answers holds up no other call for long.
 _NOTES_TIMEOUT_SECONDS = 90.0
 _MIN_TICK_SECONDS = 1.0
@@ -243,10 +244,10 @@ class CallTranscriptService:
         self._started_at = clock()
         """When this MindRoom began serving calls: every app gets a full minute from then to check in."""
         self._room_locks: dict[str, asyncio.Lock] = {}
-        self._uploading: set[str] = set()
-        """Who is sending a stretch now, from before its audio is read until it is answered."""
-        self._speaking: dict[str, str] = {}
-        """The call of each person's stretch let in and not yet written; one each, as each has one upload slot."""
+        self._uploading: dict[str, float] = {}
+        """When each person sending a stretch now took their slot, from before its audio is read until it is answered."""
+        self._speaking: dict[object, str] = {}
+        """The call of each stretch let in and not yet written."""
         self._recent_speech: dict[str, deque[float]] = {}
         self._settling: dict[str, asyncio.Task[None]] = {}
         """Each call's one task making its Matrix writes, by call, so no call's writes wait for another's."""
@@ -322,7 +323,8 @@ class CallTranscriptService:
             # A stretch has ended by the time it arrives, and none of the call's was said before the call began.
             said_at = max(call.started_at, min(started_at, now - seconds))
             await self._admit(call, user_id, said_at=said_at, seconds=seconds, now=now)
-            self._speaking[user_id] = call.id
+            stretch = object()
+            self._speaking[stretch] = call.id
         try:
             text = await self._transcribe(audio, call_id=call.id, user_id=user_id, seconds=seconds)
             if text == "":
@@ -350,29 +352,33 @@ class CallTranscriptService:
                     )
         finally:
             # In flight until its line is written, with no wait between, so the message cannot fall due without it.
-            del self._speaking[user_id]
+            del self._speaking[stretch]
         if line is None:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         return line
 
-    async def reserve_upload(self, call_id: str, user_id: str) -> None:
-        """Take the person's one upload slot before a stretch's audio is read, until ``release_upload``.
+    async def reserve_upload(self, call_id: str, user_id: str) -> float:
+        """Take the person's one upload slot before a stretch's audio is read, until ``release_upload`` or 25 seconds on.
 
         Refused from someone not in the call, for a call ended more than 30 seconds ago, or while their last upload runs.
+        Returns when the slot was taken, to give it back with.
         """
         call = await self._call_for(call_id, user_id)
-        await self._require_in_call(call, user_id, self._clock())
-        if user_id in self._uploading:
+        now = self._clock()
+        await self._require_in_call(call, user_id, now)
+        if now - self._uploading.get(user_id, -math.inf) < _UPLOAD_SLOT_SECONDS:
             raise CallRefusedError(
                 code="too-many-requests",
                 message="Your previous stretch of speech is still being sent.",
                 retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
             )
-        self._uploading.add(user_id)
+        self._uploading[user_id] = now
+        return now
 
-    def release_upload(self, user_id: str) -> None:
-        """Give back the person's upload slot."""
-        self._uploading.discard(user_id)
+    def release_upload(self, user_id: str, taken_at: float) -> None:
+        """Give back the person's upload slot taken at ``taken_at``, unless their next upload has taken it since."""
+        if self._uploading.get(user_id) == taken_at:
+            del self._uploading[user_id]
 
     async def live(self, room_id: str, user_id: str, *, after: str | None = None) -> LiveCall:
         """Return the room's live call with its lines, those added after the line ``after`` if given, and names.
@@ -591,7 +597,7 @@ class CallTranscriptService:
         recent.append(now)
 
     async def _transcribe(self, audio: bytes, *, call_id: str, user_id: str, seconds: float) -> str | None:
-        """Transcribe a stretch, giving up after 20 seconds so a stuck speech service cannot hold back the call."""
+        """Transcribe a stretch, giving up after 60 seconds so a stuck speech service cannot hold back the call."""
         try:
             async with asyncio.timeout(_TRANSCRIBE_TIMEOUT_SECONDS):
                 return await self._transcriber.transcribe(audio, call_id=call_id, user_id=user_id, seconds=seconds)

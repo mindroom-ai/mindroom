@@ -523,38 +523,31 @@ async def test_a_second_upload_at_once_or_one_from_a_member_not_in_the_call_is_r
 
 
 @pytest.mark.asyncio
-async def test_a_stuck_transcription_frees_the_upload_slot_before_chat_gives_up(
-    api: Api,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Speech-to-text stuck for 20 seconds answers a gap and frees the slot, so the person's next stretch is taken.
+async def test_a_slow_transcription_holds_the_upload_slot_no_longer_than_chat_waits(api: Api) -> None:
+    """Chat gives up on an upload after 30 seconds and sends its next stretch: 25 seconds on, that one is taken.
 
-    Chat gives up on an upload 30 seconds after it began, its one retry included, and then sends its next stretch.
-    The event loop's clock is moved on instead of waiting.
+    Both stretches are transcribed into lines, the slow one once speech-to-text answers.
     """
-    loop = asyncio.get_running_loop()
-    real_time = loop.time
-    skipped = 0.0
-    monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
     call_id = (await api.join(ANN)).json()["call"]["id"]
     api.world.clock.advance(10)
     api.world.transcriber.gate = asyncio.Event()
     first = asyncio.create_task(api.speech(call_id, ANN))
     await api.world.transcriber.started.wait()
 
-    skipped = 15.0
-    await asyncio.sleep(0.2)
-    still_waiting = not first.done()
-    skipped = 20.0
-    gap = await asyncio.wait_for(first, timeout=2)
-    api.world.transcriber.gate = None
-    second = await api.speech(call_id, ANN)
+    api.world.clock.advance(24)
+    refused = await api.speech(call_id, ANN)
+    api.world.clock.advance(1)
+    api.world.transcriber.started.clear()
+    second = asyncio.create_task(api.speech(call_id, ANN))
+    started = asyncio.create_task(api.world.transcriber.started.wait())
+    await asyncio.wait({second, started}, return_when=asyncio.FIRST_COMPLETED)
+    started.cancel()
+    api.world.transcriber.gate.set()
+    answers = await asyncio.gather(first, second)
 
-    assert still_waiting
-    assert gap.status_code == 200, gap.text
-    assert (gap.json()["line"]["kind"], gap.json()["line"]["reason"]) == ("gap", "not-transcribed")
-    assert second.status_code == 200, second.text
-    assert second.json()["line"]["text"] == "Hello there"
+    _refusal(refused, 429, "too-many-requests")
+    assert [answer.status_code for answer in answers] == [200, 200]
+    assert [answer.json()["line"]["text"] for answer in answers] == ["Hello there", "Hello there"]
 
 
 @pytest.mark.asyncio
