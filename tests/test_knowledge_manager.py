@@ -1060,6 +1060,23 @@ async def test_git_refresh_publishes_a_checkout_tracking_a_file_whose_name_is_no
 
 
 @pytest.mark.asyncio
+async def test_git_forced_reindex_indexes_a_tracked_name_holding_a_carriage_return(tmp_path: Path) -> None:
+    """A forced reindex of a checkout already at the remote revision indexes a tracked file whose name holds a carriage return."""
+    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", "a\rb.md": "carriage return guide"})
+    docs_path = tmp_path / "checkout"
+    git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+
+    assert first.index_published is second.index_published is True
+    assert first.availability is second.availability is KnowledgeAvailability.READY
+    assert first.indexed_count == second.indexed_count == 2
+
+
+@pytest.mark.asyncio
 async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

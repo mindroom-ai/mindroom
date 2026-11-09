@@ -751,6 +751,23 @@ def test_file_listing_leaves_out_a_file_whose_name_is_not_utf8(tmp_path: Path, g
     assert response.json()["file_listing_degraded"] is False
 
 
+def test_git_file_listing_lists_a_tracked_name_holding_a_carriage_return(tmp_path: Path) -> None:
+    """A tracked file whose name holds a carriage return is listed under that exact name."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a\rb.md").write_text("carriage return", encoding="utf-8")
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    _init_git_checkout(tmp_path, docs, "a\rb.md", "guide.md")
+    publish_api_config(client.app, _knowledge_config(docs, git=True))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert [entry["path"] for entry in response.json()["files"]] == ["a\rb.md", "guide.md"]
+    assert response.json()["file_listing_degraded"] is False
+
+
 def test_git_file_listing_timeout_degrades_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -896,6 +913,26 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
     ]
+
+
+def test_upload_accepts_a_name_at_the_file_system_limit(tmp_path: Path) -> None:
+    """A file name of 255 bytes, the longest the knowledge folder accepts, uploads and is listed."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    publish_api_config(client.app, _knowledge_config(docs))
+    long_name = "a" * 252 + ".md"
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", (long_name, b"hello", "text/markdown"))],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["uploaded"] == [long_name]
+    assert [entry["path"] for entry in client.get("/api/knowledge/bases/research/files").json()["files"]] == [
+        long_name,
+    ]
+    assert [path.name for path in docs.iterdir()] == [long_name]
 
 
 def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path) -> None:
@@ -1253,8 +1290,16 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     assert scheduler.scheduled == []
 
 
-def test_failed_batch_upload_removes_the_files_it_staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A batch upload that fails on its third file leaves neither that file nor the two staged before it."""
+@pytest.mark.parametrize("prefix", ["", "x" * 245], ids=["short", "long"])
+def test_failed_batch_upload_removes_the_files_it_staged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    """A batch upload that fails on its third file leaves neither that file nor the two staged before it.
+
+    The long prefix makes every name about 250 bytes, close to the longest a file name can be.
+    """
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     publish_api_config(client.app, _knowledge_config(docs))
@@ -1263,9 +1308,9 @@ def test_failed_batch_upload_removes_the_files_it_staged(tmp_path: Path, monkeyp
     response = client.post(
         "/api/knowledge/bases/research/upload",
         files=[
-            ("files", ("one.md", b"one", "text/markdown")),
-            ("files", ("two.md", b"two", "text/markdown")),
-            ("files", ("three.md", b"too large", "text/markdown")),
+            ("files", (f"{prefix}one.md", b"one", "text/markdown")),
+            ("files", (f"{prefix}two.md", b"two", "text/markdown")),
+            ("files", (f"{prefix}three.md", b"too large", "text/markdown")),
         ],
     )
 
