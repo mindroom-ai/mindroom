@@ -1529,7 +1529,7 @@ Neither call checks who may use the agent, so check that before you start a serv
 `WorkerServiceState` has `state`, `port`, and `exit_code`.
 `state` is `running` once the program, or a process it started in the program's process group, listens on its port and no other process does, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
 Each worker runs one instance of a service, so ensuring a running service returns the same port.
-A service that exits because another socket took its port before the service bound it starts once more on a fresh port.
+A service that exits as it starts because another socket took its port first starts once more on a fresh port.
 Otherwise a service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
 The program's output goes to the worker's log.
 The program runs in the worker's own workspace folder, not in the agent's workspace where its shell and file tools work, so a file it writes by a relative path is not in the agent's workspace.

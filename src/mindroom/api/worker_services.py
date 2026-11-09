@@ -71,7 +71,8 @@ class _ServiceInstance:
     idle_timeout_seconds: float
     idle_until: float = 0.0
     expiry: asyncio.Task[None] | None = None
-    # Whether an exit while another socket holds its port starts the service once more on a fresh one.
+    # Whether an exit while another socket holds its port starts the service once more on a fresh one: only until an
+    # ensure reports the instance, which may then have run, so that its own closed connections may hold the port.
     retries: bool = True
 
 
@@ -120,14 +121,18 @@ class _WorkerServices:
                 instance = await self._add(key, program)
             self.touch(plugin, name)
         state = await _settled(instance)
-        if state.state != "exited" or not instance.retries or not _port_taken(instance.port):
+        if state.state != "exited" or not instance.retries:
+            instance.retries = False
             return state
-        # Another socket took the probed port before the service bound it, as one can between the probe and the bind.
         async with self._lock:
             if self._instances.get(key) is instance:
-                await self._end(key, instance)
-                (await self._add(key, program)).retries = False
-                self.touch(plugin, name)
+                # Another socket took the probed port before the service bound it, as one can between probe and bind.
+                if _port_taken(instance.port):
+                    await self._end(key, instance)
+                    (await self._add(key, program)).retries = False
+                    self.touch(plugin, name)
+                else:
+                    instance.retries = False
             current = self._instances.get(key)
         # A concurrent ensure may have started it once more already, and a stop may have ended it.
         return state if current is None else await _settled(current)

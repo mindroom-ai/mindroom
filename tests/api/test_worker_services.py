@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import itertools
 import json
 import re
 import shutil
@@ -334,16 +333,50 @@ async def test_an_idle_service_stops_after_its_timeout(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -> None:
-    """A program that exits is reported with its exit code, and ensuring it again starts nothing until a stop."""
+    """A program that exits is reported with its exit code, and ensuring it again starts nothing until a stop.
+
+    That holds once another socket listens on its port too.
+    """
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert state["state"] == "exited"
         assert state["exit_code"] == 3
         process = worker_services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
-        _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
+        with socket.create_server(("127.0.0.1", state["port"])):
+            _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert again == state
         assert worker_services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
         assert (runner.workspace / "crash.log").read_text() == "ran\n"
+
+
+# A service that records each run, answers one connection, closing it first, and then crashes.
+_ONCE = """
+import os, socket, sys
+
+open("once.log", "a").write("ran\\n")
+server = socket.create_server(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])))
+connection = server.accept()[0]
+connection.sendall(b"bye")
+connection.close()
+sys.exit(3)
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_crashes_after_it_served_is_reported_and_not_restarted(tmp_path: Path) -> None:
+    """A program that exits after it ran stays exited, though the connection it closed still holds its port a while."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "once.py").write_text(_ONCE)
+        _, state = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
+        assert state["state"] == "running"
+        reader, writer = await asyncio.open_connection("127.0.0.1", state["port"])
+        assert await reader.read() == b"bye"
+        writer.close()
+        process = worker_services(sandbox_runner_app.app).instance("demo", "once").process  # type: ignore[union-attr]
+        await _until(lambda: process.returncode is not None)
+        _, again = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
+        assert (again["state"], again["exit_code"], again["port"]) == ("exited", 3, state["port"])
+        assert (runner.workspace / "once.log").read_text() == "ran\n"
 
 
 @pytest.mark.asyncio
@@ -1023,8 +1056,15 @@ async def _other_server(
 
     async with await asyncio.start_server(answer, "127.0.0.1", 0) as other:
         port = other.sockets[0].getsockname()[1]
-        probes, probe = iter([port]) if once else itertools.repeat(port), worker_services_module._free_loopback_port
-        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: next(probes, None) or probe())
+        probe = worker_services_module._free_loopback_port
+        taken = [port]
+
+        def probed() -> int:
+            if not once:
+                return port
+            return taken.pop() if taken else probe()
+
+        monkeypatch.setattr(worker_services_module, "_free_loopback_port", probed)
         yield port, connections
 
 
