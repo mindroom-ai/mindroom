@@ -475,7 +475,7 @@ _MEMBERS = {
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
     "mindroom.plugin_http.WorkerRelay": {
         "http": "(self, method, path, *, service, port, headers, body)",
-        "websocket": "(self, path, *, service, port, protocols)",
+        "websocket": "(self, path, *, service, port, protocols, headers)",
         "relay_messages": "(self, websocket, upstream)",
         "ports": "(self)",
     },
@@ -627,7 +627,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 24), "7fec787b0a7fa9c0b93631172e92c68db804bbe5fad7f3e9be42ad8211f36b81")
+_PINNED_VERSION = ((1, 25), "b83a38f4bba0e0a18ffff3fa97ee171861386ea989c4a35d148dd496f402bf84")
 
 
 def _is_enum(obj: object) -> bool:
