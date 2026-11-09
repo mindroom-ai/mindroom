@@ -824,6 +824,10 @@ def get_tool_by_name(
         shell_path_prepend = init_kwargs.get("shell_path_prepend")
         if tool_name == "shell" and isinstance(shell_path_prepend, str):
             proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
+        if tool_name == "shell":
+            init_kwargs["allow_without_worker"] = (
+                runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
+            )
         init_kwargs.update(
             _build_managed_tool_init_kwargs(
                 metadata,

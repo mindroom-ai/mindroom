@@ -43,6 +43,8 @@ def saas_config() -> dict:
     # An explicit worker_tools list overrides the chart's sandbox routing, and [] would run
     # shell/file/python in the primary pod beside tenant credentials.
     config["defaults"].pop("worker_tools", None)
+    # Hosted shells run only in workers.
+    config["defaults"].pop("allow_shell_without_worker", None)
 
     # Voice messages transcribe through OpenRouter's OpenAI-compatible endpoint with the tenant's OpenRouter key.
     config["voice"] = {

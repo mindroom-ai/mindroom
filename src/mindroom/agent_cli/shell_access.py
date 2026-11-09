@@ -20,6 +20,7 @@ from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tools.shell import shell_refuses_commands
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker_config import DOCKER_HOST_ALIAS
 
@@ -151,6 +152,11 @@ def minimal_shell_problems(config: Config, runtime_paths: RuntimePaths, agent_na
     if get_api_server_address() is None:
         return ["Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it."]
     if _shell_runs_in_primary(config, runtime_paths, agent_name):
+        if shell_refuses_commands(runtime_paths, allow_without_worker=config.defaults.allow_shell_without_worker):
+            return [
+                "Route `shell` to a worker or set `defaults.allow_shell_without_worker: true`, "
+                "because the shell refuses commands in MindRoom's own process.",
+            ]
         return []
     return _worker_problems(runtime_paths)
 

@@ -688,6 +688,9 @@ class TestConfigInit:
             {"name": "script", "defer": True},
             {"name": "mcp_matrix_mcp", "defer": True},
         ]
+        # Mind's shell runs in MindRoom's process until a worker is set up, so the starter allows it there.
+        assert config["defaults"]["worker_tools"] == []
+        assert config["defaults"]["allow_shell_without_worker"] is True
         assert mind["delegate_to"] == ["mind"]
         assert mind["skill_learning"] == {"enabled": True}
         assert mind["automations"] == ["prompt_curation", "dreaming"]

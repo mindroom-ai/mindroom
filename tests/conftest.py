@@ -54,6 +54,7 @@ from openai import AsyncOpenAI, OpenAI
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
+import mindroom.agent_cli.shell_access as agent_cli_shell_access_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
@@ -73,6 +74,7 @@ import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+import mindroom.tools.shell as shell_tool_module
 from mindroom import ai as mindroom_ai
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -3792,6 +3794,16 @@ def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
         return False
 
     monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", no_live_frames)
+
+
+@pytest.fixture(autouse=True)
+def _shell_runs_without_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let shells in the test process run commands, and minimal mode use them, as `allow_shell_without_worker` does.
+
+    A test of the refusal sets `shell_refuses_commands` back in both modules.
+    """
+    for module in (shell_tool_module, agent_cli_shell_access_module):
+        monkeypatch.setattr(module, "shell_refuses_commands", lambda *_args, **_kwargs: False)
 
 
 @pytest.fixture(autouse=True)

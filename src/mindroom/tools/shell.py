@@ -19,6 +19,7 @@ from mindroom.constants import (
     workspace_home_identity_env,
 )
 from mindroom.path_confinement import resolve_path_within_root
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
@@ -105,6 +106,11 @@ _WORKING_METHOD_NOTE = (
     "available tests, and recheck suspicious results such as a zero count."
 )
 
+_NO_WORKER_ERROR = (
+    "Error: Shell commands run only in a worker, and this agent's shell runs in MindRoom's own process. "
+    "Route `shell` to a worker, or set `defaults.allow_shell_without_worker: true` in config.yaml to run them here."
+)
+
 # A stopped command registers no handle, so every call shares one namespace.
 _SHELL_NAMESPACE = "shell"
 
@@ -149,6 +155,15 @@ def _normalize_shell_args(args: object) -> list[str]:
     if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
         return _normalize_shell_command_line(normalized_args[0])
     return normalized_args
+
+
+def shell_refuses_commands(runtime_paths: RuntimePaths, *, allow_without_worker: bool) -> bool:
+    """Return whether a shell built for ``runtime_paths`` refuses its commands.
+
+    A worker builds the toolkit in runner mode; anywhere else its commands would run in MindRoom's own process, which
+    ``defaults.allow_shell_without_worker`` (``allow_without_worker``) must allow.
+    """
+    return not allow_without_worker and not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
 
 
 def _shell_path_prepend_entries(shell_path_prepend: str | None) -> tuple[str, ...]:
@@ -381,8 +396,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
+            allow_without_worker: bool = False,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
+            self._refuse_commands = shell_refuses_commands(runtime_paths, allow_without_worker=allow_without_worker)
 
             tools: list[Callable[..., object]] = []
             if all or enable_run_shell_command:
@@ -488,6 +505,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 The command output or an error message.
 
             """
+            if self._refuse_commands:
+                return _NO_WORKER_ERROR
             try:
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
