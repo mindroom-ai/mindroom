@@ -117,6 +117,26 @@ def test_fifos_and_sockets_are_neither_listed_nor_read(root: Path) -> None:
         assert _status(lambda: read_file(root, "sock")) == 400
 
 
+def test_a_file_swapped_for_a_pipe_while_it_is_read_answers_400(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code the agent runs may swap a file for a pipe after the check; the read still refuses it without blocking."""
+    (root / "notes.md").write_text("x")
+    real_stat = os.stat
+    swapped = []
+
+    def stat_then_swap(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        status = real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+        if path == "notes.md" and not swapped:
+            swapped.append(path)
+            (root / "notes.md").unlink()
+            os.mkfifo(root / "notes.md")
+        return status
+
+    monkeypatch.setattr(operations.os, "stat", stat_then_swap)
+
+    assert _status(lambda: read_file(root, "notes.md")) == 400
+    assert swapped
+
+
 def test_nothing_below_git_is_changed(root: Path) -> None:
     """Saving, making, moving and deleting in or as ``.git`` answer 403, and Git's config stays as it was."""
     assert _status(lambda: save_file(root, "repo/.git/config", b"[core]\nfsmonitor = x\n", None)) == 403

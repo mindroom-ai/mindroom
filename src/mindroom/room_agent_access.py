@@ -287,8 +287,7 @@ def _offered_functions(
     functions = None if available is None else offered(available)
     if not metadata.workspace_writers:
         return functions, metadata.executes_code
-    writers = offered(metadata.workspace_writers)
-    return functions, bool(writers if functions is None else writers & functions)
+    return functions, bool(offered(metadata.workspace_writers))
 
 
 def _workspace(
