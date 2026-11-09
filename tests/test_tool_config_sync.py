@@ -68,6 +68,8 @@ IGNORED_AGNO_PARAMS = {
     # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
     "reasoning": {"add_instructions"},
     "zep": {"add_instructions"},
+    # MindRoom sets it from `defaults.allow_shell_without_worker`, never from the tool's own settings.
+    "shell": {"allow_without_worker"},
 }
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
 # reads the null words as left out.

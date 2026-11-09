@@ -8,6 +8,11 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to a shell that needs a worker
+
+The `shell` tool now refuses commands in the MindRoom process, so an agent with `shell` and no worker, such as one an earlier `mindroom config init` created with `worker_tools: []`, gets an error on every shell call.
+To keep running its commands in the MindRoom process, add `allow_shell_without_worker: true` under `defaults:` in `config.yaml`; otherwise route `shell` to a worker as in [Sandbox Proxy Isolation](sandbox-proxy.md).
+
 ## Upgrading from Agent Vault
 
 MindRoom no longer supports Agent Vault; [Agent Keys](egress-broker.md) injects credentials into worker egress instead, and secrets stored in Agent Vault do not carry over.

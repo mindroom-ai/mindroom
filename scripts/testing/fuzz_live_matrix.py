@@ -3869,6 +3869,7 @@ class ManagedTuwunelStack:
             config["agents"][AGENT_NAME]["model"] = "synthetic"
             config["agents"][AGENT_NAME]["tools"] = ["shell"]
             config["agents"][AGENT_NAME]["worker_tools"] = []
+            cast("dict[str, Any]", config["defaults"])["allow_shell_without_worker"] = True
             # The managed load sender is an agent, so without this its workload roots would stop
             # waking the responder once they reach the consecutive agent-reply limit.
             cast("dict[str, Any]", config["defaults"])["max_consecutive_agent_replies"] = 1_000_000
