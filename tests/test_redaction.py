@@ -830,6 +830,11 @@ def test_redact_sensitive_text_redacts_quoted_secret_with_escaped_quote() -> Non
     assert redact_sensitive_text(value) == r'{"password": "***redacted***", "mode": "safe"}'
 
 
+def test_an_assignment_inside_a_secret_value_is_hidden_with_it() -> None:
+    """The scan resumes after a secret's value, so a key inside the value is hidden with it rather than read again."""
+    assert redact_sensitive_text('password="token=abc def" mode=safe') == f'password="{REDACTED}" mode=safe'
+
+
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
     """Performance guards must not exempt long secret-bearing keys from redaction."""
     key = "x" * 256 + "password"
