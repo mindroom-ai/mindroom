@@ -263,7 +263,7 @@ class AgentBrowserBridge:
 
     async def _release_input(self) -> None:
         """Release the buttons and keys this bridge still presses, so the agent never resumes with one held down."""
-        # Each is forgotten only once its release is sent, so a release that leaving cancels is finished on leaving.
+        # They are forgotten only once all their releases are sent, so a release that leaving cancels runs again then.
         if (cdp := self._cdp) is not None:
             x, y = self._pointer
             with suppress(PlaywrightError, TimeoutError):
@@ -273,10 +273,8 @@ class AgentBrowserBridge:
                             "Input.dispatchMouseEvent",
                             {"type": "mouseReleased", "x": x, "y": y, "button": button},
                         )
-                        self._buttons.discard(button)
-                    for code, key in list(self._keys.items()):
+                    for key in list(self._keys.values()):
                         await cdp.send("Input.dispatchKeyEvent", {**key, "type": "keyUp"})
-                        self._keys.pop(code, None)
         self._buttons.clear()
         self._keys.clear()
 

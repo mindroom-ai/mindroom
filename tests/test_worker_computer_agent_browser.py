@@ -386,6 +386,8 @@ async def test_releasing_control_releases_what_the_service_held(agent: _Agent) -
         await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Control", "code": "ControlLeft"})
         await service.call("MindRoom.releaseControl")
         assert await page.evaluate("released") == ["Control"]
+    # What a release let go of is not released again when the service leaves.
+    assert await page.evaluate("released") == ["Control"]
 
 
 @pytest.mark.asyncio
