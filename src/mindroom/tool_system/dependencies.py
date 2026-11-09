@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import tomllib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,11 +55,8 @@ def _environment_lock_path() -> Path:
     """
     site_packages = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
     lock_path = site_packages / ".mindroom-optional-dependencies.lock"
-    try:
+    with suppress(OSError):
         os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
-    except OSError:
-        pass
-    else:
         return lock_path
     key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
     if sys.platform == "win32":
