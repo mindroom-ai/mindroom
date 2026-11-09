@@ -25,10 +25,10 @@ from mindroom.worker_computer.agent_browser import AgentBrowserBridge
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 from tests.api.test_worker_services import _AUTH, _body, _call, _runner
-from tests.test_worker_computer_runtime import FakeDisplay
+from tests.test_worker_computer_runtime import FakeDisplay, unused
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from playwright.async_api import Page
 
@@ -39,10 +39,6 @@ window.released = [];
 document.addEventListener("keyup", (event) => released.push(event.key));
 document.addEventListener("mouseup", (event) => released.push("button " + event.button));
 </script>"""
-
-
-async def unused(*_args: object, **_kwargs: object) -> None:
-    """Stand in for a browser entrypoint or closer the bridge never calls."""
 
 
 @dataclass
@@ -73,7 +69,7 @@ class _Service:
         self.messages.append(json.loads(text))
         self._arrived.set()
 
-    async def _take(self, matches: Any) -> dict[str, Any]:  # noqa: ANN401 - a predicate over JSON messages
+    async def _take(self, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
         async with asyncio.timeout(_TIMEOUT):
             while True:
                 for index, message in enumerate(self.messages):
@@ -347,7 +343,7 @@ async def test_control_is_exclusive_with_the_desktops_viewers(agent: _Agent) -> 
     """A viewer holding the Computer keeps the bridge out, and the bridge holding it keeps viewers out."""
     runtime = agent.runtime
     generation = runtime.status()["generation"]
-    viewer = await runtime.attach_stream("viewer", generation)
+    await runtime.attach_stream("viewer", generation)
     await runtime.take_control("viewer", generation=generation)
     async with _connected(runtime) as service:
         assert "another user session" in await service.refused("MindRoom.takeControl")
@@ -451,18 +447,26 @@ class _FakeSession:
     """A CDP session whose events the test delivers by hand; one Chromium had in flight arrives during the detach."""
 
     def __init__(self, late_frame: str | None = None) -> None:
-        self.handlers: dict[str, Any] = {}
+        self.handlers: dict[str, Callable[[dict[str, Any]], None]] = {}
         self.late_frame = late_frame
         self.detached = False
         # A page its own script froze answers no input.
         self.frozen = False
+        self.key_ups: list[str] = []
+        # Holds the first key-up until set, as a slow page would.
+        self.first_key_up: asyncio.Event | None = None
 
-    def on(self, event: str, handler: object) -> None:
+    def on(self, event: str, handler: Callable[[dict[str, Any]], None]) -> None:
         self.handlers[event] = handler
 
-    async def send(self, method: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.frozen and method.startswith("Input."):
             await asyncio.Event().wait()
+        if method == "Input.dispatchKeyEvent" and params and params.get("type") == "keyUp":
+            self.key_ups.append(params["key"])
+            if (slow := self.first_key_up) is not None:
+                self.first_key_up = None
+                await slow.wait()
         return {}
 
     async def detach(self) -> None:
@@ -516,6 +520,51 @@ async def test_input_to_a_frozen_page_answers_an_error_in_time(monkeypatch: pyte
     await agent.runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_leaving_during_a_release_still_releases_what_was_held() -> None:
+    """A service that releases control and leaves at once leaves no key down, even if the release had not finished."""
+    page = _FakePage(_FakeSession())
+    agent = _Agent(cast("Page", page))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft"})
+        page.session.first_key_up = asyncio.Event()
+        service.send("MindRoom.releaseControl")
+        async with asyncio.timeout(_TIMEOUT):
+            while not page.session.key_ups:  # noqa: ASYNC110 - the release reaches the page from another task
+                await asyncio.sleep(0.01)
+    # Leaving cancelled the release mid-send, so leaving sends the key-up again.
+    assert page.session.key_ups == ["Shift", "Shift"]
+    await agent.runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_input_during_a_release_is_refused_so_nothing_stays_held() -> None:
+    """Once a release starts, no new press reaches the page, so the agent never resumes with one held down."""
+    page = _FakePage(_FakeSession())
+    agent = _Agent(cast("Page", page))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft"})
+        slow = page.session.first_key_up = asyncio.Event()
+        release = service.send("MindRoom.releaseControl")
+        async with asyncio.timeout(_TIMEOUT):
+            while not page.session.key_ups:  # noqa: ASYNC110 - the release reaches the page from another task
+                await asyncio.sleep(0.01)
+        assert "control" in await service.refused(
+            "Input.dispatchKeyEvent",
+            {"type": "rawKeyDown", "key": "a", "code": "KeyA"},
+        )
+        slow.set()
+        assert "result" in await service.answer(release)
+    assert page.session.key_ups == ["Shift"]
+    await agent.runtime.close()
+
+
 _SECRET_HEADER = "X-MindRoom-Service-Secret"  # noqa: S105 - a header name
 # A service that records its secret, then exits at once.
 _BRIEF = """
@@ -523,6 +572,19 @@ import json, sys
 with open("service.json", "w") as record:
     json.dump({"secret": sys.stdin.readline().strip()}, record)
 """
+
+
+@pytest_asyncio.fixture
+async def computer(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkerComputerRuntime]:
+    """The Computer of the worker the runner serves, stopped until a bridge opens it."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
+    yield runtime
+    await runtime.close()
+
+
+def _secret(record: dict[str, object]) -> dict[str, str]:
+    return {_SECRET_HEADER: str(record["secret"])}
 
 
 def _bridge_url(pid: object) -> str:
@@ -544,11 +606,9 @@ async def _refused(url: str, headers: dict[str, str]) -> bool:
 @pytest.mark.asyncio
 async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_starts_the_computer(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    computer: WorkerComputerRuntime,
 ) -> None:
     """Neither the runner token, another service's secret, nor a stopped or exited instance's secret opens it."""
-    runtime = WorkerComputerRuntime(FakeDisplay())
-    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
     async with _runner(tmp_path) as runner:
         (runner.plugin_root / "brief.py").write_text(_BRIEF)
         await _call("POST", runner.url("other"), _body(), _AUTH)
@@ -559,59 +619,52 @@ async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_sta
         assert url == f"ws://127.0.0.1:{runner.port}/api/sandbox-runner/plugin-services/demo/hello/agent-browser"
         for headers in ({}, _AUTH, {_SECRET_HEADER: other_secret}, {_SECRET_HEADER: f"{record['secret']}x"}):
             assert await _refused(url, headers)
-        assert runtime.status()["state"] == "stopped"
+        assert computer.status()["state"] == "stopped"
 
-        headers = {_SECRET_HEADER: str(record["secret"])}
+        headers = _secret(record)
         async with aiohttp.ClientSession() as client, client.ws_connect(url, headers=headers) as bridge:
             assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
-            assert runtime.status()["state"] == "ready"
+            assert computer.status()["state"] == "ready"
             # The agent's browser has no page yet, and a service that shows a browser of its own still takes control.
             await bridge.send_json({"id": 1, "method": "MindRoom.takeControl"})
             assert await bridge.receive_json() == {"method": "MindRoom.control", "params": {"held": True}}
             assert await bridge.receive_json() == {"id": 1, "result": {}}
-            assert runtime.status()["controller_session_id"] is not None
+            assert computer.status()["controller_session_id"] is not None
             await bridge.send_bytes(b"binary")
             assert (await bridge.receive()).type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED}
-        assert runtime.status()["controller_session_id"] is None
+        assert computer.status()["controller_session_id"] is None
 
         await _call("DELETE", runner.url(), None, _AUTH)
         assert await _refused(url, headers)
         _, brief = await _call("POST", runner.url("brief"), _body("brief.py"), _AUTH)
         assert brief["state"] == "exited"
-        brief_secret = {_SECRET_HEADER: str(runner.record()["secret"])}
+        brief_secret = _secret(runner.record())
         assert await _refused(url.replace("/hello/", "/brief/"), brief_secret)
 
 
 @pytest.mark.asyncio
-async def test_a_plugin_of_any_valid_name_opens_its_service_s_bridge(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.usefixtures("computer")
+async def test_a_plugin_of_any_valid_name_opens_its_service_s_bridge(tmp_path: Path) -> None:
     """Plugin names may start with an underscore and run longer than service names, and their bridge opens too."""
-    runtime = WorkerComputerRuntime(FakeDisplay())
-    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
     plugin = "_" + "x" * 80
     async with _runner(tmp_path) as runner:
         (runner.plugin_root / "mindroom.plugin.json").write_text(json.dumps({"name": plugin}))
         await _call("POST", runner.url(plugin=plugin), _body(), _AUTH)
         record = runner.record()
-        headers = {_SECRET_HEADER: str(record["secret"])}
+        headers = _secret(record)
         async with (
             aiohttp.ClientSession() as client,
             client.ws_connect(_bridge_url(record["pid"]), headers=headers) as bridge,
         ):
             assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_the_bridge_opens_while_the_agent_s_browser_call_runs(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    computer: WorkerComputerRuntime,
 ) -> None:
     """A running Computer is not started again, so opening the bridge never waits for the agent's call to end."""
-    runtime = WorkerComputerRuntime(FakeDisplay())
-    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
     running, finish = asyncio.Event(), asyncio.Event()
 
     async def slow_call(*_args: object, **_kwargs: object) -> None:
@@ -622,10 +675,10 @@ async def test_the_bridge_opens_while_the_agent_s_browser_call_runs(
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
         call = asyncio.create_task(
-            runtime.run_browser_call("binding", lambda _display: BrowserSession(slow_call, unused), [], {}),
+            computer.run_browser_call("binding", lambda _display: BrowserSession(slow_call, unused), [], {}),
         )
         await asyncio.wait_for(running.wait(), _TIMEOUT)
-        headers = {_SECRET_HEADER: str(record["secret"])}
+        headers = _secret(record)
         async with (
             asyncio.timeout(_TIMEOUT),
             aiohttp.ClientSession() as client,
@@ -634,7 +687,6 @@ async def test_the_bridge_opens_while_the_agent_s_browser_call_runs(
             assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
         finish.set()
         await call
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -644,4 +696,4 @@ async def test_a_worker_without_a_computer_refuses_the_bridge(tmp_path: Path, mo
     async with _runner(tmp_path) as runner:
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
-        assert await _refused(_bridge_url(record["pid"]), {_SECRET_HEADER: str(record["secret"])})
+        assert await _refused(_bridge_url(record["pid"]), _secret(record))

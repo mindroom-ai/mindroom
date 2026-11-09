@@ -1526,8 +1526,11 @@ SECRET = sys.stdin.readline().strip()
 
 
 async def main() -> None:
+    # The worker reports a service as running once it accepts connections on its port.
+    port = int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])
+    server = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", port)
     headers = {"X-MindRoom-Service-Secret": SECRET}
-    async with connect(os.environ["MINDROOM_AGENT_BROWSER_URL"], additional_headers=headers, max_size=None) as bridge:
+    async with server, connect(os.environ["MINDROOM_AGENT_BROWSER_URL"], additional_headers=headers, max_size=None) as bridge:
         async for raw in bridge:
             message = json.loads(raw)
             if message.get("method") == "MindRoom.page" and message["params"]["page"]:

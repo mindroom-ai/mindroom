@@ -12,6 +12,10 @@ from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 
 
+async def unused(*_args: object, **_kwargs: object) -> None:
+    """Stand in for a browser entrypoint or closer a test never calls."""
+
+
 class FakeDisplay:
     """Display adapter without external processes."""
 
@@ -433,9 +437,6 @@ async def test_agent_page_is_the_browser_s_page_only_while_the_computer_is_ready
     display = FakeDisplay()
     runtime = WorkerComputerRuntime(display)
     page = object()
-
-    async def unused(*_args: object, **_kwargs: object) -> None:
-        return None
 
     assert runtime.agent_page() is None
     await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
