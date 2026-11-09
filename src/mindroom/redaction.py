@@ -428,8 +428,7 @@ def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int]
 
 def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
     """Return the text from ``start`` on, without its leading whitespace, as a value whose end cannot be known."""
-    rest = value[start:]
-    start += len(rest) - len(rest.lstrip())
+    start = len(value) - len(value[start:].lstrip())
     return (start, len(value), len(value)) if start < len(value) else None
 
 
@@ -466,10 +465,8 @@ def _assignment_value_span(
         return _rest_of_text_span(value, value_start)
     if value[value_start] in {"'", '"'}:
         return _quoted_value_span(value, value_start)
-    value_end = unquoted_value_end(value_start)
     # Whitespace before where the value ends, as before `&& run`, is not part of it.
-    while value_end > value_start and value[value_end - 1] in " \t":
-        value_end -= 1
+    value_end = value_start + len(value[value_start : unquoted_value_end(value_start)].rstrip(" \t"))
     return (value_start, value_end, value_end) if value_end > value_start else None
 
 
@@ -509,17 +506,14 @@ def _redact_secret_assignments(value: str) -> str:
         )
         if value_span is None:
             continue
-        value_start, value_end, match_end = value_span
+        value_start, value_end, search_start = value_span
         assignment_value = value[value_start:value_end].lower()
         if (
             classification.normalized == "authorization"
             and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
         ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
-            search_start = match_end
             continue
-
         spans.append((value_start, value_end))
-        search_start = match_end
 
     return _replace_spans_with_redaction(value, spans)
 
@@ -707,8 +701,10 @@ def _redact_password_options(command_match: re.Match[str]) -> str:
     """Redact the password options of one command that runs curl or mysql, first or right after a word such as ``sudo``."""
     command = command_match.group(0)
     program = _PASSWORD_PROGRAM_PATTERN.search(command)
-    words_before = command[: program.start()].split() if program else []
-    if program is None or (words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS):
+    if program is None:
+        return command
+    words_before = command[: program.start()].split()
+    if words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS:
         return command
     option = _CURL_USER_OPTION_PATTERN if program.group("curl") else _MYSQL_PASSWORD_OPTION_PATTERN
     return command[: program.end()] + option.sub(_redact_matched_token, command[program.end() :])
@@ -725,10 +721,6 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     has_private_key = "private key" in lowered_value
     has_password_option = any(program in bounded_value for program in ("curl", "mysql", "mariadb"))
-    if not any(
-        (has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key, has_password_option),
-    ):
-        return _truncate_text(bounded_value, max_length, cut=cut)
     # Keys go first, so the patterns below never see a key's body.
     redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
     redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
@@ -791,7 +783,7 @@ def truncate_review_text(value: str, max_length: int | None) -> str:
     opening = head.rfind(_PLACEHOLDER_OPEN)
     if opening > head.rfind(_PLACEHOLDER_CLOSE) and head[opening + 1 : opening + 2] != "=":
         head = head[:opening]
-    return (head + _TRUNCATED)[:max_length]
+    return _truncate_text(head, max_length, cut=True)
 
 
 def _redact_review_tokens(value: str, *, max_length: int | None, placeholders: dict[str, str]) -> str:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.redaction import REDACTION_FAILED
+from mindroom.redaction import REDACTED
 from mindroom.tool_system.progress import report_tool_progress, shown_progress, tool_progress_reporter
 
 
@@ -25,11 +25,10 @@ def test_output_hides_what_follows_a_secret_name_that_ends_its_line() -> None:
     manifest = "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db-credentials\n"
     rollout = "\n".join(f"rollout: {index}/100 pods ready" for index in range(1, 101))
 
-    shown = shown_progress(manifest + rollout)
-
-    assert "db-credentials" not in shown
-    assert shown.startswith("env:\n  - name: DB_PASSWORD")
-    assert shown != REDACTION_FAILED
+    assert (
+        shown_progress(manifest + rollout)
+        == f"env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        {REDACTED}"
+    )
 
 
 def test_shown_output_is_what_a_live_reply_shows() -> None:
