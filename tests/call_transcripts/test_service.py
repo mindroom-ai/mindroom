@@ -94,6 +94,7 @@ class FakeRoom:
     edit_gate: asyncio.Event | None = None
     edit_started: asyncio.Event = field(default_factory=asyncio.Event)
     row_edits: list[EndedRow] = field(default_factory=list)
+    titled: list[tuple[TranscriptMessage, str]] = field(default_factory=list)
 
     def _read(self) -> None:
         if self.on_read is not None:
@@ -168,6 +169,10 @@ class FakeRoom:
             return None
         self.transcripts.append(message)
         return f"$transcript-{len(self.transcripts)}"
+
+    def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
+        """Record the posted message the row's thread is to be titled from."""
+        self.titled.append((message, event_id))
 
     async def edit_row(self, row: EndedRow) -> str | None:
         """Edit the row while the router is ready and may post, after ``edit_gate`` opens; the first ``crashing_edits`` crash."""
@@ -913,9 +918,12 @@ async def test_the_transcript_message_is_posted_about_20_seconds_after_the_end(w
     ]
     assert world.notes.transcripts == [world.room.transcripts[0].transcript]
     assert world.store.lines(call.id) == []
+    # The notes say what the call was about, so the row's thread is titled from them, once.
+    assert world.room.titled == [(world.room.transcripts[0], "$transcript-1")]
     world.clock.advance(120)
     await world.tick()
     assert len(world.room.transcripts) == 1
+    assert len(world.room.titled) == 1
 
 
 @pytest.mark.asyncio
@@ -964,6 +972,8 @@ async def test_without_a_notes_model_the_message_says_how_long_the_call_was(worl
     [message] = world.room.transcripts
     assert message.body == "Call · 12 min"
     assert message.transcript.duration_seconds == 720
+    # Its length alone is no title.
+    assert world.room.titled == []
 
 
 @pytest.mark.asyncio
@@ -1000,6 +1010,7 @@ async def test_a_call_whose_every_stretch_failed_to_transcribe_says_so(world: Wo
     assert message.body == "Call · 1 min. Nothing could be transcribed."
     assert message.transcript.turns == ()
     assert world.notes.transcripts == []
+    assert world.room.titled == []
     assert world.store.lines(call_id) == []
     assert [edit.transcript_event_id for edit in world.room.row_edits] == [None, "$transcript-1"]
 

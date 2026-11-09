@@ -101,6 +101,29 @@ def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
     assert _saved(payload).value == {"created": str(created), "amount": "1.50", "ratio": "nan", "ids": str(by_id)}
 
 
+@pytest.mark.parametrize("kind", ["dict", "list"])
+def test_payload_refuses_a_value_inside_itself_and_says_so(kind: str) -> None:
+    """A value that holds itself can never be saved whole, and the reason says that instead of a recursion limit."""
+    cycle: dict[str, object] | list[object]
+    if kind == "dict":
+        cycle = {}
+        cycle["self"] = cycle
+    else:
+        cycle = []
+        cycle.append(cycle)
+
+    with pytest.raises(ValueError, match=r"^it refers to itself$"):
+        encode_result_payload(ToolResultPayload(value=[{"events": (cycle,)}]))
+
+
+def test_payload_saves_an_item_held_in_several_places_in_each() -> None:
+    """Only a value inside itself is refused: an item that several places hold saves in each of them."""
+    shared = {"tags": ["a"]}
+    payload = ToolResultPayload(value={"first": shared, "second": [shared, {"again": shared}]})
+
+    assert _saved(payload) == payload
+
+
 def test_payload_captures_a_local_artifact_before_cleanup(tmp_path: Path) -> None:
     """Durable media bytes survive deletion of a toolkit-owned file."""
     path = tmp_path / "image.png"

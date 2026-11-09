@@ -179,8 +179,19 @@ class FakeRouterClient:
         return nio.UploadResponse(f"mxc://example.org/upload-{len(self.uploads)}"), None
 
 
-def _room(client: FakeRouterClient | None, *, monotonic: Callable[[], float] = lambda: 0.0) -> RouterCallRoom:
-    return RouterCallRoom(client=lambda: cast("nio.AsyncClient | None", client), monotonic=monotonic)
+def _room(
+    client: FakeRouterClient | None,
+    *,
+    monotonic: Callable[[], float] = lambda: 0.0,
+    titles: list[tuple[str, str, str, str]] | None = None,
+) -> RouterCallRoom:
+    """The room side over ``client``; each request to title a thread again goes into ``titles``."""
+    asked = [] if titles is None else titles
+    return RouterCallRoom(
+        client=lambda: cast("nio.AsyncClient | None", client),
+        retitle=lambda *request: asked.append(request),
+        monotonic=monotonic,
+    )
 
 
 def _ended_row(*, transcript_event_id: str | None = None) -> EndedRow:
@@ -588,6 +599,16 @@ async def test_mentions_in_the_notes_are_neutralised() -> None:
     assert "and ann@example.org" in content["body"]
 
 
+def test_the_rows_thread_is_titled_from_the_notes_as_posted() -> None:
+    """The router titles the row's thread counting the posted message, with the text it posted: mentions neutralised."""
+    titles: list[tuple[str, str, str, str]] = []
+    room = _room(FakeRouterClient(), titles=titles)
+
+    room.title_thread(_message(body="We planned the launch with @ann:example.org."), "$notes")
+
+    assert titles == [(ROOM, "$row", "$notes", "We planned the launch with @\u200bann:example.org.")]
+
+
 @pytest.mark.asyncio
 async def test_a_transcript_too_large_for_one_event_goes_to_the_sidecar() -> None:
     """A long call's transcript is uploaded beside a preview that still names the call and lives in the thread."""
@@ -636,7 +657,7 @@ async def test_switching_off_while_the_sidecar_uploads_sends_nothing() -> None:
     """A transcript whose sidecar is still uploading when call transcripts go off is never sent."""
     client = FakeRouterClient(state={ROOM: [_member(ANN)]}, upload_gate=asyncio.Event())
     on = True
-    room = RouterCallRoom(client=lambda: cast("nio.AsyncClient", client) if on else None)
+    room = RouterCallRoom(client=lambda: cast("nio.AsyncClient", client) if on else None, retitle=lambda *_: None)
     turns = tuple(_Turn(sender=ANN if index % 2 else BOB, text="word " * 400) for index in range(60))
     posting = asyncio.ensure_future(room.post_transcript(_message(turns=turns)))
     await client.uploading.wait()

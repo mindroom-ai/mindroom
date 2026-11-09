@@ -553,7 +553,7 @@ class _TeamTurn:
         record = attempt.terminal_record()
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
-            if paused.response_text:
+            if paused.response_text or shown is not None:
                 yield StructuredStreamChunk(
                     content=paused.response_text,
                     tool_trace=list(paused.tool_trace),
@@ -616,7 +616,7 @@ class _TeamTurn:
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
         return replace(
-            continued_team_pause(attempt.presentation, paused),
+            continued_team_pause(attempt.presentation, paused, quiet=self.ctx.allow_no_report_response),
             runtime_model_name=attempt.runtime_model_name,
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
