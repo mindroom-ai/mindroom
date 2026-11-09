@@ -5,10 +5,10 @@
 streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{port}``, or at ``[::1]:{port}`` when it
 listens only there.
 Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
-A dedicated worker's loopback is not only the worker's either: in a Kubernetes pod every container shares it, and
-MindRoom's other servers can listen there.
+A dedicated worker's loopback is not only the worker's either: every container of a Kubernetes worker pod shares it,
+as does any container started in the worker's network namespace.
 So the relay reaches a port only when the worker's own processes, those of its runner's process tree or its cgroup,
-hold every socket listening on it, and never a port of MindRoom's own servers.
+hold every socket listening on it, and never the runner's own port.
 The runner marks each refusal with the ``x-mindroom-relay-refused`` header: 403 for a port the relay never reaches,
 and 502 for one no app answers on.
 The runner's own token never reaches an app.
@@ -31,7 +31,6 @@ from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
 from mindroom.previews.listeners import held_by_this_worker, listening_sockets
 from mindroom.previews.relay import relay_websocket
-from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -69,15 +68,6 @@ _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 _LOOPBACK_ADDRESSES = frozenset(
     ipaddress.ip_address(address)
     for address in ("127.0.0.1", "0.0.0.0", "::1", "::")  # noqa: S104 - every address, loopback included
-)
-# MindRoom's own servers, which the relay never reaches: the default ports of the API and a runner, and the ports
-# MindRoom's settings give the API, a runner, the script gateway, and the egress broker.
-_OWN_DEFAULT_PORTS = frozenset({8765, 8766})
-_OWN_PORT_SETTINGS = (
-    "MINDROOM_PORT",
-    SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
-    "MINDROOM_SCRIPT_GATEWAY_PORT",
-    EGRESS_BROKER_ENV_BY_KEY["port"],
 )
 _CANNOT_TELL = "This runner can't tell which processes hold its ports, so it relays to none."
 # The listening sockets each port was last found to be the worker's by, so their holders are read again only once
@@ -119,16 +109,6 @@ async def _loopback_host(port: int) -> str | None:
     return None
 
 
-def _own_ports(connection: HTTPConnection) -> set[int]:
-    """Return the ports of MindRoom's own servers, the runner's included."""
-    paths = app_runtime_paths(connection.app)
-    ports = {*_OWN_DEFAULT_PORTS, connection.scope["server"][1]}
-    for name in _OWN_PORT_SETTINGS:
-        with suppress(ValueError):
-            ports.add(int(paths.env_value(name) or ""))
-    return ports
-
-
 def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None:
     """Return why the relay reaches no server on ``port``, where ``sockets`` listen, or None when only the worker holds them.
 
@@ -145,10 +125,10 @@ def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None
     return None
 
 
-def _refusal(port: int, own_ports: set[int]) -> HTTPException | None:
+def _refusal(port: int, runner_port: int) -> HTTPException | None:
     """Return why the relay reaches no server on ``port``, or None when it does. Blocking, like ``_holders_refusal``."""
-    if port in own_ports:
-        return _refused(403, f"Port {port} is one of MindRoom's own, which the relay never reaches.")
+    if port == runner_port:
+        return _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
     try:
         return _holders_refusal(port, frozenset(listener.inode for listener in listening_sockets(port)))
     except OSError:
@@ -157,7 +137,7 @@ def _refusal(port: int, own_ports: set[int]) -> HTTPException | None:
 
 async def _require_reachable(connection: HTTPConnection, port: int) -> None:
     """Refuse ``port`` unless a server of the worker's own listens on it."""
-    refusal = await asyncio.to_thread(_refusal, port, _own_ports(connection))
+    refusal = await asyncio.to_thread(_refusal, port, connection.scope["server"][1])
     if refusal is not None:
         raise refusal
 
@@ -198,14 +178,14 @@ def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str]) -> lis
     return [(name, value) for name, value in pairs if name not in excluded]
 
 
-def _reachable_ports(own_ports: set[int]) -> list[int]:
+def _reachable_ports(runner_port: int) -> list[int]:
     """Return each port listening at loopback or every address that the relay reaches. Blocking, like ``_refusal``."""
     try:
         listeners = listening_sockets()
         sockets: dict[int, set[int]] = {}
         for listener in listeners:
             sockets.setdefault(listener.port, set()).add(listener.inode)
-        ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES} - own_ports
+        ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES} - {runner_port}
         return sorted(port for port in ports if _holders_refusal(port, frozenset(sockets[port])) is None)
     except OSError:
         raise _refused(403, _CANNOT_TELL) from None
@@ -240,7 +220,7 @@ class _AppResponse(StreamingResponse):
 async def listening_ports(request: Request) -> list[int]:
     """List the ports the worker's own apps listen on at its loopback: those the relay reaches."""
     _require_dedicated_worker(request)
-    return await asyncio.to_thread(_reachable_ports, _own_ports(request))
+    return await asyncio.to_thread(_reachable_ports, request.scope["server"][1])
 
 
 @router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])

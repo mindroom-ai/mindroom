@@ -186,7 +186,7 @@ def _of_this_worker(pid: int, runner: int, cgroup: str | None) -> bool:
 def held_by_this_worker(sockets: frozenset[int]) -> bool:
     """Return whether processes of this worker, and only they, hold each of ``sockets``.
 
-    Blocking: reads every process's descriptors. Raises OSError when ``/proc`` lists no processes.
+    Blocking: reads every process's descriptors. Raises OSError when ``/proc`` cannot be read.
     """
     runner = os.getpid()
     cgroup = _read(_PROC / "self" / "cgroup")

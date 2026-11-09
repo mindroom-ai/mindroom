@@ -424,36 +424,33 @@ async def test_relay_reaches_a_server_the_worker_started(tmp_path: Path, unused_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "setting",
-    ["MINDROOM_PORT", "MINDROOM_SANDBOX_RUNNER_PORT", "MINDROOM_SCRIPT_GATEWAY_PORT", "MINDROOM_EGRESS_BROKER_PORT"],
-)
-async def test_relay_refuses_a_port_mindrooms_settings_give_its_own_server(tmp_path: Path, setting: str) -> None:
-    """A worker's app on the port a MindRoom setting gives the API, a runner, or another of its servers is refused."""
-    async with _app() as port, _runner(tmp_path, env={setting: str(port)}) as runner, aiohttp.ClientSession() as client:
-        await _assert_refused(
-            client,
-            runner,
-            port,
-            403,
-            f"Port {port} is one of MindRoom's own, which the relay never reaches.",
-        )
-        await _assert_unlisted(client, runner, port)
+@pytest.mark.parametrize("setting", ["MINDROOM_PORT", "MINDROOM_SCRIPT_GATEWAY_PORT", "MINDROOM_EGRESS_BROKER_PORT"])
+async def test_relay_reaches_the_workers_app_on_a_port_the_primarys_servers_use(tmp_path: Path, setting: str) -> None:
+    """The API, script gateway, and egress broker listen in the primary, so a worker's app on their port is relayed."""
+    async with (
+        _app() as port,
+        _runner(tmp_path, env={setting: str(port)}) as runner,
+        aiohttp.ClientSession() as client,
+    ):
+        async with client.get(f"{runner.root}/{port}/hello", headers=_AUTH) as response:
+            assert response.status == 200
+            assert (await response.json())["path"] == "/hello"
+        async with client.get(runner.root, headers=_AUTH) as response:
+            assert port in await response.json()
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_the_runners_port_and_mindrooms_default_ports(tmp_path: Path) -> None:
-    """The runner's own port and the default ports of the API and a runner are refused, whoever listens there."""
+async def test_relay_refuses_the_runners_own_port(tmp_path: Path) -> None:
+    """The runner's own port is a marked refusal and is not listed."""
     async with _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for port in (runner.port, 8765, 8766):
-            await _assert_refused(
-                client,
-                runner,
-                port,
-                403,
-                f"Port {port} is one of MindRoom's own, which the relay never reaches.",
-            )
-            await _assert_unlisted(client, runner, port)
+        await _assert_refused(
+            client,
+            runner,
+            runner.port,
+            403,
+            f"Port {runner.port} is this runner's own, which the relay never reaches.",
+        )
+        await _assert_unlisted(client, runner, runner.port)
 
 
 @pytest.mark.asyncio
@@ -502,18 +499,30 @@ async def test_relay_reads_a_ports_holders_again_only_once_another_socket_listen
 
 
 @pytest.mark.asyncio
-async def test_relay_follows_no_websocket_redirect_to_a_port_it_refuses(tmp_path: Path) -> None:
-    """A WebSocket handshake an app redirects to one of MindRoom's own ports, served or not, is refused."""
+async def test_relay_follows_no_websocket_redirect_to_a_server_the_worker_does_not_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebSocket handshake an app redirects to a server no process of the worker holds is refused."""
     async with (
         _app() as port,
-        _app() as own,
-        _runner(tmp_path, env={"MINDROOM_PORT": str(own)}) as runner,
+        _app() as other,
+        _runner(tmp_path) as runner,
         aiohttp.ClientSession() as client,
     ):
-        there = f"http://127.0.0.1:{own}/socket"
+        # Found to be the worker's while /proc shows its holder, so the app on ``port`` stays reachable below.
+        async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+            assert response.status == 200
+        proc = tmp_path / "proc"
+        (proc / "self").mkdir(parents=True)
+        (proc / "self" / "cgroup").write_text("0::/\n")
+        monkeypatch.setattr(listeners, "_PROC", proc)
+        there = f"http://127.0.0.1:{other}/socket"
         with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
             await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)
         assert refused.value.status == 403
+        async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+            assert response.status == 200
 
 
 @pytest.mark.asyncio
