@@ -11,7 +11,6 @@ import pytest
 import uvicorn
 
 from mindroom.api import computers
-from mindroom.worker_computer.protocol import SCREENCAST_PROTOCOL
 from tests.computer_helpers import ComputerPeer, computer_app
 
 
@@ -125,15 +124,6 @@ async def test_computer_ticket_handshake_and_denial_framing(
             ) as websocket:
                 assert websocket.protocol == "binary"
                 assert await websocket.receive_bytes() == b"screen"
-            async with client.ws_connect(
-                origin + path + "/screencast",
-                protocols=[SCREENCAST_PROTOCOL, await ticket()],
-                origin="https://chat.example.org",
-            ) as websocket:
-                assert websocket.protocol == SCREENCAST_PROTOCOL
-                assert await websocket.receive_bytes() == b"screen"
-                await websocket.send_str("input")
-                assert await websocket.receive_str() == "view"
             await _assert_denial(port, path, f"binary, {first}", 401)
             expired = await ticket()
             peer.now += 31

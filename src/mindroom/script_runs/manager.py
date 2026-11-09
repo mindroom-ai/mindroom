@@ -199,6 +199,10 @@ class ScriptRunStatus:
     output: str = ""
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass(slots=True)
 class ScriptRunManager:
     """Own durable script intent while existing supervisors own process signals."""
@@ -212,6 +216,8 @@ class ScriptRunManager:
     toolkit_name_resolver: Callable[[ToolRuntimeContext], frozenset[str]] = resolve_script_launch_toolkit_names
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
+    # The current time, which each run's maximum runtime is measured against.
+    clock: Callable[[], datetime] = _utc_now
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _run_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
@@ -547,7 +553,7 @@ class ScriptRunManager:
                 status = await self._process_status(pending)
                 return ScriptRunStatus(run=pending, output=status.output)
             return ScriptRunStatus(run=reconciled, output=reconciled.output)
-        if _runtime_expired(run):
+        if _runtime_expired(run, now=self.clock()):
             reconciled = await self._terminate_durable_run_locked(run.run_id, reason=MAX_RUNTIME_EXCEEDED)
             return ScriptRunStatus(run=reconciled, output=reconciled.output)
         status = await self._process_status(run)
@@ -642,7 +648,7 @@ class ScriptRunManager:
                         reason=run.cancellation_reason or OWNER_CANCELLATION,
                         broker_revoked=broker_revoked,
                     )
-                if _runtime_expired(run):
+                if _runtime_expired(run, now=self.clock()):
                     return await self._terminate_durable_run_locked(run_id, reason=MAX_RUNTIME_EXCEEDED)
                 status = await self._process_status(run)
                 return await self._apply_process_status(run, status)
@@ -1181,10 +1187,9 @@ def _validate_cancel_receipt(receipt: WorkerScriptCancel) -> None:
     raise ScriptRunManagerError(msg)
 
 
-def _runtime_expired(run: ScriptRunRecord) -> bool:
-    started_at = run.started_at or run.created_at
-    started = datetime.fromisoformat(started_at)
-    return (datetime.now(UTC) - started).total_seconds() >= run.max_runtime_seconds
+def _runtime_expired(run: ScriptRunRecord, *, now: datetime) -> bool:
+    started = datetime.fromisoformat(run.started_at or run.created_at)
+    return (now - started).total_seconds() >= run.max_runtime_seconds
 
 
 def _validated_name(name: str | None) -> str | None:

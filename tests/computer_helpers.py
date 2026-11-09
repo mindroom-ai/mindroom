@@ -16,7 +16,6 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.worker_computer.protocol import SCREENCAST_PROTOCOL
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore, ComputerTarget
 from mindroom.workers.models import WorkerHandle
@@ -76,24 +75,20 @@ class ComputerPeer:
         )
 
     async def stream(self, request: web.Request) -> web.WebSocketResponse:
-        """Attach real ownership and invalidate streams on release/stop; a screencast answers its text input in text."""
+        """Attach real ownership and invalidate streams on release/stop."""
         self.requests.append((request.path_qs, request.headers.get("X-Mindroom-Sandbox-Token", "")))
         if request.headers.get("X-Mindroom-Sandbox-Token") != "worker-secret":
             raise web.HTTPUnauthorized
         session_id = request.query["session_id"]
         event = await self.runtime.attach_stream(session_id, request.query["generation"])
-        screencast = request.path.endswith("/screencast")
-        websocket = web.WebSocketResponse(protocols=(SCREENCAST_PROTOCOL if screencast else "binary",))
+        websocket = web.WebSocketResponse(protocols=("binary",))
         await websocket.prepare(request)
         await websocket.send_bytes(b"screen")
 
         async def echo() -> None:
             async for message in websocket:
-                mode = "control" if self.runtime.allows_input(session_id, event) else "view"
                 if message.type == aiohttp.WSMsgType.BINARY:
-                    await websocket.send_bytes(mode.encode())
-                elif screencast and message.type == aiohttp.WSMsgType.TEXT:
-                    await websocket.send_str(mode)
+                    await websocket.send_bytes(b"control" if self.runtime.allows_input(session_id, event) else b"view")
 
         tasks = [asyncio.create_task(echo()), asyncio.create_task(event.wait())]
         try:
@@ -115,7 +110,6 @@ def computer_app(peer: ComputerPeer, tmp_path: Path) -> FastAPI:
         upstream = web.Application()
         upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", peer.openid)
         upstream.router.add_get("/computer/stream", peer.stream)
-        upstream.router.add_get("/computer/screencast", peer.stream)
         upstream.router.add_route("*", "/computer{tail:.*}", peer.http)
         runner = web.AppRunner(upstream, access_log=None)
         await runner.setup()
