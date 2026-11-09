@@ -1265,7 +1265,7 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ### An agent's terminals
 
 `await terminals(workspace, *, create=False)` returns a `WorkerTerminals` for the agent's [terminals](tools/execution-and-coding.md#terminal), those the chat's Terminal tab shows the caller for that agent in this room, or `None` while `workspace.terminal` is `none`.
-It checks nothing beyond what `agent()` checked: like MindRoom's own terminal routes, a route opens, closes, or types in a terminal only while `workspace.terminal` is `type`, and otherwise at most lists and watches them.
+It checks nothing beyond what `agent()` checked, so the route enforces what the caller may do, as MindRoom's own terminal routes do: opening, closing, and typing in a terminal require `workspace.terminal == "type"`, and listing and watching require `watch` or `type`.
 Pass `create=True` before opening a terminal, so the agent's workspace exists, as its first turn would make it.
 
 | Call | Effect |

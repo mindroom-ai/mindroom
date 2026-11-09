@@ -279,3 +279,28 @@ async def test_a_stream_of_a_terminal_the_workspace_does_not_have_closes(tmp_pat
         stream = await _stream(client, room, f"{base}/agents/{room.ids['coder']}/terminals/nope", ALICE)
         assert (await stream.receive()).type == aiohttp.WSMsgType.CLOSE
         assert stream.close_code == 1008
+
+
+async def test_each_route_refuses_with_its_own_answer_where_the_caller_may_not_act(tmp_path: Path, runner: str) -> None:
+    """Bob, read-only, may neither open nor close; once the agent gives no terminals, Alice's stream says so."""
+    room = _Room(Config(agents=_agents(ALICE, BOB)), _paths(tmp_path, runner), ("coder",))
+    coder = f"agents/{room.ids['coder']}/terminals"
+    no_typing = {"detail": agent_terminals._NO_TYPING}
+    async with _served(room) as (client, base):
+        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        assert await _answer(client.post(f"{base}/{coder}", headers=_auth(room, BOB))) == (403, no_typing)
+        assert await _answer(client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, BOB))) == (
+            403,
+            no_typing,
+        )
+        unset = AgentConfig(display_name="Coder", tools=["shell"], access=ResponderAccessConfig(users=[ALICE]))
+        room.serve(Config(agents=_agents(ALICE) | {"coder": unset}))
+        assert await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE))) == (403, no_typing)
+        assert await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE))) == (200, {"terminals": []})
+        stream = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
+        message = await stream.receive()
+    assert (message.type, stream.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1008,
+        "This agent has no terminals.",
+    )
