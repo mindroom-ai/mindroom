@@ -1704,7 +1704,7 @@ MindRoom adds no other header, so the route sets its own caching and content-typ
 On any host that is not a plugin host, such as `127.0.0.1`, the listener answers `GET /ask?domain=<host>`, the check Caddy's on-demand TLS makes before it gets a certificate.
 It answers 200 when the host's plugin defines `serves(label)` in its origin module, plain or `async`, and it returns `True` within 5 seconds; it answers 404 otherwise, including for a plugin without `serves`.
 A `serves` that raises or takes longer is logged as `Plugin origin serves() failed` with the plugin's name.
-A plain `serves` runs on the server's event loop, so it must not block.
+A plain `serves` runs in a thread of its own, so the deadline holds even while it blocks.
 This Caddyfile serves plugin hosts under `example-apps.net` with a listener on port 8770:
 
 ```caddy

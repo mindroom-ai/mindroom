@@ -138,8 +138,10 @@ class _PluginOrigins:
         label, plugin_name = parsed
         try:
             async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
-                answer = serves(label)
-                return (await answer if inspect.isawaitable(answer) else answer) is True
+                # A plain ``serves`` runs in a thread, so one that blocks holds up neither the deadline nor the server.
+                if inspect.iscoroutinefunction(serves):
+                    return await serves(label) is True
+                return await asyncio.to_thread(serves, label) is True
         except Exception:
             logger.exception("Plugin origin serves() failed", plugin_name=plugin_name)
             return False

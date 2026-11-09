@@ -38,6 +38,7 @@ FLOOR = f"frame-ancestors 'self' {CHAT}"
 
 ORIGIN = """
 import asyncio
+import time
 
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import HTMLResponse
@@ -277,6 +278,8 @@ def test_an_origin_route_checks_membership_for_the_user_its_own_gate_names(tmp_p
         ("slow.demo.localhost", 404),
         ("yes.sync.localhost", 200),
         ("no.sync.localhost", 404),
+        ("slow.sync.localhost", 404),
+        ("boom.sync.localhost", 404),
         ("yes.plain.localhost", 404),  # an origin module without serves()
         ("yes.other.localhost", 404),  # no origin module
         ("yes.missing.localhost", 404),
@@ -294,7 +297,7 @@ def test_ask_answers_200_only_for_a_host_its_plugins_serves_says_it_serves(
     _write(
         tmp_path,
         "sync",
-        origin=ORIGIN.replace("async def serves", "def serves").replace("await asyncio.sleep(60)", "pass"),
+        origin=ORIGIN.replace("async def serves", "def serves").replace("await asyncio.sleep(60)", "time.sleep(1)"),
     )
     _write(tmp_path, "plain", origin=ORIGIN.split("async def serves", maxsplit=1)[0])
     _write(tmp_path, "other", routes=ROUTES)
@@ -306,9 +309,8 @@ def test_ask_answers_200_only_for_a_host_its_plugins_serves_says_it_serves(
     assert answer.status_code == status
     assert answer.headers["cache-control"] == "no-store"
     failed = [log for log in logs if log["event"] == "Plugin origin serves() failed"]
-    assert [log["plugin_name"] for log in failed] == (
-        ["demo"] if domain.split(".", maxsplit=1)[0] in {"boom", "slow"} else []
-    )
+    label, plugin_name = domain.split(".")[:2] if domain else ("", "")
+    assert [log["plugin_name"] for log in failed] == ([plugin_name] if label in {"boom", "slow"} else [])
 
 
 def test_ask_is_answered_only_off_plugin_hosts(tmp_path: Path) -> None:
