@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 type _LineKind = Literal["speech", "gap"]
 type _GapReason = Literal["paused", "not-transcribed"]
-# What an ended call's row was last edited to say: that the call ended, then also where its transcript message is.
+# The last edit made to an ended call's row: "ended" gives the end, "transcript" also links the transcript message.
 type RowEdit = Literal["ended", "transcript"]
 
 _SCHEMA = (
@@ -79,7 +79,7 @@ class StoredCall:
     ended_at: float | None
     """None while the call is live."""
     row_event_id: str | None
-    """The call's row notice, None until it is posted."""
+    """The event ID of the notice the router posts for the call; None until it is up."""
     retry_at: float | None
     """When the call's Matrix writes may be tried again after one failed; None until one fails."""
     notes_failures: int
@@ -89,7 +89,7 @@ class StoredCall:
     transcript_event_id: str | None
     """The posted transcript message, None until it is posted or when there was nothing to post."""
     row_edit: RowEdit | None
-    """What the row was last edited to say, None while it is unedited."""
+    """The last edit made to the row; None before any."""
     paused_since: float | None
     """When the current pause began, None while transcription is not paused."""
     paused_by: str | None
@@ -217,7 +217,7 @@ class CallTranscriptStore:
             return speech_seconds
 
     def record_row_edit(self, call_id: str, edit: RowEdit) -> None:
-        """Record what the call's row was edited to say; an edit for the end never replaces one for the transcript."""
+        """Record the row's latest edit; an ``ended`` edit never overwrites a ``transcript`` one."""
         self._write(
             "UPDATE calls SET row_edit = ? WHERE id = ? AND (row_edit IS NULL OR ? = 'transcript')",
             (edit, call_id, edit),
