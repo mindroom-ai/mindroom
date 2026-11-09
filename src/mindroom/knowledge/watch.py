@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING
 from watchfiles import Change, DefaultFilter, awatch
 from watchfiles._rust_notify import WatchfilesRustInternalError
 
-from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path, pinned_canonical_directory
+from mindroom.knowledge.file_listing import (
+    include_semantic_knowledge_relative_path,
+    is_utf8,
+    pinned_canonical_directory,
+)
 from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -142,15 +146,6 @@ def _shared_poll_targets(
     return targets
 
 
-def _is_utf8(name: str) -> bool:
-    """Return whether a name read from the filesystem is valid UTF-8; Python escapes the bytes of one that is not."""
-    try:
-        name.encode()
-    except UnicodeEncodeError:
-        return False
-    return True
-
-
 def _watched_folders(root: Path, *, check_file_names: bool) -> tuple[list[Path], set[Path]]:
     """Return the base folder and the folders below it, reached without a link, up to the cap, and the folders skipped.
 
@@ -162,11 +157,11 @@ def _watched_folders(root: Path, *, check_file_names: bool) -> tuple[list[Path],
     skipped: set[Path] = set()
     with pinned_canonical_directory(root) as root_fd:
         for folder, subfolders, files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
-            if all(map(_is_utf8, [*subfolders, *files] if check_file_names else subfolders)):
+            if all(map(is_utf8, [*subfolders, *files] if check_file_names else subfolders)):
                 folders.append(root / folder)
             else:
                 skipped.add(root / folder)
-            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and _is_utf8(name)]
+            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and is_utf8(name)]
             if len(folders) == _MAX_WATCHED_FOLDERS:
                 break
     return folders, skipped

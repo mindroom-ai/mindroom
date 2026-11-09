@@ -731,6 +731,26 @@ def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> No
     assert list_response.json()["bases"][0]["file_count"] == 1
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_file_listing_leaves_out_a_file_whose_name_is_not_utf8(tmp_path: Path, git: bool) -> None:
+    """A file whose name is not valid UTF-8 is left out of the dashboard listing instead of failing it."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    odd_name = os.fsdecode(b"odd-\xff.md")
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    (docs / odd_name).write_text("odd", encoding="utf-8")
+    if git:
+        _init_git_checkout(tmp_path, docs, "guide.md", odd_name)
+    publish_api_config(client.app, _knowledge_config(docs, git=git))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert [entry["path"] for entry in response.json()["files"]] == ["guide.md"]
+    assert response.json()["file_listing_degraded"] is False
+
+
 def test_git_file_listing_timeout_degrades_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1231,6 +1251,26 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     assert not (docs / "guide.md").exists()
     assert list(docs.glob(".*.upload.tmp")) == []
     assert scheduler.scheduled == []
+
+
+def test_failed_batch_upload_removes_the_files_it_staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch upload that fails on its third file leaves neither that file nor the two staged before it."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    publish_api_config(client.app, _knowledge_config(docs))
+    monkeypatch.setattr(knowledge_api, "_MAX_UPLOAD_BYTES", 5)
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[
+            ("files", ("one.md", b"one", "text/markdown")),
+            ("files", ("two.md", b"two", "text/markdown")),
+            ("files", ("three.md", b"too large", "text/markdown")),
+        ],
+    )
+
+    assert response.status_code == 413
+    assert list(docs.iterdir()) == []
 
 
 @pytest.mark.asyncio

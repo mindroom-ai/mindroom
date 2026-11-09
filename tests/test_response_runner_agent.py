@@ -2469,6 +2469,7 @@ class TestAgentBot(AgentBotTestBase):
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
+            retitle=False,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -2587,6 +2588,7 @@ class TestAgentBot(AgentBotTestBase):
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
+            retitle=False,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
