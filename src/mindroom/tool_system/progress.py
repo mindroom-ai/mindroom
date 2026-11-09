@@ -23,7 +23,7 @@ _MAX_PROGRESS_CHARS = 2000
 _SHOWN_PROGRESS_CHARS = 1000
 # A listener that shows a report masks credentials before cutting it, so a long credential keeps the label that
 # identifies it: a report carries the shown output plus the longest private key (8192-bit, about 6.5K characters). A
-# line redaction cannot delimit hides the shown output until it scrolls out of this window, so it stays small.
+# secret name that ends its line hides everything after it until it scrolls out of this window, so it stays small.
 _REPORT_WINDOW_CHARS = 8000
 
 _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_reporter", default=None)

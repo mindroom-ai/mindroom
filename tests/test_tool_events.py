@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from mindroom import redaction
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
@@ -592,11 +593,16 @@ def test_format_tool_started_redacts_top_level_key_value_secret_args() -> None:
     assert "value=***redacted***" in trace.args_preview
 
 
-def test_format_tool_started_survives_structured_redaction_failure() -> None:
+def test_format_tool_started_survives_structured_redaction_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed argument redaction must not abort tool event formatting."""
+
+    def raise_redaction_error(_value: str) -> str:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_secret_assignments", raise_redaction_error)
     _text, trace = _format_tool_started(
         "run_shell",
-        {"command": "password=\n  hunter2"},
+        {"command": "password=hunter2"},
     )
 
     assert trace.args_preview == "command=[redaction failed]"
