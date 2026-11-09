@@ -1335,6 +1335,7 @@ Once accepted, the websocket closes with code 4401 as soon as its session ends: 
 Each user may hold 16 open streams at once across every route on `client_stream`, MindRoom's own included, whatever their sessions; past that, the handshake is refused with 503 and `This user has too many open streams; close one and try again.` until one of them closes.
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
+A client that leaves ends the block only once the route reads or sends on the websocket, so a route that only waits to send also reads it in a task beside its sends; otherwise each stream a client left keeps its place among the user's 16 until its next send or the session's end.
 
 A route with an admission rule of its own, such as a cap on each user's open streams, passes it as `admit`: a function, plain or `async`, that gets the signed-in `ClientUser` once the checks above pass and returns whether to accept.
 A plain function runs on the server's event loop, so it must not block.

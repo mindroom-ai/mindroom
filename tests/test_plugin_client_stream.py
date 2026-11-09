@@ -637,7 +637,7 @@ def test_a_stream_that_ends_stops_its_membership_rechecks(
     assert membership.calls == calls
 
 
-def _open_streams(client: TestClient, streams: ExitStack, token: str, count: int) -> None:
+def _open_many(client: TestClient, streams: ExitStack, token: str, count: int) -> None:
     """Open ``count`` streams for ``token``'s user, alternating between the routes in and outside the room."""
     for index in range(count):
         streams.enter_context(_connect(client, token, _echo_path() if index % 2 else "/api/plugins/demo/echo"))
@@ -655,7 +655,7 @@ def test_a_users_streams_across_routes_are_capped_before_accept(app: FastAPI, cl
     bob = store.create(BOB).token
 
     with ExitStack() as streams:
-        _open_streams(client, streams, alice, STREAMS_PER_USER)
+        _open_many(client, streams, alice, STREAMS_PER_USER)
         assert _refused_for_too_many(client, alice)
         # A second session of the same user shares the user's limit.
         assert _refused_for_too_many(client, store.create(ALICE).token)
@@ -670,7 +670,7 @@ def test_closing_a_stream_lets_the_users_next_one_in(app: FastAPI, client: TestC
     token = store.create(ALICE).token
 
     with ExitStack() as streams:
-        _open_streams(client, streams, token, STREAMS_PER_USER - 1)
+        _open_many(client, streams, token, STREAMS_PER_USER - 1)
         with _connect(client, token):
             assert _refused_for_too_many(client, token)
         ended = store.create(ALICE).token
@@ -703,7 +703,7 @@ def test_a_refused_or_failed_handshake_takes_no_place(
         raise RuntimeError(msg)
 
     with ExitStack() as streams:
-        _open_streams(client, streams, token, STREAMS_PER_USER - 1)
+        _open_many(client, streams, token, STREAMS_PER_USER - 1)
         for path, protocols, origin, status in (
             (_echo_path(), _offers(token), "https://evil.example.org", 403),
             (_echo_path(), ["mindroom-session"], CLIENT_ORIGIN, 401),
