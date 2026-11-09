@@ -181,8 +181,8 @@ async def ensure_worker_service(
 
 
 async def _stop(endpoint: _Endpoint, worker_key: str, plugin: str, name: str) -> None:
-    _started.pop((worker_key, plugin, name), None)
     await _send("DELETE", endpoint, f"{plugin}/{name}", None)
+    _started.pop((worker_key, plugin, name), None)
 
 
 async def stop_worker_service(context: PluginContext, service: WorkerService, target: ResolvedWorkerTarget) -> None:
@@ -213,6 +213,9 @@ async def stop_started_worker_services() -> None:
         *(_stop_recorded(paths, *key) for key, paths in started),
         return_exceptions=True,
     )
-    for (_, plugin, name), result in zip((key for key, _ in started), results, strict=True):
+    for (key, paths), result in zip(started, results, strict=True):
         if isinstance(result, Exception):
+            # The next load or shutdown tries again, unless an ensure since recorded the service anew.
+            _started.setdefault(key, paths)
+            _, plugin, name = key
             logger.warning("Failed to stop a worker service", plugin_name=plugin, service=name, error=str(result))

@@ -514,6 +514,10 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
         workers.handle = replace(workers.handle, status="ready", endpoint=endpoint)
         with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: ConnectError"):
             await ensure_worker_service(context, _SERVICE, _TARGET)
+        # A stop that fails keeps the service recorded, so the next plugin load stops it.
+        with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: ConnectError"):
+            await stop_worker_service(context, _SERVICE, _TARGET)
+        assert (_WORKER_KEY, "demo", "hello") in plugin_worker_services._started
         workers.handle = replace(workers.handle, auth_token=None)
         with pytest.raises(WorkerServiceError, match="unavailable: MINDROOM_SANDBOX_PROXY_TOKEN must be set"):
             await ensure_worker_service(context, _SERVICE, _TARGET)
@@ -607,7 +611,7 @@ def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: fl
 
 @pytest.mark.asyncio
 async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plugin load or shutdown stops every started service, even when one worker cannot be reached."""
+    """A plugin load or shutdown stops every started service, even when one worker cannot be reached, and keeps that one."""
     stopped: list[str] = []
 
     async def stop(_paths: object, _worker_key: str, _plugin: str, name: str) -> None:
@@ -621,7 +625,8 @@ async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytes
         plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = None  # type: ignore[assignment]
     await plugin_worker_services.stop_started_worker_services()
     assert stopped == ["broken", "hello"]
-    assert plugin_worker_services._started == {}
+    # The service that failed to stop stays recorded, so the next load or shutdown stops it.
+    assert list(plugin_worker_services._started) == [(_WORKER_KEY, "demo", "broken")]
 
 
 @pytest.mark.asyncio
