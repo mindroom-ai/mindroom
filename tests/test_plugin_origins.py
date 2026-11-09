@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
+from mindroom import plugin_http
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.plugin_origins import _PluginOrigins, plugin_origin_url, serve_plugin_origins
@@ -21,6 +22,7 @@ from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.plugin_check import check_plugin
+from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
@@ -106,6 +108,12 @@ router = APIRouter()
 @router.get("/link")
 async def link(request: Request) -> dict:
     return {"url": plugin_origin_url(request, "item-1")}
+"""
+
+EMPTY_ORIGIN = """
+from fastapi import APIRouter
+
+router = APIRouter()
 """
 
 
@@ -289,7 +297,7 @@ def test_ask_answers_200_only_for_a_host_its_plugins_serves_says_it_serves(
 ) -> None:
     """Caddy's on-demand TLS check gets 200 only while ``serves`` returns True within the deadline."""
     _write(tmp_path, "demo", origin=ORIGIN)
-    _write(tmp_path, "plain", origin=ORIGIN.split("async def serves", maxsplit=1)[0])
+    _write(tmp_path, "plain", origin=EMPTY_ORIGIN)
     _write(tmp_path, "other", routes=ROUTES)
     client = _client(_api_app(tmp_path, "demo", "plain", "other"), "127.0.0.1:9100")
 
@@ -316,13 +324,43 @@ def test_ask_is_answered_only_off_plugin_hosts(tmp_path: Path) -> None:
 
 def test_plugin_origin_url_names_the_calling_plugins_host(tmp_path: Path) -> None:
     """An API route links to its own plugin's host, and answers 503 while origins are off."""
-    _write(tmp_path, "linker", routes=ROUTES)
+    _write(tmp_path, "linker", routes=ROUTES, origin=EMPTY_ORIGIN)
 
     on = TestClient(_api_app(tmp_path, "linker")).get("/api/plugins/linker/link")
     off = TestClient(_api_app(tmp_path, "linker", MINDROOM_PLUGIN_ORIGIN_PORT="")).get("/api/plugins/linker/link")
 
     assert (on.status_code, on.json()) == (200, {"url": "http://item-1.linker.localhost:9100"})
     assert (off.status_code, off.json()) == (503, {"detail": "Plugin origins are off."})
+
+
+def test_plugin_origin_url_refuses_a_plugin_without_origins(tmp_path: Path) -> None:
+    """A plugin without an origin module gets no URL, which nothing would serve, though another plugin has one."""
+    _write(tmp_path, "linker", routes=ROUTES)
+    _write(tmp_path, "demo", origin=EMPTY_ORIGIN)
+
+    with pytest.raises(RuntimeError, match="Plugin 'linker' has no origin_module"):
+        TestClient(_api_app(tmp_path, "linker", "demo")).get("/api/plugins/linker/link")
+
+
+@pytest.mark.parametrize(
+    ("env", "url"),
+    [({}, "http://item-1.linker.localhost:9100"), ({"MINDROOM_PLUGIN_ORIGIN_PORT": ""}, None)],
+)
+def test_plugin_origin_url_from_a_tools_context(tmp_path: Path, env: dict[str, str], url: str | None) -> None:
+    """A tool's context names its own plugin's host, and None while origins are off, since a tool answers no request."""
+    _write(tmp_path, "linker", origin=EMPTY_ORIGIN)
+    _write(tmp_path, "plain")
+    app = _api_app(tmp_path, "linker", "plain", **env)
+    snapshot = config_lifecycle.require_api_state(app).snapshot
+    config = snapshot.runtime_config
+    assert config is not None
+
+    def context(name: str) -> PluginContext:
+        return build_plugin_context(name, config, snapshot.runtime_paths, lambda: config)
+
+    assert plugin_http.plugin_origin_url(context("linker"), "item-1") == url
+    with pytest.raises(RuntimeError, match="Plugin 'plain' has no origin_module"):
+        plugin_http.plugin_origin_url(context("plain"), "item-1")
 
 
 @pytest.mark.parametrize(
@@ -421,6 +459,7 @@ async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
         async with serve_plugin_origins(
             _paths(tmp_path, MINDROOM_PLUGIN_ORIGIN_PORT=""),
             host="127.0.0.1",
+            api_port=8765,
             api_app=FastAPI(),
             log_level="INFO",
         ):
@@ -436,17 +475,22 @@ async def test_without_its_port_nothing_listens(tmp_path: Path) -> None:
             {"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "https://example-apps.net"},
             "MINDROOM_PLUGIN_ORIGIN_DOMAIN must be a domain",
         ),
+        ({"MINDROOM_PLUGIN_ORIGIN_PORT": "8765"}, "MINDROOM_PLUGIN_ORIGIN_PORT must differ"),
+        ({"MINDROOM_SCRIPT_GATEWAY_PORT": "9100"}, "MINDROOM_PLUGIN_ORIGIN_PORT must differ"),
     ],
 )
-async def test_an_invalid_public_port_or_domain_fails_the_start(
+async def test_an_invalid_or_taken_port_or_domain_fails_the_start(
     tmp_path: Path,
     env: dict[str, str],
     error: str,
 ) -> None:
-    """A mistyped setting stops MindRoom from starting rather than break every link."""
+    """A mistyped setting, or a port the API or the script gateway listens on, stops MindRoom from starting."""
     paths = _paths(tmp_path, **env)
-    with pytest.raises(ValueError, match=error):
-        async with serve_plugin_origins(paths, host="127.0.0.1", api_app=FastAPI(), log_level="INFO"):
+    with (
+        patch("mindroom.api.plugin_origins.serve_listener", side_effect=AssertionError("listener started")),
+        pytest.raises(ValueError, match=error),
+    ):
+        async with serve_plugin_origins(paths, host="127.0.0.1", api_port=8765, api_app=FastAPI(), log_level="INFO"):
             pass
 
 
@@ -470,7 +514,7 @@ async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: 
     uvicorn.Config(app, log_level="info")
 
     async with (
-        serve_plugin_origins(snapshot.runtime_paths, host="127.0.0.1", api_app=app, log_level="INFO"),
+        serve_plugin_origins(snapshot.runtime_paths, host="127.0.0.1", api_port=8765, api_app=app, log_level="INFO"),
         aiohttp.ClientSession() as client,
     ):
         assert logging.getLogger("uvicorn.access").handlers

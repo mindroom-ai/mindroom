@@ -127,8 +127,9 @@ class WorkerRelay:
         service: str | None = None,
         port: int | None = None,
         protocols: Iterable[str] = (),
+        headers: Iterable[tuple[str, str]] = (),
     ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
-        """Open one WebSocket and yield it until the block ends.
+        """Open one WebSocket, its handshake carrying ``headers``, and yield it until the block ends.
 
         A refused handshake raises ``aiohttp.WSServerHandshakeError`` with the runner's status and headers, and a
         redirected one with the app's, which the runner hands back.
@@ -140,7 +141,7 @@ class WorkerRelay:
                 session.ws_connect(
                     url,
                     protocols=tuple(protocols),
-                    headers=self._headers,
+                    headers=self._route_headers(headers),
                     max_msg_size=_MAX_MESSAGE_BYTES,
                 ) as upstream,
             ):

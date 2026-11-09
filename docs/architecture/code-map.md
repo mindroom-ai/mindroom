@@ -333,7 +333,7 @@ Matrix sync callback
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
 | `plugin_lifecycle.py` | `PluginLifespans` runs the `lifespan` of each plugin the primary publishes, starting a reload's new lifespans before it closes the replaced plugins' websockets and stops the old ones, and stopping them all at shutdown |
 | `plugin_testing.py` | The supported kit for a plugin's own tests: loads one plugin as startup does, serves its routes with real client sessions, and runs its tools and hooks behind the turn's admission decision, over stand-in rooms; MindRoom never imports it |
-| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks, room reads for routes and streams, and room admins' mode changes (`RoomReader`, `RoomPower`, `RoomModes`, `RoomHistory`, `client_rooms`, `stream_room_reader`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), posting as the router (`RoomMessenger`), administrator checks, and the route's `PluginContext` |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks, room reads for routes and streams, and room admins' mode changes (`RoomReader`, `RoomPower`, `RoomModes`, `RoomHistory`, `client_rooms`, `stream_room_reader`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), posting as the router (`RoomMessenger`), administrator checks, the route's `PluginContext`, and the URLs of the plugin's own hosts and the chat's origins for its pages (`plugin_origin_url`, `client_origins`) |
 | `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: a running bot in the room answers each read, the router first, and concurrent membership callers for one room share a lookup |
 | `matrix/history_visibility.py` | Where a joined member's view of a room's history begins under its history visibility, walking back from their member event to the join or invite that began their membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
@@ -504,7 +504,7 @@ Matrix sync callback
 | `previews/listeners.py` | Lists the TCP sockets listening on this machine's ports, through the kernel's socket diagnostics or `/proc/net`, and whether only the runner's process tree or cgroup holds them |
 | `previews/relay.py` | Passes one WebSocket's messages both ways between an accepted socket and a client socket until either closes |
 | `api/worker_services.py` | Dedicated-worker runner routes that start, report, and stop plugins' worker services, each with its process group, port, secret, and idle timer |
-| `plugin_worker_relay.py` | The primary's client of a dedicated worker's runner relay, which plugin routes open through `plugin_http.worker_relay` to reach their worker services by name or the agent's servers by port |
+| `plugin_worker_relay.py` | The primary's client of a dedicated worker's runner relay, which plugin routes and tools open through `plugin_http.worker_relay` to reach their worker services by name or the agent's servers by port |
 | `worker_computer/agent_browser.py` | A worker service's own CDP session on the agent's browser page: an allowlist of watching commands, acting ones only under the Computer's control lease, following the agent between pages, and releasing held input |
 | `plugin_worker_services.py` | The primary's side of plugin worker services: the declaration plugins import, ensure and stop through the target's worker, and stopping the started ones when plugins reload or MindRoom stops |
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
@@ -540,7 +540,7 @@ Matrix sync callback
 | `api/auth_user.py` | The typed login of one API request and the one rule for which Matrix user it acts as |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background |
-| `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
+| `api/request_body_limit.py` | Pure ASGI middleware answering 413 for request bodies over 16 MiB on the dashboard API, except knowledge uploads, and on the plugin origin listener |
 | `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
 | `api/budgets.py` | Dashboard and budget-service routes for budget status and setting or clearing one user's cap |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
