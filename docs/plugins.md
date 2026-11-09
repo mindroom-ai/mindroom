@@ -1275,7 +1275,7 @@ Pass `create=True` before opening a terminal, so the agent's workspace exists, a
 | `await terminals.close(session_id)` | Ends a terminal |
 | `async with terminals.attach(session_id) as terminal` | Attaches to a terminal; `await terminal.send_input(data)` types `data`, at most 16384 characters at once |
 
-Each call raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have.
+A call the worker refuses raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have.
 This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run:
 
 ```python
