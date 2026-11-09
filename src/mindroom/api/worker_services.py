@@ -3,9 +3,9 @@
 A service is a program in the plugin's folder, which the request's config places as it does for ``/execute``, started as
 a tool's subprocess is: with the worker's Python and sanitized environment, in a process group of its own. It serves on
 the loopback port in ``MINDROOM_WORKER_SERVICE_PORT``, and ``MINDROOM_WORKER_SERVICE_RUNNER_URL`` is this runner's URL.
-Every process in the worker can reach that port, so each start gets a fresh secret on stdin, which other processes
-cannot read as they read the environment and command line; the program refuses requests whose
-``X-MindRoom-Service-Secret`` header lacks it, and the secret never leaves this runner.
+Every process in the worker can reach that port, so each start gets a fresh secret on stdin, a socket that other
+processes cannot open through ``/proc`` as they could a pipe, or read as they read the environment and command line;
+the program refuses requests whose ``X-MindRoom-Service-Secret`` header lacks it, and the secret never leaves this runner.
 """
 
 from __future__ import annotations
@@ -169,19 +169,19 @@ async def _start(program: _Program, idle_timeout_seconds: float) -> _ServiceInst
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     secret = secrets.token_urlsafe(32)
-    process = await asyncio.create_subprocess_exec(
-        *(program.python, "-s", str(program.path)),
-        stdin=asyncio.subprocess.PIPE,
-        env={**program.env, "MINDROOM_WORKER_SERVICE_PORT": str(port)},
-        cwd=program.cwd,
-        start_new_session=True,
-    )
-    assert process.stdin is not None
-    process.stdin.write(f"{secret}\n".encode())
-    # A program that exits before reading its secret is reported as exited.
-    with suppress(ConnectionError):
-        await process.stdin.drain()
-    process.stdin.close()
+    # 🔒 A pipe's reader end can be opened again through /proc/<pid>/fd/0 by any process of the same user; a socket's not.
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        process = await asyncio.create_subprocess_exec(
+            *(program.python, "-s", str(program.path)),
+            stdin=theirs.fileno(),
+            env={**program.env, "MINDROOM_WORKER_SERVICE_PORT": str(port)},
+            cwd=program.cwd,
+            start_new_session=True,
+        )
+        # The secret fits the socket's buffer, so this never blocks; a program that already exited is reported as such.
+        with suppress(OSError):
+            ours.sendall(f"{secret}\n".encode())
     return _ServiceInstance(process, port, secret, program.entry_hash, idle_timeout_seconds)
 
 

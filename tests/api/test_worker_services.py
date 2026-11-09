@@ -201,6 +201,9 @@ async def test_the_secret_and_the_runner_token_stay_out_of_the_service_s_environ
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
         proc = Path(f"/proc/{record['pid']}")
+        # Another process of the same user cannot open the service's stdin again to read what it was sent.
+        with pytest.raises(OSError, match="No such device or address"):
+            (proc / "fd" / "0").open("rb")
         exposed = (proc / "environ").read_bytes() + (proc / "cmdline").read_bytes()
         assert str(record["secret"]).encode() not in exposed
         assert _TOKEN.encode() not in exposed
