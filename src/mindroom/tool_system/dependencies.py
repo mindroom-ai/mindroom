@@ -47,15 +47,19 @@ def _environment_lock_path() -> Path:
 
     The lock lives in the site-packages directory MindRoom is installed in: installs into MindRoom's
     own environment write there, and every process running it imports from there, including local
-    worker tool subprocesses with their own TMPDIR and venv. The file is private to the current user,
-    so other local users can hold it only if they can already change those packages. When that
-    directory is read-only, a private per-user directory in the OS temporary directory keeps other
-    local users from creating or holding the lock.
+    worker tool subprocesses with their own TMPDIR and venv. The file is private to the account that
+    creates it, so other local users can hold it only if they can already change those packages.
+    When this user cannot open it, as in a read-only installation or one where another account
+    created it, a private per-user directory in the OS temporary directory keeps other local users
+    from creating or holding the lock.
     """
     site_packages = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
-    if os.access(site_packages, os.W_OK):
-        lock_path = site_packages / ".mindroom-optional-dependencies.lock"
+    lock_path = site_packages / ".mindroom-optional-dependencies.lock"
+    try:
         os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass
+    else:
         return lock_path
     key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
     if sys.platform == "win32":

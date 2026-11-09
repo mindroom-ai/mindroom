@@ -1064,12 +1064,21 @@ def test_optional_dependency_lock_is_private_to_the_current_user(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
-@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root can write a read-only directory")
-def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a read-only installation, other local users cannot share or plant this user's lock directory."""
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root can open files without permission")
+@pytest.mark.parametrize("installation", ["read-only", "lock-of-another-account"])
+def test_optional_dependency_lock_directory_must_be_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installation: str,
+) -> None:
+    """When this user cannot open the installation's lock, other local users cannot share or plant its own lock."""
     site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
     monkeypatch.syspath_prepend(str(site_packages))
-    site_packages.chmod(0o555)
+    if installation == "read-only":
+        site_packages.chmod(0o555)
+    else:
+        # A lock another account created is private to it, so this user cannot open it.
+        (site_packages / ".mindroom-optional-dependencies.lock").touch(mode=0o000)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     lock_dir = tmp_path / f"mindroom-optional-dependencies-{os.getuid()}"
     lock_dir.mkdir()
