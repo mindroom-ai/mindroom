@@ -12,6 +12,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.conversation_hydration import readable_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.joined_members import read_joined_members
 
 if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -35,7 +36,7 @@ async def _joined_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom 
     current = client.rooms.get(room_id)
     if current is None:
         return None
-    response = await client.joined_members(room_id)
+    response = await read_joined_members(client, room_id)
     if not isinstance(response, nio.JoinedMembersResponse) or response.room_id != room_id:
         return None
     room = nio.MatrixRoom(room_id, client.user_id)

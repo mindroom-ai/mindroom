@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
@@ -58,7 +59,7 @@ def retract_room_export(accumulator: ThreadExportAccumulator, room: ThreadExport
 
 async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset[str]:
     """Return the current joined Matrix user IDs for one room."""
-    response = await client.joined_members(room_id)
+    response = await read_joined_members(client, room_id)
     if isinstance(response, nio.JoinedMembersResponse):
         return frozenset(member.user_id for member in response.members)
     msg = f"Membership lookup failed: {response}"

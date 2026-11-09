@@ -11,6 +11,7 @@ import nio
 from nio.durable import RecordKind
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.joined_members import read_joined_members
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -151,7 +152,7 @@ async def ensure_room_membership_synced(
         projected_members = _projected_members(room)
         revision = lookup.revision
         try:
-            response = await client.joined_members(room.room_id)
+            response = await read_joined_members(client, room.room_id)
         except Exception as exc:
             logger.warning(
                 "authoritative_room_membership_fetch_failed",

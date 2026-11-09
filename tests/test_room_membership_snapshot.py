@@ -68,6 +68,21 @@ async def test_projection_change_requires_a_new_membership_lookup() -> None:
     assert set(room.users) == {ACCOUNT, "@new:example.org"}
 
 
+@pytest.mark.asyncio
+async def test_a_lookup_refused_for_a_membership_change_is_read_again() -> None:
+    """A member list the client refused for a membership change during the read is read again and kept."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember(PEER, "Peer", None)], ROOM),
+    ]
+
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert cached_joined_member_ids(room) == {ACCOUNT, PEER}
+
+
 def _member_record(user_id: str, membership: str, display_name: str | None) -> SyncRecord:
     content: dict[str, object] = {"membership": membership}
     if display_name is not None:

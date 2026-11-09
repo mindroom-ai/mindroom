@@ -22,6 +22,7 @@ from mindroom.matrix.client_visible_messages import (
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.thread_summary.state import current_thread_summary
 from mindroom.tool_system.authoring import Toolkit
@@ -273,7 +274,7 @@ class MatrixRoomTools(Toolkit):
         room_id: str,
     ) -> str:
         try:
-            response = await context.client.joined_members(room_id)
+            response = await read_joined_members(context.client, room_id)
         except (ClientError, TimeoutError) as exc:
             return self._payload(
                 "error",

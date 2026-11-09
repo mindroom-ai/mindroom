@@ -1243,6 +1243,43 @@ async def test_target_requires_every_configured_room_member(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_member_filter_reads_a_member_list_refused_for_a_membership_change_again(tmp_path: Path) -> None:
+    """A member list the client refused for a membership change during the read is read again, not a failure."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = Mock()
+    client.joined_members = AsyncMock(
+        side_effect=[
+            nio.LocalProtocolError("room membership changed during lookup"),
+            nio.JoinedMembersResponse([nio.RoomMember("@owner:localhost", "", "")], "!room:localhost"),
+        ],
+    )
+
+    with patch(
+        "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=([], False)),
+    ):
+        accumulators = await _export_threads_for_targets_for_client(
+            client=client,
+            reader=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
+            rooms=(_ThreadExportRoom("room", "!room:localhost", "#room:localhost", "Room"),),
+            targets=(
+                ThreadExportTarget(
+                    output_dir=tmp_path / "exports",
+                    required_member_user_ids=("@owner:localhost",),
+                ),
+            ),
+        )
+
+    assert accumulators[0].rooms_exported == 1
+    assert accumulators[0].failed_items == []
+
+
+@pytest.mark.asyncio
 async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tmp_path: Path) -> None:
     """A failed membership lookup must keep existing exports: unknown is not revoked."""
     config = _config(tmp_path)
