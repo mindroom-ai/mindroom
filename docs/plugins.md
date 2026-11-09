@@ -1204,7 +1204,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none`, `read`, or `write`, as [Who may open and change a workspace](workspace-files.md#who-may-open-and-change-a-workspace) describes; a toolkit that saves files without naming the function in its `workspace_writers` gives only `read` |
+| `files` | `none`, `read`, or `write`, as [Who may open and change a workspace](workspace-files.md#who-may-open-and-change-a-workspace) describes, from each toolkit's [`workspace_writers`](#decorator-fields) |
 | `terminal` | `none` when the agent has no [`shell`](tools/execution-and-coding.md#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](tools/execution-and-coding.md#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.

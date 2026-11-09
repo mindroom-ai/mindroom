@@ -79,9 +79,14 @@ ENTRY_KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFLNK: "link",
 }
 _NOT_A_FILE = "That path is not a regular file."
-# Saves, moves and deletes through this process check what is there and change it one at a time, so two saves of one
-# version, or two moves onto one name, never both land, and a save that passed its check never brings back a deleted file.
-_CHANGES = threading.Lock()
+# Saves, moves and deletes through this process check what is there and change it one at a time per workspace, so two
+# saves of one version, or two moves onto one name, never both land, a save that passed its check never brings back a
+# deleted file, and a long delete in one workspace holds up no other.
+_CHANGES: dict[Path, threading.Lock] = {}
+
+
+def _changes(base: Path) -> threading.Lock:
+    return _CHANGES.setdefault(base, threading.Lock())
 
 
 @dataclass(frozen=True)
@@ -350,7 +355,7 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Sa
     _refuse_git(path)
     found = _find(root, path)
     _refuse_git(found.relative)
-    with _CHANGES:
+    with _changes(found.base):
         try:
             current = _etag(_read(found)[0])
         except HTTPException as error:
@@ -389,7 +394,11 @@ def move(root: Path, raw_path: str, raw_to: str) -> None:
         raise HTTPException(400, "That is already its name.")
     if destination.is_relative_to(moved):
         raise HTTPException(400, "A folder can't move into itself.")
-    with _CHANGES, _refusals(), open_directory_within_root(source.base, source.relative) as source_directory:
+    with (
+        _changes(source.base),
+        _refusals(),
+        open_directory_within_root(source.base, source.relative) as source_directory,
+    ):
         os.stat(source_name, dir_fd=source_directory, follow_symlinks=False)
         with open_directory_within_root(target.base, target.relative, create=True) as target_directory:
             try:
@@ -417,7 +426,7 @@ def delete(root: Path, raw_path: str) -> None:
     removed = parent.relative / name
     _refuse_git(removed)
     _refuse_credential_place(removed)
-    with _CHANGES, _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
+    with _changes(parent.base), _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
         if stat.S_ISDIR(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
             _refuse_holding_kept(directory, name, removed)
             # Walks every level by descriptor, never following a link.

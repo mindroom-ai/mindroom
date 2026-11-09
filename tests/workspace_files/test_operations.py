@@ -542,6 +542,28 @@ def test_two_moves_onto_one_name_never_both_land(root: Path, monkeypatch: pytest
     assert (root / "report.md").read_text() in {"a", "b"}
 
 
+def test_a_change_in_one_workspace_never_waits_for_another(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long delete in one workspace leaves saves in every other workspace free to land."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    (first / "build").mkdir(parents=True)
+    second.mkdir()
+    real_rmtree = shutil.rmtree
+    saved = []
+
+    with ThreadPoolExecutor(1) as pool:
+
+        def rmtree_while_saving(*args: object, **kwargs: object) -> None:
+            saving = pool.submit(save_file, second, "notes.md", b"x", None)
+            saved.append(saving.result(timeout=5))
+            real_rmtree(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(operations.shutil, "rmtree", rmtree_while_saving)
+        delete(first, "build")
+
+    assert saved
+    assert not (first / "build").exists()
+
+
 def test_a_delete_during_a_save_lands_after_it(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A save that passed its etag check can't bring back a file deleted meanwhile: the delete waits for it."""
     etag = read_file(root, "notes.md").etag
