@@ -229,7 +229,8 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
 
 
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
-    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    # Every runner runs in runner mode, as its startup sets it.
+    runtime_paths = resolve_primary_runtime_paths(process_env={**os.environ, "MINDROOM_SANDBOX_RUNNER_MODE": "true"})
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths, config=config)
     return runtime_paths, config
@@ -259,6 +260,7 @@ def _lifespan_app_for_dedicated_worker(
             "MINDROOM_NAMESPACE": "alpha1234",
             "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         },
     )
     app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
@@ -6686,6 +6688,46 @@ def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
     assert resolved == workspace
     assert response.ok is True
     assert workspace.is_dir()
+
+
+@pytest.mark.usefixtures("real_shell_refusal")
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_a_runner_runs_shell_commands_with_the_setting_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A runner started as in deployments runs shell commands; `defaults.allow_shell_without_worker` is off."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    monkeypatch.delenv("MINDROOM_SANDBOX_RUNNER_MODE", raising=False)
+    _set_worker_tool_validation_snapshot(monkeypatch)
+    _, config = _initialize_runner_app_from_startup_runtime()
+    assert config.defaults.allow_shell_without_worker is False
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": ["echo ran-in-runner"],
+                "kwargs": {},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "ran-in-runner"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

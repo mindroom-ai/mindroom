@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
 from mindroom.shell.execution import _MAX_OUTPUT_BYTES, _OutputBuffer, _OutputProgress, _progress_lines
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -58,6 +59,49 @@ def _get_toolkit(tmp_path: Path) -> AnyToolkit:
         worker_target=None,
         tools=builtin_tool_registry(),
     )
+
+
+def _shell_for_config(tmp_path: Path, defaults: dict[str, object]) -> AnyToolkit:
+    """Build the shell for a config with these ``defaults``, placed where the sandbox settings place it."""
+    runtime_paths = _make_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime({"defaults": defaults}, runtime_paths)
+    return get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runtime_config=config,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
+@pytest.mark.parametrize("defaults", [{}, {"allow_shell_without_worker": False}], ids=["unset", "off"])
+async def test_shell_without_a_worker_refuses_each_command(tmp_path: Path, defaults: dict[str, object]) -> None:
+    """Without a worker, and without the setting that allows it, a command never runs in MindRoom's process."""
+    marker = tmp_path / "ran"
+    tool = _shell_for_config(tmp_path, defaults)
+
+    result = await tool.functions["run_shell_command"](["touch", str(marker)])
+
+    assert result == (
+        "Error: Shell commands run only in a worker, and this agent's shell runs in MindRoom's own process. "
+        "Route `shell` to a worker, or set `defaults.allow_shell_without_worker: true` in config.yaml to run them here."
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_shell_without_a_worker_runs_commands_when_the_config_allows_it(tmp_path: Path) -> None:
+    """`defaults.allow_shell_without_worker: true` lets the shell run commands in MindRoom's process."""
+    marker = tmp_path / "ran"
+    tool = _shell_for_config(tmp_path, {"allow_shell_without_worker": True})
+
+    result = await tool.functions["run_shell_command"](f"touch {marker} && echo ran-here")
+
+    assert result == "ran-here"
+    assert marker.exists()
 
 
 def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_code: int = 0) -> str:

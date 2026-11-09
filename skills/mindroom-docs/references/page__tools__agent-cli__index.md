@@ -160,7 +160,7 @@ Set environment settings in the runtime's `.env` and restart MindRoom.
 
 ### Shell in MindRoom itself
 
-When the agent's shell runs in the MindRoom process, which is the default without a worker backend, nothing else is needed.
+When the agent's shell runs in the MindRoom process, which is the default without a worker backend, set [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults), because the shell refuses commands there otherwise.
 Such an agent is already fully trusted, as described in [the security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
 ### Shell in a worker
