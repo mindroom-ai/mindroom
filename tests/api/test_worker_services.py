@@ -18,6 +18,7 @@ import uvicorn
 
 from mindroom import plugin_worker_services
 from mindroom.api import sandbox_runner_app
+from mindroom.api import worker_services as worker_services_module
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_services import _services, close_worker_services
 from mindroom.config.agent import AgentConfig
@@ -48,14 +49,18 @@ _TOKEN = "runner-secret"  # noqa: S105 - isolated test credential
 _AUTH = {"X-Mindroom-Sandbox-Token": _TOKEN}
 # The key of the worker the agent ``coder``'s turns use, which the runner is pinned to.
 _WORKER_KEY = "v1:default:shared:coder"
-# A service that records its pid and the secret it read, and answers "hello" only to a request carrying that secret.
+# A service that records its pid, its child's, and the secret it read, and answers "hello" only with that secret.
 _HELLO = """
-import json, os, sys
+import json, os, subprocess, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 secret = sys.stdin.readline().strip()
+# A process the service starts, which a stop asks to end with it, as a TERM signal it records.
+CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(open('child-term', 'w').close())); time.sleep(600)"
+child = subprocess.Popen([sys.executable, "-c", CHILD])
 with open("service.json", "w") as record:
-    json.dump({"pid": os.getpid(), "secret": secret, "runner_url": os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]}, record)
+    runner_url = os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]
+    json.dump({"pid": os.getpid(), "child": child.pid, "secret": secret, "runner_url": runner_url}, record)
 
 
 class Hello(BaseHTTPRequestHandler):
@@ -67,6 +72,19 @@ class Hello(BaseHTTPRequestHandler):
 
 
 ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Hello).serve_forever()
+"""
+
+# A service that, like the child it starts, ignores the TERM signal a stop sends first, and accepts connections.
+_STUBBORN = """
+import json, os, signal, socket, subprocess, sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+with open("service.json", "w") as record:
+    json.dump({"pid": os.getpid(), "child": child.pid}, record)
+server = socket.create_server(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])))
+while True:
+    server.accept()[0].close()
 """
 
 
@@ -101,6 +119,7 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
     (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
     (plugin_root / "hello.py").write_text(_HELLO)
     (plugin_root / "crash.py").write_text("import sys\nsys.exit(3)\n")
+    (plugin_root / "stubborn.py").write_text(_STUBBORN)
     # The worker's Python, without building a virtualenv.
     venv_python = tmp_path / "venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True)
@@ -197,15 +216,33 @@ async def test_a_second_ensure_reuses_the_running_instance(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_stop_ends_the_service_and_the_next_ensure_starts_it_again(tmp_path: Path) -> None:
-    """A stop ends the program's process group; ensuring after it starts a new instance."""
+    """A stop ends the program and every process it started; ensuring after it starts a new instance."""
     async with _runner(tmp_path) as runner:
         await _call("POST", runner.url(), _body(), _AUTH)
-        pid = int(runner.record()["pid"])
+        record = runner.record()
         assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
-        assert not _pid_alive(pid)
+        await _until(lambda: not _pid_alive(int(record["child"])))
+        assert not _pid_alive(int(record["pid"]))
+        assert (runner.workspace / "child-term").exists()
+        pid = record["pid"]
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
         assert state["state"] == "running"
         assert runner.record()["pid"] != pid
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_ignores_the_stop_signal_is_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A program that outlives its grace period after the TERM signal is killed, with every process it started."""
+    monkeypatch.setattr(worker_services_module, "_STOP_SECONDS", 0.2)
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url("stubborn"), _body("stubborn.py"), _AUTH)
+        record = runner.record()
+        assert (await _call("DELETE", runner.url("stubborn"), headers=_AUTH))[0] == 204
+        assert not _pid_alive(int(record["pid"]))
+        await _until(lambda: not _pid_alive(int(record["child"])))
 
 
 @pytest.mark.asyncio
@@ -246,24 +283,28 @@ async def test_a_changed_program_starts_again_on_the_next_ensure(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_the_runner_stopping_ends_its_services(tmp_path: Path) -> None:
-    """Closing the runner ends every instance."""
+    """The runner's shutdown ends every instance."""
     async with _runner(tmp_path) as runner:
-        await _call("POST", runner.url(), _body(), _AUTH)
-        pid = int(runner.record()["pid"])
-        await close_worker_services(sandbox_runner_app.app)
+        async with sandbox_runner_app._lifespan(sandbox_runner_app.app):
+            await _call("POST", runner.url(), _body(), _AUTH)
+            pid = int(runner.record()["pid"])
         assert not _pid_alive(pid)
 
 
 @pytest.mark.asyncio
 async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
-    """A plugin this worker lacks, a program outside the plugin, or a missing token: clear refusals, no process."""
+    """A plugin this worker lacks, a program outside the plugin, another protocol, no token: refusals, no process."""
     async with _runner(tmp_path) as runner:
         status, answer = await _call("POST", runner.url(plugin="other"), _body(), _AUTH)
         assert status == 404
         assert "not loaded in this worker" in answer["detail"]
-        status, answer = await _call("POST", runner.url(), _body("../demo/../../config.yaml"), _AUTH)
+        (runner.plugin_root.parent / "outside.py").write_text(_HELLO)
+        status, answer = await _call("POST", runner.url(), _body("../outside.py"), _AUTH)
         assert status == 400
         assert "no file in plugin" in answer["detail"]
+        status, answer = await _call("POST", runner.url(), {**_body(), "protocol": 0}, _AUTH)
+        assert status == 400
+        assert "worker protocol" in answer["detail"]
         assert (await _call("POST", runner.url(), _body()))[0] == 401
         assert not (runner.workspace / "service.json").exists()
 
@@ -371,7 +412,7 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The runner's refusal and a worker that is not ready fail with their reason; stopping in a stopped worker is a no-op."""
+    """Each reason a service cannot run fails with that reason; stopping in a stopped worker starts nothing."""
     async with _runner(tmp_path) as runner:
         workers = _Workers(runner.port)
         context = _primary(tmp_path, runner, monkeypatch, workers)
@@ -383,8 +424,26 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
         crashed = await ensure_worker_service(context, WorkerService("crash", "crash.py"), _TARGET)
         assert (crashed.state, crashed.exit_code) == ("exited", 3)
 
+        unresolved = resolve_worker_target("user", "coder", replace(_TARGET.execution_identity, requester_id=None))
+        with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: Worker scope 'user'"):
+            await ensure_worker_service(context, _SERVICE, unresolved)
+
+        async def garbled(*_args: object) -> bytes:
+            return b'{"state": "gone"}'
+
+        with monkeypatch.context() as patched:
+            patched.setattr(plugin_worker_services, "_send", garbled)
+            with pytest.raises(WorkerServiceError, match="answered something other than a service state"):
+                await ensure_worker_service(context, _SERVICE, _TARGET)
+
         workers.handle = replace(workers.handle, status="starting")
         with pytest.raises(WorkerServiceError, match=r"The agent's worker is not ready\."):
+            await ensure_worker_service(context, _SERVICE, _TARGET)
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            endpoint = f"http://127.0.0.1:{closed.getsockname()[1]}/api/sandbox-runner/execute"
+        workers.handle = replace(workers.handle, status="ready", endpoint=endpoint)
+        with pytest.raises(WorkerServiceError, match="The agent's worker is unavailable: ConnectError"):
             await ensure_worker_service(context, _SERVICE, _TARGET)
 
 
@@ -438,3 +497,22 @@ def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: fl
     """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
     with pytest.raises(ValueError, match=r"(?i)worker service"):
         WorkerService(name, "hello.py", idle_timeout_seconds=idle)
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plugin load or shutdown stops every started service, even when one worker cannot be reached."""
+    stopped: list[str] = []
+
+    async def stop(*args: object) -> None:
+        stopped.append(str(args[-1]))
+        if args[-1] == "broken":
+            msg = "worker gone"
+            raise WorkerServiceError(msg)
+
+    monkeypatch.setattr(plugin_worker_services, "_stop", stop)
+    for name in ("broken", "hello"):
+        plugin_worker_services._started[("v1:default:shared:coder", "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
+    await plugin_worker_services.stop_started_worker_services()
+    assert stopped == ["broken", "hello"]
+    assert plugin_worker_services._started == {}

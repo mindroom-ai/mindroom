@@ -103,7 +103,6 @@ class _WorkerServices:
             if instance is None:
                 instance = self._instances[key] = await _start(program, idle_timeout_seconds)
                 instance.expiry = asyncio.create_task(self._expire(key, instance), name="worker-service-idle")
-            instance.idle_timeout_seconds = idle_timeout_seconds
             self.touch(plugin, name)
         return await _settled(instance)
 
