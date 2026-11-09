@@ -45,7 +45,7 @@ Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the a
 
 | Route | Answer |
 |-------|--------|
-| `GET /workspaces` | `{"workspaces": [{"agent_user_id", "display_name", "private", "files"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write` |
+| `GET /workspaces` | `{"workspaces": [{"agent_user_id", "display_name", "private", "files", "terminal"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write`, and `terminal` is what the caller may do in the agent's [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none`, `watch`, or `type` |
 | `GET /agents/{agent_user_id}/workspace/folder?path=<folder>` | `{"path", "entries", "truncated"}`: the folder's entries, folders and links to folders first, then by name |
 | `GET /agents/{agent_user_id}/workspace/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
 | `PUT /agents/{agent_user_id}/workspace/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |

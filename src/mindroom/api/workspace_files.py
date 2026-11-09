@@ -50,6 +50,8 @@ class OpenWorkspace:
     private: bool
     """Whether the agent is private, so this caller's workspace is their own."""
     files: Literal["read", "write"]
+    terminal: Literal["none", "watch", "type"]
+    """What the caller may do in the agent's terminals, as the terminal routes allow it."""
 
 
 class _Save(BaseModel):
@@ -102,10 +104,16 @@ async def _made_root(request: Request, room: RoomReader, room_id: str, agent_use
 
 @router.get("/workspaces")
 async def list_workspaces(room: _Room) -> dict[str, list[OpenWorkspace]]:
-    """Return the workspaces the caller may open in the room, in config order, with whether they may change files."""
+    """Return the workspaces the caller may open in the room, in config order, with what they may do in each."""
     return {
         "workspaces": [
-            OpenWorkspace(workspace.user_id, workspace.display_name, workspace.private, workspace.files)
+            OpenWorkspace(
+                workspace.user_id,
+                workspace.display_name,
+                workspace.private,
+                workspace.files,
+                workspace.terminal,
+            )
             for workspace in await room.agents()
             if workspace.files != "none"
         ],

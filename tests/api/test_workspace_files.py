@@ -97,18 +97,27 @@ def test_every_route_needs_a_client_session(client: _Client) -> None:
 
 
 def test_the_room_lists_the_workspaces_each_caller_may_open_and_what_they_may_do(client: _Client) -> None:
-    """Writing needs power to post; the private agent's files only read; Carol sees only what she may use."""
+    """Writing and typing need power to post; the private agent's files only read and it has no shell for terminals.
+
+    Carol sees only what she may use.
+    """
     ids = client.room.ids
     coder = {"agent_user_id": ids["coder"], "display_name": "Coder", "private": False}
-    notes = {"agent_user_id": ids["notes"], "display_name": "Notes", "private": True}
+    notes = {
+        "agent_user_id": ids["notes"],
+        "display_name": "Notes",
+        "private": True,
+        "files": "read",
+        "terminal": "none",
+    }
 
     assert client.workspaces(ALICE).json() == {
-        "workspaces": [coder | {"files": "write"}, notes | {"files": "read"}],
+        "workspaces": [coder | {"files": "write", "terminal": "type"}, notes],
     }
     assert client.workspaces(BOB).json() == {
-        "workspaces": [coder | {"files": "read"}, notes | {"files": "read"}],
+        "workspaces": [coder | {"files": "read", "terminal": "watch"}, notes],
     }
-    assert client.workspaces(CAROL).json() == {"workspaces": [notes | {"files": "read"}]}
+    assert client.workspaces(CAROL).json() == {"workspaces": [notes]}
 
 
 def test_an_agent_whose_tools_reach_no_files_opens_no_workspace(tmp_path: Path) -> None:
