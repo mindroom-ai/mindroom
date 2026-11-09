@@ -1040,12 +1040,21 @@ def _seed_git_remote(tmp_path: Path, files: Mapping[str, str]) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_git_refresh_publishes_a_checkout_tracking_a_file_whose_name_is_not_utf8(tmp_path: Path) -> None:
-    """A tracked file whose name is not valid UTF-8 is left out, and the rest of the checkout is indexed and published.
+@pytest.mark.parametrize(
+    ("tracked_name", "indexed_count"),
+    [(os.fsdecode(b"odd-\xff.md"), 1), ("a\rb.md", 2)],
+    ids=["not-utf8", "carriage-return"],
+)
+async def test_git_refresh_and_forced_reindex_of_a_checkout_tracking_an_unusual_name(
+    tmp_path: Path,
+    tracked_name: str,
+    indexed_count: int,
+) -> None:
+    """A tracked name that is not valid UTF-8 is left out, one holding a carriage return is indexed, and the checkout publishes.
 
     A forced reindex of a checkout already at the remote revision lists the tracked files itself: its sync finds nothing new and lists none.
     """
-    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", os.fsdecode(b"odd-\xff.md"): "odd guide"})
+    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", tracked_name: "unusual guide"})
     docs_path = tmp_path / "checkout"
     git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
@@ -1056,24 +1065,7 @@ async def test_git_refresh_publishes_a_checkout_tracking_a_file_whose_name_is_no
 
     assert first.index_published is second.index_published is True
     assert first.availability is second.availability is KnowledgeAvailability.READY
-    assert first.indexed_count == second.indexed_count == 1
-
-
-@pytest.mark.asyncio
-async def test_git_forced_reindex_indexes_a_tracked_name_holding_a_carriage_return(tmp_path: Path) -> None:
-    """A forced reindex of a checkout already at the remote revision indexes a tracked file whose name holds a carriage return."""
-    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", "a\rb.md": "carriage return guide"})
-    docs_path = tmp_path / "checkout"
-    git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
-    runtime_paths = runtime_paths_for(config)
-
-    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
-
-    assert first.index_published is second.index_published is True
-    assert first.availability is second.availability is KnowledgeAvailability.READY
-    assert first.indexed_count == second.indexed_count == 2
+    assert first.indexed_count == second.indexed_count == indexed_count
 
 
 @pytest.mark.asyncio
