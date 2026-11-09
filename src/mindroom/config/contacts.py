@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.judgment import JudgmentConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import validate_unique_entries
 
 # Tools that act with the owner's authority beyond the conversation, so a contact turn never offers them.
 CONTACT_CONTROL_TOOLS = frozenset(
@@ -39,6 +40,13 @@ class ContactsConfig(BaseModel):
         default=None,
         description="Judgment backend that checks each message against the rules; unset runs no judge",
     )
+    remote_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact or wildcard Matrix IDs of agents on other MindRoom deployments that this agent may ask for "
+            "contact and be asked by; empty keeps contacts within this deployment"
+        ),
+    )
 
     @field_validator("tools")
     @classmethod
@@ -49,3 +57,9 @@ class ContactsConfig(BaseModel):
                 msg = f"contacts.tools may not include {name}"
                 raise ValueError(msg)
         return tools
+
+    @field_validator("remote_agents")
+    @classmethod
+    def refuse_duplicate_remote_agents(cls, remote_agents: list[str]) -> list[str]:
+        """Name each pattern once, so the configured intent has one reading."""
+        return validate_unique_entries(remote_agents, field_name="contacts.remote_agents")

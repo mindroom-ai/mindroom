@@ -72,9 +72,20 @@ async def invite_to_room(
     client: nio.AsyncClient,
     room_id: str,
     user_id: str,
+    *,
+    reason: str | None = None,
 ) -> bool:
-    """Invite a user to a room."""
-    response = await client.room_invite(room_id, user_id)
+    """Invite a user to a room, with a ``reason`` the invitee reads before deciding to join."""
+    if reason is None:
+        response = await client.room_invite(room_id, user_id)
+    else:
+        # nio's room_invite sends no reason.
+        response = await client._send(
+            nio.RoomInviteResponse,
+            "POST",
+            nio.Api._build_path(["rooms", room_id, "invite"], {"access_token": client.access_token}),
+            nio.Api.to_json({"user_id": user_id, "reason": reason}),
+        )
     if isinstance(response, nio.RoomInviteResponse):
         logger.info("matrix_room_invited", room_id=room_id, user_id=user_id)
         return True
@@ -812,6 +823,16 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | 
     return None
 
 
+async def get_room_membership(client: nio.AsyncClient, room_id: str, user_id: str) -> str | None:
+    """Return a user's membership of a room from its state, such as ``invite`` or ``leave``, or ``None`` if unreadable."""
+    response = await client.room_get_state_event(room_id, "m.room.member", user_id)
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        membership = response.content.get("membership")
+        return membership if isinstance(membership, str) else None
+    logger.warning("matrix_room_membership_fetch_failed", room_id=room_id, user_id=user_id, error=str(response))
+    return None
+
+
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     """Get all rooms the client has joined."""
     response = await client.joined_rooms()
@@ -874,6 +895,7 @@ __all__ = [
     "ensure_room_name",
     "get_joined_rooms",
     "get_room_members",
+    "get_room_membership",
     "get_room_name",
     "invite_to_room",
     "join_room",

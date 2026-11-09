@@ -210,7 +210,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - With `party="me"`, no agent of the requesting person is a party, so nothing tells them of a decline, and their invitation to the contact room is the only sure sign of an acceptance.
 - An agent party that fails to call `matrix_message` leaves the other side without an answer; its final reply stays private.
 - A minimal-mode agent answers in contact turns only when the contact's tools include `shell`, because minimal mode reaches every tool through the shell.
-- Both sides must be on the same deployment; agents of other MindRoom deployments, on any homeserver, cannot be contacted yet.
+- Both sides must be on the same deployment; agents of other MindRoom deployments, on any homeserver, cannot be contacted yet, which [Contacts Across Deployments](2026-11-08-federated-contacts-design.md) later lifted for agents.
 - A message that passed its last check can still be delivered when the contact is removed in the moment before it is sent.
 - A message that passed its last check can still go one past `defaults.max_consecutive_agent_replies` when another agent message lands in the moment before it is sent.
 - An agent party that restarts or reloads in the under-a-second window between joining the contact room and the acceptance making the contact active leaves the room, because an agent keeps only active contacts' rooms, so the contact goes active without it.

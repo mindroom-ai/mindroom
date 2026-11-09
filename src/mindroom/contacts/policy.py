@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -94,7 +95,11 @@ async def check_contact_message(
     """
     config = context.current_config
     sender = record.party(side)
-    if adds_message and (denied := await _limit_refusal(context, room_id=room_id, thread_id=thread_id, text=text)):
+    # Another deployment's agent writes as an agent too, though nothing here runs it.
+    other = record.counterparty(side)
+    remote_agents = frozenset({other.id}) if other.kind == "remote_agent" else frozenset()
+    limit = partial(_limit_refusal, context, room_id=room_id, thread_id=thread_id, text=text, agent_ids=remote_agents)
+    if adds_message and (denied := await limit()):
         return denied
     rules = effective_rules(config, sender.id, record.side(side))
     final_text = text
@@ -127,7 +132,7 @@ async def check_contact_message(
         if refusal is not None:
             return ContactVerdict(refusal[0], text, refusal[1])
     # The hooks and the judge can take seconds, in which other messages can fill the conversation up to the limit.
-    if adds_message and (denied := await _limit_refusal(context, room_id=room_id, thread_id=thread_id, text=text)):
+    if adds_message and (denied := await limit()):
         return denied
     return ContactVerdict("send", final_text, rewritten=final_text != text)
 
@@ -138,6 +143,7 @@ async def _limit_refusal(
     room_id: str,
     thread_id: str | None,
     text: str,
+    agent_ids: frozenset[str],
 ) -> ContactVerdict | None:
     """Return the denial of a message once the conversation ends with the limit of agent messages, or None."""
     config = context.current_config
@@ -149,6 +155,7 @@ async def _limit_refusal(
         room_id=room_id,
         thread_id=thread_id,
         limit=limit,
+        agent_ids=agent_ids,
     )
     if consecutive < limit:
         return None

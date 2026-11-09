@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 - pydantic resolves the field type at runtime
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-type PartyKind = Literal["agent", "person"]
+type PartyKind = Literal["agent", "person", "remote_agent"]
 type ContactStatus = Literal["pending", "active", "declined", "removed"]
 type SideName = Literal["requester", "target"]
 
@@ -26,13 +26,33 @@ _SIDES: tuple[SideName, SideName] = ("requester", "target")
 
 
 class ContactParty(BaseModel):
-    """One end of a contact: a personal agent by name, or a person by canonical Matrix ID."""
+    """One end of a contact: a personal agent by name, a person by canonical Matrix ID, or another deployment's agent.
+
+    Another deployment's agent is known by its Matrix ID alone: no deployment can verify who owns another's agent, so
+    it has no owner here, while every party of this deployment has one.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     kind: PartyKind
     id: str
-    owner: str
+    owner: str | None
+
+    @model_validator(mode="after")
+    def owned_unless_remote(self) -> ContactParty:
+        """Refuse an owner on another deployment's agent and a missing owner on any party here."""
+        if (self.kind == "remote_agent") != (self.owner is None):
+            msg = "Only an agent of another deployment has no owner, and it never has one"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def local_owner(self) -> str:
+        """Return the owner of a party of this deployment, which every one of them has."""
+        if self.owner is None:
+            msg = f"{self.id} is an agent of another deployment and has no owner here"
+            raise ValueError(msg)
+        return self.owner
 
 
 class ContactSide(BaseModel):
@@ -56,7 +76,8 @@ class ContactRecord(BaseModel):
     reason: str
     requester_side: ContactSide
     target_side: ContactSide
-    origin_room_id: str
+    # A request another deployment sent was asked in no room here.
+    origin_room_id: str | None
     origin_thread_id: str | None
     notice_event_id: str | None = None
     room_id: str | None = None
@@ -69,6 +90,14 @@ class ContactRecord(BaseModel):
     # Coverage: tests/contacts/test_store.py::test_a_record_written_before_dates_reads_them_unset
     requested_at: datetime | None = None
     decided_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def asked_here_unless_remote(self) -> ContactRecord:
+        """Refuse a request of this deployment without the room it was asked in, and one from another with a room."""
+        if (self.requester.kind == "remote_agent") != (self.origin_room_id is None):
+            msg = "Only a request from another deployment's agent has no origin room, and it never has one"
+            raise ValueError(msg)
+        return self
 
     def party(self, side: SideName) -> ContactParty:
         """Return the party on one side."""
@@ -88,6 +117,10 @@ class ContactRecord(BaseModel):
             (side for side in _SIDES if (party := self.party(side)).kind == "agent" and party.id == agent_name),
             None,
         )
+
+    def owners(self) -> list[str]:
+        """Return the owners of this deployment's parties, requester's first; another deployment's agent has none."""
+        return [party.owner for party in (self.requester, self.target) if party.owner is not None]
 
     def owner_side(self, user_id: str) -> SideName | None:
         """Return the side whose party this user owns."""
@@ -186,27 +219,40 @@ def contact_room_ids(
     *,
     any_status: bool = False,
 ) -> frozenset[str]:
-    """Return the rooms of the active contacts this agent is a party of, which it keeps across restarts.
+    """Return the rooms this agent keeps across restarts.
+
+    Those are its active contacts' rooms, and the rooms of its pending requests to agents of other deployments, since
+    such a room is the request itself and needs a member left for the other agent to join.
 
     With ``any_status`` every room its contacts have or had counts, pending and removed ones included, since a room
     is named on a pending contact before anyone is invited and a contact keeps its room once removed.
     """
     return frozenset(
         record.room_id
-        for record, _side in agent_contacts(config, runtime_paths, agent_name)
-        if (any_status or record.status == "active") and record.room_id is not None
+        for record, side in agent_contacts(config, runtime_paths, agent_name)
+        if record.room_id is not None
+        and (
+            any_status
+            or record.status == "active"
+            or (record.status == "pending" and side == "requester" and record.target.kind == "remote_agent")
+        )
     )
 
 
-def remove_active_contacts(runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
-    """Mark every active contact this agent is a party of removed, and return their IDs.
+def remove_kept_contacts(runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
+    """Mark every contact whose room this agent keeps removed, and return their IDs.
 
-    An agent that no longer has contacts leaves their rooms, so its contacts end for both sides, and restoring its
-    contacts later revives none of them. Nothing is written while it has no active contact.
+    Those are its active contacts and its pending requests to agents of other deployments. An agent that no longer has
+    contacts leaves their rooms, so its contacts end for both sides, and restoring its contacts later revives none of
+    them. Nothing is written while it has no such contact.
     """
 
     def active(record: ContactRecord) -> bool:
-        return record.status == "active" and record.agent_side(agent_name) is not None
+        side = record.agent_side(agent_name)
+        if side is None:
+            return False
+        sent_elsewhere = side == "requester" and record.target.kind == "remote_agent"
+        return record.status == "active" or (record.status == "pending" and sent_elsewhere)
 
     if not any(active(record) for record in read_contacts(runtime_paths).contacts):
         return []

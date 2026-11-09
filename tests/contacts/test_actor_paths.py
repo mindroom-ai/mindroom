@@ -14,6 +14,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.contacts.parties import remote_party
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
@@ -62,20 +63,48 @@ ACTIVE = {
     "agent itself":       (IGNORED, IGNORED,     IGNORED, RUN),
 }
 # fmt: on
-# A removed contact's room starts nothing for anyone else, its agent's owner included.
-REMOVED = {actor: ACTIVE["agent itself"] if actor == "agent itself" else (REFUSED,) * len(PATHS) for actor in ACTIVE}
+# In a contact with another deployment's agent, that agent is the whole other side: nobody here can vouch for its
+# owner, who is refused like a stranger. Its edit reaches the edit regenerator like a person's, which regenerates no
+# contact turn.
+# fmt: off
+REMOTE_ACTIVE = {
+    #                      edit     message hook media    reaction hook
+    "owner":              (RUN,     RUN,         RUN,     RUN),
+    "remote agent":       (RUN,     RUN,         RUN,     RUN),
+    "remote owner":       (REFUSED, REFUSED,     REFUSED, REFUSED),
+    "administrator":      (REFUSED, REFUSED,     REFUSED, REFUSED),
+    "stranger":           (REFUSED, REFUSED,     REFUSED, REFUSED),
+    "agent itself":       (IGNORED, IGNORED,     IGNORED, RUN),
+}
+# fmt: on
+
+
+def _removed(active: dict[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    """A removed contact's room starts nothing for anyone else, its agent's owner included."""
+    return {actor: active["agent itself"] if actor == "agent itself" else (REFUSED,) * len(PATHS) for actor in active}
+
+
+REMOTE = "@mindroom_mind_dana:other.org"
 # Each actor's Matrix ID, or the agent whose account it writes from.
 SENDERS = {
     "owner": CO_OWNER,
     "counterparty owner": OWNER,
     "counterparty agent": "mind_alice",
+    "remote agent": REMOTE,
+    "remote owner": "@dana:other.org",
     "administrator": ADMIN,
     "stranger": CAROL,
     "agent itself": "mind_bob",
 }
+TABLES = {
+    ("local", "active"): ACTIVE,
+    ("local", "removed"): _removed(ACTIVE),
+    ("remote", "active"): REMOTE_ACTIVE,
+    ("remote", "removed"): _removed(REMOTE_ACTIVE),
+}
 CASES = [
-    pytest.param(status, actor, path, outcome, id=f"{status}-{actor}-{path}".replace(" ", "_"))
-    for status, table in (("active", ACTIVE), ("removed", REMOVED))
+    pytest.param(other, status, actor, path, outcome, id=f"{other}-{status}-{actor}-{path}".replace(" ", "_"))
+    for (other, status), table in TABLES.items()
     for actor, outcomes in table.items()
     for path, outcome in zip(PATHS, outcomes, strict=True)
 ]
@@ -141,17 +170,24 @@ def _hooks(bot: AgentBot, ran: list[str], posted: list[str | None]) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize(("status", "actor", "path", "expected"), CASES)
+@pytest.mark.parametrize(("other", "status", "actor", "path", "expected"), CASES)
 async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_says(
     tmp_path: Path,
+    other: str,
     status: str,
     actor: str,
     path: str,
     expected: str,
 ) -> None:
-    """No path reaches the room: a hook's post into it is refused, and a refused or ignored event starts no reply."""
+    """No path reaches the room: a hook's post into it is refused, and a refused or ignored event starts no reply.
+
+    The other side is Alice's agent here, or an agent of another deployment.
+    """
     config, paths = _setup(tmp_path)
-    _contact(paths)
+    if other == "local":
+        _contact(paths)
+    else:
+        _contact(paths, requester=remote_party(REMOTE))
     sender = SENDERS[actor] if SENDERS[actor].startswith("@") else _agent(paths, SENDERS[actor])
     # Only the message path reads the content, so a recipient-discovery regression fails that path alone.
     content = await _message(config, paths, actor) if path == "message hook post" else {}
