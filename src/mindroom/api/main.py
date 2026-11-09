@@ -49,7 +49,7 @@ from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
-from mindroom.api.plugin_routes import mount_plugin_routes
+from mindroom.api.plugin_routes import framed_by_server, mount_plugin_routes
 from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
@@ -439,6 +439,18 @@ def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _Dashboar
     return _DashboardCorsSettings(allow_origins=origins, allow_credentials="*" not in origins)
 
 
+# Remove once uvicorn 0.52.1 or later, which stops duplicating these headers, can be locked; openbb-core 1.6 caps it
+# below 0.41.
+class _FramedWebsocketDenials:
+    """Leave every websocket denial's framing headers to the server, so clients can read a refused handshake."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self.app(scope, receive, framed_by_server(send) if scope["type"] == "websocket" else send)
+
+
 def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Add dashboard CORS middleware without wildcard credential defaults."""
     api_app.add_middleware(
@@ -461,6 +473,7 @@ app = FastAPI(
 initialize_api_app(app, _runtime_paths)
 # Added before CORS, so a 413 still carries the dashboard's CORS headers.
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(_FramedWebsocketDenials)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 
 

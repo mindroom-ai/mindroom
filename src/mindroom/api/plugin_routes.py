@@ -51,8 +51,6 @@ class _PluginRoutesApp:
         root_path = scope.get("root_path", "")
         name = scope["path"].removeprefix(root_path).removeprefix("/").partition("/")[0]
         routes_app = self._routes_app(name)
-        if scope["type"] == "websocket":
-            send = framed_by_server(send)
         if routes_app is None:
             # A websocket gets the same 404 as its handshake's denial response.
             await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
