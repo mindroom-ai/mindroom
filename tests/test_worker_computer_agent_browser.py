@@ -298,6 +298,31 @@ async def test_a_computer_stop_ends_the_bridges_lease_and_its_page(agent: _Agent
 
 
 @pytest.mark.asyncio
+async def test_taking_control_again_keeps_the_lease_it_holds(agent: _Agent) -> None:
+    """A second takeControl answers at once, and the service never hears that it lost control."""
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        assert await service.event("MindRoom.control") == {"held": True}
+        await service.call("MindRoom.takeControl")
+        await service.call("Input.insertText", {"text": "still"})
+        assert [message for message in service.messages if message.get("method") == "MindRoom.control"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_dead_display_stops_input_before_the_computer_stops(agent: _Agent) -> None:
+    """Input is checked against the Computer itself, so a display that died refuses it before the stop reaches the lease."""
+    page = cast("Page", agent.shown)
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        await _click(service, page, "#field")
+        cast("FakeDisplay", agent.runtime.display).alive = False
+        assert "control" in await service.refused("Input.insertText", {"text": "late"})
+        assert await page.input_value("#field") == ""
+
+
+@pytest.mark.asyncio
 async def test_control_is_exclusive_with_the_desktops_viewers(agent: _Agent) -> None:
     """A viewer holding the Computer keeps the bridge out, and the bridge holding it keeps viewers out."""
     runtime = agent.runtime

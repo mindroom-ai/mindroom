@@ -325,11 +325,10 @@ class AgentBrowserBridge:
                 await self._computer.release_control(self._id)
 
     async def _lease_ended(self, lease: asyncio.Event) -> None:
-        # A release, a Computer stop or restart, or a dead display ends the lease.
+        # A release, a Computer stop or restart, or a dead display ends the lease; all but a release close the browser.
         await lease.wait()
         if self._lease is lease:
             self._lease = None
-            await self._agent.release()
             self._post({"method": "MindRoom.control", "params": {"held": False}})
 
     async def close(self) -> None:
