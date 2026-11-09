@@ -112,6 +112,32 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.asyncio
+async def test_scope_reads_a_member_list_refused_for_a_membership_change_again(tmp_path: Path) -> None:
+    """A member list the client refused for a membership change during the read is read again."""
+    client, config, paths, index, _router, agent = picker_setup(tmp_path)
+    answer = client.joined_members.return_value
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        answer,
+        nio.LocalProtocolError("room membership changed during lookup"),
+        answer,
+    ]
+
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id="$root",
+    )
+
+    assert scope is not None
+    assert scope.agent_user_ids == (agent,)
+
+
 @pytest.mark.parametrize(
     "root",
     [

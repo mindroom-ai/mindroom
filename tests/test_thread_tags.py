@@ -2064,6 +2064,34 @@ async def test_thread_tags_write_rejects_non_member_requester_even_with_pl0_even
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refusals", [1, 3])
+async def test_requester_membership_read_refused_for_a_membership_change(refusals: int) -> None:
+    """A member read refused for a membership change is read again, and a refusal that lasts is a ThreadTagsError."""
+    client = _tag_writer_client("@mindroom_general:localhost", {})
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={"@mindroom_general:localhost": 50, "@alice:localhost": 50},
+    )
+    client.joined_members.side_effect = [
+        *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+        _joined_members_response("@mindroom_general:localhost", "@alice:localhost"),
+    ]
+
+    if refusals < 3:
+        state = await _write_operation(client, "set")
+        assert state.tags["resolved"].set_by == "@alice:localhost"
+    else:
+        with pytest.raises(
+            ThreadTagsError,
+            match=(
+                r"^Failed to verify requester membership for @alice:localhost in !room:localhost: "
+                r"room membership changed during lookup$"
+            ),
+        ):
+            await _write_operation(client, "set")
+        client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["set", "remove"])
 async def test_thread_tags_write_rejects_missing_client_user_id(action: str) -> None:
     """State writes should fail closed when the Matrix client identity is unavailable."""

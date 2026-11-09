@@ -16,6 +16,7 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
 from mindroom.matrix.room_power import user_power_level
 from mindroom.matrix.room_reconciliation import read_room_creators
@@ -565,7 +566,11 @@ async def _assert_requester_joined_room(
     requester_user_id: str,
 ) -> None:
     """Require the requester to be a joined member of the target room."""
-    response = await client.joined_members(room_id)
+    try:
+        response = await read_joined_members(client, room_id)
+    except nio.LocalProtocolError as exc:
+        msg = f"Failed to verify requester membership for {requester_user_id} in {room_id}: {exc}"
+        raise ThreadTagsError(msg) from exc
     if not isinstance(response, nio.JoinedMembersResponse):
         msg = f"Failed to verify requester membership for {requester_user_id} in {room_id}: {response}"
         raise ThreadTagsError(msg)

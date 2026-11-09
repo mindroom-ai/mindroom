@@ -68,11 +68,67 @@ async def test_projection_change_requires_a_new_membership_lookup() -> None:
     assert set(room.users) == {ACCOUNT, "@new:example.org"}
 
 
+@pytest.mark.asyncio
+async def test_a_lookup_refused_for_a_membership_change_is_read_again() -> None:
+    """A member list the client refused for a membership change during the read is read again and kept."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember(PEER, "Peer", None)], ROOM),
+    ]
+
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert cached_joined_member_ids(room) == {ACCOUNT, PEER}
+
+
 def _member_record(user_id: str, membership: str, display_name: str | None) -> SyncRecord:
     content: dict[str, object] = {"membership": membership}
     if display_name is not None:
         content["displayname"] = display_name
     return SyncRecord(RecordKind.STATE, ROOM, {"type": "m.room.member", "state_key": user_id, "content": content})
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_a_membership_change_interrupted_is_read_again() -> None:
+    """A lookup whose room changed while it read is read again, and the answer after the change is kept."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+    answers = [
+        nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None)], ROOM),
+        nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember(PEER, "Peer", None)], ROOM),
+    ]
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        if len(answers) == 2:
+            # The peer's join is synced while the first read is in flight.
+            invalidate_membership_lookups([_member_record(PEER, "join", "Peer")], account_id=ACCOUNT)
+        return answers.pop(0)
+
+    client.joined_members.side_effect = joined_members
+
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert cached_joined_member_ids(room) == {ACCOUNT, PEER}
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_changes_on_every_read_fails_after_3_reads() -> None:
+    """A room that changes during each of 3 reads is not known, so the lookup fails."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        invalidate_membership_lookups([_member_record(PEER, "join", "Peer")], account_id=ACCOUNT)
+        return nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None)], ROOM)
+
+    client.joined_members.side_effect = joined_members
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert client.joined_members.await_count == 3
 
 
 async def _looked_up_room() -> tuple[nio.MatrixRoom, AsyncMock]:
@@ -219,34 +275,46 @@ async def test_membership_record_invalidates_peer_absent_from_projection(tmp_pat
 
 @pytest.mark.asyncio
 async def test_lookup_cannot_install_over_a_changed_projection() -> None:
-    """A membership transition during HTTP lookup leaves the partial projection authoritative."""
+    """A membership transition during HTTP lookup discards that answer, and the room is read again."""
     room = nio.MatrixRoom(ROOM, ACCOUNT)
     room.add_member(ACCOUNT, "Bot", None)
     client = AsyncMock(spec=nio.AsyncClient)
+    answers = [
+        nio.JoinedMembersResponse([nio.RoomMember(PEER, "Peer", None)], ROOM),
+        nio.JoinedMembersResponse(
+            [nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember("@new:example.org", "New", None)],
+            ROOM,
+        ),
+    ]
 
     async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
         room.add_member("@new:example.org", "New", None)
-        return nio.JoinedMembersResponse([nio.RoomMember(PEER, "Peer", None)], ROOM)
+        return answers.pop(0)
 
     client.joined_members.side_effect = joined_members
-    assert not await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
     assert cached_joined_member_ids(room) == {ACCOUNT, "@new:example.org"}
+    assert client.joined_members.await_count == 2
     assert not room.members_synced
 
 
 @pytest.mark.asyncio
 async def test_inflight_lookup_is_rejected_after_membership_invalidation() -> None:
-    """A leave for a member absent from nio's projection invalidates an awaited lookup."""
+    """A leave for a member absent from nio's projection invalidates an awaited lookup, which reads again."""
     room = nio.MatrixRoom(ROOM, ACCOUNT)
     room.add_member(ACCOUNT, "Bot", None)
     client = AsyncMock(spec=nio.AsyncClient)
     started = asyncio.Event()
     release = asyncio.Event()
+    answers = [
+        nio.JoinedMembersResponse([nio.RoomMember(PEER, "Peer", None)], ROOM),
+        nio.JoinedMembersResponse([nio.RoomMember(ACCOUNT, "Bot", None)], ROOM),
+    ]
 
     async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
         started.set()
         await release.wait()
-        return nio.JoinedMembersResponse([nio.RoomMember(PEER, "Peer", None)], ROOM)
+        return answers.pop(0)
 
     client.joined_members.side_effect = joined_members
     lookup = asyncio.create_task(ensure_room_membership_synced(client, room, sender_id=PEER))
@@ -262,9 +330,10 @@ async def test_inflight_lookup_is_rejected_after_membership_invalidation() -> No
         account_id=ACCOUNT,
     )
     release.set()
-    assert not await lookup
+    assert await lookup
     assert cached_joined_member_ids(room) == {ACCOUNT}
-    assert not room_membership_is_complete(room)
+    assert room_membership_is_complete(room)
+    assert client.joined_members.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -286,8 +355,8 @@ async def test_snapshots_are_scoped_to_account_and_room_lifetime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queued_lookup_can_refresh_after_inflight_lookup_is_invalidated() -> None:
-    """A waiting turn must fetch and use fresh members after rejecting an older response."""
+async def test_queued_lookup_uses_the_fresh_members_an_invalidated_lookup_read_again() -> None:
+    """An invalidated lookup reads fresh members again, and a turn waiting behind it uses them without a read."""
     room = nio.MatrixRoom(ROOM, ACCOUNT)
     room.add_member(ACCOUNT, "Bot", None)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -306,6 +375,6 @@ async def test_queued_lookup_can_refresh_after_inflight_lookup_is_invalidated() 
     await asyncio.sleep(0)
     invalidate_membership_lookups([SyncRecord(RecordKind.LOSS, ROOM, {})], account_id=ACCOUNT)
     release.set()
-    assert await asyncio.gather(first, second) == [False, True]
+    assert await asyncio.gather(first, second) == [True, True]
     assert client.joined_members.await_count == 2
     assert cached_joined_member_ids(room) == {PEER}

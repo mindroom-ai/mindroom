@@ -391,6 +391,25 @@ async def test_members_transport_error_returns_structured_error() -> None:
     assert "Matrix request failed" in payload["message"]
 
 
+@pytest.mark.asyncio
+async def test_members_read_refused_for_a_membership_change_is_read_again() -> None:
+    """A member list the client refused for a membership change during the read is read again."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.joined_members = AsyncMock(
+        side_effect=[
+            nio.LocalProtocolError("room membership changed during lookup"),
+            nio.JoinedMembersResponse([nio.RoomMember("@user:localhost", "User", None)], "!room:localhost"),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="members"))
+
+    assert payload["status"] == "ok"
+    assert [member["user_id"] for member in payload["members"]] == ["@user:localhost"]
+
+
 # --- threads ---
 
 _MOCK_TARGET = "mindroom.custom_tools.matrix_room.get_room_threads_page"
