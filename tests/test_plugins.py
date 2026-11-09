@@ -1425,6 +1425,27 @@ def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
         assert (installed_inner_hooks() is first) is (load is plugins_module.refresh_plugins)
 
 
+def test_a_package_plugin_inside_a_directory_plugin_keeps_names_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A package plugin whose package lies in another plugin's directory loads apart from that plugin's names."""
+    site_packages = tmp_path / "site-packages"
+    hooks_path = site_packages / "inner_pkg" / "hooks.py"
+    hooks_path.parent.mkdir(parents=True)
+    (site_packages / "mindroom.plugin.json").write_text(json.dumps({"name": "outer"}))
+    (hooks_path.parent / "__init__.py").write_text("", encoding="utf-8")
+    (hooks_path.parent / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
+    hooks_path.write_text("STATE = {}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    config = _bind_runtime_paths(Config(plugins=[str(site_packages), "inner_pkg"]), tmp_path / "config.yaml")
+
+    with _forgetting_modules("inner_pkg"):
+        _load(config, runtime_paths_for(config))
+
+        assert cached_plugin_module(hooks_path).__name__.startswith(PLUGIN_MODULE_PREFIX)
+
+
 def test_a_worker_keeps_a_nested_plugins_modules_when_the_plugin_around_it_is_added(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

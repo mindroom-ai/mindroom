@@ -274,9 +274,9 @@ def _locate_python_plugin(plugin_path: str) -> tuple[Path, str | None] | None:
     if not resolved_root.exists() or not resolved_root.is_dir():
         return None
 
-    # A plugin inside another plugin's package keeps names of its own, so that plugin's package names never reach it.
-    outer = resolved_root.parents[: len(package.split(".")) - 1] if package else ()
-    return resolved_root, None if any((parent / _PLUGIN_MANIFEST).exists() for parent in outer) else package
+    # A plugin inside another plugin's directory keeps names of its own, so that plugin's package names never reach it.
+    nested = any((parent / _PLUGIN_MANIFEST).exists() for parent in resolved_root.parents)
+    return resolved_root, None if nested else package
 
 
 def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
