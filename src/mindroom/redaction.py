@@ -93,10 +93,16 @@ _COMMAND_PATTERN = re.compile(
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
 _PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
+# An unquoted option value is one shell word: a backslash escapes the next character, and a line break after it
+# continues the word when more of the word follows. A quoted value ends at its own unescaped quote.
+_OPTION_WORD = r"(?:[^\s\"'\\]|\\(?:\r?\n(?=\S)|[^\r\n]))++"
 _CURL_USER_OPTION_PATTERN = re.compile(
-    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)(?:(?!(?P=quote))[^\r\n])++|[^\s\"']++))",
+    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
+    rf"(?P<token>(?(quote)(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])++|{_OPTION_WORD}))",
 )
-_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)")
+_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(
+    rf"(?<!\S)-p(?P<token>'[^']*+'?|\"(?:[^\"\\]|\\[\s\S])*+\"?|{_OPTION_WORD})",
+)
 # Words that run the word after them as a program, as in `sudo mysql`.
 _COMMAND_PREFIX_WORDS = frozenset(
     {"command", "do", "elif", "else", "env", "exec", "if", "nohup", "sudo", "then", "time", "until", "while", "xargs"},
