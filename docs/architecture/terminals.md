@@ -17,7 +17,7 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 - A terminal opens from the request a shell call of the agent's shell toolkit would send, prepared by the same runner code as `/execute`, so its environment, workspace, `PATH`, and the call's own environment changes are the ones the agent's commands get.
   `tests/terminal/test_worker_terminals.py` compares the two environments in both runner execution modes.
 - The shell is `bash --noprofile --norc -i`: it reads no startup files, as the Bash that runs a shell command string reads none, so opening a terminal runs nothing that worker code wrote into the workspace's `~/.bashrc` or `~/.profile`.
-  It also starts with `INPUTRC=/dev/null`, so it reads no readline settings and keeps Bash's built-in key bindings, whatever worker code wrote into the workspace's `~/.inputrc` or the call's environment names.
+  It also starts with `INPUTRC=/dev/null`, which the programs it starts inherit, so neither it nor a program such as `python3` started in it reads readline settings, whatever worker code wrote into the workspace's `~/.inputrc` or the call's environment names.
 - Input and resize travel only on a websocket the runner serves its viewers, so there is no second input path to keep consistent with it.
 - Opening a terminal starts the agent's dedicated worker, as a shell call does; listing, attaching, and closing only look the worker up, so a stopped worker has no terminals and nothing starts one to answer.
   An attached viewer marks the worker used every minute, so the worker is not stopped as idle while someone watches it.
