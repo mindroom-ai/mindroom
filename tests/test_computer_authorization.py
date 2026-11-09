@@ -1,7 +1,7 @@
 """Matrix OpenID trust boundary and live Computer policy."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import DEFAULT, AsyncMock
 
 import aiohttp
 import nio
@@ -330,6 +330,25 @@ async def test_computer_checks_read_only_their_room_once_grants_are_current(
         await computer.authorize(ALICE, ROOM, agent_id)
         assert client.joined_members.await_count - before == 1
     assert client.joined_rooms.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_member_list_raced_by_a_membership_change_is_read_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A joiner's first Computer call, whose member read the client refuses for that join, reads again and passes."""
+    computer, client, agent_id, _paths = _bound_computer(tmp_path, monkeypatch, [ROOM])
+    # The Computer's own read is refused once; its re-read and the grant refresh's read of the room answer.
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        DEFAULT,
+        DEFAULT,
+    ]
+
+    target = await computer.authorize(ALICE, ROOM, agent_id)
+
+    assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -151,7 +152,7 @@ class _Bot:
         await self.settle()
 
     async def settle(self) -> None:
-        assert await wait_for_background_tasks(timeout=5, owner=self.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=self.runtime)
 
 
 @pytest.mark.asyncio

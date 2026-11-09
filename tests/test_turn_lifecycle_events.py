@@ -44,6 +44,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval
 from tests.bot_helpers import _hook_plugin
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
     patch_response_runner_module,
     publish_hook_plugin,
@@ -136,7 +137,7 @@ async def _approval_turns(tmp_path: Path, seen: _Seen, *, requires_human: bool) 
         stop = bot._journal_store.approval_signals.follow_ended_approvals(bot.end_paused_turn)
         try:
             yield bot
-            assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
             # Every turn whose approval ended took its end: none stays open.
             assert unwrap_extracted_collaborator(bot._response_runner).locked._turn_ends == {}
         finally:

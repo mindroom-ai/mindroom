@@ -20,6 +20,7 @@ from mindroom.matrix.event_types import (
     MINDROOM_ACCOUNTS_EVENT_TYPE,
     MINDROOM_SERVER_EVENT_TYPE,
 )
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
@@ -800,9 +801,9 @@ async def resolve_room_reference(
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
     try:
-        response = await client.joined_members(room_id)
+        response = await read_joined_members(client, room_id)
     except nio.LocalProtocolError as error:
-        # The durable client refuses a member list that a concurrent membership change made stale.
+        # The durable client refuses a member list, as one that concurrent membership changes kept making stale.
         logger.warning("matrix_room_members_fetch_failed", room_id=room_id, error=str(error))
         return None
     if isinstance(response, nio.JoinedMembersResponse):

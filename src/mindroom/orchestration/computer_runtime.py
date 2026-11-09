@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.room_agent_access import admit_room_agent, room_execution_identity
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -45,7 +46,7 @@ async def _authorize_computer(
     """Require exact live room membership, responder access, and ordinary browser routing."""
 
     async def joined_members() -> frozenset[str]:
-        response = await client.joined_members(room_id)
+        response = await read_joined_members(client, room_id)
         if not isinstance(response, nio.JoinedMembersResponse):
             raise ComputerError(503, "Authoritative room membership is unavailable.")
         return frozenset(member.user_id for member in response.members)

@@ -12,11 +12,12 @@ import nio
 from mindroom.access_policy import resolve_responder_access
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -108,7 +109,7 @@ class AgentReplyMembershipIndex:
         self._refresh_transitions: list[_LiveTransition] | None = None
         # (room ID, requester) to when a denial first waited for the router's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
-        # Rooms whose ready rows trail a live roster an access check read, which the next refresh reads again.
+        # Rooms whose ready rows may trail a join the router has not applied yet, which the next refresh reads again.
         self._reread_room_ids: set[str] = set()
         self._clock = clock
 
@@ -190,9 +191,25 @@ class AgentReplyMembershipIndex:
             and not self.is_current_room_member(sender_id, room_id, config, runtime_paths)
         )
 
-    def reread_room(self, room_id: str) -> None:
-        """Have the next refresh read one room again, keeping the other ready rooms."""
-        self._reread_room_ids.add(room_id)
+    async def refresh_reading_room(
+        self,
+        room_id: str,
+        refresh: Callable[[], Awaitable[None]],
+        current: Callable[[], bool],
+    ) -> bool:
+        """Refresh through ``refresh`` until ``current`` holds, twice at most, reading ``room_id`` again while it fails.
+
+        Only that room is read again; the other ready rooms stay. The router applies a join from its own sync, which
+        can trail the room's live roster, and a refresh already in flight may have read the room before the join, so
+        one more follows it. Return whether ``current`` holds at the end.
+        """
+        for _ in range(2):
+            if not current():
+                self._reread_room_ids.add(room_id)
+            await refresh()
+            if current():
+                return True
+        return False
 
     def awaits_router_join(
         self,
@@ -742,7 +759,7 @@ async def _authoritative_room_members(
 ) -> frozenset[str] | None:
     """Return raw joined Matrix user IDs for one stable room ID or fail closed."""
     try:
-        response = await client.joined_members(room_id)
+        response = await read_joined_members(client, room_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

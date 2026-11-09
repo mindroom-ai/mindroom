@@ -138,6 +138,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     FakeCredentialsManager,
     call_proxy_sync_for_test,
     make_conversation_reader_mock,
@@ -198,16 +199,17 @@ async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_co
 
     def block_default_executor() -> None:
         default_started.set()
-        release_default.wait(timeout=5)
+        # Held past the worker proxy call's own guard; the test releases it once it has checked the call.
+        release_default.wait(timeout=2 * SETTLE_TIMEOUT_SECONDS)
 
     default_blocker = loop.run_in_executor(None, block_default_executor)
-    assert default_started.wait(timeout=1)
+    assert default_started.wait(timeout=SETTLE_TIMEOUT_SECONDS)
     token = request_scope.set("request-scope")
 
     try:
         result = await asyncio.wait_for(
             sandbox_proxy_module._run_in_worker_proxy_executor(request_scope.get),
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
         )
 
         assert result == "request-scope"
@@ -1307,7 +1309,7 @@ async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_
             await asyncio.to_thread(starts[0].wait, 30)
             call.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                async with asyncio.timeout(2):
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                     await call
             [leaf] = tracker.settle()
             held = not leaf.done()
@@ -5246,7 +5248,7 @@ def test_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.Mo
                 call_number = init_count
             if call_number == 1:
                 first_init_started.set()
-                assert allow_first_init_to_finish.wait(timeout=1.0)
+                assert allow_first_init_to_finish.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
         def shutdown(self) -> None:
             return None
@@ -5264,12 +5266,12 @@ def test_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.Mo
     second_thread = threading.Thread(target=load_manager)
 
     first_thread.start()
-    assert first_init_started.wait(timeout=1.0)
+    assert first_init_started.wait(timeout=SETTLE_TIMEOUT_SECONDS)
     second_thread.start()
     assert init_count == 1
     allow_first_init_to_finish.set()
-    first_thread.join(timeout=1.0)
-    second_thread.join(timeout=1.0)
+    first_thread.join(timeout=SETTLE_TIMEOUT_SECONDS)
+    second_thread.join(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert exceptions == []
     assert init_count == 1
@@ -5833,7 +5835,7 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
 
     replacement_thread = threading.Thread(target=_replace_manager)
     replacement_thread.start()
-    assert shutdown_started.wait(timeout=1.0)
+    assert shutdown_started.wait(timeout=SETTLE_TIMEOUT_SECONDS)
     assert replacement_thread.is_alive()
     allow_shutdown.set()
     replacement_thread.join(timeout=5.0)

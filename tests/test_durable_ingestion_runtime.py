@@ -124,7 +124,7 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(
         release.set()
         if preparation is not None:
             await preparation
-        await wait_for_background_tasks(timeout=2, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 
 @asynccontextmanager
@@ -352,7 +352,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
         assert [record.provenance for record in seen if record.source.get("event_id") == "$leave"] == [
             nio.TimelineEventProvenance.RECOVERED,
         ]
-        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         call_manager.revoke_reply_authorization.assert_awaited()
         client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[control, member] if rejoined else [control],
