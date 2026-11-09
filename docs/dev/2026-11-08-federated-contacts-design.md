@@ -79,7 +79,7 @@ A request from the agent that declined this side's request is asked anyway and c
 
 The room exists before the target accepts, because the invite is the request.
 The requesting agent keeps its pending request's room across restarts, like an active contact's room, because the target can join only while a member remains; a contact within one deployment still keeps only its active room, because an acceptance cut short there leaves a pending room its agents must not rejoin.
-The target joins first and then marks the contact active, like an acceptance within one deployment, so a store write that fails leaves no active contact whose agent never joined.
+The target marks the contact active and then joins, because the other side reads the join as the acceptance and may write at once, and a message refused while the target's record is still pending is never delivered; a join that fails or is cancelled puts the request back to pending and leaves again.
 
 ### Membership events drive the requesting side
 
@@ -118,8 +118,8 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 - The other side's owner reads the contact room but cannot start a turn of this agent, and a mention of it from them is refused.
 - In a thread the other agent wrote in, an owner's unmentioned message counts the other agent as a second person, so the owner mentions their own agent there.
 - A remote request whose notice could not be posted is shown only on the Contacts page and by `list_contacts`.
-- The asked side never sees a request withdrawn, because the agent receives no member event when an invite to a room it never joined is withdrawn; the request stays pending there until its owner answers it, where accepting fails and declining clears it, or until the same agent asks again, which replaces it.
-- An agent that restarts between joining a remote contact's room and marking it active leaves the room, so the other side activates and then ends the contact.
+- The asked side never sees a request withdrawn, because the agent receives no member event when an invite to a room it never joined is withdrawn; the request stays pending there until its owner answers it, where accepting fails and removing it clears it, or until the same agent asks again, which replaces it.
+- An agent that stops between marking a remote request accepted and joining its room keeps the contact active without joining, so the other side stays pending until either owner removes the request.
 
 ## Evidence
 

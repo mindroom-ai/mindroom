@@ -89,7 +89,7 @@ async def _reject(actor: ContactActor, agent_name: str, room_id: str, inviter: s
 def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str) -> tuple[ContactRecord, bool] | None:
     """Store a new request and return it with True, or return the one this room already holds with False.
 
-    Return None, storing nothing, for a room whose request was declined or removed, for a pair with an active contact
+    Return None, storing no new request, for a room whose request was declined or removed, for a pair with an active contact
     or this agent's own pending request in another room, or one this side declined, which blocks the pair until the
     owner removes the declined contact. A decline of this agent's own request by the other side blocks only that side,
     and the other side keeps one pending request per pair, so the other agent asking now clears that decline and
@@ -241,9 +241,10 @@ async def contact_member_event(
     """Apply a membership change in the room of this agent's contact with another deployment's agent.
 
     For a request this agent sent, the other agent joining accepts it and leaving or being banned declines it. Once
-    active, the other agent leaving or being banned ends the contact here too. This agent removed by anyone else, as
-    when the other side withdraws the invite that was its request, ends the contact as well. Every other change, and
-    the same change seen again, changes nothing.
+    active, the other agent leaving or being banned ends the contact here too. This agent removed by anyone else, as a
+    homeserver administrator or a room creator with unlimited power can do, ends the contact as well; a withdrawn invite
+    of a room this agent never joined reaches no member event. Every other change, and the same change seen again,
+    changes nothing.
     """
     found = _agent(config, runtime_paths, agent_name, agent_bot)
     if found is None:

@@ -896,7 +896,12 @@ async def _join_remote_request(
     rules: str | None,
     tools: list[str] | None,
 ) -> ContactRecord:
-    """Join a pending request's room and make the contact active, or leave again when that cannot stand."""
+    """Make a pending request's contact active, then join its room, putting it back when the join cannot stand.
+
+    The other side reads the join as the acceptance and may write at once, so the contact is active before the join,
+    and a message that arrives while the join settles is admitted. A join that fails, is cancelled, or finds the
+    asking agent gone puts the request back to pending and leaves again.
+    """
     bot, client = agents[record.target.id]
     room_id = record.room_id
     assert room_id is not None  # A request from another deployment is its invite into this room.
@@ -904,13 +909,6 @@ async def _join_remote_request(
         f"{record.target.id} could not join the contact room; the request may have been withdrawn, so accept again "
         "later or decline it"
     )
-    if not await bot.change_local_membership(room_id, "join"):
-        raise ValueError(withdrawn)
-    # An invite outlives its request when the withdrawal failed, and a room the asking agent left is no contact.
-    members = await get_room_members(client, room_id)
-    if members is not None and record.requester.id not in members:
-        await bot.change_local_membership(room_id, "leave")
-        raise ValueError(withdrawn)
 
     def activate(book: ContactBook) -> ContactRecord | None:
         current = _by_id(book, record.id)
@@ -921,14 +919,43 @@ async def _join_remote_request(
         _change_side(current.target_side, rules, tools)
         return current.model_copy(deep=True)
 
+    def put_back(book: ContactBook) -> None:
+        current = _by_id(book, record.id)
+        if current.status == "active":
+            current.status = "pending"
+            current.decided_at = None
+            current.target_side = record.target_side.model_copy(deep=True)
+
+    async def roll_back() -> None:
+        await run_blocking_until_complete(update_contacts, actor.runtime_paths, put_back)
+        await bot.change_local_membership(room_id, "leave")
+
     accepted = await run_blocking_until_complete(update_contacts, actor.runtime_paths, activate)
     if accepted is None:
-        await bot.change_local_membership(room_id, "leave")
         raise ValueError(_NOT_PENDING["accept"])
+    try:
+        joined = await _join_while_asked(bot, client, room_id, record.requester.id)
+    except BaseException:
+        await roll_back()
+        raise
+    if not joined:
+        await roll_back()
+        raise ValueError(withdrawn)
     owner = record.target.local_owner
     if not await invite_to_room(client, room_id, owner):
         logger.warning("contact_room_owner_invite_failed", contact_id=record.id, user_id=owner, room_id=room_id)
     return accepted
+
+
+async def _join_while_asked(bot: AgentBot, client: nio.AsyncClient, room_id: str, requester_id: str) -> bool:
+    """Join a request's room and return whether the asking agent is still there.
+
+    An invite outlives its request when the withdrawal failed, and a room the asking agent left is no contact.
+    """
+    if not await bot.change_local_membership(room_id, "join"):
+        return False
+    members = await get_room_members(client, room_id)
+    return members is None or requester_id in members
 
 
 async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord:

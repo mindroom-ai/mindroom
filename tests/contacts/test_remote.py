@@ -24,6 +24,7 @@ from mindroom.contacts.store import (
     contact_room_ids,
     update_contacts,
 )
+from mindroom.contacts.turns import contact_admission
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
@@ -568,22 +569,41 @@ async def test_removing_a_pending_remote_request_only_rejects_its_invite(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_request_answered_while_joining_leaves_the_room_again(tmp_path: Path) -> None:
-    """A decline that lands while the agent joins wins, and the agent leaves, which the other side reads as the end."""
+async def test_a_message_while_the_acceptance_joins_is_admitted(tmp_path: Path) -> None:
+    """The other side reads the join as the acceptance and may write at once, so the contact is active before it."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    admitted: list[str | None] = []
+
+    async def join_while_the_other_agent_writes(_room_id: str, _membership: str) -> bool:
+        admission = contact_admission(config, paths, room_id=REMOTE_ROOM, agent_name="mind_bob", sender_ids=[REMOTE])
+        admitted.append(None if admission is None else admission.requester_id)
+        return True
+
+    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=join_while_the_other_agent_writes)
+    with _matrix(), _delivered():
+        await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
+    assert admitted == [CO_OWNER]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_acceptance_puts_the_request_back_and_leaves(tmp_path: Path) -> None:
+    """A join cut short may still have landed, so the agent leaves again and the request waits as it did."""
     config, paths = _remote_setup(tmp_path)
     _store(paths, _incoming_with_notice())
     runtime = _runtime()
 
-    async def join_while_declined(_room_id: str, _membership: str) -> bool:
-        def decline(book: ContactBook) -> None:
-            book.contacts[0].status = "declined"
-
-        update_contacts(paths, decline)
+    async def cancelled_join(_room_id: str, membership: str) -> bool:
+        if membership == "join":
+            raise asyncio.CancelledError
         return True
 
-    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=join_while_declined)
-    with _matrix() as matrix, pytest.raises(ValueError, match=r"^Only a pending contact can be accepted$"):
-        await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
+    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=cancelled_join)
+    with _matrix() as matrix, pytest.raises(asyncio.CancelledError):
+        await flow.accept_contact(_bob(config, paths, runtime), "in", rules="Only scheduling.", tools=None)
+    [stored] = _stored(paths)
+    assert (stored.status, stored.decided_at, stored.target_side) == ("pending", None, ContactSide())
     assert [call.args for call in runtime.bots["mind_bob"].change_local_membership.await_args_list] == [
         (REMOTE_ROOM, "join"),
         (REMOTE_ROOM, "leave"),
@@ -682,7 +702,7 @@ async def test_the_other_agent_leaving_ends_the_contact_here(tmp_path: Path, mem
 
 @pytest.mark.asyncio
 async def test_being_removed_from_the_room_ends_the_contact(tmp_path: Path) -> None:
-    """An agent the other side removes can no longer speak there, so its contact ends."""
+    """An agent removed from the room, as a homeserver administrator can do, can no longer speak there, so its contact ends."""
     config, paths = _remote_setup(tmp_path)
     _store(paths, _outgoing(status="active"))
     runtime = _runtime()
@@ -693,7 +713,10 @@ async def test_being_removed_from_the_room_ends_the_contact(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_a_withdrawn_invite_ends_the_request_it_was(tmp_path: Path) -> None:
-    """The other side taking back its invite withdraws the request waiting for Bob."""
+    """A member event of Bob's agent removed from a request's room, should one arrive, ends the request waiting for Bob.
+
+    A withdrawn invite of a room the agent never joined reaches no member event, so this is defensive.
+    """
     config, paths = _remote_setup(tmp_path)
     _store(paths, _incoming_with_notice())
     runtime = _runtime()
