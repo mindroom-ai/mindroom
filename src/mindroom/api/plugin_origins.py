@@ -23,7 +23,7 @@ from starlette.responses import JSONResponse, Response
 from mindroom.api import config_lifecycle
 from mindroom.api.plugin_routes import framed_by_server, published_plugins
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
-from mindroom.api.script_gateway import listener_port, serve_listener
+from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
 from mindroom.logging_config import get_logger
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
@@ -160,6 +160,7 @@ async def serve_plugin_origins(
     runtime_paths: RuntimePaths,
     *,
     host: str,
+    api_port: int,
     api_app: FastAPI,
     log_level: str,
 ) -> AsyncIterator[None]:
@@ -168,6 +169,9 @@ async def serve_plugin_origins(
     if port is None:
         yield
         return
+    if port in (api_port, listener_port(runtime_paths, SCRIPT_GATEWAY_PORT_ENV)):
+        msg = f"{_PORT_ENV} must differ from the API's port and from {SCRIPT_GATEWAY_PORT_ENV}, not {port}."
+        raise ValueError(msg)
     # An invalid public port or domain fails the start, rather than each link a route makes.
     listener_port(runtime_paths, _PUBLIC_PORT_ENV)
     domain = _domain(runtime_paths)
