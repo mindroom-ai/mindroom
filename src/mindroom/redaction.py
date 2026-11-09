@@ -76,8 +76,9 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     r"[\"']?[A-Za-z0-9_.-]++[\"']?[^\S\r\n]*+(?::|=(?!=))",
     re.IGNORECASE,
 )
-# A line break after a backslash continues a value, as in a shell command.
-_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\\)(?<!\\\r)[\r\n]|[,&)\]}\"']")
+# A line break right after a backslash that ends the value's word continues the value, as in a shell command; after a
+# backslash that stands alone, as in ` \`, it continues only the command.
+_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\S\\)(?<!\S\\\r)[\r\n]|[,&)\]}\"']")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
@@ -437,7 +438,7 @@ def _quoted_value_span(value: str, quote_start: int) -> tuple[int, int, int] | N
     assert quoted is not None
     body_start, body_end = quoted.span("body")
     if quoted.group("close"):
-        return body_start, body_end, body_end + 1
+        return body_start, body_end, quoted.end()
     return _rest_of_text_span(value, body_start)
 
 

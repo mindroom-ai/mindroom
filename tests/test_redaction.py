@@ -889,6 +889,12 @@ def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expecte
         ("API_KEY=abc && run", f"API_KEY={REDACTED} && run"),
         ("export api_key=abc && run", f"export api_key={REDACTED} && run"),
         ("TOKEN=abc , next", f"TOKEN={REDACTED} , next"),
+        ("export DB_PASSWORD=hunter2 \\\n  DB_HOST=db", f"export DB_PASSWORD={REDACTED}\n  DB_HOST=db"),
+        ("export DB_PASSWORD=hunter2 \\\r\n  DB_HOST=db", f"export DB_PASSWORD={REDACTED}\r\n  DB_HOST=db"),
+        (
+            "docker run -d \\\n  -e POSTGRES_PASSWORD=hunter2 \\\n  -p 5432:5432 postgres:16",
+            f"docker run -d \\\n  -e POSTGRES_PASSWORD={REDACTED}\n  -p 5432:5432 postgres:16",
+        ),
     ],
 )
 def test_an_unquoted_value_leaves_the_whitespace_before_its_end(command: str, expected: str) -> None:
@@ -1014,8 +1020,6 @@ def test_a_bounded_redaction_never_shows_a_url_password_its_cut_split_off() -> N
         redact_sensitive_text(text, max_length=100),
         redact_sensitive_data({"command": text}, max_string_length=100)["command"],
     ):
-        assert isinstance(redacted, str)
-        assert "hunter2" not in redacted
         assert redacted == f"{REDACTED} https://***@host/x... [truncated]"
 
 
