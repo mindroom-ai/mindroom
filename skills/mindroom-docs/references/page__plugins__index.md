@@ -1476,7 +1476,7 @@ Each worker runs one instance of a service, so ensuring a running service return
 A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
 The program's output goes to the worker's log.
 
-A service stops when `idle_timeout_seconds` pass without an ensure or a [relayed](#reaching-the-agents-worker) request while no relayed answer or WebSocket to it is open, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
+A service stops when `idle_timeout_seconds` pass without an ensure or a [relayed](#reaching-the-agents-worker) request, though never while a relayed answer or WebSocket to it is open, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
 A service that replaced plugin code starts during a reload keeps running until its idle timeout.
 Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
 A plugin with worker services states `"mindroom_plugin_api": "1.20"` in its manifest.
