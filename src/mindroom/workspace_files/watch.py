@@ -42,6 +42,10 @@ _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
 # Each folder is opened from the root, so a deeper one costs more opens.
 _MAX_DEPTH = 32
+# The length of the paths a scan keeps and a follower holds unsent, so each holds at most 64 MB of path text, at 4 bytes
+# a character at most; names of 255 bytes 32 folders deep would let the entry cap alone keep about 800 MB per scan. It
+# leaves the entry cap room for paths of 160 characters each.
+_MAX_PATH_CHARACTERS = 16_000_000
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
     ignore_dirs=(*watchfiles.DefaultFilter.ignore_dirs, ".cache"),
@@ -58,15 +62,19 @@ class _Follower:
     """One stream's changes not sent yet; scans, at least ``_INTERVAL_SECONDS`` apart, add them."""
 
     pending: set[str] = field(default_factory=set)
+    pending_characters: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
-    # Why the stream ends, set once more changes wait than one scan examines, as for a client that stopped reading, or
-    # once the scanner fails. The client lists again once it connects again, so what waited is dropped.
+    # Why the stream ends, set once more changes or longer paths wait than one scan takes in, as for a client that
+    # stopped reading, or once the scanner fails. The client lists again once it connects again, so what waited is
+    # dropped.
     ended: str | None = None
 
     def add(self, paths: set[str]) -> None:
         if self.ended is None:
-            self.pending |= paths
-            if len(self.pending) > _MAX_ENTRIES:
+            added = paths - self.pending
+            self.pending |= added
+            self.pending_characters += sum(map(len, added))
+            if len(self.pending) > _MAX_ENTRIES or self.pending_characters > _MAX_PATH_CHARACTERS:
                 self.end("Too many changes to follow; connect again.")
         self.ready.set()
 
@@ -81,7 +89,7 @@ class _Follower:
         self.ready.clear()
         if self.ended is not None:
             raise HTTPException(503, self.ended)
-        paths, self.pending = sorted(self.pending), set()
+        paths, self.pending, self.pending_characters = sorted(self.pending), set(), 0
         return paths
 
 
@@ -128,7 +136,7 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
 def _scan(root: Path) -> dict[str, _Seen]:
     """Return what the workspace holds now by relative path, empty while the root is missing or a link."""
     seen: dict[str, _Seen] = {}
-    examined = 0
+    examined = characters = 0
     with suppress(OSError), open_directory_within_root(root) as root_fd:
         folders = [PurePosixPath()]
         # The list grows while it is read.
@@ -153,12 +161,18 @@ def _scan(root: Path) -> dict[str, _Seen]:
                         # Gone since the folder was listed, as a temporary file often is.
                         continue
                     kind = stat.S_IFMT(status.st_mode)
+                    if kind not in ENTRY_KINDS:
+                        continue
+                    path = str(relative)
+                    characters += len(path)
+                    if characters > _MAX_PATH_CHARACTERS:
+                        return seen
                     if kind == stat.S_IFDIR:
-                        seen[str(relative)] = (kind, 0, 0, status.st_ino)
+                        seen[path] = (kind, 0, 0, status.st_ino)
                         if len(folders) < _MAX_FOLDERS and len(relative.parts) < _MAX_DEPTH:
                             folders.append(relative)
-                    elif kind in ENTRY_KINDS:
-                        seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
+                    else:
+                        seen[path] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
     return seen
 
 
