@@ -476,7 +476,15 @@ _MEMBERS = {
         "modes": "(self)",
         "set_modes": "(self, *, thread, reply)",
         "history": "(self)",
+        "terminals": "(self, workspace, *, create)",
     },
+    "mindroom.plugin_http.WorkerTerminals": {
+        "open": "(self, *, cols, rows, cwd)",
+        "sessions": "(self)",
+        "close": "(self, session_id)",
+        "attach": "(self, session_id)",
+    },
+    "mindroom.terminal.client.TerminalStream": {"send_input": "(self, data, *, empty_line)"},
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
     "mindroom.plugin_http.WorkerRelay": {
         "http": "(self, method, path, *, service, port, headers, body)",
@@ -582,7 +590,9 @@ _HTTP_EXPORTS = [
     "RoomModes",
     "RoomPower",
     "RoomReader",
+    "TerminalError",
     "WorkerRelay",
+    "WorkerTerminals",
     "client_origins",
     "client_rooms",
     "client_stream",
@@ -623,6 +633,8 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
     "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
+    "mindroom.plugin_http.TerminalError": "(status_code, detail)",
+    "mindroom.terminal.session.TerminalInfo": "(id, cols, rows, alive, exit_code, created_at)",
     "mindroom.plugin_http.WorkerRelay": "()",
     "mindroom.plugin_http.worker_relay": "(connection, target)",
     "mindroom.plugin_testing.Room": "(room_id, members, power_levels, direct, history_visibility, key, sent)",
@@ -632,7 +644,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 27), "467eec7145d159f2481306105b679c35dedbf0de4638ac79ece96f5ae0bea30d")
+_PINNED_VERSION = ((1, 28), "2a27f954cc71341be4367c00b61358be1f8238ec9a9c98b44383a80352f2fe3f")
 
 
 def _is_enum(obj: object) -> bool:

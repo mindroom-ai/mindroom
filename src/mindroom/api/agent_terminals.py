@@ -13,7 +13,6 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
-    Request,
     Response,
     WebSocket,
     WebSocketDisconnect,
@@ -23,17 +22,12 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from mindroom.api import agent_streams
-from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import RoomReader, client_stream, require_room_reader, stream_room_reader
-from mindroom.room_agent_access import room_execution_identity
 from mindroom.terminal.client import MAX_INPUT_CHARS, TerminalDetachedError
-from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from fastapi.requests import HTTPConnection
 
     from mindroom.plugin_http import AgentWorkspace
     from mindroom.terminal.client import TerminalStream, WorkerTerminals
@@ -92,27 +86,8 @@ _FRAME = TypeAdapter(Annotated[_Input | _Resize, Field(discriminator="type")])
 _Room = Annotated[RoomReader, Depends(require_room_reader)]
 
 
-async def _workspace_terminals(
-    connection: HTTPConnection,
-    room_id: str,
-    user_id: str,
-    workspace: AgentWorkspace,
-    *,
-    create: bool,
-) -> WorkerTerminals:
-    """Return ``workspace``'s terminals as a turn of its agent for ``user_id`` in ``room_id`` resolves them."""
-    if workspace.terminal == "none":
-        raise HTTPException(403, _NO_TERMINALS)
-    paths = bind_current_request_snapshot(connection).runtime_paths
-    identity = room_execution_identity(workspace.name, user_id, room_id, workspace.config, paths)
-    terminals = await asyncio.to_thread(
-        agent_terminals,
-        workspace.name,
-        workspace.config,
-        paths,
-        identity,
-        create=create,
-    )
+async def _workspace_terminals(room: RoomReader, workspace: AgentWorkspace, *, create: bool) -> WorkerTerminals:
+    terminals = await room.terminals(workspace, create=create)
     if terminals is None:
         raise HTTPException(403, _NO_TERMINALS)
     return terminals
@@ -130,11 +105,11 @@ def _terminal(workspace: AgentWorkspace, info: TerminalInfo) -> _Terminal:
 
 
 @router.get("/terminals")
-async def list_terminals(request: Request, room: _Room, room_id: str) -> _TerminalList:
+async def list_terminals(room: _Room) -> _TerminalList:
     """List the terminals of each workspace the caller may watch in the room, oldest first per agent."""
 
     async def listed(workspace: AgentWorkspace) -> list[_Terminal]:
-        terminals = await _workspace_terminals(request, room_id, room.user.user_id, workspace, create=False)
+        terminals = await _workspace_terminals(room, workspace, create=False)
         try:
             return [_terminal(workspace, info) for info in await terminals.sessions()]
         except TerminalError as error:
@@ -146,16 +121,10 @@ async def list_terminals(request: Request, room: _Room, room_id: str) -> _Termin
 
 
 @router.post("/agents/{agent_user_id}/terminals", status_code=201)
-async def open_terminal(
-    request: Request,
-    room: _Room,
-    room_id: str,
-    agent_user_id: str,
-    size: _OpenTerminal | None = None,
-) -> _Terminal:
+async def open_terminal(room: _Room, agent_user_id: str, size: _OpenTerminal | None = None) -> _Terminal:
     """Open a terminal in the agent's workspace, starting its worker as a shell call would."""
     workspace = await _typing_workspace(room, agent_user_id)
-    terminals = await _workspace_terminals(request, room_id, room.user.user_id, workspace, create=True)
+    terminals = await _workspace_terminals(room, workspace, create=True)
     size = size or _OpenTerminal()
     try:
         return _terminal(workspace, await terminals.open(cols=size.cols, rows=size.rows))
@@ -164,16 +133,10 @@ async def open_terminal(
 
 
 @router.delete("/agents/{agent_user_id}/terminals/{terminal_id}", status_code=204)
-async def close_terminal(
-    request: Request,
-    room: _Room,
-    room_id: str,
-    agent_user_id: str,
-    terminal_id: str,
-) -> Response:
+async def close_terminal(room: _Room, agent_user_id: str, terminal_id: str) -> Response:
     """Close one of the agent's terminals; one the workspace does not have answers 404."""
     workspace = await _typing_workspace(room, agent_user_id)
-    terminals = await _workspace_terminals(request, room_id, room.user.user_id, workspace, create=False)
+    terminals = await _workspace_terminals(room, workspace, create=False)
     try:
         await terminals.close(terminal_id)
     except TerminalError as error:
@@ -186,8 +149,9 @@ async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str
     """Relay one terminal's output to the viewer and, while it may type, its keys and size to the terminal."""
     async with client_stream(websocket, room_id) as user:
         try:
-            workspace = await (await stream_room_reader(websocket, user, room_id)).agent(agent_user_id)
-            terminals = await _workspace_terminals(websocket, room_id, user.user_id, workspace, create=False)
+            room = await stream_room_reader(websocket, user, room_id)
+            workspace = await room.agent(agent_user_id)
+            terminals = await _workspace_terminals(room, workspace, create=False)
             async with terminals.attach(terminal_id) as terminal:
                 await _Viewer(websocket, terminal, workspace).relay(
                     agent_streams.rechecked(websocket, user, room_id, agent_user_id),
