@@ -6692,7 +6692,7 @@ def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
 
 @pytest.mark.usefixtures("real_shell_refusal")
 @pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
-def test_a_runner_runs_shell_commands_without_the_setting_for_shells_outside_workers(
+def test_a_runner_runs_shell_commands_with_the_setting_off(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     execution_mode: str,
