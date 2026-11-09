@@ -58,29 +58,21 @@ def test_a_dumped_target_loads_back_as_the_same_target_after_passing_through_jso
     """Every field survives a JSON round trip, the identity's included."""
     target = _target(tmp_path, agent)
 
-    stored = json.loads(json.dumps(dump_worker_target(target)))
+    stored = _through_json(target)
 
     assert load_worker_target(stored) == target
     assert stored["version"] == 1
 
 
-def test_a_private_target_keeps_its_requester_s_worker(tmp_path: Path) -> None:
-    """A loaded private target still names its requester and the agents visible in that worker."""
-    target = _target(tmp_path, _AGENTS["private per user and agent"])
-    assert target.worker_key is not None
-    assert "@alice:localhost" in target.worker_key
-
-    loaded = load_worker_target(json.loads(json.dumps(dump_worker_target(target))))
-
-    assert (loaded.worker_key, loaded.private_agent_names) == (target.worker_key, frozenset({"coder"}))
-    assert loaded.execution_identity == target.execution_identity
+def _through_json(target: ResolvedWorkerTarget) -> dict[str, Any]:
+    return json.loads(json.dumps(dump_worker_target(target)))
 
 
-def _stored(tmp_path: Path) -> dict[str, object]:
-    return json.loads(json.dumps(dump_worker_target(_target(tmp_path, _AGENTS["private per user and agent"]))))
+def _stored(tmp_path: Path) -> dict[str, Any]:
+    return _through_json(_target(tmp_path, _AGENTS["private per user and agent"]))
 
 
-def _identity(stored: dict[str, object], **changes: object) -> dict[str, object]:
+def _identity(stored: dict[str, Any], **changes: object) -> dict[str, Any]:
     identity = stored["execution_identity"]
     assert isinstance(identity, dict)
     return {**stored, "execution_identity": {**identity, **changes}}
@@ -122,7 +114,7 @@ def test_a_target_that_is_malformed_or_names_another_worker_raises_value_error(
 
 
 def test_a_target_with_no_identity_round_trips(tmp_path: Path) -> None:
-    """A target that resolves no worker, here an isolating scope without a requester, loads back as it was."""
+    """A target without an identity, here an unscoped agent's, loads back as it was."""
     target = replace(_target(tmp_path, _AGENTS["unscoped"]), execution_identity=None, tenant_id=None, account_id=None)
 
-    assert load_worker_target(json.loads(json.dumps(dump_worker_target(target)))) == target
+    assert load_worker_target(_through_json(target)) == target

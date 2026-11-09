@@ -1684,7 +1684,7 @@ A target lives only in memory, so a plugin that lets people come back to somethi
 `dump_worker_target(target)` from `mindroom.plugin_api` returns a JSON-safe `dict`, and `load_worker_target(data)` returns the target again.
 A tool that stores one, like `share_app` below, sets [`requires_primary_runtime=True`](#decorator-fields), since it reads its plugin's context and the call's runtime context.
 `load_worker_target` raises `ValueError` for data it does not know, such as data a later MindRoom stored, and for a target whose worker is not the one its own agent and requester resolve to.
-A loaded target reaches the worker of the turn that recorded it, for a private agent that of the requester it served, whoever calls the route later.
+A loaded target reaches the agent's worker for the requester whose turn recorded it, for a private agent that requester's own, whoever calls the route later.
 So store a target with what it belongs to in the plugin's [state directory](hooks.md#plugin-state), load only what the plugin stored there itself, never a target a client sends, and check that the caller may use that agent in that room before relaying them, as for any target:
 
 ```python

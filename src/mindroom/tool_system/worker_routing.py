@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, get_args
 from urllib.parse import quote
 
 if TYPE_CHECKING:
@@ -138,16 +138,10 @@ _STORED_TARGET_STRINGS = ("routing_agent_name", "tenant_id", "account_id", "work
 
 def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
     """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
-    identity = target.execution_identity
     names = target.private_agent_names
     return {
         "version": _STORED_TARGET_VERSION,
-        "worker_scope": target.worker_scope,
-        "routing_agent_name": target.routing_agent_name,
-        "execution_identity": serialize_tool_execution_identity(identity) if identity is not None else None,
-        "tenant_id": target.tenant_id,
-        "account_id": target.account_id,
-        "worker_key": target.worker_key,
+        **asdict(target),
         "private_agent_names": sorted(names) if names is not None else None,
     }
 
@@ -168,7 +162,7 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
     scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]
     strings = {name: stored[name] for name in _STORED_TARGET_STRINGS}
     if (
-        scope not in (None, "shared", "user", "user_agent")
+        scope not in (None, *get_args(WorkerScope))
         or any(value is not None and not isinstance(value, str) for value in strings.values())
         or (names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)))
         or (identity is not None and not (isinstance(identity, dict) and set(identity) == _STORED_IDENTITY_KEYS))
@@ -187,17 +181,23 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
         **cast("dict[str, str | None]", strings),
     )
     agent = target.routing_agent_name
-    # The visibility each target an agent's turn resolves carries: that agent alone when it is private, else none.
-    visibilities = (frozenset(), frozenset({agent})) if scope == "user_agent" and agent is not None else (None,)
-    resolved = resolve_worker_target(
-        target.worker_scope,
-        agent,
-        execution_identity=identity,
-        tenant_id=target.tenant_id,
-        account_id=target.account_id,
-        private_agent_names=target.private_agent_names,
+    visibilities = (
+        {_turn_private_agent_names(target.worker_scope, agent, is_private=private) for private in (False, True)}
+        if agent is not None
+        else {None}
     )
-    if resolved != target or target.private_agent_names not in visibilities:
+    # The target is what a turn of its agent resolves, whether that agent is private or not.
+    if target not in (
+        resolve_worker_target(
+            target.worker_scope,
+            agent,
+            execution_identity=identity,
+            tenant_id=target.tenant_id,
+            account_id=target.account_id,
+            private_agent_names=visibility,
+        )
+        for visibility in visibilities
+    ):
         msg = "A stored worker target names another worker than its own scope, agent, and identity resolve."
         raise ValueError(msg)
     return target
@@ -372,17 +372,25 @@ def build_agent_toolkit_worker_target(
     Single source of truth for the `private_agent_names` derivation shared by
     agent toolkit construction and dispatch-time tool composition.
     """
-    if worker_scope == "user_agent":
-        private_agent_names = frozenset({agent_name}) if is_private else frozenset()
-    else:
-        private_agent_names = None
     return build_worker_target_from_runtime_env(
         worker_scope,
         agent_name,
         execution_identity=execution_identity,
         runtime_paths=runtime_paths,
-        private_agent_names=private_agent_names,
+        private_agent_names=_turn_private_agent_names(worker_scope, agent_name, is_private=is_private),
     )
+
+
+def _turn_private_agent_names(
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    *,
+    is_private: bool,
+) -> frozenset[str] | None:
+    """Return the private agents a turn of ``agent_name`` sees in its worker: itself when private, on user_agent only."""
+    if worker_scope != "user_agent":
+        return None
+    return frozenset({agent_name}) if is_private else frozenset()
 
 
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
