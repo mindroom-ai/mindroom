@@ -87,8 +87,11 @@ _PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:my
 _SHELL_WORD = r"(?:[^\s\"'\\;|&<>]|\\[^\r\n]|'[^']*+'?|\"(?:[^\"\\]|\\[\s\S])*+\"?)++"
 _SHELL_WORD_PATTERN = re.compile(_SHELL_WORD)
 _LEADING_WHITESPACE_PATTERN = re.compile(r"\s*+")
-# The space between two arguments of a command, which a backslash line break may continue.
-_ARGUMENT_GAP_PATTERN = re.compile(r"(?:[^\S\r\n]|\\\r?\n)*+")
+# The space between two arguments of a command, which a backslash line break may continue, and the arguments up to a
+# shell operator or the end of the line.
+_ARGUMENT_GAP = r"(?:[^\S\r\n]|\\\r?\n)"
+_ARGUMENT_GAP_PATTERN = re.compile(rf"{_ARGUMENT_GAP}*+")
+_ARGUMENTS_PATTERN = re.compile(rf"{_SHELL_WORD}(?:{_ARGUMENT_GAP}++{_SHELL_WORD})*+")
 # curl's `user:password` is one shell word, whose part after the first colon is the password.
 _CURL_USER_OPTION_PATTERN = re.compile(rf"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<word>{_SHELL_WORD})")
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(rf"(?<!\S)-p(?P<token>{_SHELL_WORD})")
@@ -432,8 +435,7 @@ def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
 
 
 def _quoted_value_span(value: str, quote_start: int) -> tuple[int, int, int] | None:
-    quoted = _QUOTED_VALUE_PATTERNS[value[quote_start]].match(value, quote_start)
-    assert quoted is not None
+    quoted = cast("re.Match[str]", _QUOTED_VALUE_PATTERNS[value[quote_start]].match(value, quote_start))
     body_start, body_end = quoted.span("body")
     if quoted.group("close"):
         return body_start, body_end, body_end + 1
@@ -450,16 +452,18 @@ def _assignment_value_span(
     """Return the start and end of one assigned value and where the scan resumes, or None when nothing is assigned.
 
     ``key_quote`` is the quote that opened a string holding the key, as in ``grep "password=" .``, so the same quote
-    right after the key closes that string. The shell word after it, attached or after spaces, may still be the value,
-    as in ``"password="hunter2`` or ``echo "password:" hunter2``, so it is hidden; a shell operator there opens none.
+    right after the key closes that string. What follows may still be the value, so it is hidden up to a shell
+    operator: the shell word attached to the quote, as in ``"password="hunter2``, or after spaces the rest of the
+    command, as in ``echo "password:" correct horse``.
     """
     if value_start < len(value) and value[value_start] == key_quote:
-        value_start = cast("re.Match[str]", _ARGUMENT_GAP_PATTERN.match(value, value_start + 1)).end()
-        if value_start >= len(value) or value[value_start] in ";|&<>":
+        gap_end = cast("re.Match[str]", _ARGUMENT_GAP_PATTERN.match(value, value_start + 1)).end()
+        if gap_end >= len(value) or value[gap_end] in ";|&<>":
             return None
-        word = _SHELL_WORD_PATTERN.match(value, value_start)
-        if word is not None:
-            return value_start, word.end(), word.end()
+        rest = (_ARGUMENTS_PATTERN if gap_end > value_start + 1 else _SHELL_WORD_PATTERN).match(value, gap_end)
+        if rest is not None:
+            return gap_end, rest.end(), rest.end()
+        value_start = gap_end
     if value_start >= len(value):
         return None
     # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
@@ -662,9 +666,7 @@ def _bounded_redaction_input(value: str, *, max_length: int | None) -> str:
         return value[: word_end.start()]
     if len(value) <= _MAX_TEXT_INPUT_LENGTH:
         return value
-    last_word = _LAST_WORD_PATTERN.search(value, 0, scan_length)
-    assert last_word is not None
-    return value[: last_word.start()]
+    return value[: cast("re.Match[str]", _LAST_WORD_PATTERN.search(value, 0, scan_length)).start()]
 
 
 def _redact_url_match(match: re.Match[str]) -> str:

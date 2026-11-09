@@ -874,12 +874,14 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
         ("echo \"password:\" 'hun'ter2", f'echo "password:" {REDACTED}'),
         ('echo "password:" hunter2 > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
         ('echo "password:" hunter2>config.yaml', f'echo "password:" {REDACTED}>config.yaml'),
+        ('echo "password:" correct horse battery > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
+        ('At the "Password:" prompt, enter hunter2', f'At the "Password:" {REDACTED}'),
         ('echo "password:" \\\n  hunter2 > config.yaml', f'echo "password:" \\\n  {REDACTED} > config.yaml'),
         ('grep -rn "password="; echo done', 'grep -rn "password="; echo done'),
     ],
 )
-def test_a_quoted_secret_name_hides_the_word_after_it(command: str, expected: str) -> None:
-    """The quote after the name ends the string holding it, and the next word, a search path or a value, is hidden."""
+def test_a_quoted_secret_name_hides_the_value_that_may_follow_it(command: str, expected: str) -> None:
+    """A word attached to the quote that ends the name's string, or the arguments after a space, may be the value."""
     assert redact_sensitive_text(command) == expected
 
 
