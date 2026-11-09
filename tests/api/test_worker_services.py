@@ -18,6 +18,7 @@ import uvicorn
 
 from mindroom import plugin_worker_services
 from mindroom.api import sandbox_runner_app
+from mindroom.api import worker_services as worker_services_module
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_services import _services, close_worker_services
 from mindroom.config.agent import AgentConfig
@@ -54,8 +55,9 @@ import json, os, subprocess, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 secret = sys.stdin.readline().strip()
-# A process the service starts, which a stop ends with it.
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+# A process the service starts, which a stop asks to end with it, as a TERM signal it records.
+CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(open('child-term', 'w').close())); time.sleep(600)"
+child = subprocess.Popen([sys.executable, "-c", CHILD])
 with open("service.json", "w") as record:
     runner_url = os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]
     json.dump({"pid": os.getpid(), "child": child.pid, "secret": secret, "runner_url": runner_url}, record)
@@ -70,6 +72,19 @@ class Hello(BaseHTTPRequestHandler):
 
 
 ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Hello).serve_forever()
+"""
+
+# A service that, like the child it starts, ignores the TERM signal a stop sends first, and accepts connections.
+_STUBBORN = """
+import json, os, signal, socket, subprocess, sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+with open("service.json", "w") as record:
+    json.dump({"pid": os.getpid(), "child": child.pid}, record)
+server = socket.create_server(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])))
+while True:
+    server.accept()[0].close()
 """
 
 
@@ -104,6 +119,7 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
     (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
     (plugin_root / "hello.py").write_text(_HELLO)
     (plugin_root / "crash.py").write_text("import sys\nsys.exit(3)\n")
+    (plugin_root / "stubborn.py").write_text(_STUBBORN)
     # The worker's Python, without building a virtualenv.
     venv_python = tmp_path / "venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True)
@@ -207,10 +223,26 @@ async def test_stop_ends_the_service_and_the_next_ensure_starts_it_again(tmp_pat
         assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
         await _until(lambda: not _pid_alive(int(record["child"])))
         assert not _pid_alive(int(record["pid"]))
+        assert (runner.workspace / "child-term").exists()
         pid = record["pid"]
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
         assert state["state"] == "running"
         assert runner.record()["pid"] != pid
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_ignores_the_stop_signal_is_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A program that outlives its grace period after the TERM signal is killed, with every process it started."""
+    monkeypatch.setattr(worker_services_module, "_STOP_SECONDS", 0.2)
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url("stubborn"), _body("stubborn.py"), _AUTH)
+        record = runner.record()
+        assert (await _call("DELETE", runner.url("stubborn"), headers=_AUTH))[0] == 204
+        assert not _pid_alive(int(record["pid"]))
+        await _until(lambda: not _pid_alive(int(record["child"])))
 
 
 @pytest.mark.asyncio
