@@ -79,9 +79,9 @@ ENTRY_KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFLNK: "link",
 }
 _NOT_A_FILE = "That path is not a regular file."
-# Saves, moves and deletes through this process check what is there and change it one at a time per workspace, so two
-# saves of one version, or two moves onto one name, never both land, a save that passed its check never brings back a
-# deleted file, and a long delete in one workspace holds up no other.
+# Saves, new folders, moves and deletes through this process check what is there and change it one at a time per
+# workspace, so two saves of one version, or two moves onto one name, never both land, a save that passed its check
+# never brings back a deleted file, a delete never stops half done, and a long delete in one workspace holds up no other.
 _CHANGES: dict[Path, threading.Lock] = {}
 
 
@@ -377,7 +377,11 @@ def make_folder(root: Path, raw_path: str) -> None:
     _refuse_git(path)
     parent, name = _leaf(root, path)
     _refuse_git(parent.relative / name)
-    with _refusals(), open_directory_within_root(parent.base, parent.relative, create=True) as directory:
+    with (
+        _changes(parent.base),
+        _refusals(),
+        open_directory_within_root(parent.base, parent.relative, create=True) as directory,
+    ):
         os.mkdir(name, dir_fd=directory)
 
 

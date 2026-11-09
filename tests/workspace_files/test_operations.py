@@ -564,6 +564,28 @@ def test_a_change_in_one_workspace_never_waits_for_another(tmp_path: Path, monke
     assert not (first / "build").exists()
 
 
+def test_a_folder_made_during_a_delete_lands_after_it(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Making a folder inside one being deleted waits for the delete, which so never stops half done."""
+    (root / "build" / "out").mkdir(parents=True)
+    (root / "build" / "out" / "app.js").write_text("x")
+    real_rmtree = shutil.rmtree
+    makings = []
+
+    with ThreadPoolExecutor(1) as pool:
+
+        def rmtree_while_making(*args: object, **kwargs: object) -> None:
+            makings.append(pool.submit(make_folder, root, "build/new"))
+            with pytest.raises(TimeoutError):
+                makings[0].result(timeout=0.2)
+            real_rmtree(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(operations.shutil, "rmtree", rmtree_while_making)
+        delete(root, "build")
+        makings[0].result(timeout=5)
+
+    assert sorted(path.name for path in (root / "build").iterdir()) == ["new"]
+
+
 def test_a_delete_during_a_save_lands_after_it(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A save that passed its etag check can't bring back a file deleted meanwhile: the delete waits for it."""
     etag = read_file(root, "notes.md").etag
