@@ -401,6 +401,28 @@ async def test_a_scanner_that_fails_ends_its_streams_and_any_that_join_it(
     assert watch._watches == {}
 
 
+@pytest.mark.asyncio
+async def test_a_first_scan_that_fails_ends_the_stream_instead_of_keeping_it_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream waits for the first scan before it follows, so one that breaks must still let it go."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    def broken(_root: Path) -> dict[str, object]:
+        msg = "The scan broke."
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(watch, "_scan", broken)
+    with pytest.raises(HTTPException) as ended:
+        async with asyncio.timeout(5), workspace_changes(root) as next_changes:
+            await next_changes()
+
+    assert ended.value.status_code == 503
+    assert watch._watches == {}
+
+
 def test_a_scan_leaves_out_folders_past_the_depth_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A deep chain of folders, which each scan would open from the root, costs at most the cap's depth."""
     root = tmp_path / "workspace"
