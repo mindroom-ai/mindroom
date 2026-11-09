@@ -71,8 +71,8 @@ class _ServiceInstance:
     idle_timeout_seconds: float
     idle_until: float = 0.0
     expiry: asyncio.Task[None] | None = None
-    # Whether an exit while another socket holds its port starts the service once more on a fresh port. Only until an
-    # ensure reports the instance: after that it may have served, and its own closed connections can hold the port.
+    # Whether an exit while another socket holds its port starts the service once more on a fresh port: only until an
+    # ensure reports it running, which says the port was its own.
     may_retry: bool = True
 
 
@@ -107,7 +107,7 @@ class _WorkerServices:
     ) -> WorkerServiceState:
         """Start the service unless an instance of this program exists, crashed or not, then report it.
 
-        An instance that exits before any ensure reported it, while another socket holds its port, starts once more.
+        An instance that exits, never reported running, while another socket holds its port starts once more.
 
         ``stops`` is the service's stop count as the request arrived; a stop that arrived since refuses the start.
         """
@@ -123,8 +123,9 @@ class _WorkerServices:
                 instance = await self._add(key, program)
             self.touch(plugin, name)
         state = await _settled(instance)
-        if state.state != "exited" or not instance.may_retry:
+        if state.state == "running":
             instance.may_retry = False
+        if state.state != "exited" or not instance.may_retry:
             return state
         async with self._lock:
             if self._instances.get(key) is instance:
@@ -223,6 +224,8 @@ def _free_loopback_port() -> int:
 def _port_taken(port: int) -> bool:
     """Return whether a socket holds the loopback port."""
     with socket.socket() as probe:
+        # So that connections a server that reuses its address closed, waiting out TIME_WAIT, do not count.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
         except OSError:

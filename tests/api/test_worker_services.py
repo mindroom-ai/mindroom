@@ -364,7 +364,7 @@ sys.exit(3)
 
 @pytest.mark.asyncio
 async def test_a_service_that_crashes_after_it_served_is_reported_and_not_restarted(tmp_path: Path) -> None:
-    """A program that exits after it ran stays exited, though the connection it closed still holds its port a while."""
+    """A program that exits after it ran stays exited, also once another socket listens on its port."""
     async with _runner(tmp_path) as runner:
         (runner.plugin_root / "once.py").write_text(_ONCE)
         _, state = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
@@ -374,7 +374,8 @@ async def test_a_service_that_crashes_after_it_served_is_reported_and_not_restar
         writer.close()
         process = worker_services(sandbox_runner_app.app).instance("demo", "once").process  # type: ignore[union-attr]
         await _until(lambda: process.returncode is not None)
-        _, again = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
+        with socket.create_server(("127.0.0.1", state["port"])):
+            _, again = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
         assert (again["state"], again["exit_code"], again["port"]) == ("exited", 3, state["port"])
         assert (runner.workspace / "once.log").read_text() == "ran\n"
 
@@ -1123,6 +1124,63 @@ async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_on
             failed, running = map(int, (runner.workspace / "children").read_text().split())
             await _until(lambda: not _pid_alive(failed))
             assert _pid_alive(running)
+
+
+# Delays only a service's first start, past the ensure's wait.
+_SLOW_FIRST = """
+import os, time
+if not os.path.exists("slept"):
+    open("slept", "w").close()
+    time.sleep(1.5)
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_slow_service_whose_port_another_server_took_runs_on_a_fresh_one_on_the_next_ensure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ensure that found the service still starting leaves the fresh start to the next, once its bind failed."""
+    monkeypatch.setattr(worker_services_module, "_START_SECONDS", 0.5)
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "echo.py").write_text(_SLOW_FIRST + _ECHO)
+        async with _other_server(monkeypatch, once=True) as connections:
+            _, state = await _call("POST", runner.url("echo"), _body("echo.py"), _AUTH)
+            assert state["state"] == "starting"
+            process = worker_services(sandbox_runner_app.app).instance("demo", "echo").process  # type: ignore[union-attr]
+            await _until(lambda: process.returncode is not None)
+            _, again = await _call("POST", runner.url("echo"), _body("echo.py"), _AUTH)
+            assert again["state"] == "running"
+            assert connections == []
+
+
+@pytest.mark.asyncio
+async def test_a_slow_service_that_crashes_after_it_served_is_reported_and_not_restarted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service an ensure found still starting, which then served and exited, stays exited.
+
+    The connection it closed still holds its port a while.
+    """
+    monkeypatch.setattr(worker_services_module, "_START_SECONDS", 0.5)
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "once.py").write_text(_SLOW_FIRST + _ONCE)
+        _, state = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
+        assert state["state"] == "starting"
+        await _until(lambda: _port_listens(state["port"]))
+        reader, writer = await asyncio.open_connection("127.0.0.1", state["port"])
+        assert await reader.read() == b"bye"
+        writer.close()
+        process = worker_services(sandbox_runner_app.app).instance("demo", "once").process  # type: ignore[union-attr]
+        await _until(lambda: process.returncode is not None)
+        _, again = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
+        assert (again["state"], again["exit_code"], again["port"]) == ("exited", 3, state["port"])
+        assert (runner.workspace / "once.log").read_text() == "ran\n"
+
+
+def _port_listens(port: int) -> bool:
+    return any(listener.port == port for listener in listeners.listening_sockets())
 
 
 @pytest.mark.asyncio
