@@ -192,7 +192,7 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
     resolved = resolve_worker_target(
         target.worker_scope,
         agent,
-        identity,
+        execution_identity=identity,
         tenant_id=target.tenant_id,
         account_id=target.account_id,
         private_agent_names=target.private_agent_names,

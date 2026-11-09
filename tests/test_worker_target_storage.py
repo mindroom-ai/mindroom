@@ -96,6 +96,7 @@ _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "a number for a name": lambda stored: {**stored, "routing_agent_name": 1},
     "a string for the private agents": lambda stored: {**stored, "private_agent_names": "coder"},
     "a number among the private agents": lambda stored: {**stored, "private_agent_names": [1]},
+    "a list among the private agents": lambda stored: {**stored, "private_agent_names": [["coder"]]},
     "an identity that is not an object": lambda stored: {**stored, "execution_identity": "alice"},
     "an unknown identity channel": lambda stored: _identity(stored, channel="email"),
     "an unknown identity field": lambda stored: _identity(stored, extra=None),
