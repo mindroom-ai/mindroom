@@ -1502,7 +1502,7 @@ Two events are the bridge's own:
 | Event | Sent |
 |-------|------|
 | `{"method": "MindRoom.page", "params": {"page": true}}` | On connect and whenever the agent's browser shows another page or none (`false`); each page has a new session, so start the screencast and `Page.enable` again |
-| `{"method": "MindRoom.control", "params": {"held": true}}` | When this connection takes control, and with `false` when it loses it: by releasing it, by leaving, or when the Computer stops or restarts |
+| `{"method": "MindRoom.control", "params": {"held": true}}` | When this connection takes control, and with `false` when it loses it: by releasing it, or when the Computer stops or restarts |
 
 Control is the Computer's own, shared with the viewers of its desktop: one holder at a time, and while it is held the agent's browser calls fail with `Computer is under user control; resume the agent first.`
 `MindRoom.takeControl` answers an error while someone else holds control or the Computer is stopped, and works while the agent's browser shows no page, so a service that shows a browser of its own can gate it by the same control.

@@ -583,6 +583,61 @@ async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_sta
 
 
 @pytest.mark.asyncio
+async def test_a_plugin_of_any_valid_name_opens_its_service_s_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin names may start with an underscore and run longer than service names, and their bridge opens too."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
+    plugin = "_" + "x" * 80
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "mindroom.plugin.json").write_text(json.dumps({"name": plugin}))
+        await _call("POST", runner.url(plugin=plugin), _body(), _AUTH)
+        record = runner.record()
+        headers = {_SECRET_HEADER: str(record["secret"])}
+        async with (
+            aiohttp.ClientSession() as client,
+            client.ws_connect(_bridge_url(record["pid"]), headers=headers) as bridge,
+        ):
+            assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_opens_while_the_agent_s_browser_call_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running Computer is not started again, so opening the bridge never waits for the agent's call to end."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
+    running, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow_call(*_args: object, **_kwargs: object) -> None:
+        running.set()
+        await finish.wait()
+
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        record = runner.record()
+        call = asyncio.create_task(
+            runtime.run_browser_call("binding", lambda _display: BrowserSession(slow_call, unused), [], {}),
+        )
+        await asyncio.wait_for(running.wait(), _TIMEOUT)
+        headers = {_SECRET_HEADER: str(record["secret"])}
+        async with (
+            asyncio.timeout(_TIMEOUT),
+            aiohttp.ClientSession() as client,
+            client.ws_connect(_bridge_url(record["pid"]), headers=headers) as bridge,
+        ):
+            assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
+        finish.set()
+        await call
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_a_worker_without_a_computer_refuses_the_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A service of a worker that runs no Computer has no agent's browser to reach."""
     monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", None, raising=False)

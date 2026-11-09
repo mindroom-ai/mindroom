@@ -3985,11 +3985,11 @@ async def test_worker_browser_accepts_host_override_of_desktop_default(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_worker_shown_page_is_the_open_tab_the_agent_last_brought_to_the_front(
+async def test_worker_shown_page_is_the_active_tab_of_the_profile_the_agent_last_brought_to_the_front(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The agent's browser bridge shows the tab the agent last brought to the front of its display, while it is open."""
+    """The agent's browser bridge shows the active tab of the profile the agent last brought to the front, while open."""
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     browser = BrowserTools(paths)
     browser.bind_worker_display(":99", tmp_path / "workspace")
@@ -4013,5 +4013,7 @@ async def test_worker_shown_page_is_the_open_tab_the_agent_last_brought_to_the_f
     await browser.browser("focus", targetId=first["targetId"])
     assert shown_url() == "https://example.org/first"
     await browser.browser("close", targetId=first["targetId"])
-    assert shown_url() is None
+    # Closing the shown tab leaves its profile's next tab active, and that is what the agent works on next.
+    assert shown_url() == "about:blank"
     await browser.browser("stop")
+    assert shown_url() is None

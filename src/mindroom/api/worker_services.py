@@ -2,7 +2,8 @@
 
 A service is a program in the plugin's folder, which the request's config places as it does for ``/execute``, started as
 a tool's subprocess is: with the worker's Python and sanitized environment, in a process group of its own. It serves on
-the loopback port in ``MINDROOM_WORKER_SERVICE_PORT``, and ``MINDROOM_WORKER_SERVICE_RUNNER_URL`` is this runner's URL.
+the loopback port in ``MINDROOM_WORKER_SERVICE_PORT``, ``MINDROOM_WORKER_SERVICE_RUNNER_URL`` is this runner's URL, and
+``MINDROOM_AGENT_BROWSER_URL`` is its bridge to the agent's browser page.
 Every process in the worker can reach that port, so each start gets a fresh secret on stdin, which other processes
 cannot read as they read the environment and command line; the program refuses requests whose
 ``X-MindRoom-Service-Secret`` header lacks it, and the secret never leaves this runner.
@@ -257,7 +258,7 @@ async def stop_service(request: Request, plugin: str, name: _Name) -> None:
 
 
 @router.websocket("/{plugin}/{name}/agent-browser")
-async def agent_browser(websocket: WebSocket, plugin: _Name, name: _Name) -> None:
+async def agent_browser(websocket: WebSocket, plugin: str, name: _Name) -> None:
     """Bridge the agent's browser page to the running instance of this service, which presents its own secret."""
     instance = _services(websocket.app).instance(plugin, name)
     supplied = websocket.headers.get("x-mindroom-service-secret", "").encode()

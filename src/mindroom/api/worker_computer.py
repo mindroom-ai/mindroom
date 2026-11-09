@@ -212,8 +212,10 @@ async def serve_agent_browser(websocket: WebSocket) -> None:
     """
     try:
         computer = _app_computer(websocket.app)
-        await computer.ensure_started()
-    except (HTTPException, OSError, RuntimeError, TimeoutError):
+        # Starting takes the lock an agent's browser call holds, so a running Computer is not started again.
+        if computer.status()["state"] != "ready":
+            await computer.ensure_started()
+    except (HTTPException, OSError, RuntimeError, TimeoutError, ExceptionGroup):
         await websocket.close(code=1008)
         return
     # Playwright loads only once a service reaches the agent's browser, which already runs it.
