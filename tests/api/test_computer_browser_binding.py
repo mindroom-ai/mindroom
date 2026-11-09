@@ -78,22 +78,3 @@ async def test_retained_session_rejects_functions_outside_fixed_provider(
             await session.execute("browser_run_code_unsafe")
     finally:
         await session.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("native", [False, True])
-async def test_only_the_in_process_browser_offers_its_page_to_a_screencast(tmp_path: Path, native: bool) -> None:
-    """The browser tool's page is reachable in this process; browser_mcp's browser runs in another one."""
-    name = "browser_mcp" if native else "browser"
-    function = "browser_snapshot" if native else "browser_control"
-    factory = browser_mcp_tools if native else browser_tools
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    toolkit = BrowserMCPTools(runtime_paths=paths) if native else BrowserTools(runtime_paths=paths)
-    provider = select_browser_provider(name, function, factory, str)
-    _key, session = provider.bind(provider.validate_toolkit(toolkit), ":77", tmp_path, _run_toolkit_entrypoint)
-    try:
-        if isinstance(toolkit, BrowserTools):
-            assert session.page == toolkit.worker_active_page
-        assert session.page() is None
-    finally:
-        await session.close()

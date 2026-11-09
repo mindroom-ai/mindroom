@@ -8243,16 +8243,17 @@ path = "mindroom.api.worker_preview"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
+    "mindroom.previews.listeners",
     "mindroom.previews.relay",
 ]
 
 [[modules]]
-path = "mindroom.previews.relay"
+path = "mindroom.previews.listeners"
 depends_on = []
 
 [[modules]]
-path = "mindroom.worker_computer.screencast"
-depends_on = ["mindroom.worker_computer.protocol"]
+path = "mindroom.previews.relay"
+depends_on = []
 
 [[modules]]
 path = "mindroom.api.worker_computer"
@@ -8261,7 +8262,6 @@ depends_on = [
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
-    "mindroom.worker_computer.screencast",
 ]
 
 [[modules]]
@@ -8323,7 +8323,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
-    "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend_kinds",
 ]

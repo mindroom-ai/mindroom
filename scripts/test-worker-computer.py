@@ -41,6 +41,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_proxy_client import _read_execute_stream
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
@@ -275,14 +276,24 @@ class Fixture:
             json.dumps(self.container_security, indent=2, sort_keys=True) + "\n",
         )
         request = self.runner_request(tool, function, kwargs, user=user, worker_key=target.spec.worker_key)
-        async with httpx.AsyncClient(timeout=100) as client:
-            response = await client.post(
-                handle.endpoint,
-                headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
-                json=request.model_dump(mode="json"),
-            )
-            response.raise_for_status()
-            return response.json()
+
+        def post() -> dict[str, Any]:
+            # The runner streams progress and keep-alive lines before the result line, as the primary reads it.
+            with (
+                httpx.Client(timeout=100) as client,
+                client.stream(
+                    "POST",
+                    handle.endpoint,
+                    headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
+                    json=request.model_dump(mode="json"),
+                ) as response,
+            ):
+                response.raise_for_status()
+                result = _read_execute_stream(response, deadline=None, cancellation=None)
+            assert result is not None
+            return result
+
+        return await asyncio.to_thread(post)
 
     async def browser(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - fixture provider translation
         """Return the public tool result, failing on runner errors."""
@@ -660,7 +671,7 @@ with sync_playwright() as playwright:
             "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');"
             "document.cookie='persist=yes;max-age=3600;path=/';}",
         )
-        await fixture.shell(["sh", "-c", "printf alice-only > isolation-marker.txt"])
+        await fixture.shell(["sh", "-c", "printf written-by-alice > shared-marker.txt"])
         await fixture.download("worker-shared-download-ok")
         result["download_read_through_shell"] = True
         await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
@@ -838,12 +849,10 @@ with sync_playwright() as playwright:
                 assert "Worker computer fixture" in json.dumps(await fixture.browser(action="snapshot"))
                 result["fresh_download_after_restart"] = True
                 await create("bob")
-                assert "isolated" in await fixture.shell(
-                    ["sh", "-c", "test ! -e isolation-marker.txt && printf isolated"],
-                    user=fixture.other,
-                )
+                # Each requester gets its own worker, but a non-private agent shares one workspace by design.
+                assert "written-by-alice" in await fixture.shell(["cat", "shared-marker.txt"], user=fixture.other)
                 assert len(fixture.container_ids) == 2
-                result["requester_isolation"] = True
+                result["requester_workers_share_workspace"] = True
                 assert not errors, errors
                 result["page_errors"] = errors
             except BaseException:
