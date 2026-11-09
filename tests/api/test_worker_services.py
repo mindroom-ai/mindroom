@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import re
 import shutil
@@ -776,7 +777,7 @@ async def test_an_ensure_during_a_stop_keeps_its_service_recorded(
 # A service that echoes each WebSocket text message with its pid and path, refusing a handshake without its secret.
 # The worker's Python here has only the standard library, so it speaks the protocol's few frames itself.
 _ECHO = """
-import base64, hashlib, os, socketserver, struct, sys, time
+import base64, gzip, hashlib, os, socketserver, struct, sys, time
 
 secret = sys.stdin.readline().strip()
 
@@ -790,6 +791,10 @@ class Echo(socketserver.StreamRequestHandler):
             headers[name.lower()] = value.strip()
         if headers.get("x-mindroom-service-secret") != secret:
             self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
+            return
+        if path == "/gzip":
+            body = gzip.compress(b"compressed")
+            self.wfile.write(f"HTTP/1.1 200 OK\\r\\nContent-Encoding: gzip\\r\\nContent-Length: {len(body)}\\r\\n\\r\\n".encode() + body)
             return
         if "upgrade" not in headers:
             # A slow answer, as a stream of events is, whose second part comes after the idle timeout.
@@ -917,7 +922,11 @@ async def test_a_relayed_stream_keeps_its_service_and_its_worker_in_use_while_it
             assert workers.touches == touches + 1
         touch_workers_in_flight(workers)  # type: ignore[arg-type]
         assert workers.touches == touches + 1
-        # So does a slow answer.
+        # An answer passes as the service sent it, compressed or not.
+        async with relay.http("GET", "/gzip", service="echo") as answer:
+            assert answer.headers["Content-Encoding"] == "gzip"
+            assert gzip.decompress(await answer.read()) == b"compressed"
+        # A slow answer outlasts the idle timeout too.
         async with relay.http("GET", "/slow", service="echo") as answer:
             assert await answer.text() == f"first;second from {instance.process.pid}"
         await _until(lambda: services.instance("demo", "echo") is None)
