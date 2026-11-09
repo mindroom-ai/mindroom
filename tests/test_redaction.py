@@ -694,6 +694,10 @@ def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> No
         ("token:", "token:"),
         ("token:\n  \n", "token:\n  \n"),
         ('expect "Password:"\nsend "hunter2\\r"', f'expect "Password:"\n{REDACTED}'),
+        (
+            "permissions:\n  id-token:\n    write # OIDC\nenv:\n  password=hunter2",
+            f"permissions:\n  id-token:\n    write # OIDC\nenv:\n  password={REDACTED}",
+        ),
     ],
 )
 def test_a_secret_name_that_ends_its_line_hides_the_rest_of_the_text(text: str, expected: str) -> None:
@@ -866,6 +870,7 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
         'read -rsp "Password: " pw && echo done',
         'grep -rn "token=" src | grep -v test',
         'grep -rn "password=" "src/" | grep "x"',
+        'grep -rn "password="; echo done',
     ],
 )
 def test_a_quote_closing_the_string_that_holds_a_secret_name_keeps_the_command_readable(command: str) -> None:
@@ -951,10 +956,9 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("curl -u 'admin:p\"ssw0rd' https://example.test/x", f"curl -u 'admin:{REDACTED}' https://example.test/x"),
         ('curl -u "admin:ab\\"cd" https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
         ("curl -u admin:my\\ pw https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
-        ("curl -u admin:abc\\\ndef https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
         ("curl -u admin:pw\\\n  https://example.test/x", f"curl -u admin:{REDACTED}\\\n  https://example.test/x"),
         ('mysql -p"ab\\"cd" app', f"mysql -p{REDACTED} app"),
-        ("mysql -pab\\\ncd app", f"mysql -p{REDACTED} app"),
+        ("mysql -ppassword: hunter2", f"mysql -p{REDACTED} {REDACTED}"),
         ("mysql -u root -p'ab&c;d|e' app", f"mysql -u root -p{REDACTED} app"),
         ('mysql -e "select 1; select 2" -ppw app', f'mysql -e "select 1; select 2" -p{REDACTED} app'),
         ("time mysql -uroot -ppw app", f"time mysql -uroot -p{REDACTED} app"),
@@ -977,6 +981,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "ssh -p2222 host",
         "git push -u origin main",
         "docker run --user 1000:0 alpine id",
+        "curl --user-agent=Mozilla:5.0 https://example.test/x",
         "date -u +%H:%M:%S",
         "rsync -u host:/srv/data ./data",
         "docker run --name mysql -p3306:3306 -d mysql:8",
@@ -993,36 +998,6 @@ def test_options_that_carry_no_password_stay(command: str) -> None:
     assert redact_sensitive_text(command) == command
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "echo sk-abcdef\\\nghijkl",
-        "curl -H 'Authorization: Bearer abcdef\\\nghijkl' https://example.test",
-        "export TOKEN=abcdef\\\nghijkl",
-        "export TOKEN=abcdef\\\r\nghijkl",
-    ],
-)
-def test_a_token_split_by_a_backslash_line_break_stays_hidden(text: str) -> None:
-    """A shell command may continue a long token on the next line after a backslash."""
-    redacted = redact_sensitive_text(text)
-
-    assert "abcdef" not in redacted
-    assert "ghijkl" not in redacted
-    assert REDACTION_FAILED not in redacted
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("my-cli --key sk-abc123\\\npassword=hunter2", f"my-cli --key {REDACTED}\\\npassword={REDACTED}"),
-        ("Use a bearer token\\\nThen call the API.", "Use a bearer token\\\nThen call the API."),
-    ],
-)
-def test_a_backslash_line_break_after_a_token_does_not_join_the_next_line_to_it(text: str, expected: str) -> None:
-    """A key that starts the next line, or a prose word after a Markdown line break, is not part of the token before it."""
-    assert redact_sensitive_text(text) == expected
-
-
 def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote() -> None:
     """The command after a quoted value that a backslash line break continues stays readable."""
     assert redact_sensitive_text('TOKEN="abcdef\\\nghijkl" make') == f'TOKEN="{REDACTED}" make'
@@ -1030,8 +1005,16 @@ def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote
 
 @pytest.mark.parametrize(
     "unit",
-    ['grep "token=" .\n', "token:\n", "export TOKEN=a ", "mysql -p", "curl -u a:b;", 'password="\n', "echo sk-a\\\n"],
-    ids=["closing-quotes", "line-ends", "shell-words", "mysql", "curl", "unclosed-quotes", "continuations"],
+    [
+        'grep "token=" .\n',
+        "token:\n",
+        "export TOKEN=a ",
+        "mysql -p",
+        "curl -u a:b;",
+        'password="\n',
+        "curl -u a:b \\\n",
+    ],
+    ids=["closing-quotes", "line-ends", "assignments", "mysql", "curl", "unclosed-quotes", "continued-commands"],
 )
 def test_redaction_stays_linear_over_many_command_patterns(unit: str) -> None:
     """Each pattern a command can repeat is read once, however often it repeats."""

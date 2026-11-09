@@ -49,14 +49,6 @@ URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
 )
-
-
-def _continued_run(characters: str) -> str:
-    """Return a pattern for a run of ``characters`` that a shell command may continue after a backslash line break."""
-    # A key that starts the next line, as in `--key sk-…\` then `password=…`, is not part of the token.
-    return rf"[{characters}]++(?:\\\r?\n[{characters}]++(?![^\S\r\n]*+[=:]))*+"
-
-
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
     r"(?P<token>[A-Za-z0-9._~+/=-]+)",
@@ -77,9 +69,7 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     r"[\"']?[A-Za-z0-9_.-]++[\"']?[^\S\r\n]*+(?::|=(?!=))",
     re.IGNORECASE,
 )
-# A line break right after a backslash that ends the value's word continues the value, as in a shell command; after a
-# backslash that stands alone, as in ` \`, it continues only the command.
-_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\S\\)(?<!\S\\\r)[\r\n]|[,&)\]}\"']")
+_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
@@ -93,11 +83,11 @@ _COMMAND_PATTERN = re.compile(
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
 _PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
-# An unquoted option value is one shell word: a backslash escapes the next character, and a line break after it
-# continues the word when more of the word follows. A quoted value ends at its own unescaped quote.
-_OPTION_WORD = r"(?:[^\s\"'\\]|\\(?:\r?\n(?=\S)|[^\r\n]))++"
+# An unquoted option value is one shell word, in which a backslash escapes the next character on its line; a quoted
+# value ends at its own unescaped quote.
+_OPTION_WORD = r"(?:[^\s\"'\\]|\\[^\r\n])++"
 _CURL_USER_OPTION_PATTERN = re.compile(
-    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
+    r"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
     rf"(?P<token>(?(quote)(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])++|{_OPTION_WORD}))",
 )
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(
@@ -118,12 +108,12 @@ _PRIVATE_KEY_PATTERN = re.compile(
 _BROKER_TOKEN_PATTERN = r"mrb1\.[A-Za-z0-9_-]{100,}+\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"  # noqa: S105
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
-    rf"(?:sk|pk)-{_continued_run('A-Za-z0-9._-')}"
-    rf"|(?:sk|pk|rk)_(?:live|test)_{_continued_run('A-Za-z0-9._-')}"
-    rf"|xox[baprs]-{_continued_run('A-Za-z0-9-')}"
-    rf"|gh(?:p|o|u|s|r)_{_continued_run('A-Za-z0-9_')}"
-    rf"|github_pat_{_continued_run('A-Za-z0-9_')}"
-    rf"|AIza{_continued_run('0-9A-Za-z_-')}"
+    r"(?:sk|pk)-[A-Za-z0-9._-]+"
+    r"|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9._-]+"
+    r"|xox[baprs]-[A-Za-z0-9-]+"
+    r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
+    r"|github_pat_[A-Za-z0-9_]+"
+    r"|AIza[0-9A-Za-z_-]+"
     rf"|{_BROKER_TOKEN_PATTERN}"
     r"))(?![A-Za-z0-9])",
 )
@@ -466,7 +456,7 @@ def _assignment_value_span(
     """
     if value_start < len(value) and value[value_start] == key_quote:
         value_start += 1
-        if value_start < len(value) and value[value_start] in " \t":
+        if value_start < len(value) and value[value_start] in " \t;|<>":
             return None
     if value_start >= len(value):
         return None
@@ -522,6 +512,8 @@ def _redact_secret_assignments(value: str) -> str:
             classification.normalized == "authorization"
             and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
         ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
+            # A value that is not a credential may still hold later assignments, as the rest of a text does.
+            search_start = value_start
             continue
         spans.append((value_start, value_end))
 
@@ -742,10 +734,10 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
         redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_phrase_token, redacted)
     if has_token:
         redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
-    if has_password_option:
-        redacted = _COMMAND_PATTERN.sub(_redact_password_options, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted)
+    if has_password_option:
+        redacted = _COMMAND_PATTERN.sub(_redact_password_options, redacted)
     return _truncate_text(redacted, max_length, cut=cut)
 
 
