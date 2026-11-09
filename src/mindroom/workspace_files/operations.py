@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Literal
 
 from fastapi import HTTPException
 
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, open_regular_file_at
 from mindroom.path_safety import resolve_base_dir_path, resolve_tool_base_dir, write_resolved_file
 
@@ -371,10 +372,9 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Sa
     return Saved(_etag(payload), status.st_size, _mtime(status))
 
 
-def make_folder(root: Path, raw_path: str) -> None:
-    """Make a folder and the folders above it, answering 409 when something is already there."""
-    path = _relative(raw_path)
-    _refuse_git(path)
+@contextmanager
+def _new_entry(root: Path, path: PurePosixPath) -> Iterator[tuple[int, str]]:
+    """Open, under the workspace's change lock, the folder that gets ``path``'s last part, making the folders above."""
     parent, name = _leaf(root, path)
     _refuse_git(parent.relative / name)
     with (
@@ -382,6 +382,27 @@ def make_folder(root: Path, raw_path: str) -> None:
         _refusals(),
         open_directory_within_root(parent.base, parent.relative, create=True) as directory,
     ):
+        yield directory, name
+
+
+def create_file(root: Path, raw_path: str, payload: bytes) -> Saved:
+    """Publish a new file whole, never over anything there, link or not, even one that appeared since the checks."""
+    if len(payload) > _MAX_FILE_BYTES:
+        raise _too_large()
+    path = _relative(raw_path)
+    _refuse_git(path)
+    with _new_entry(root, path) as (directory, name):
+        with atomic_write_file_at(directory, name, file_mode=0o644, replace=False) as output:
+            output.write(payload)
+        status = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    return Saved(_etag(payload), status.st_size, _mtime(status))
+
+
+def make_folder(root: Path, raw_path: str) -> None:
+    """Make a folder and the folders above it, answering 409 when something is already there."""
+    path = _relative(raw_path)
+    _refuse_git(path)
+    with _new_entry(root, path) as (directory, name):
         os.mkdir(name, dir_fd=directory)
 
 

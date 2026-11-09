@@ -2104,7 +2104,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.workspace_files.operations"
-depends_on = ["mindroom.path_confinement"]
+depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.workspace_files.watch"

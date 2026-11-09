@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from mindroom.workspace_files import operations
 from mindroom.workspace_files.operations import (
     StaleEtagError,
+    create_file,
     delete,
     is_hidden,
     list_folder,
@@ -410,6 +411,82 @@ def test_a_save_without_an_etag_overwrites(root: Path) -> None:
     save_file(root, "notes.md", b"# Mine\n", None)
 
     assert (root / "notes.md").read_text() == "# Mine\n"
+
+
+def test_a_create_only_save_makes_a_new_file_and_the_folders_above(root: Path) -> None:
+    """A create gets a new file with the folders above it and mode 0o644, as a plain save makes one."""
+    umask = os.umask(0o077)
+    try:
+        saved = create_file(root, "docs/guide/new.md", b"# New\n")
+    finally:
+        os.umask(umask)
+
+    created = root / "docs" / "guide" / "new.md"
+    assert created.read_bytes() == b"# New\n"
+    assert created.stat().st_mode & 0o777 == 0o644
+    assert created.stat().st_nlink == 1
+    assert (saved.etag, saved.size, saved.mtime) == (_etag(b"# New\n"), 6, created.stat().st_mtime_ns // 1_000_000)
+    assert not list(root.rglob(".mindroom-*"))
+
+
+def _tree(root: Path) -> dict[str, bytes | str | None]:
+    """Every entry below ``root``: a link's target, a file's content, None for a folder."""
+    return {
+        str(entry.relative_to(root)): (
+            str(entry.readlink()) if entry.is_symlink() else entry.read_bytes() if entry.is_file() else None
+        )
+        for entry in root.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("path", ["notes.md", "src", "notes-link", "dangling-link"])
+def test_a_create_only_save_over_anything_already_there_answers_409_and_changes_nothing(root: Path, path: str) -> None:
+    """A file, a folder, a link to a file and a link leading nowhere all take the name, and nothing is written."""
+    (root / "notes-link").symlink_to("notes.md")
+    (root / "dangling-link").symlink_to("missing.md")
+    before = _tree(root)
+
+    with pytest.raises(HTTPException) as taken:
+        create_file(root, path, b"mine")
+
+    assert (taken.value.status_code, taken.value.detail) == (409, "Something is already there.")
+    assert _tree(root) == before
+
+
+def test_a_create_only_save_never_overwrites_what_appears_after_the_path_is_followed(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code the agent runs can make the file between the save's checks and its write: the save then answers 409."""
+    leaf = operations._leaf
+
+    def planting(*args: object) -> object:
+        found = leaf(*args)
+        (root / "race.md").write_text("theirs")
+        return found
+
+    monkeypatch.setattr(operations, "_leaf", planting)
+
+    assert _status(lambda: create_file(root, "race.md", b"mine")) == 409
+    assert (root / "race.md").read_text() == "theirs"
+
+
+def test_a_create_is_refused_where_a_save_is(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A create over the size limit, below ``.git``, at a credential, or climbing out answers as a save does."""
+    monkeypatch.setattr(operations, "_MAX_FILE_BYTES", 4)
+    (root / "elsewhere").mkdir()
+    (root / "src" / ".git").symlink_to("../elsewhere")
+
+    assert _status(lambda: create_file(root, "big.md", b"12345")) == 413
+    assert _status(lambda: create_file(root, "repo/.git/hooks/pre-commit", b"x")) == 403
+    # Named below `.git`, even where that is a link to a folder by another name.
+    assert _status(lambda: create_file(root, "src/.git/hooks/pre-commit", b"x")) == 403
+    assert _status(lambda: make_folder(root, "src/.git/hooks")) == 403
+    assert _status(lambda: create_file(root, ".env.new", b"x")) == 404
+    assert _status(lambda: create_file(root, "../planted.md", b"x")) == 400
+    assert not (root / "big.md").exists()
+    assert not (root / "repo" / ".git" / "hooks").exists()
+    assert not list((root / "elsewhere").iterdir())
 
 
 def test_make_folder_makes_the_folders_above_and_refuses_a_taken_name(root: Path) -> None:
