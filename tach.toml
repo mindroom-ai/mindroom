@@ -2087,8 +2087,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.agent_streams"
+depends_on = ["mindroom.plugin_http"]
+
+[[modules]]
 path = "mindroom.api.workspace_files"
 depends_on = [
+    "mindroom.api.agent_streams",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
     "mindroom.room_agent_access",
@@ -8335,6 +8340,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.agent_terminals"
 depends_on = [
+    "mindroom.api.agent_streams",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
     "mindroom.room_agent_access",

@@ -11,18 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from mindroom.api import agent_streams
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import (
     AgentWorkspace,
-    ClientUser,
     RoomReader,
     client_stream,
     require_room_reader,
@@ -34,14 +33,12 @@ from mindroom.workspace_files import operations
 from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["workspace-files"])
 
 _Room = Annotated[RoomReader, Depends(require_room_reader)]
-# As often as a terminal's stream rechecks its viewer, and each check as long.
-_RECHECK_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -74,11 +71,14 @@ class _Move(BaseModel):
     to: str
 
 
-async def _opened(room: RoomReader, agent_user_id: str) -> AgentWorkspace:
-    workspace = await room.agent(agent_user_id)
+def _with_files(workspace: AgentWorkspace) -> AgentWorkspace:
     if workspace.files == "none":
         raise HTTPException(403, "This agent's tools reach no files.")
     return workspace
+
+
+async def _opened(room: RoomReader, agent_user_id: str) -> AgentWorkspace:
+    return _with_files(await room.agent(agent_user_id))
 
 
 async def _writable(room: RoomReader, agent_user_id: str) -> AgentWorkspace:
@@ -178,30 +178,13 @@ async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str)
             workspace = await _opened(await stream_room_reader(websocket, user, room_id), agent_user_id)
             async with workspace_changes(workspace.root) as next_changes:
                 await websocket.send_json({"type": "ready"})
-                tasks = [
-                    asyncio.create_task(task)
-                    for task in (
-                        _send_changes(websocket, next_changes),
-                        _until_closed(websocket),
-                        _recheck(websocket, user, room_id, workspace),
-                    )
-                ]
-                try:
-                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        task.result()
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-        except HTTPException as error:
-            refused = error.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
-            # The client may be gone already.
-            with suppress(RuntimeError, WebSocketDisconnect):
-                await websocket.close(
-                    status.WS_1008_POLICY_VIOLATION if refused else status.WS_1013_TRY_AGAIN_LATER,
-                    error.detail,
+                await agent_streams.until_first(
+                    _send_changes(websocket, next_changes),
+                    _until_closed(websocket),
+                    _recheck(agent_streams.rechecked(websocket, user, room_id, agent_user_id), workspace),
                 )
+        except HTTPException as error:
+            await agent_streams.close_answering(websocket, error.status_code, error.detail)
         except WebSocketDisconnect:
             pass
 
@@ -211,7 +194,7 @@ async def _send_changes(websocket: WebSocket, next_changes: Callable[[], Awaitab
         paths = await next_changes()
         # A client that stopped reading blocks the send, and with it the follower's own overflow answer.
         try:
-            async with asyncio.timeout(_RECHECK_SECONDS):
+            async with asyncio.timeout(agent_streams.RECHECK_SECONDS):
                 await websocket.send_json({"type": "changed", "paths": paths})
         except TimeoutError:
             raise HTTPException(503, "The client stopped reading changes; connect again.") from None
@@ -223,13 +206,7 @@ async def _until_closed(websocket: WebSocket) -> None:
         pass
 
 
-async def _recheck(websocket: WebSocket, user: ClientUser, room_id: str, workspace: AgentWorkspace) -> None:
-    while True:
-        await asyncio.sleep(_RECHECK_SECONDS)
-        try:
-            async with asyncio.timeout(_RECHECK_SECONDS):
-                current = await _opened(await stream_room_reader(websocket, user, room_id), workspace.user_id)
-        except TimeoutError:
-            raise HTTPException(503, "Agent access is unavailable; try again.") from None
-        if current.root != workspace.root:
+async def _recheck(rechecked: AsyncIterator[AgentWorkspace], workspace: AgentWorkspace) -> None:
+    async for current in rechecked:
+        if _with_files(current).root != workspace.root:
             raise HTTPException(403, "The agent's workspace moved for you.")

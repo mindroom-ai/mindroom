@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def broken_scan(_root: Path) -> dict[str, object]:
+    """Stand in for a scan that breaks with something other than a file error."""
+    msg = "The scan broke."
+    raise RuntimeError(msg)
+
+
 async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) -> set[str]:
     """Collect every reported path until all of ``paths`` show, failing after five seconds."""
     seen: set[str] = set()
@@ -371,6 +377,48 @@ async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(mon
     with pytest.raises(HTTPException) as overflow:
         await follower.next()
     assert overflow.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_a_scanner_that_fails_ends_its_streams_and_any_that_join_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a scan breaks, every stream of the workspace is told to connect again instead of waiting for nothing."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    async with workspace_changes(root) as first:
+        monkeypatch.setattr(watch, "_scan", broken_scan)
+        with pytest.raises(HTTPException) as ended:
+            async with asyncio.timeout(5):
+                await first()
+        # The first stream still holds the broken scanner, so the next one joins it.
+        async with workspace_changes(root) as late:
+            with pytest.raises(HTTPException) as late_ended:
+                async with asyncio.timeout(5):
+                    await late()
+
+    assert (ended.value.status_code, late_ended.value.status_code) == (503, 503)
+    assert watch._watches == {}
+
+
+@pytest.mark.asyncio
+async def test_a_first_scan_that_fails_ends_the_stream_instead_of_keeping_it_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream waits for the first scan before it follows, so one that breaks must still let it go."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    monkeypatch.setattr(watch, "_scan", broken_scan)
+    with pytest.raises(HTTPException) as ended:
+        async with asyncio.timeout(5), workspace_changes(root) as next_changes:
+            await next_changes()
+
+    assert ended.value.status_code == 503
+    assert watch._watches == {}
 
 
 def test_a_scan_leaves_out_folders_past_the_depth_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
