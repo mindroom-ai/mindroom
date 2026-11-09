@@ -48,6 +48,7 @@ nav = [
     { "Interactive Questions" = "interactive.md" },
     { "Interactive Canvases" = "canvases.md" },
     { "Thread Exports" = "thread-exports.md" },
+    { "Workspace Files" = "workspace-files.md" },
     { "Bug Reports" = "bug-reports.md" },
     { "Custom Emoji" = "custom-emoji.md" },
     { "Usage Tracking" = "usage.md" },

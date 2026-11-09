@@ -36,7 +36,7 @@ from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
     from pathlib import Path
 
     from fastapi.requests import HTTPConnection
@@ -57,24 +57,6 @@ _STATIC_RUNNER_AGENT_STORAGE_ENV = "MINDROOM_STATIC_RUNNER_AGENT_STORAGE"
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
 _ACCESS_UNAVAILABLE = "Agent access is unavailable; try again."
-# The functions that write any content to any path of the workspace or run code there, by toolkit; delete alone
-# edits nothing. Any function of another toolkit that runs code counts.
-_WRITERS = {
-    "file": frozenset({"save_file", "replace_file_chunk"}),
-    "coding": frozenset({"write_file", "edit_file"}),
-    "python": frozenset(
-        {
-            "run_python_code",
-            "save_to_file_and_run",
-            "run_python_file_return_variable",
-            "pip_install_package",
-            "uv_pip_install_package",
-        },
-    ),
-    "script": frozenset({"start_script"}),
-    "claude_agent": frozenset({"claude_start_session", "claude_send"}),
-    "docker": frozenset({"build_image", "run_container", "start_container", "exec_in_container"}),
-}
 
 
 def _may_converse(
@@ -250,7 +232,8 @@ class AgentWorkspace:
     """The workspace folder, which may not exist before the agent's first turn for this caller."""
     files: Literal["none", "read", "write"]
     """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code
-    and power to post messages in the room."""
+    where it works in the workspace, not a ``static_runner`` that sees only its own storage, and power to post
+    messages in the room."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
     the workspace, as a dedicated worker does, and the caller may post messages in the room; never more than the
@@ -277,25 +260,35 @@ def _toolkit_host(
     return "scratch_worker"
 
 
-def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str] | None:
-    """Return the toolkit's functions its settings leave on: Agno's ``all`` or ``enable_<function>``, then filters.
+def _offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
 
-    None when the toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them.
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code.
     """
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
     include, exclude = (
         normalize_string_array_override(values.get(name), preserve_empty_list=True)
         for name in ("include_tools", "exclude_tools")
     )
+
+    def offered(names: Iterable[str]) -> frozenset[str]:
+        return frozenset(
+            function
+            for function in names
+            if (values.get("all") or values.get(f"enable_{function}", True))
+            and tool_name_allowed(function, include=include, exclude=exclude)
+        )
+
     available = metadata.function_names or include
-    if available is None:
-        return None
-    return frozenset(
-        function
-        for function in available
-        if (values.get("all") or values.get(f"enable_{function}", True))
-        and tool_name_allowed(function, include=include, exclude=exclude)
-    )
+    functions = None if available is None else offered(available)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
+    return functions, bool(offered(metadata.workspace_writers))
 
 
 def _workspace(
@@ -319,11 +312,11 @@ def _workspace(
     )
     tools = config_plugins(config, runtime_paths).tools
     agent_tools = resolve_agent_tools(config, name, tools)
-    # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers; by name, whether
-    # one of them writes files or runs code.
+    # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers, and its
+    # declarations whether one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
     for entry in agent_tools.candidates(matrix_room_tools=True):
-        # Until toolkits declare what changes files, this one is skipped by name: it acts only through the shell.
+        # It acts only through the shell, whose own entry counts what that shell may change.
         if entry.name == "terminal":
             continue
         metadata = tools.get(entry.name)
@@ -341,13 +334,11 @@ def _workspace(
             tool_config_overrides=entry.tool_config_overrides,
         )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions = _offered_functions(metadata, settings.values)
+        functions, writes = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        writers = _WRITERS.get(entry.name)
-        path_toolkits[entry.name] = (
-            metadata.executes_code if writers is None else not writers.isdisjoint(functions or ())
-        )
+        # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.
+        path_toolkits[entry.name] = writes and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
     # sees the workspace, and get it only as far as the agent's config allows.
     shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None

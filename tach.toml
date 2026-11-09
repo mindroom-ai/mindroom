@@ -2076,6 +2076,7 @@ depends_on = [
     "mindroom.api.usage_export",
     "mindroom.api.validation_errors",
     "mindroom.api.workers",
+    "mindroom.api.workspace_files",
     "mindroom.call_transcripts",
     "mindroom.constants",
     "mindroom.embeddings.embedder_health",
@@ -2084,6 +2085,25 @@ depends_on = [
     "mindroom.api.config_schema",
     "mindroom.knowledge_graph.store",
 ]
+
+[[modules]]
+path = "mindroom.api.workspace_files"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.plugin_http",
+    "mindroom.room_agent_access",
+    "mindroom.runtime_resolution",
+    "mindroom.workspace_files.operations",
+    "mindroom.workspace_files.watch",
+]
+
+[[modules]]
+path = "mindroom.workspace_files.operations"
+depends_on = ["mindroom.path_confinement"]
+
+[[modules]]
+path = "mindroom.workspace_files.watch"
+depends_on = ["mindroom.path_confinement", "mindroom.workspace_files.operations"]
 
 [[modules]]
 path = "mindroom.api.credentials"
