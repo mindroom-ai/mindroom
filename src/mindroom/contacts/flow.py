@@ -47,7 +47,13 @@ from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import create_room, get_room_members, invite_to_room, kick_from_room
+from mindroom.matrix.client_room_admin import (
+    create_room,
+    get_room_members,
+    invite_to_room,
+    kick_from_room,
+    leave_room,
+)
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
@@ -666,6 +672,19 @@ async def leave_contact_room(actor: ContactActor, record: ContactRecord, room_id
             logger.exception("contact_room_leave_failed", contact_id=record.id, agent_name=party.id, room_id=room_id)
 
 
+async def reject_contact_invite(actor: ContactActor, agent_name: str, room_id: str) -> None:
+    """Reject the invite into another deployment's contact room, which the other side reads as a decline.
+
+    The agent is only invited there, and its membership commands read an invite as already left, so they would send
+    nothing; leaving the room on the homeserver directly rejects the invite.
+    """
+    bot = actor.agent_bot(agent_name)
+    if bot is None or bot.client is None:
+        logger.warning("contact_invite_reject_skipped", agent_name=agent_name, room_id=room_id)
+        return
+    await leave_room(bot.client, room_id)
+
+
 async def announce_acceptance(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
     """Start the requesting agent's turn in the thread it asked from, as its owner, so it continues its task.
 
@@ -898,8 +917,7 @@ async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord
             "they must remove it before you can ask again.",
         )
     if record.requester.kind == "remote_agent" and record.room_id is not None:
-        # Rejecting the invite is the decline the other side sees.
-        await leave_contact_room(actor, record, record.room_id)
+        await reject_contact_invite(actor, record.target.id, record.room_id)
     await _answer_request_thread(actor, record, personal, "Declined on the Connections page.")
     return record
 
@@ -966,7 +984,11 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
             elif record.target.kind == "remote_agent":
                 # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
                 await kick_from_room(client, record.room_id, record.target.id)
-        await leave_contact_room(actor, record, record.room_id)
+        if was_pending and record.requester.kind == "remote_agent":
+            # The agent was only invited to the room of the request it never accepted.
+            await reject_contact_invite(actor, record.target.id, record.room_id)
+        else:
+            await leave_contact_room(actor, record, record.room_id)
     return record
 
 

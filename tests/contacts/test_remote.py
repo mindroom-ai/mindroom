@@ -309,10 +309,15 @@ async def _invited(
     )
 
 
-def _rejected(runtime: _Runtime, room_id: str = REMOTE_ROOM) -> bool:
-    return (room_id, "leave") in [
-        call.args for call in runtime.bots["mind_bob"].change_local_membership.await_args_list
-    ]
+def _rejected(runtime: _Runtime, room_id: str = REMOTE_ROOM, agent_name: str = "mind_bob") -> bool:
+    """Return whether the agent rejected its invite on the homeserver.
+
+    The bot's membership commands read an invite as already left and would send nothing, so only a direct leave
+    rejects it.
+    """
+    leaves = [call.args for call in runtime.clients[agent_name].room_leave.await_args_list]
+    commands = [call.args for call in runtime.bots[agent_name].change_local_membership.await_args_list]
+    return leaves == [(room_id,)] and (room_id, "leave") not in commands
 
 
 def test_only_a_matching_sender_from_elsewhere_invites_with_a_request(tmp_path: Path) -> None:
@@ -414,9 +419,7 @@ async def test_a_request_nobody_could_answer_is_rejected(tmp_path: Path) -> None
             reason="Find a slot",
         )
     assert _stored(paths) == []
-    assert (REMOTE_ROOM, "leave") in [
-        call.args for call in runtime.bots["work_bob"].change_local_membership.await_args_list
-    ]
+    assert _rejected(runtime, agent_name="work_bob")
 
 
 @pytest.mark.asyncio
@@ -487,7 +490,7 @@ async def test_declining_another_deployments_request_rejects_its_invite(tmp_path
     with _delivered() as send:
         declined = await flow.decline_contact(_bob(config, paths, runtime), "in")
     assert declined.status == "declined"
-    runtime.bots["mind_bob"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
+    assert _rejected(runtime)
     send.assert_not_awaited()
     for bot in runtime.bots.values():
         bot.hook_context.send_message.assert_not_awaited()
@@ -514,7 +517,7 @@ async def test_removing_a_pending_remote_request_only_rejects_its_invite(tmp_pat
     with _matrix() as matrix:
         await flow.remove_contact(_bob(config, paths, runtime), "in")
     matrix["kick"].assert_not_awaited()
-    runtime.bots["mind_bob"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
+    assert _rejected(runtime)
 
 
 @pytest.mark.asyncio

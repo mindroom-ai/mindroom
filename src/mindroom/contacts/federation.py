@@ -20,6 +20,7 @@ from mindroom.contacts.flow import (
     leave_contact_room,
     post_in_thread,
     post_request_notice,
+    reject_contact_invite,
     withdraw_unjoined_owner_invites,
 )
 from mindroom.contacts.parties import agent_party, personal_room_agent, remote_party, remote_target
@@ -81,9 +82,7 @@ def _agent(
 async def _reject(actor: ContactActor, agent_name: str, room_id: str, inviter: str, why: str) -> None:
     """Reject the invite, which the other side reads as a decline."""
     logger.info("contact_request_rejected", agent_name=agent_name, room_id=room_id, inviter=inviter, reason=why)
-    bot = actor.agent_bot(agent_name)
-    if bot is not None:
-        await bot.change_local_membership(room_id, "leave")
+    await reject_contact_invite(actor, agent_name, room_id)
 
 
 def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str) -> tuple[ContactRecord, bool] | None:
