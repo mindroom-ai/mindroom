@@ -12,6 +12,10 @@ from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 
 
+async def unused(*_args: object, **_kwargs: object) -> None:
+    """Stand in for a browser entrypoint or closer a test never calls."""
+
+
 class FakeDisplay:
     """Display adapter without external processes."""
 
@@ -425,3 +429,21 @@ async def test_runtime_retries_failed_browser_cleanup_before_restart() -> None:
         await runtime.ensure_started()
         await runtime.close()
     assert not resources
+
+
+@pytest.mark.asyncio
+async def test_agent_page_is_the_browser_s_page_only_while_the_computer_is_ready() -> None:
+    """The bridge reaches the agent's page only while the Computer runs that browser on a live display."""
+    display = FakeDisplay()
+    runtime = WorkerComputerRuntime(display)
+    page = object()
+
+    assert runtime.agent_page() is None
+    await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
+    assert runtime.agent_page() is page
+    display.alive = False
+    assert runtime.agent_page() is None
+    await runtime.stop()
+    await runtime.run_browser_call("browser_mcp", lambda _display: BrowserSession(unused, unused), [], {})
+    assert runtime.agent_page() is None
+    await runtime.close()
