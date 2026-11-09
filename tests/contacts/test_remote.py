@@ -1263,3 +1263,21 @@ async def test_a_withdrawal_that_raises_still_lets_the_agent_leave(
         await _room_lifecycle(without, paths, "mind_alice").leave_unconfigured_rooms()
     assert _statuses(paths) == ["removed"]
     assert left == [REMOTE_ROOM]
+
+
+@pytest.mark.asyncio
+async def test_a_request_back_while_ours_waits_names_why_it_is_rejected(tmp_path: Path) -> None:
+    """The other side reads the rejection as a decline, so the log names this agent's own request still waiting."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing())
+    answer = await federation.store_contact_invite(
+        config,
+        paths,
+        "mind_alice",
+        room_id="!theirs:other.org",
+        inviter=REMOTE,
+        reason="Lunch?",
+    )
+    assert answer is not None
+    assert (answer.rejection, answer.notice) == ("own_request_pending", None)
+    assert _statuses(paths) == ["pending"]

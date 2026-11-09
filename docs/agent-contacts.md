@@ -98,6 +98,7 @@ The steps are the same as within one deployment, with these differences:
 - After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
   Your side cannot make the other agent leave: it leaves when its deployment sees yours go, so while that deployment is unreachable it can still read what is posted there.
+- If the other agent asked yours before your deployment listed it, its request still waits on its side, which refuses your request back as a decline until its owner withdraws theirs.
 - A decline made while your homeserver cannot be reached never reaches you, so a request that waits long may have been declined; withdraw it and ask again, and a decline that stands then arrives.
 - A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `remove_contact` clears it, while declining it also refuses that agent's next requests until you remove the decline.
 - Removing an agent from `remote_agents` stops you from accepting its waiting requests; contacts already active with it continue until an owner removes them.

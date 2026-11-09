@@ -87,29 +87,31 @@ async def _reject(actor: ContactActor, agent_name: str, room_id: str, inviter: s
     await reject_contact_invite(actor, agent_name, room_id)
 
 
-def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str) -> tuple[ContactRecord, bool] | None:
+def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str) -> tuple[ContactRecord, bool] | str:
     """Store a new request and return it with True, or return the one this room already holds with False.
 
-    Return None, storing no new request, for a room whose request was declined or removed, for a pair with an active contact
-    or this agent's own pending request in another room, or one this side declined, which blocks the pair until the
-    owner removes the declined contact. A decline of this agent's own request by the other side blocks only that side,
+    Return why the invite is rejected instead, storing no new request, for a room whose request was declined or
+    removed, for a pair with an active contact or this agent's own pending request in another room, or one this side
+    declined, which blocks the pair until the owner removes the declined contact. A decline of this agent's own request by the other side blocks only that side,
     and the other side keeps one pending request per pair, so the other agent asking now clears that decline and
     replaces its own earlier request, whose withdrawal this side does not see.
     """
     for stored in book.contacts:
         if stored.room_id == record.room_id and stored.agent_side(agent_name) is not None:
             # A room whose request was answered or withdrawn is no new request.
-            return (stored.model_copy(deep=True), False) if stored.status in {"pending", "active"} else None
+            return (stored.model_copy(deep=True), False) if stored.status in {"pending", "active"} else "settled_room"
     for stored in book.contacts:
         ours_declined = stored.requester.id == agent_name and stored.target.id == record.requester.id
         theirs = stored.requester.id == record.requester.id and stored.target.id == agent_name
         if (stored.status == "declined" and ours_declined) or (stored.status == "pending" and theirs):
             stored.status = "removed"
     try:
-        if existing_contact(book, record.requester, record.target, rules=None, tools=None) is not None:
-            return None
+        found = existing_contact(book, record.requester, record.target, rules=None, tools=None)
     except ValueError:
-        return None
+        return "declined_here"
+    if found is not None:
+        # This agent's own request still waits on the other side, which then reads this rejection as a decline.
+        return "own_request_pending" if found.requester.id == agent_name else "pair_has_a_contact"
     book.contacts.append(record)
     return record.model_copy(deep=True), True
 
@@ -146,8 +148,13 @@ async def store_contact_invite(
     if target is None:
         return None
     text = reason.strip() if isinstance(reason, str) else ""
-    # The answerer's problem says which of its owner's agents is missing or lacks contacts, for an operator to fix.
-    rejection = "no_reason" if not text else answerer_problem(config, target.local_owner)
+    rejection = (
+        "no_reason"
+        if not text
+        else "owner_cannot_answer"
+        if answerer_problem(config, target.local_owner) is not None
+        else None
+    )
     if rejection is not None:
         return _InviteAnswer(room_id, inviter, rejection, None)
     record = ContactRecord(
@@ -165,8 +172,8 @@ async def store_contact_invite(
     )
     store = partial(_store_request, record=record, agent_name=agent_name)
     stored = await run_blocking_until_complete(update_contacts, runtime_paths, store)
-    if stored is None:
-        return _InviteAnswer(room_id, inviter, "pair_has_a_contact", None)
+    if isinstance(stored, str):
+        return _InviteAnswer(room_id, inviter, stored, None)
     record, new = stored
     unposted = new or (record.status == "pending" and record.notice_event_id is None)
     return _InviteAnswer(room_id, inviter, None, record if unposted else None)
