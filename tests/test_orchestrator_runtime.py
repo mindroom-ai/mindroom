@@ -1708,13 +1708,13 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
             try:
-                await asyncio.wait_for(api_shutdown_started.wait(), timeout=1)
+                await asyncio.wait_for(api_shutdown_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
                 await asyncio.sleep(0)
                 await asyncio.sleep(0)
                 assert not main_task.done()
                 assert not api_cancelled.is_set()
                 api_allow_finish.set()
-                await asyncio.wait_for(main_task, timeout=1)
+                await asyncio.wait_for(main_task, timeout=SETTLE_TIMEOUT_SECONDS)
             finally:
                 api_allow_finish.set()
                 if not main_task.done():
@@ -1839,7 +1839,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         try:
-            await asyncio.wait_for(core_stop_started.wait(), timeout=0.1)
+            await asyncio.wait_for(core_stop_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             core_stop_started.set()
             await finishing
@@ -2303,7 +2303,7 @@ class TestAgentBot(AgentBotTestBase):
             assert runtime_paths is not None
             events.append("setup_started")
             setup_started.set()
-            assert release_setup.wait(2.0)
+            assert release_setup.wait(SETTLE_TIMEOUT_SECONDS)
             events.append("setup_finished")
 
         with (
@@ -2321,7 +2321,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             main_task = asyncio.create_task(main(log_level="INFO", runtime_paths=runtime_paths, api=False))
             try:
-                assert await asyncio.to_thread(setup_started.wait, 2.0)
+                assert await asyncio.to_thread(setup_started.wait, SETTLE_TIMEOUT_SECONDS)
                 main_task.cancel()
                 await asyncio.sleep(0)
                 assert not main_task.done()

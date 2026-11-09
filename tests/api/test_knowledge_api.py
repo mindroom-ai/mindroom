@@ -42,6 +42,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.api.conftest import publish_api_config
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.knowledge_test_support import seed_collection
 from tests.runtime_fakes import bind_test_embedded_runtime
 
@@ -906,7 +907,7 @@ async def test_git_status_probe_does_not_block_event_loop(
             ),
         ),
     )
-    await asyncio.wait_for(probe_started.wait(), timeout=0.1)
+    await asyncio.wait_for(probe_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
 
     assert status_task.done() is False
