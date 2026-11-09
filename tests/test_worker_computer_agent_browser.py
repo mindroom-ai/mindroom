@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 from starlette.websockets import WebSocketDisconnect
 
@@ -367,6 +368,35 @@ async def test_a_pending_navigation_holds_neither_other_commands_nor_a_leaving_s
         await agent.browse()
     finally:
         stalled.close()
+
+
+class _ClosingPage:
+    """A page that closes as the bridge attaches to it, while the agent's browser still names it."""
+
+    def __init__(self) -> None:
+        self.context = self
+        self.attempts = 0
+        self.retried = asyncio.Event()
+
+    async def new_cdp_session(self, _page: object) -> None:
+        self.attempts += 1
+        if self.attempts >= 3:
+            self.retried.set()
+        msg = "Target page, context or browser has been closed"
+        raise PlaywrightError(msg)
+
+
+@pytest.mark.asyncio
+async def test_a_page_the_bridge_cannot_attach_to_reads_as_no_page_once() -> None:
+    """The bridge tries again at each poll, and the service hears that there is no page once."""
+    closing = _ClosingPage()
+    agent = _Agent(cast("Page", closing))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": False}
+        await asyncio.wait_for(closing.retried.wait(), _TIMEOUT)
+        assert [message for message in service.messages if message.get("method") == "MindRoom.page"] == []
+    await agent.runtime.close()
 
 
 def _runner(tmp_path: Path, runtime: WorkerComputerRuntime | None) -> FastAPI:

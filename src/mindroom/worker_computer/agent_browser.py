@@ -223,6 +223,7 @@ class AgentBrowserBridge:
         self._tasks: set[asyncio.Task[None]] = set()
         self._control = asyncio.Lock()
         self._lease: asyncio.Event | None = None
+        self._showing: bool | None = None
 
     def _post(self, message: dict[str, Any]) -> None:
         self._outbox.put_nowait(json.dumps(message))
@@ -242,8 +243,12 @@ class AgentBrowserBridge:
         if cdp is not None:
             for event in _EVENTS:
                 cdp.on(event, partial(self._forward, cdp, event))
+        elif self._showing is False:
+            # A page that cannot be attached to is tried again at each poll, which the service need not hear about.
+            return
+        self._showing = cdp is not None
         # The service starts what it needs, such as a screencast, again on the new page's session.
-        self._post({"method": "MindRoom.page", "params": {"page": cdp is not None}})
+        self._post({"method": "MindRoom.page", "params": {"page": self._showing}})
 
     def _forward(self, cdp: CDPSession, method: str, params: dict[str, Any]) -> None:
         # The page this bridge is leaving can still deliver an event while its session detaches.
