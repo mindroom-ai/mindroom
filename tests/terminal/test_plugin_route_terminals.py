@@ -49,8 +49,9 @@ def _plugin_router() -> APIRouter:
     async def has_terminals(
         room: Annotated[RoomReader, Depends(require_room_reader)],
         agent_user_id: str,
+        create: bool = False,
     ) -> dict[str, bool]:
-        return {"terminals": await room.terminals(await room.agent(agent_user_id)) is not None}
+        return {"terminals": await room.terminals(await room.agent(agent_user_id), create=create) is not None}
 
     return router
 
@@ -116,3 +117,18 @@ async def test_an_agent_without_terminals_for_its_caller_has_none(
     async with _served(room) as (client, base):
         url = f"{base}/agents/{room.ids['coder']}/has-terminals"
         assert await _answer(client.get(url, headers=_auth(room, ALICE))) == (200, {"terminals": False})
+
+
+async def test_terminals_make_the_caller_s_workspace_only_when_asked(tmp_path: Path, runner: str) -> None:
+    """Alice's own workspace of a private agent appears only once a route asks for her terminals with ``create``."""
+    agents = _agents(ALICE)
+    agents["coder"] = agents["coder"].model_copy(update={"private": AgentPrivateConfig(per="user")})
+    room = _Room(Config(agents=agents), _paths(tmp_path, runner), ("coder",))
+    room.app.include_router(_plugin_router())
+    (workspace,) = await room.agents(ALICE)
+    async with _served(room) as (client, base):
+        url = f"{base}/agents/{room.ids['coder']}/has-terminals"
+        assert await _answer(client.get(url, headers=_auth(room, ALICE))) == (200, {"terminals": True})
+        assert not workspace.root.exists()
+        assert await _answer(client.get(f"{url}?create=true", headers=_auth(room, ALICE))) == (200, {"terminals": True})
+        assert workspace.root.is_dir()
