@@ -54,8 +54,9 @@ _READ_ONLY = (
 )
 _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
-    "or keys typed while a command ran may be queued); nothing was typed. Send <ctrl-c> with terminal_send, which an "
-    "idle prompt needs too after such keys, then run it again."
+    "or keys typed while a command ran may be queued); nothing was typed. To keep a running command, run this in "
+    "another terminal from terminal_open; otherwise send <ctrl-c> with terminal_send, which an idle prompt needs too "
+    "after such keys, then run it again."
 )
 # Keys that edit the line, complete, interrupt or end input, which a command line never holds.
 _KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
