@@ -2679,7 +2679,7 @@ def test_runtime_limit_is_measured_against_the_current_time(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["reconcile", "status"])
-async def test_reconcile_enforces_runtime_limit_through_revocation_path(tmp_path: Path, entry: str) -> None:
+async def test_an_expired_run_is_revoked_before_its_worker_is_signalled(tmp_path: Path, entry: str) -> None:
     """An expired run is revoked and broker-cancelled before its worker receives a signal, also when its owner asks."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)

@@ -1188,8 +1188,7 @@ def _validate_cancel_receipt(receipt: WorkerScriptCancel) -> None:
 
 
 def _runtime_expired(run: ScriptRunRecord, *, now: datetime) -> bool:
-    started_at = run.started_at or run.created_at
-    started = datetime.fromisoformat(started_at)
+    started = datetime.fromisoformat(run.started_at or run.created_at)
     return (now - started).total_seconds() >= run.max_runtime_seconds
 
 

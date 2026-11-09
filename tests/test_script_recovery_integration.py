@@ -46,19 +46,9 @@ if TYPE_CHECKING:
 _RUN_ID = f"script-{'a' * 32}"
 _GATEWAY_URL = "http://primary.test/api/script-gateway"
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-# Far beyond the test's own timeout, so the supervisor never ends the script on wall time and only the test's clock
-# reaches the run's deadline.
+# Far beyond the test's own timeout, so neither the supervisor nor a primary reaches the run's deadline on wall time;
+# the test moves the reconstructed primary's clock there instead.
 _MAX_RUNTIME_SECONDS = 3600
-
-
-@dataclass
-class _Clock:
-    """The time the primaries measure the run's maximum runtime against, which only the test advances."""
-
-    now: datetime
-
-    def __call__(self) -> datetime:
-        return self.now
 
 
 @dataclass
@@ -180,7 +170,6 @@ def _lifecycle(
     backend: _RecoveringWorkerBackend,
     worker_client: _SupervisorWorkerClient,
     config: Config,
-    clock: _Clock,
 ) -> ScriptRuntimeLifecycle:
     resolver = _AuthorizedResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)  # type: ignore[arg-type]
@@ -190,7 +179,6 @@ def _lifecycle(
         worker_client=worker_client,  # type: ignore[arg-type]
         worker_backend=backend,
         gateway_url=_GATEWAY_URL,
-        clock=clock,
     )
     lifecycle = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -271,7 +259,6 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
     running = store.transition_run(_RUN_ID, state=ScriptRunState.RUNNING, worker_id=worker.worker_id)
     assert running.started_at is not None
     started = datetime.fromisoformat(running.started_at)
-    clock = _Clock(started)
 
     supervisor = _ShellSupervisorManager()
     first_lifecycle: ScriptRuntimeLifecycle | None = None
@@ -317,7 +304,6 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             backend=backend,
             worker_client=worker_client,
             config=config,
-            clock=clock,
         )
         await first_lifecycle.start()
         initially_adopted = store.get_run(_RUN_ID)
@@ -345,7 +331,6 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             backend=backend,
             worker_client=worker_client,
             config=config,
-            clock=clock,
         )
         await second_lifecycle.start()
 
@@ -378,11 +363,12 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert response.status_code == 200
         assert response.json()["state"] == ScriptCallState.INDETERMINATE
 
-        clock.now = started + timedelta(seconds=_MAX_RUNTIME_SECONDS - 1)
-        before_deadline = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
+        manager = second_lifecycle.manager
+        manager.clock = lambda: started + timedelta(seconds=_MAX_RUNTIME_SECONDS - 1)
+        before_deadline = await manager.reconcile_durable(run_id=_RUN_ID)
         assert before_deadline.state is ScriptRunState.RUNNING
-        clock.now = started + timedelta(seconds=_MAX_RUNTIME_SECONDS)
-        terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
+        manager.clock = lambda: started + timedelta(seconds=_MAX_RUNTIME_SECONDS)
+        terminal = await manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED
         assert terminal.cancellation_reason == MAX_RUNTIME_EXCEEDED
         # The script ignores SIGTERM, so it ends only by the kill that follows.
