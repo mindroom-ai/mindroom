@@ -168,12 +168,12 @@ async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     room.app.include_router(workspace_files.router)
     coder = f"agents/{room.ids['coder']}/terminals"
-
-    async def workspace_list_terminal() -> str:
-        _, listed = await _answer(client.get(f"{base}/workspaces", headers=_auth(room, ALICE)))
-        return next(w["terminal"] for w in listed["workspaces"] if w["agent_user_id"] == room.ids["coder"])
-
     async with _served(room) as (client, base):
+
+        async def workspace_list_terminal() -> str:
+            _, listed = await _answer(client.get(f"{base}/workspaces", headers=_auth(room, ALICE)))
+            return next(w["terminal"] for w in listed["workspaces"] if w["agent_user_id"] == room.ids["coder"])
+
         assert await workspace_list_terminal() == "type"
         opened_status, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
         assert opened_status == 201
