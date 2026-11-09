@@ -6,7 +6,7 @@ import hashlib
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, get_args
 from urllib.parse import quote
@@ -131,17 +131,49 @@ class ResolvedWorkerTarget:
 
 
 _STORED_TARGET_VERSION = 1
-_STORED_TARGET_KEYS = frozenset({"version", *(field.name for field in fields(ResolvedWorkerTarget))})
-_STORED_IDENTITY_KEYS = frozenset(field.name for field in fields(ToolExecutionIdentity))
+# The stored format of this version, spelled out so that a new field of either dataclass fails the round trip tests
+# instead of changing what plugins have stored.
+_STORED_TARGET_KEYS = frozenset(
+    {
+        "version",
+        "worker_scope",
+        "routing_agent_name",
+        "execution_identity",
+        "tenant_id",
+        "account_id",
+        "worker_key",
+        "private_agent_names",
+    },
+)
+_STORED_IDENTITY_KEYS = frozenset(
+    {
+        "channel",
+        "agent_name",
+        "requester_id",
+        "room_id",
+        "thread_id",
+        "resolved_thread_id",
+        "session_id",
+        "tenant_id",
+        "account_id",
+        "transport_agent_name",
+    },
+)
 _STORED_TARGET_STRINGS = ("routing_agent_name", "tenant_id", "account_id", "worker_key")
 
 
 def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
     """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
+    identity = target.execution_identity
     names = target.private_agent_names
     return {
         "version": _STORED_TARGET_VERSION,
-        **asdict(target),
+        "worker_scope": target.worker_scope,
+        "routing_agent_name": target.routing_agent_name,
+        "execution_identity": serialize_tool_execution_identity(identity) if identity is not None else None,
+        "tenant_id": target.tenant_id,
+        "account_id": target.account_id,
+        "worker_key": target.worker_key,
         "private_agent_names": sorted(names) if names is not None else None,
     }
 
@@ -156,7 +188,8 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
         msg = f"A stored worker target has exactly the keys {sorted(_STORED_TARGET_KEYS)}."
         raise ValueError(msg)
     stored = cast("dict[str, object]", data)
-    if stored["version"] != _STORED_TARGET_VERSION:
+    # ``type`` rather than ``==``, which takes ``true`` and ``1.0`` for ``1``.
+    if type(stored["version"]) is not int or stored["version"] != _STORED_TARGET_VERSION:
         msg = f"Unknown stored worker target version: {stored['version']!r}."
         raise ValueError(msg)
     scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]

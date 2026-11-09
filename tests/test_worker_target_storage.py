@@ -82,6 +82,8 @@ def _identity(stored: dict[str, Any], **changes: object) -> dict[str, Any]:
 _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "not an object": lambda _: [],
     "a future version": lambda stored: {**stored, "version": 2},
+    "true for the version": lambda stored: {**stored, "version": True},
+    "a float for the version": lambda stored: {**stored, "version": 1.0},
     "no version": lambda stored: {key: value for key, value in stored.items() if key != "version"},
     "an unknown field": lambda stored: {**stored, "extra": None},
     "a missing field": lambda stored: {key: value for key, value in stored.items() if key != "worker_key"},

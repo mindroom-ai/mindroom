@@ -1078,8 +1078,13 @@ async def test_a_stored_target_reaches_the_same_worker_after_the_primary_restart
         workers = _Workers(runner.port)
         workers.running = True
         restarted = _primary(tmp_path, runner, monkeypatch, workers)
+        app = FastAPI()
+        ensure_app_state(app).api_state = config_lifecycle.ApiState(
+            threading.Lock(),
+            config_lifecycle.ApiSnapshot(1, restarted.runtime_paths, runtime_config=restarted.config),
+        )
         target = load_worker_target(json.loads((restarted.state_root / "target.json").read_text()))
-        relay = await open_worker_relay(restarted.runtime_paths, target, restarted.plugin_name)
+        relay = await worker_relay(Request({"type": "http", "app": app, PLUGIN_NAME_SCOPE_KEY: "demo"}), target)
 
         assert await _get(relay, "/", service="hello") == (200, "hello", False)
         assert workers.touches == 1
