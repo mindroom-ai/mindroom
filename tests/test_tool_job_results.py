@@ -121,7 +121,7 @@ def test_payload_refuses_a_value_inside_itself_and_says_so(kind: str) -> None:
     else:
         metadata: dict[str, object] = {}
         image = Image(content=b"chart", metadata=metadata)
-        metadata["self"] = image if kind == "medium" else metadata
+        metadata["self"] = image if kind == "medium" else [metadata]
         cycle = ToolValue(content="chart", images=(image,))
 
     with pytest.raises(ValueError, match=r"^it refers to itself$"):
