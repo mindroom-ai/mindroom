@@ -38,7 +38,6 @@ FLOOR = f"frame-ancestors 'self' {CHAT}"
 
 ORIGIN = """
 import asyncio
-import time
 
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import HTMLResponse
@@ -276,10 +275,6 @@ def test_an_origin_route_checks_membership_for_the_user_its_own_gate_names(tmp_p
         ("truthy.demo.localhost", 404),
         ("boom.demo.localhost", 404),
         ("slow.demo.localhost", 404),
-        ("yes.sync.localhost", 200),
-        ("no.sync.localhost", 404),
-        ("slow.sync.localhost", 404),
-        ("boom.sync.localhost", 404),
         ("yes.plain.localhost", 404),  # an origin module without serves()
         ("yes.other.localhost", 404),  # no origin module
         ("yes.missing.localhost", 404),
@@ -292,16 +287,11 @@ def test_ask_answers_200_only_for_a_host_its_plugins_serves_says_it_serves(
     domain: str,
     status: int,
 ) -> None:
-    """Caddy's on-demand TLS check gets 200 only while ``serves`` returns True, sync or async, within the deadline."""
+    """Caddy's on-demand TLS check gets 200 only while ``serves`` returns True within the deadline."""
     _write(tmp_path, "demo", origin=ORIGIN)
-    _write(
-        tmp_path,
-        "sync",
-        origin=ORIGIN.replace("async def serves", "def serves").replace("await asyncio.sleep(60)", "time.sleep(1)"),
-    )
     _write(tmp_path, "plain", origin=ORIGIN.split("async def serves", maxsplit=1)[0])
     _write(tmp_path, "other", routes=ROUTES)
-    client = _client(_api_app(tmp_path, "demo", "sync", "plain", "other"), "127.0.0.1:9100")
+    client = _client(_api_app(tmp_path, "demo", "plain", "other"), "127.0.0.1:9100")
 
     with patch("mindroom.api.plugin_origins._SERVES_TIMEOUT_SECONDS", 0.2), capture_logs() as logs:
         answer = client.get("/ask", params={"domain": domain})
@@ -382,7 +372,11 @@ def test_a_plugin_whose_name_is_no_dns_label_cannot_have_an_origin_module(tmp_pa
     ("source", "error"),
     [
         ("x = 1\n", "Plugin origin module must define router: APIRouter"),
-        ("from fastapi import APIRouter\nrouter = APIRouter()\nserves = 1\n", "serves must be callable"),
+        ("from fastapi import APIRouter\nrouter = APIRouter()\nserves = 1\n", "serves must be async def serves"),
+        (
+            "from fastapi import APIRouter\nrouter = APIRouter()\ndef serves(label):\n    return True\n",
+            "serves must be async",
+        ),
     ],
 )
 def test_a_broken_origin_module_costs_only_the_origins(tmp_path: Path, source: str, error: str) -> None:

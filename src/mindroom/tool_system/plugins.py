@@ -9,6 +9,7 @@ generations.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import json
 import sys
@@ -104,7 +105,7 @@ class _LoadedPlugin:
     # The origin module's router as an app of its own, built by staged loads like the routes app, and its optional
     # ``serves(label)``.
     origin_app: PluginRoutesApp | None
-    origin_serves: Callable[[str], object] | None
+    origin_serves: Callable[[str], Awaitable[object]] | None
     # Why a staged load serves no origins from the plugin's origin module, which leaves the rest of it loaded.
     origin_error: plugin_imports.PluginValidationError | None
 
@@ -911,10 +912,11 @@ def _plugin_lifespan(module: ModuleType) -> PluginLifespan:
     return lifespan
 
 
-def _origin_serves(module: ModuleType) -> Callable[[str], object] | None:
+def _origin_serves(module: ModuleType) -> Callable[[str], Awaitable[object]] | None:
     serves = vars(module).get("serves")
-    if serves is not None and not callable(serves):
-        msg = "Plugin origin module's serves must be callable as serves(label)"
+    # Only a coroutine can be held to its deadline without blocking the server or holding a thread.
+    if serves is not None and not inspect.iscoroutinefunction(serves):
+        msg = "Plugin origin module's serves must be async def serves(label)"
         raise plugin_imports.PluginValidationError(msg)
     return serves
 

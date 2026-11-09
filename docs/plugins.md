@@ -270,7 +270,7 @@ Other `mindroom` modules can change in any release.
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `lifecycle_module` | string | no | Relative path to the module defining `lifespan(lifecycle)`, the plugin's start and stop code; see [Plugin lifecycle](#plugin-lifecycle) |
-| `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `serves(label)`; see [Origins of your own](#origins-of-your-own) |
+| `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
@@ -1713,9 +1713,9 @@ MindRoom adds no other header, so the route sets its own caching and content-typ
 ### Certificates on demand
 
 On any host that is not a plugin host, such as `127.0.0.1`, the listener answers `GET /ask?domain=<host>`, the check Caddy's on-demand TLS makes before it gets a certificate.
-It answers 200 when the host's plugin defines `serves(label)` in its origin module, plain or `async`, and it returns `True` within 5 seconds; it answers 404 otherwise, including for a plugin without `serves`.
+It answers 200 when the host's plugin defines `async def serves(label)` in its origin module and it returns `True` within 5 seconds; it answers 404 otherwise, including for a plugin without `serves`.
 A `serves` that raises or takes longer is logged as `Plugin origin serves() failed` with the plugin's name.
-A plain `serves` runs in a thread of its own, so the deadline holds even while it blocks.
+A `serves` that is not `async def` fails the module's load with `Plugin origin module's serves must be async def serves(label)`, since only a coroutine can be held to the deadline.
 This Caddyfile serves plugin hosts under `example-apps.net` with a listener on port 8770:
 
 ```caddy
@@ -1808,7 +1808,7 @@ COOKIE = "__Host-app"
 router = APIRouter()
 
 
-def serves(label: str) -> bool:
+async def serves(label: str) -> bool:
     return any(app.label == label for app in SESSIONS.values()) or any(app.label == label for app, _ in LINKS.values())
 
 

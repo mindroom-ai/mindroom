@@ -13,7 +13,6 @@ Every answer says that only its own origin and the chat's origins may frame it, 
 from __future__ import annotations
 
 import asyncio
-import inspect
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -32,7 +31,7 @@ from mindroom.tool_system.plugin_imports import DNS_LABEL
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from fastapi import FastAPI
     from starlette.types import Message, Receive, Scope, Send
@@ -121,7 +120,7 @@ class _PluginOrigins:
             response = JSONResponse({"detail": "Not Found"}, status_code=404)
         await response(scope, receive, send)
 
-    def _origin(self, name: str) -> tuple[PluginRoutesApp, Callable[[str], object] | None] | None:
+    def _origin(self, name: str) -> tuple[PluginRoutesApp, Callable[[str], Awaitable[object]] | None] | None:
         """Return the origin app and ``serves`` of the published plugin ``name``, or None when it serves no origins."""
         plugins = published_plugins(self._api_app)
         for plugin in plugins.loaded_plugins if plugins is not None else ():
@@ -138,10 +137,7 @@ class _PluginOrigins:
         label, plugin_name = parsed
         try:
             async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
-                # A plain ``serves`` runs in a thread, so one that blocks holds up neither the deadline nor the server.
-                if inspect.iscoroutinefunction(serves):
-                    return await serves(label) is True
-                return await asyncio.to_thread(serves, label) is True
+                return await serves(label) is True
         except Exception:
             logger.exception("Plugin origin serves() failed", plugin_name=plugin_name)
             return False
