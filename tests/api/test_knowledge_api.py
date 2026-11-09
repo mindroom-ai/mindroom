@@ -768,6 +768,26 @@ def test_git_file_listing_lists_a_tracked_name_holding_a_carriage_return(tmp_pat
     assert response.json()["file_listing_degraded"] is False
 
 
+def test_git_file_listing_reports_what_git_printed_when_it_fails(tmp_path: Path) -> None:
+    """A checkout whose Git index is corrupt degrades the listing with the exit code and Git's own message."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    _init_git_checkout(tmp_path, docs, "guide.md")
+    (_checkout_git_dir(tmp_path, docs) / "index").write_bytes(b"garbage")
+    publish_api_config(client.app, _knowledge_config(docs, git=True))
+
+    response = client.get("/api/knowledge/bases/research/files")
+
+    assert response.status_code == 200
+    assert response.json()["file_listing_degraded"] is True
+    assert response.json()["file_listing_error"].startswith(
+        "Git command failed with exit code 128: git ls-files -z\nfatal: ",
+    )
+    assert "index file smaller than expected" in response.json()["file_listing_error"]
+
+
 def test_git_file_listing_timeout_degrades_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
