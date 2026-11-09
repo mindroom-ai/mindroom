@@ -101,7 +101,7 @@ def _require_dedicated_worker(connection: HTTPConnection) -> None:
         raise _refused(403, "Only a dedicated worker's runner relays to its ports.")
 
 
-async def _loopback_host(port: int) -> str | None:
+async def loopback_host(port: int) -> str | None:
     """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers.
 
     Connecting costs far less than reading /proc/net, whose size grows with every connection the relay closes.
@@ -130,7 +130,7 @@ async def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for."""
     _require_dedicated_worker(connection)
     own = port == connection.scope["server"][1]
-    host = None if own or not 0 < port < 65536 else await _loopback_host(port)
+    host = None if own or not 0 < port < 65536 else await loopback_host(port)
     if host is None:
         raise _refused(502, f"No app listens on port {port} at this worker's loopback.")
     # The path below the port as the primary sent it, still percent-encoded.

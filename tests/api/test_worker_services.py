@@ -1,0 +1,440 @@
+"""A dedicated worker's runner starts, reports, and stops the services plugins run in it."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import socket
+import sys
+from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import aiohttp
+import pytest
+import uvicorn
+
+from mindroom import plugin_worker_services
+from mindroom.api import sandbox_runner_app
+from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
+from mindroom.api.worker_services import _services, close_worker_services
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+from mindroom.plugin_context import build_plugin_context
+from mindroom.plugin_lifecycle import PluginLifespans
+from mindroom.plugin_worker_services import (
+    WorkerService,
+    WorkerServiceError,
+    ensure_worker_service,
+    stop_worker_service,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
+from mindroom.workers.models import WorkerHandle, WorkerSpec
+from tests.conftest import bind_runtime_paths, publish_test_plugins
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Iterator
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.plugin_context import PluginContext
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Services run in their own process groups.")
+
+_TOKEN = "runner-secret"  # noqa: S105 - isolated test credential
+_AUTH = {"X-Mindroom-Sandbox-Token": _TOKEN}
+# The key of the worker the agent ``coder``'s turns use, which the runner is pinned to.
+_WORKER_KEY = "v1:default:shared:coder"
+# A service that records its pid and the secret it read, and answers "hello" only to a request carrying that secret.
+_HELLO = """
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+secret = sys.stdin.readline().strip()
+with open("service.json", "w") as record:
+    json.dump({"pid": os.getpid(), "secret": secret, "runner_url": os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]}, record)
+
+
+class Hello(BaseHTTPRequestHandler):
+    def do_GET(self):
+        allowed = self.headers.get("X-MindRoom-Service-Secret") == secret
+        self.send_response(200 if allowed else 403)
+        self.end_headers()
+        self.wfile.write(b"hello" if allowed else b"refused")
+
+
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Hello).serve_forever()
+"""
+
+
+@dataclass(frozen=True)
+class _Runner:
+    port: int
+    plugin_root: Path
+    workspace: Path
+
+    def url(self, name: str = "hello", plugin: str = "demo") -> str:
+        return f"http://127.0.0.1:{self.port}/api/sandbox-runner/plugin-services/{plugin}/{name}"
+
+    def record(self) -> dict[str, object]:
+        return json.loads((self.workspace / "service.json").read_text())
+
+
+def _config(plugin_root: Path, paths: RuntimePaths) -> Config:
+    """A config loading the plugin at ``plugin_root`` with the agent ``coder``, whose worker is shared."""
+    agent = AgentConfig(display_name="Coder", worker_scope="shared")
+    return bind_runtime_paths(Config(agents={"coder": agent}, plugins=[str(plugin_root)]), paths)
+
+
+def _body(module: str = "hello.py", idle_timeout_seconds: float = 600.0) -> dict[str, object]:
+    return {"protocol": WORKER_PROTOCOL_VERSION, "module": module, "idle_timeout_seconds": idle_timeout_seconds}
+
+
+@asynccontextmanager
+async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_Runner]:
+    """Serve the runner app over TCP as a dedicated worker's runner whose config loads the ``demo`` plugin."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    (plugin_root / "hello.py").write_text(_HELLO)
+    (plugin_root / "crash.py").write_text("import sys\nsys.exit(3)\n")
+    # The worker's Python, without building a virtualenv.
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(Path(sys.executable))
+    env = {"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": _WORKER_KEY} if dedicated else {}
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    config = _config(plugin_root, paths)
+    initialize_sandbox_runner_app(sandbox_runner_app.app, paths, config=config, runner_token=_TOKEN)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(sandbox_runner_app.app, lifespan="off", log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:  # noqa: ASYNC110 - uvicorn sets a flag, not an event
+                await asyncio.sleep(0.01)
+        yield _Runner(listener.getsockname()[1], plugin_root, tmp_path / "workspace")
+    finally:
+        await close_worker_services(sandbox_runner_app.app)
+        server.should_exit = True
+        await serving
+        listener.close()
+
+
+async def _call(
+    method: str,
+    url: str,
+    body: object = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, object]:
+    async with aiohttp.ClientSession() as client, client.request(method, url, json=body, headers=headers) as response:
+        text = await response.text()
+        return response.status, json.loads(text) if text and response.content_type == "application/json" else text
+
+
+def _pid_alive(pid: int) -> bool:
+    status = Path(f"/proc/{pid}/status")
+    return status.exists() and "State:\tZ" not in status.read_text()
+
+
+async def _until(condition: Callable[[], bool], seconds: float = 10.0) -> None:
+    async with asyncio.timeout(seconds):
+        while not condition():  # noqa: ASYNC110 - polls a process's state
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_service_starts_on_demand_and_answers_only_with_its_secret(tmp_path: Path) -> None:
+    """The first ensure starts the program; it serves on its port and refuses a request without the secret."""
+    async with _runner(tmp_path) as runner:
+        status, state = await _call("POST", runner.url(), _body(), _AUTH)
+        assert status == 200
+        assert state["state"] == "running"
+        assert state["exit_code"] is None
+        port = state["port"]
+        record = runner.record()
+        assert record["runner_url"] == f"http://127.0.0.1:{runner.port}"
+        secret = str(record["secret"])
+        assert len(secret) >= 32
+        assert await _call("GET", f"http://127.0.0.1:{port}/", headers={"X-MindRoom-Service-Secret": secret}) == (
+            200,
+            "hello",
+        )
+        assert await _call("GET", f"http://127.0.0.1:{port}/") == (403, "refused")
+
+
+@pytest.mark.asyncio
+async def test_the_secret_and_the_runner_token_stay_out_of_the_service_s_environment_and_command_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Other processes in the worker read a process's environ and cmdline, so neither holds a secret."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TOKEN)
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        record = runner.record()
+        proc = Path(f"/proc/{record['pid']}")
+        exposed = (proc / "environ").read_bytes() + (proc / "cmdline").read_bytes()
+        assert str(record["secret"]).encode() not in exposed
+        assert _TOKEN.encode() not in exposed
+        assert b"MINDROOM_WORKER_SERVICE_PORT=" in exposed
+
+
+@pytest.mark.asyncio
+async def test_a_second_ensure_reuses_the_running_instance(tmp_path: Path) -> None:
+    """One instance per service: ensuring it again answers the same port and starts no second process."""
+    async with _runner(tmp_path) as runner:
+        _, first = await _call("POST", runner.url(), _body(), _AUTH)
+        pid = runner.record()["pid"]
+        _, second = await _call("POST", runner.url(), _body(), _AUTH)
+        assert second == first
+        assert runner.record()["pid"] == pid
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_the_service_and_the_next_ensure_starts_it_again(tmp_path: Path) -> None:
+    """A stop ends the program's process group; ensuring after it starts a new instance."""
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        pid = int(runner.record()["pid"])
+        assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
+        assert not _pid_alive(pid)
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+        assert state["state"] == "running"
+        assert runner.record()["pid"] != pid
+
+
+@pytest.mark.asyncio
+async def test_an_idle_service_stops_after_its_timeout(tmp_path: Path) -> None:
+    """Without an ensure or traffic for its idle timeout, the instance ends and is forgotten."""
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(idle_timeout_seconds=0.5), _AUTH)
+        pid = int(runner.record()["pid"])
+        await _until(lambda: not _pid_alive(pid))
+        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -> None:
+    """A program that exits is reported with its exit code, and ensuring it again starts nothing until a stop."""
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
+        assert state["state"] == "exited"
+        assert state["exit_code"] == 3
+        process = _services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
+        _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
+        assert again == state
+        assert _services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_a_changed_program_starts_again_on_the_next_ensure(tmp_path: Path) -> None:
+    """An instance runs the program file it started from; an ensure after the file changed restarts it."""
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        pid = int(runner.record()["pid"])
+        (runner.plugin_root / "hello.py").write_text(_HELLO + "\n# changed\n")
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+        assert state["state"] == "running"
+        assert not _pid_alive(pid)
+        assert runner.record()["pid"] != pid
+
+
+@pytest.mark.asyncio
+async def test_the_runner_stopping_ends_its_services(tmp_path: Path) -> None:
+    """Closing the runner ends every instance."""
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        pid = int(runner.record()["pid"])
+        await close_worker_services(sandbox_runner_app.app)
+        assert not _pid_alive(pid)
+
+
+@pytest.mark.asyncio
+async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
+    """A plugin this worker lacks, a program outside the plugin, or a missing token: clear refusals, no process."""
+    async with _runner(tmp_path) as runner:
+        status, answer = await _call("POST", runner.url(plugin="other"), _body(), _AUTH)
+        assert status == 404
+        assert "not loaded in this worker" in answer["detail"]
+        status, answer = await _call("POST", runner.url(), _body("../demo/../../config.yaml"), _AUTH)
+        assert status == 400
+        assert "no file in plugin" in answer["detail"]
+        assert (await _call("POST", runner.url(), _body()))[0] == 401
+        assert not (runner.workspace / "service.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path) -> None:
+    """The request's config names the plugin, but its folder is missing here: a clear refusal."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "mindroom.plugin.json").rename(tmp_path / "moved.json")
+        for child in runner.plugin_root.iterdir():
+            child.unlink()
+        runner.plugin_root.rmdir()
+        status, answer = await _call("POST", runner.url(), _body(), _AUTH)
+        assert status == 404
+        assert answer["detail"] == (
+            "Plugin 'demo' is not loaded in this worker: its folder is missing here, or it failed to load."
+        )
+
+
+@pytest.mark.asyncio
+async def test_only_a_dedicated_worker_s_runner_runs_services(tmp_path: Path) -> None:
+    """The shared runner's loopback is every agent's, so it runs none."""
+    async with _runner(tmp_path, dedicated=False) as runner:
+        status, answer = await _call("POST", runner.url(), _body(), _AUTH)
+        assert status == 403
+        assert answer["detail"] == "Only a dedicated worker's runner runs plugin services."
+
+
+# What the plugin ``demo`` declares, and the worker the agent ``coder``'s turns use for Alice.
+_SERVICE = WorkerService("hello", "hello.py", idle_timeout_seconds=300)
+_TARGET = resolve_worker_target(
+    "shared",
+    "coder",
+    ToolExecutionIdentity("matrix", "coder", "@alice:localhost", None, None, None, None),
+)
+
+
+class _Workers:
+    """A dedicated backend whose one worker is the test's runner: an ensure starts it, a touch only finds it."""
+
+    def __init__(self, port: int, status: str = "ready") -> None:
+        self.handle = WorkerHandle(
+            worker_id="worker-1",
+            worker_key=_WORKER_KEY,
+            endpoint=f"http://127.0.0.1:{port}/api/sandbox-runner/execute",
+            auth_token=_TOKEN,
+            status=status,  # type: ignore[arg-type]
+            backend_name="docker",
+            last_used_at=0.0,
+            created_at=0.0,
+        )
+        self.running = False
+
+    def ensure_worker(self, spec: WorkerSpec, *, progress_sink: object = None) -> WorkerHandle:
+        del progress_sink
+        assert spec.worker_key == _WORKER_KEY
+        self.running = True
+        return self.handle
+
+    def touch_worker(self, worker_key: str) -> WorkerHandle | None:
+        assert worker_key == _WORKER_KEY
+        return self.handle if self.running else None
+
+
+@pytest.fixture(autouse=True)
+def _forget_started_services() -> Iterator[None]:
+    """Leave no service a test started for a later plugin load to stop."""
+    yield
+    plugin_worker_services._started.clear()
+
+
+def _primary(tmp_path: Path, runner: _Runner, monkeypatch: pytest.MonkeyPatch, workers: _Workers) -> PluginContext:
+    """Return the plugin ``demo``'s context in a primary whose Docker workers are ``workers``."""
+    env = {"MINDROOM_WORKER_BACKEND": "docker"}
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "primary.yaml",
+        storage_path=tmp_path / "primary",
+        process_env=env,
+    )
+    config = _config(runner.plugin_root, paths)
+    publish_test_plugins(config, paths)
+    monkeypatch.setattr(plugin_worker_services, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+    return build_plugin_context("demo", config, paths, lambda: config)
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_runs_its_service_in_the_agent_s_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The primary starts the service in the target's worker, reuses it on the next ensure, and stops it."""
+    async with _runner(tmp_path) as runner:
+        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
+        state = await ensure_worker_service(context, _SERVICE, _TARGET)
+        assert state.state == "running"
+        assert await ensure_worker_service(context, _SERVICE, _TARGET) == state
+        instance = _services(sandbox_runner_app.app).instance("demo", "hello")
+        assert instance is not None
+        assert instance.port == state.port
+        assert instance.idle_timeout_seconds == 300
+
+        await stop_worker_service(context, _SERVICE, _TARGET)
+        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+
+
+@pytest.mark.asyncio
+async def test_the_primary_reports_what_keeps_a_service_from_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner's refusal and a worker that is not ready fail with their reason; stopping in a stopped worker is a no-op."""
+    async with _runner(tmp_path) as runner:
+        workers = _Workers(runner.port)
+        context = _primary(tmp_path, runner, monkeypatch, workers)
+        await stop_worker_service(context, _SERVICE, _TARGET)
+        assert not workers.running
+
+        with pytest.raises(WorkerServiceError, match=r"refused: The service program 'missing\.py' is no file"):
+            await ensure_worker_service(context, WorkerService("hello", "missing.py"), _TARGET)
+        crashed = await ensure_worker_service(context, WorkerService("crash", "crash.py"), _TARGET)
+        assert (crashed.state, crashed.exit_code) == ("exited", 3)
+
+        workers.handle = replace(workers.handle, status="starting")
+        with pytest.raises(WorkerServiceError, match=r"The agent's worker is not ready\."):
+            await ensure_worker_service(context, _SERVICE, _TARGET)
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_load_or_shutdown_stops_the_services_the_primary_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each load replaces every plugin's code, so the services that code started stop with it, as at shutdown."""
+    async with _runner(tmp_path) as runner:
+        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
+        config = context.config
+        lifespans = PluginLifespans(context.runtime_paths, lambda: config)
+        await lifespans.apply_published()
+        services = _services(sandbox_runner_app.app)
+
+        await ensure_worker_service(context, _SERVICE, _TARGET)
+        publish_test_plugins(config, context.runtime_paths)
+        await lifespans.apply_published()
+        assert services.instance("demo", "hello") is None
+
+        await ensure_worker_service(context, _SERVICE, _TARGET)
+        await lifespans.stop()
+        assert services.instance("demo", "hello") is None
+
+
+@pytest.mark.parametrize("backend", ["static_runner", ""])
+@pytest.mark.asyncio
+async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_path: Path, backend: str) -> None:
+    """Nothing falls back to the primary: the shared runner and no worker at all fail with the setting to change."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": backend},
+    )
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    config = _config(plugin_root, paths)
+    publish_test_plugins(config, paths)
+    context = build_plugin_context("demo", config, paths, lambda: config)
+    expected = "Worker services need a dedicated worker backend: set MINDROOM_WORKER_BACKEND to docker or kubernetes."
+    with pytest.raises(WorkerServiceError, match=re.escape(expected)):
+        await ensure_worker_service(context, _SERVICE, _TARGET)
+    with pytest.raises(WorkerServiceError, match=re.escape(expected)):
+        await stop_worker_service(context, _SERVICE, _TARGET)
+
+
+@pytest.mark.parametrize(("name", "idle"), [("Hello", 1.0), ("a/b", 1.0), ("", 1.0), ("hello", 0.0)])
+def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: float) -> None:
+    """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
+    with pytest.raises(ValueError, match=r"(?i)worker service"):
+        WorkerService(name, "hello.py", idle_timeout_seconds=idle)

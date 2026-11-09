@@ -125,6 +125,9 @@ _EXPORTS = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "WorkerService",
+    "WorkerServiceError",
+    "WorkerServiceState",
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
@@ -136,6 +139,7 @@ _EXPORTS = [
     "current_execution_identity",
     "current_plugin_context",
     "emit_custom_event",
+    "ensure_worker_service",
     "entity_directory",
     "fetch_public_url",
     "fetch_public_url_sync",
@@ -158,6 +162,7 @@ _EXPORTS = [
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_turn_model",
+    "stop_worker_service",
     "tool",
     "toolkit_functions",
     "write_agent_file",
@@ -290,6 +295,8 @@ _SIGNATURES = {
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
+    "WorkerService": "(name, module, idle_timeout_seconds)",
+    "WorkerServiceState": "(state, port, exit_code)",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
         "intent, source_kind, trust, acts_for_requester)"
@@ -305,6 +312,7 @@ _SIGNATURES = {
     "current_execution_identity": "()",
     "current_plugin_context": "(plugin_name)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
+    "ensure_worker_service": "(context, service, target)",
     "entity_directory": "(config, runtime_paths)",
     "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
@@ -338,6 +346,7 @@ _SIGNATURES = {
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
     "resolve_config_relative_path": "(raw_path, runtime_paths)",
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
+    "stop_worker_service": "(context, service, target)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
     "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
@@ -346,7 +355,7 @@ _SIGNATURES = {
 
 # Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
 # pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
-_ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry"]
+_ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry", "WorkerServiceError"]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
 _ENUM_MEMBERS = {
@@ -599,7 +608,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 17), "1c7b6088ef4e9d09d77fd00abf75898d44de788a95fb129be371a545a7d0ed42")
+_PINNED_VERSION = ((1, 18), "9267cbbc49280963fec42b3503576833906c70ad9e4a2b87369f6f094f73efec")
 
 
 def _is_enum(obj: object) -> bool:

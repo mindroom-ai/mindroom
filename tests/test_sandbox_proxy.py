@@ -2367,7 +2367,7 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
         monkeypatch.setenv("MINDROOM_WORKER_BACKEND", worker_backend)
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8765")
 
-    config = sandbox_proxy_module._worker_proxy_client_config(
+    config = sandbox_proxy_module.worker_proxy_client_config(
         sandbox_proxy_module.sandbox_proxy_config(runtime_paths),
         runtime_paths,
     )
@@ -4164,7 +4164,7 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
         return _FakeLease()
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_route", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -4257,7 +4257,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
         return _FakeLease()
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_route", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -4778,7 +4778,7 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(
 
     worker_target = _worker_target(runtime_paths, None, "code", identity)
     assert worker_target.execution_identity is not None
-    route, worker_handle = sandbox_proxy_module._worker_route(
+    route, worker_handle = sandbox_proxy_module.worker_route(
         runtime_paths=runtime_paths,
         runtime_config=None,
         tool_name="shell",
@@ -4848,7 +4848,7 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
     expected_worker_key = resolve_worker_key("user", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    route, worker_handle = sandbox_proxy_module._worker_route(
+    route, worker_handle = sandbox_proxy_module.worker_route(
         runtime_paths=runtime_paths,
         runtime_config=None,
         tool_name="shell",
@@ -4912,7 +4912,7 @@ def _route_for(
     worker_target: ResolvedWorkerTarget,
     manager: _SpecRecordingWorkerManager,
 ) -> WorkerRoute:
-    route, _handle = sandbox_proxy_module._worker_route(
+    route, _handle = sandbox_proxy_module.worker_route(
         runtime_paths=runtime_paths,
         runtime_config=None,
         tool_name="shell",
@@ -6079,7 +6079,7 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
     monkeypatch.setattr(
         sandbox_proxy_module,
-        "_worker_route",
+        "worker_route",
         lambda **_kwargs: (WorkerRoute(protocol=WORKER_PROTOCOL_VERSION), None),
     )
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _fake_execute_worker_proxy_request)
@@ -6566,7 +6566,7 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
     preparing = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    worker_route = sandbox_proxy_module._worker_route
+    worker_route = sandbox_proxy_module.worker_route
     execute = sandbox_proxy_module.execute_worker_proxy_request
 
     def slow_routing(**kwargs: object) -> object:
@@ -6580,7 +6580,7 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
         finally:
             finished.set()
 
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", slow_routing)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_route", slow_routing)
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", tracked_execute)
     call = asyncio.create_task(entrypoint("echo never"))
     assert await asyncio.to_thread(preparing.wait, 10)

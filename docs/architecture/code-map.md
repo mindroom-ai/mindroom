@@ -501,6 +501,8 @@ Matrix sync callback
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
 | `api/worker_preview.py` | Dedicated-worker runner routes that list the ports apps listen on at the worker's loopback and relay the primary's HTTP requests and WebSockets to them |
 | `previews/relay.py` | Passes one WebSocket's messages both ways between an accepted socket and a client socket until either closes |
+| `api/worker_services.py` | Dedicated-worker runner routes that start, report, and stop plugins' worker services, each with its process group, port, secret, and idle timer |
+| `plugin_worker_services.py` | The primary's side of plugin worker services: the declaration plugins import, ensure and stop through the target's worker, and stopping the started ones when plugins reload or MindRoom stops |
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |

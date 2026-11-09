@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.plugin_worker_services import stop_started_worker_services
 from mindroom.tool_system.plugins import PluginGeneration, config_plugins, plugin_process_state
 
 if TYPE_CHECKING:
@@ -164,6 +165,7 @@ class PluginLifespans:
             )
             for name, running in replaced.items():
                 await _stop(running, "reload" if name in self._running else "disabled")
+            await stop_started_worker_services()
 
     async def stop(self) -> None:
         """Stop every running lifespan as MindRoom shuts down, and start none after."""
@@ -172,3 +174,4 @@ class PluginLifespans:
             running, self._running = self._running, {}
             for lifespan in running.values():
                 await _stop(lifespan, "shutdown")
+            await stop_started_worker_services()

@@ -279,12 +279,13 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     )
 
 
-def _worker_proxy_client_config(
+def worker_proxy_client_config(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
     *,
     request_budget_seconds: float = 0.0,
 ) -> WorkerProxyClientConfig:
+    """Return how a request reaches its worker or the shared runner under these proxy settings."""
     return WorkerProxyClientConfig(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
@@ -296,7 +297,7 @@ def _worker_proxy_client_config(
     )
 
 
-def _worker_route(
+def worker_route(
     *,
     runtime_paths: RuntimePaths,
     runtime_config: Config | None,
@@ -465,7 +466,7 @@ def save_attachment_to_worker(
 
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
+        route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -476,7 +477,7 @@ def save_attachment_to_worker(
         )
         sha256 = hashlib.sha256(payload_bytes).hexdigest()
         response = post_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=worker_proxy_client_config(proxy_config, runtime_paths),
             request=SaveAttachmentRequest(
                 **dict(route),
                 attachment_id=attachment_id,
@@ -522,7 +523,7 @@ def view_file_from_worker(
     """View one file in the selected worker, for an agent whose workspace tools run in a worker."""
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
+        route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -537,7 +538,7 @@ def view_file_from_worker(
                 path = Path(path).relative_to(workspace_root).as_posix()
 
         response = post_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=worker_proxy_client_config(proxy_config, runtime_paths),
             request=ViewFileRequest(**dict(route), path=path),
             response_model=ViewFileResponse,
             worker_handle=worker_handle,
@@ -745,7 +746,7 @@ def _build_execute_request(
 ) -> tuple[ExecuteRequest, WorkerHandle | None]:
     """Build one call that ``stand_ins`` sends, unsent, and return it with the handle of the worker that serves it.
 
-    That worker starts unless ``start`` is False, as ``_worker_route`` describes.
+    That worker starts unless ``start`` is False, as ``worker_route`` describes.
     """
     runtime_paths = stand_ins.runtime_paths
     tool_name = stand_ins.tool_name
@@ -754,7 +755,7 @@ def _build_execute_request(
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
     init_overrides = dict(stand_ins.tool_init_overrides or {})
     base_dir = init_overrides.pop("base_dir", None)
-    route, worker_handle = _worker_route(
+    route, worker_handle = worker_route(
         runtime_paths=runtime_paths,
         runtime_config=runtime_config,
         tool_name=tool_name,
@@ -856,7 +857,7 @@ def _call_proxy_sync(
             progress_sink=progress_sink,
         )
         result = execute_worker_proxy_request(
-            config=_worker_proxy_client_config(
+            config=worker_proxy_client_config(
                 proxy_config,
                 runtime_paths,
                 request_budget_seconds=max(
@@ -1021,7 +1022,7 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
 
     The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
     Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
-    ``start`` is False; then a dedicated worker is only marked used, as ``_worker_route`` describes, and the answer
+    ``start`` is False; then a dedicated worker is only marked used, as ``worker_route`` describes, and the answer
     is None while it is not running.
     """
     runtime_paths = stand_ins.runtime_paths
@@ -1047,7 +1048,7 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
         ),
         headers=worker_request_headers(
             worker_handle,
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=worker_proxy_client_config(proxy_config, runtime_paths),
         ),
     )
 
@@ -1068,5 +1069,7 @@ __all__ = [
     "tool_placement",
     "view_file_from_worker",
     "worker_call",
+    "worker_proxy_client_config",
+    "worker_route",
     "worker_stand_ins",
 ]
