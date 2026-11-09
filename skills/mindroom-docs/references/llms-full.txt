@@ -19039,7 +19039,7 @@ Pass `create=True` before opening a terminal, so the agent's workspace exists, a
 | `async with terminals.attach(session_id) as terminal` | Attaches to a terminal; `await terminal.send_input(data)` types `data`, at most 16384 characters at once |
 
 A refused call raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have, 413 for longer input, or 503 while the agent's worker is unavailable.
-This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run:
+This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run, and refuses a command too long to type at once before it opens one:
 
 ```python
 # routes.py
@@ -19055,7 +19055,7 @@ router = APIRouter()
 @router.post("/rooms/{room_id}/agents/{agent_user_id}/run")
 async def run(
     agent_user_id: str,
-    command: Annotated[str, Body(embed=True)],
+    command: Annotated[str, Body(embed=True, max_length=16383)],
     room: RoomReader = Depends(require_room_reader),
 ) -> dict[str, str]:
     workspace = await room.agent(agent_user_id)

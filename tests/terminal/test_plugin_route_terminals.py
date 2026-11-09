@@ -28,7 +28,7 @@ def _plugin_router() -> APIRouter:
     async def run(
         room: Annotated[RoomReader, Depends(require_room_reader)],
         agent_user_id: str,
-        command: Annotated[str, Body(embed=True)],
+        command: Annotated[str, Body(embed=True, max_length=16383)],
     ) -> dict[str, str]:
         workspace = await room.agent(agent_user_id)
         if workspace.terminal != "type":
@@ -64,6 +64,8 @@ async def test_a_plugin_route_types_in_the_terminal_mindroom_s_routes_show_its_c
 ) -> None:
     """Alice's command runs in a terminal of the workspace MindRoom's Terminal tab shows her; Bob, read-only, is refused.
 
+    A command too long to type at once opens no terminal.
+
     Bob sees Alice's terminal in a shared agent's workspace, and none in a private one's, where his workspace is his own.
     """
     agents = _agents(ALICE, BOB)
@@ -75,6 +77,8 @@ async def test_a_plugin_route_types_in_the_terminal_mindroom_s_routes_show_its_c
         run = f"{base}/agents/{room.ids['coder']}/run"
         refused = await _answer(client.post(run, json={"command": "echo bob"}, headers=_auth(room, BOB)))
         assert refused == (403, {"detail": "You may not type in this agent's terminals."})
+        too_long = await _answer(client.post(run, json={"command": "x" * 16384}, headers=_auth(room, ALICE)))
+        assert too_long[0] == 422
         status, opened = await _answer(
             client.post(run, json={"command": "echo from-$((2*3))-plugin"}, headers=_auth(room, ALICE)),
         )
