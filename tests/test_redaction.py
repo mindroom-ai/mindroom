@@ -693,6 +693,7 @@ def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> No
         ("if not api_key:\n    raise SystemExit(1)\nrun()", f"if not api_key:\n    {REDACTED}"),
         ("token:", "token:"),
         ("token:\n  \n", "token:\n  \n"),
+        ('expect "Password:"\nsend "hunter2\\r"', f'expect "Password:"\n{REDACTED}'),
     ],
 )
 def test_a_secret_name_that_ends_its_line_hides_the_rest_of_the_text(text: str, expected: str) -> None:
@@ -937,6 +938,12 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
         ('mysql -e "select \\\r\n 1" -ppw app', f'mysql -e "select \\\r\n 1" -p{REDACTED} app'),
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ('while read db; do mysql -ppw "$db"; done', f'while read db; do mysql -p{REDACTED} "$db"; done'),
+        (
+            "if true; then curl -u admin:pw https://example.test/x; fi",
+            f"if true; then curl -u admin:{REDACTED} https://example.test/x; fi",
+        ),
+        ("curl -u 'admin:p\"ssw0rd' https://example.test/x", f"curl -u 'admin:{REDACTED}' https://example.test/x"),
         ("mysql -u root -p'ab&c;d|e' app", f"mysql -u root -p{REDACTED} app"),
         ('mysql -e "select 1; select 2" -ppw app', f'mysql -e "select 1; select 2" -p{REDACTED} app'),
         ("time mysql -uroot -ppw app", f"time mysql -uroot -p{REDACTED} app"),
@@ -991,6 +998,18 @@ def test_a_token_split_by_a_backslash_line_break_stays_hidden(text: str) -> None
     assert "abcdef" not in redacted
     assert "ghijkl" not in redacted
     assert REDACTION_FAILED not in redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("my-cli --key sk-abc123\\\npassword=hunter2", f"my-cli --key {REDACTED}\\\npassword={REDACTED}"),
+        ("Use a bearer token\\\nThen call the API.", "Use a bearer token\\\nThen call the API."),
+    ],
+)
+def test_a_backslash_line_break_after_a_token_does_not_join_the_next_line_to_it(text: str, expected: str) -> None:
+    """A key that starts the next line, or a prose word after a Markdown line break, is not part of the token before it."""
+    assert redact_sensitive_text(text) == expected
 
 
 def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote() -> None:

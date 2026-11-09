@@ -53,12 +53,13 @@ URL_PATTERN = re.compile(
 
 def _continued_run(characters: str) -> str:
     """Return a pattern for a run of ``characters`` that a shell command may continue after a backslash line break."""
-    return rf"[{characters}]++(?:\\\r?\n[{characters}]++)*+"
+    # A key that starts the next line, as in `--key sk-…\` then `password=…`, is not part of the token.
+    return rf"[{characters}]++(?:\\\r?\n[{characters}]++(?![^\S\r\n]*+[=:]))*+"
 
 
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
-    rf"(?P<token>{_continued_run('A-Za-z0-9._~+/=-')})",
+    r"(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
 _API_KEY_MESSAGE_PATTERN = re.compile(
@@ -93,11 +94,13 @@ _COMMAND_PATTERN = re.compile(
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
 _PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
 _CURL_USER_OPTION_PATTERN = re.compile(
-    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
+    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)(?:(?!(?P=quote))[^\r\n])++|[^\s\"']++))",
 )
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)")
 # Words that run the word after them as a program, as in `sudo mysql`.
-_COMMAND_PREFIX_WORDS = frozenset({"command", "env", "exec", "nohup", "sudo", "time", "xargs"})
+_COMMAND_PREFIX_WORDS = frozenset(
+    {"command", "do", "elif", "else", "env", "exec", "if", "nohup", "sudo", "then", "time", "until", "while", "xargs"},
+)
 # A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
 # cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
 _PRIVATE_KEY_PATTERN = re.compile(
@@ -438,7 +441,7 @@ def _quoted_value_span(value: str, quote_start: int) -> tuple[int, int, int] | N
     assert quoted is not None
     body_start, body_end = quoted.span("body")
     if quoted.group("close"):
-        return body_start, body_end, quoted.end()
+        return body_start, body_end, body_end + 1
     return _rest_of_text_span(value, body_start)
 
 
@@ -457,7 +460,7 @@ def _assignment_value_span(
     """
     if value_start < len(value) and value[value_start] == key_quote:
         value_start += 1
-        if value_start < len(value) and value[value_start].isspace():
+        if value_start < len(value) and value[value_start] in " \t":
             return None
     if value_start >= len(value):
         return None
@@ -642,9 +645,9 @@ def _truncate_text(value: str, max_length: int | None, *, cut: bool = False) -> 
 def _bounded_redaction_input(value: str, *, max_length: int | None) -> str:
     """Return the start of ``value`` that redaction reads before cutting its result to ``max_length``.
 
-    It reads past ``max_length`` to the end of the word there, so it never splits a secret, such as a URL's password
-    from the ``@`` after it, which a shorter redaction before it could pull into view. A word that runs past the input
-    limit is left out.
+    It reads ``max_length`` and a lookahead, then on to the end of the word there, so it never splits a secret, such as
+    a URL's password from the ``@`` after it, which a shorter redaction before it could pull into view. A word that
+    runs past the input limit is left out.
     """
     if max_length is None:
         return value
@@ -780,7 +783,7 @@ def truncate_review_text(value: str, max_length: int | None) -> str:
     """Shorten reviewer-facing text without cutting a placeholder in half."""
     if max_length is None or len(value) <= max_length:
         return value
-    head = value[: max(max_length - len(_TRUNCATED), 0)]
+    head = value[: max_length - len(_TRUNCATED)]
     opening = head.rfind(_PLACEHOLDER_OPEN)
     if opening > head.rfind(_PLACEHOLDER_CLOSE) and head[opening + 1 : opening + 2] != "=":
         head = head[:opening]
