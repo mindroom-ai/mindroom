@@ -61,7 +61,7 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
 )
 _ASSIGNMENT_PREFIX_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.-])"
-    r"[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?[^\S\r\n]*+(?::|=(?!=))[^\S\r\n]*+",
+    r"(?P<open>[\"']?)(?P<key>[A-Za-z0-9_.-]++)(?P<close>[\"']?)[^\S\r\n]*+(?::|=(?!=))[^\S\r\n]*+",
     re.IGNORECASE,
 )
 _NEXT_ASSIGNMENT_PATTERN = re.compile(
@@ -70,6 +70,35 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
+_QUOTED_VALUE_PATTERNS = {
+    quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
+    for quote in ("'", '"')
+}
+# One command and its arguments run to a line break or a shell operator outside quotes; a backslash continues them.
+_COMMAND_PATTERN = re.compile(
+    r"(?:'[^'\r\n]*+'?|\"(?:[^\"\\\r\n]|\\(?:\r\n|[\s\S]))*+\"?|[^\\\r\n;&|(`'\"]|\\(?:\r\n|[\s\S]))++",
+)
+# Programs that take a password as an option: curl takes `user:password` after `-u` or `--user`, and mysql and its
+# tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
+# things, such as `docker run --user 1000:0` or `mkdir -pv`.
+_PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
+# A shell word: unquoted characters, each one a backslash escapes on its line, and quoted parts, as in `-p'a'"b"`.
+_SHELL_WORD = r"(?:[^\s\"'\\;|&<>]|\\[^\r\n]|'[^']*+'?|\"(?:[^\"\\]|\\[\s\S])*+\"?)++"
+_SHELL_WORD_PATTERN = re.compile(_SHELL_WORD)
+_LEADING_WHITESPACE_PATTERN = re.compile(r"\s*+")
+# The space between two arguments of a command, which a backslash line break may continue, and the arguments up to a
+# shell operator or the end of the line.
+_ARGUMENT_GAP = r"(?:[^\S\r\n]|\\\r?\n)"
+_ARGUMENT_GAP_PATTERN = re.compile(rf"{_ARGUMENT_GAP}*+")
+_ARGUMENTS_PATTERN = re.compile(rf"{_SHELL_WORD}(?:{_ARGUMENT_GAP}++{_SHELL_WORD})*+")
+# curl's `user:password` is one shell word, whose part after the first colon is the password.
+_CURL_USER_OPTION_PATTERN = re.compile(rf"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|{_ARGUMENT_GAP}*+)(?P<word>{_SHELL_WORD})")
+_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(rf"(?<!\S)-p(?P<token>{_SHELL_WORD})")
+# Words that run the word after them as a program, as in `sudo mysql`.
+_COMMAND_PREFIX_WORDS = frozenset(
+    {"command", "do", "elif", "else", "env", "exec", "if", "nohup", "sudo", "then", "time", "until", "while", "xargs"},
+)
 # A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
 # cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
 _PRIVATE_KEY_PATTERN = re.compile(
@@ -143,7 +172,7 @@ _PROSE_WORD_PATTERN = re.compile(r"[A-Z]?[a-z]+(?:-[a-z]+)*\.?")
 _BARE_CREDENTIAL_PHRASE_PATTERN = re.compile(r"(?:api\s+key|bearer(?:\s+token)?)\s+", re.IGNORECASE)
 # GitHub Actions grants a job's OIDC token with `id-token: write`, so one of these words names a permission, alone
 # or before a YAML comment or the end of a Markdown code span.
-_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))")
+_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))", re.IGNORECASE)
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
@@ -229,6 +258,8 @@ _CONTEXT_SECRET_VALUE_KEYS: frozenset[str] = frozenset(
     },
 )
 _REDACTION_LOOKAHEAD_CHARS = 512
+_WHITESPACE_PATTERN = re.compile(r"\s")
+_LAST_WORD_PATTERN = re.compile(r"(?<!\S)\S*+\Z")
 
 type _RedactedValue = None | bool | int | float | str | list["_RedactedValue"] | dict[str, "_RedactedValue"]
 
@@ -379,10 +410,6 @@ def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> st
     return full_match[:prefix_end] + REDACTED + full_match[suffix_start:]
 
 
-class _RedactionError(Exception):
-    """Internal signal for input that cannot be redacted safely within its budget."""
-
-
 def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int], int]:
     """Return a lookup of the first match start at or after each position of a forward-only scan.
 
@@ -401,47 +428,52 @@ def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int]
     return lookup
 
 
-def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
-    search_start = start
-    while (position := value.find(quote, search_start, end)) >= 0:
-        backslash_start = position
-        while backslash_start > start and value[backslash_start - 1] == "\\":
-            backslash_start -= 1
-        if (position - backslash_start) % 2 == 0:
-            return position
-        search_start = position + 1
-    return -1
+def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
+    """Return the text from ``start`` on, without its leading whitespace, as a value whose end cannot be known."""
+    start = cast("re.Match[str]", _LEADING_WHITESPACE_PATTERN.match(value, start)).end()
+    return (start, len(value), len(value)) if start < len(value) else None
+
+
+def _quoted_value_span(value: str, quote_start: int) -> tuple[int, int, int] | None:
+    quoted = cast("re.Match[str]", _QUOTED_VALUE_PATTERNS[value[quote_start]].match(value, quote_start))
+    body_start, body_end = quoted.span("body")
+    if quoted.group("close"):
+        return body_start, body_end, body_end + 1
+    return _rest_of_text_span(value, body_start)
 
 
 def _assignment_value_span(
     value: str,
     value_start: int,
+    *,
+    key_quote: str,
     unquoted_value_end: Callable[[int], int],
 ) -> tuple[int, int, int] | None:
+    """Return the start and end of one assigned value and where the scan resumes, or None when nothing is assigned.
+
+    ``key_quote`` is the quote that opened a string holding the key, as in ``grep "password=" .``, so the same quote
+    right after the key closes that string. What follows may still be the value, so it is hidden up to a shell
+    operator: the shell word attached to the quote, as in ``"password="hunter2``, or after spaces the rest of the
+    command, as in ``echo "password:" correct horse``.
+    """
+    if value_start < len(value) and value[value_start] == key_quote:
+        gap_end = cast("re.Match[str]", _ARGUMENT_GAP_PATTERN.match(value, value_start + 1)).end()
+        if gap_end >= len(value) or value[gap_end] in ";|&<>":
+            return None
+        rest = (_ARGUMENTS_PATTERN if gap_end > value_start + 1 else _SHELL_WORD_PATTERN).match(value, gap_end)
+        if rest is not None:
+            return gap_end, rest.end(), rest.end()
+        value_start = gap_end
     if value_start >= len(value):
         return None
+    # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
     if value[value_start] in "\r\n":
-        raise _RedactionError
-    if value[value_start] not in {"'", '"'}:
-        value_end = unquoted_value_end(value_start)
-        if value_end == value_start:
-            return None
-        return value_start, value_end, value_end
-
-    quote = value[value_start]
-    line_end = min(
-        position
-        for position in (
-            value.find("\r", value_start + 1),
-            value.find("\n", value_start + 1),
-            len(value),
-        )
-        if position >= 0
-    )
-    value_end = _find_unescaped_quote(value, quote, value_start + 1, line_end)
-    if value_end < 0:
-        raise _RedactionError
-    return value_start + 1, value_end, value_end + 1
+        return _rest_of_text_span(value, value_start)
+    if value[value_start] in {"'", '"'}:
+        return _quoted_value_span(value, value_start)
+    # Whitespace before where the value ends, as before `&& run`, is not part of it.
+    value_end = value_start + len(value[value_start : unquoted_value_end(value_start)].rstrip(" \t"))
+    return (value_start, value_end, value_end) if value_end > value_start else None
 
 
 def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:
@@ -472,20 +504,27 @@ def _redact_secret_assignments(value: str) -> str:
         if not classification.is_secret:
             continue
 
-        value_span = _assignment_value_span(value, prefix_match.end(), unquoted_value_end)
+        value_span = _assignment_value_span(
+            value,
+            search_start,
+            key_quote="" if prefix_match.group("close") else prefix_match.group("open"),
+            unquoted_value_end=unquoted_value_end,
+        )
         if value_span is None:
             continue
-        value_start, value_end, match_end = value_span
-        assignment_value = value[value_start:value_end].lower()
+        value_start, value_end, search_start = value_span
         if (
             classification.normalized == "authorization"
-            and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
-        ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
-            search_start = match_end
+            and value_end - value_start <= len(f"bearer {REDACTED}")
+            and value[value_start:value_end].lower() in {"basic", "bearer", f"bearer {REDACTED}"}
+        ) or (
+            classification.normalized == "id_token"
+            and _ID_TOKEN_PERMISSION_PATTERN.match(value, value_start, value_end)
+        ):
+            # A value that is not a credential may still hold later assignments, as the rest of a text does.
+            search_start = value_start
             continue
-
         spans.append((value_start, value_end))
-        search_start = match_end
 
     return _replace_spans_with_redaction(value, spans)
 
@@ -602,19 +641,32 @@ def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
     return _truncate_text(urlencode(query_items, doseq=True, safe="*"), max_length)
 
 
-def _truncate_text(value: str, max_length: int | None) -> str:
-    if max_length is None or len(value) <= max_length:
+def _truncate_text(value: str, max_length: int | None, *, cut: bool = False) -> str:
+    """Return ``value`` within ``max_length``, marked as truncated when it is longer or was already ``cut``."""
+    if max_length is None or (len(value) <= max_length and not cut):
         return value
-    return value[: max_length - len(_TRUNCATED)] + _TRUNCATED
+    # A bound shorter than the marker keeps only the start of the marker.
+    return (value[: max(max_length - len(_TRUNCATED), 0)] + _TRUNCATED)[:max_length]
 
 
 def _bounded_redaction_input(value: str, *, max_length: int | None) -> str:
+    """Return the start of ``value`` that redaction reads before cutting its result to ``max_length``.
+
+    It reads ``max_length`` and a lookahead, then on to the end of the word there, so it never splits a secret, such as
+    a URL's password from the ``@`` after it, which a shorter redaction before it could pull into view. A word that
+    runs past the input limit is left out.
+    """
     if max_length is None:
         return value
     scan_length = min(max_length + _REDACTION_LOOKAHEAD_CHARS, _MAX_TEXT_INPUT_LENGTH + 1)
     if len(value) <= scan_length:
         return value
-    return value[:scan_length]
+    word_end = _WHITESPACE_PATTERN.search(value, scan_length - 1, _MAX_TEXT_INPUT_LENGTH)
+    if word_end is not None:
+        return value[: word_end.start()]
+    if len(value) <= _MAX_TEXT_INPUT_LENGTH:
+        return value
+    return value[: cast("re.Match[str]", _LAST_WORD_PATTERN.search(value, 0, scan_length)).start()]
 
 
 def _redact_url_match(match: re.Match[str]) -> str:
@@ -654,8 +706,40 @@ def redact_private_keys(value: str) -> str:
     return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
 
 
+def _redact_password_options(command_match: re.Match[str]) -> str:
+    """Redact the password options of one command that runs curl or mysql, first or right after a word such as ``sudo``."""
+    command = command_match.group(0)
+    program = _PASSWORD_PROGRAM_PATTERN.search(command)
+    if program is None:
+        return command
+    words_before = [word for word in command[: program.start()].split() if word != "\\"]
+    if words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS:
+        return command
+    arguments = command[program.end() :]
+    if program.group("curl"):
+        arguments = _CURL_USER_OPTION_PATTERN.sub(_redact_curl_password, arguments)
+    else:
+        arguments = _MYSQL_PASSWORD_OPTION_PATTERN.sub(_redact_matched_token, arguments)
+    return command[: program.end()] + arguments
+
+
+def _redact_curl_password(match: re.Match[str]) -> str:
+    user, colon, password = match.group("word").partition(":")
+    if not colon or not (user or password):
+        return match.group(0)
+    prefix = match.group(0)[: match.start("word") - match.start()]
+    # A quote opened before the colon is closed again, so redacting the result again reads the same word.
+    open_quote = next((quote for quote in "\"'" if user.count(quote) % 2), "")
+    closing = open_quote if open_quote and open_quote in password else ""
+    # With nothing after the colon but that quote, as in `curl -u API_KEY:`, the user name is the credential.
+    if password == closing:
+        return prefix + user[: len(user) - len(user.lstrip("\"'"))] + REDACTED + colon + closing
+    return prefix + user + colon + REDACTED + closing
+
+
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
+    cut = len(bounded_value) < len(value)
     has_assignment = "=" in bounded_value or ":" in bounded_value
     has_url = "://" in bounded_value
     lowered_value = bounded_value.lower()
@@ -663,9 +747,8 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     has_private_key = "private key" in lowered_value
-    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
-        return _truncate_text(bounded_value, max_length)
-    # Keys go first, so the patterns below never see, or fail closed on, a key's body.
+    has_password_option = any(program in bounded_value for program in ("curl", "mysql", "mariadb"))
+    # Keys go first, so the patterns below never see a key's body.
     redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
     redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
@@ -678,7 +761,9 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
         redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted)
-    return _truncate_text(redacted, max_length)
+    if has_password_option:
+        redacted = _COMMAND_PATTERN.sub(_redact_password_options, redacted)
+    return _truncate_text(redacted, max_length, cut=cut)
 
 
 def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
@@ -690,7 +775,8 @@ def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, pr
 
 def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     """Redact common credential patterns without letting redaction break its caller."""
-    if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
+    read_length = len(value) if max_length is None else min(len(value), max_length + _REDACTION_LOOKAHEAD_CHARS)
+    if read_length > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
@@ -724,7 +810,7 @@ def truncate_review_text(value: str, max_length: int | None) -> str:
     opening = head.rfind(_PLACEHOLDER_OPEN)
     if opening > head.rfind(_PLACEHOLDER_CLOSE) and head[opening + 1 : opening + 2] != "=":
         head = head[:opening]
-    return head + _TRUNCATED
+    return _truncate_text(head, max_length, cut=True)
 
 
 def _redact_review_tokens(value: str, *, max_length: int | None, placeholders: dict[str, str]) -> str:

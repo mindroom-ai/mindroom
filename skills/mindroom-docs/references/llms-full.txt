@@ -1790,6 +1790,7 @@ agents:
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
 | `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `terminals` | string | `none` | What people in the agent's rooms may do with its [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none` shows them nothing, `watch` lets them watch, and `type` also lets people who may post open, close, and type in them where the agent's shell runs in a worker that mounts its workspace, and lets them only watch in a worker that does not. It applies to this agent only and is not inherited from `defaults`; the agent's own use of the `terminal` toolkit does not depend on it |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) |
@@ -10160,7 +10161,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
-- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room watch and type in.
+- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -10335,7 +10336,7 @@ EOF
 
 ## [`terminal`]
 
-`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals.
+`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals, as far as the agent's [`terminals`](https://docs.mindroom.chat/configuration/agents/) setting allows.
 Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
 
 - `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
@@ -10347,12 +10348,12 @@ Use it for work people should see or that keeps state between commands, such as 
 An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
-People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
+With [`terminals: type`](https://docs.mindroom.chat/configuration/agents/), people who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
 After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: the first [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` is `auto_approve`, or no rule matches and `tool_approval.default` is `auto_approve`; a rule with an approval script counts as one that may ask.
-Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people still type in the terminals.
+Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people the agent's `terminals` setting lets type still type in the terminals.
 The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 
 ```yaml
@@ -10361,6 +10362,7 @@ agents:
     tools:
       - shell
       - terminal
+    terminals: type
 ```
 
 ## [`python`]
@@ -17380,8 +17382,8 @@ Routes that act on one room use `require_room_member` instead, which authenticat
 `RoomReader.history()` reads the caller's membership again with the room's history visibility, answering 403 once they have left and 503 when the read fails or times out; the start of their view rests on `origin_server_ts`, which the sending homeserver sets, so it counts only events of the caller's own homeserver, the only one whose users get client sessions, and ends at an invite another homeserver sent.
 `RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses, under the config the API serves rather than the one the runtime runs: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the router's for the Computer, and under current room grants the agent's access rules let the caller converse with it there; `agent()` answers 503 while identities or grants are unresolved, and `agents()` leaves such an agent out and answers 503 only while the router's rooms are unknown; grants are current as the router's sync keeps them, refreshed through the runtime's one refresh when they need it, and the room read again when its ready grants lack a caller its live roster shows joined, and plugin routes never refresh grants under a membership policy the running runtime has not applied.
 Each admitted agent's `root` is the workspace a turn of that agent for that caller in that room resolves, never a path from the request; `files` and `terminal` follow the agent's toolkits as their declarations and settings describe them, and give only `read` and `watch` to a caller whose power level keeps them from posting; a contact room opens none, because its turns run as the agent's owner.
-`terminal` is `none` unless the agent's shell offers `run_shell_command` in a worker, and `type` only where that worker mounts the workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, because only there does typing act on the files the caller sees as the agent's `root`.
-The terminal routes under `/api/rooms/` take the same sessions and admit through `RoomReader.agents()` or `agent()` on every request, open, close, and take input only with `type`, and take no path or worker from the client; their streams recheck `agent()` every 15 seconds under the config served then, dropping input once the caller may only watch and closing once the agent is no longer open to them.
+`terminal` is `none` unless the agent's `terminals` setting is `watch` or `type`, `none` by default, and its shell offers `run_shell_command` in a worker, and `type` only under `terminals: type` where that worker mounts the workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, because only there does typing act on the files the caller sees as the agent's `root`.
+The terminal routes under `/api/rooms/` take the same sessions and admit through `RoomReader.agents()` or `agent()` on every request, stream only with `watch` or `type`, open, close, and take input only with `type`, and take no path or worker from the client; their streams recheck `agent()` every 15 seconds under the config served then, dropping input once the caller may only watch and closing once the agent is no longer open to them.
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 `require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
 A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, at any depth, and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
@@ -18353,7 +18355,8 @@ async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
         log.write(f"{ctx.room_id} {line}\n")
 ```
 
-It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, passwords given as `curl -u user:password` or mysql's `-ppassword`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+A secret name that ends its line, such as `password:`, or a quoted value left open, hides everything after it, since the value may continue on the next line.
 `max_length` cuts the result to that many characters, ending in `... [truncated]`.
 It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
 What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
@@ -18866,7 +18869,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
 | `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
-| `terminal` | `none` when the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
+| `terminal` | `none` when the agent's [`terminals`](https://docs.mindroom.chat/configuration/agents/) setting is `none`, its default, or the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the setting is `type`, the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
@@ -19496,7 +19499,7 @@ When a `message:before_response` hook fails, changes it made to the draft before
 When a `message:final_response_transform` hook fails, its changes are discarded and the next hook receives the previous draft.
 
 ```python
-from mindroom.plugin_api import hook
+from mindroom.plugin_api import hook, redact_sensitive_text
 
 
 @hook("message:before_response", priority=10)
@@ -19506,7 +19509,7 @@ async def add_disclaimer(ctx):
 
 @hook("message:before_response", priority=20)
 async def redact_secrets(ctx):
-    ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
+    ctx.draft.response_text = redact_sensitive_text(ctx.draft.response_text)
 
 
 @hook("message:final_response_transform", priority=10)
@@ -21829,7 +21832,7 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-  Set `MINDROOM_STATIC_RUNNER_AGENT_STORAGE=true` on the primary when its `static_runner` mounts the agents' storage, as the Kubernetes chart does; only then may people in a room type in the [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) of agents whose shell runs there, and otherwise they only watch them.
+  Set `MINDROOM_STATIC_RUNNER_AGENT_STORAGE=true` on the primary when its `static_runner` mounts the agents' storage, as the Kubernetes chart does; only then may people in a room type in the [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) of agents with `terminals: type` whose shell runs there, and otherwise they only watch them.
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 

@@ -688,7 +688,8 @@ async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
         log.write(f"{ctx.room_id} {line}\n")
 ```
 
-It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, passwords given as `curl -u user:password` or mysql's `-ppassword`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+A secret name that ends its line, such as `password:`, or a quoted value left open, hides everything after it, since the value may continue on the next line.
 `max_length` cuts the result to that many characters, ending in `... [truncated]`.
 It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
 What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
@@ -1201,7 +1202,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
 | `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
-| `terminal` | `none` when the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
+| `terminal` | `none` when the agent's [`terminals`](https://docs.mindroom.chat/configuration/agents/) setting is `none`, its default, or the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the setting is `type`, the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.

@@ -66,6 +66,7 @@ def _agents() -> dict[str, AgentConfig]:
             display_name="Coder",
             tools=["file", "shell"],
             access=ResponderAccessConfig(users=[ALICE, BOB]),
+            terminals="type",
         ),
         "notes": AgentConfig(
             display_name="Notes",
@@ -293,23 +294,36 @@ _STORAGE_RUNNER = {**_SCRATCH_RUNNER, "MINDROOM_STATIC_RUNNER_AGENT_STORAGE": "t
 
 
 @pytest.mark.parametrize(
-    ("env", "alice", "bob"),
+    ("terminals", "env", "alice", "bob"),
     [
-        ({}, "type", "watch"),
-        (_STORAGE_RUNNER, "type", "watch"),
-        (_SCRATCH_RUNNER, "watch", "watch"),
-        (_PRIMARY, "none", "none"),
+        ("type", {}, "type", "watch"),
+        ("type", _STORAGE_RUNNER, "type", "watch"),
+        ("type", _SCRATCH_RUNNER, "watch", "watch"),
+        ("type", _PRIMARY, "none", "none"),
+        ("watch", {}, "watch", "watch"),
+        ("watch", _STORAGE_RUNNER, "watch", "watch"),
+        ("watch", _SCRATCH_RUNNER, "watch", "watch"),
+        ("watch", _PRIMARY, "none", "none"),
+        (None, {}, "none", "none"),
+        (None, _STORAGE_RUNNER, "none", "none"),
+        (None, _SCRATCH_RUNNER, "none", "none"),
+        (None, _PRIMARY, "none", "none"),
     ],
 )
 @pytest.mark.asyncio
-async def test_people_type_in_terminals_only_where_the_agent_s_shell_works_in_its_workspace(
+async def test_people_get_terminals_only_as_the_agent_allows_and_type_only_where_its_shell_works_in_its_workspace(
     tmp_path: Path,
+    terminals: str | None,
     env: dict[str, str],
     alice: str,
     bob: str,
 ) -> None:
-    """Terminals run beside a worker's shell; Alice, who may post, types where that worker mounts the workspace."""
-    helper = AgentConfig(display_name="Helper", tools=["shell"], access={"users": [ALICE, BOB]})
+    """Terminals run beside a worker's shell, for people only as far as ``terminals`` allows, which is ``none`` unset.
+
+    Alice, who may post, types where the agent allows typing and that worker mounts the workspace.
+    """
+    setting = {} if terminals is None else {"terminals": terminals}
+    helper = AgentConfig(display_name="Helper", tools=["shell"], access={"users": [ALICE, BOB]}, **setting)
     room = _room(tmp_path, {"helper": helper}, **env)
 
     assert [workspace.terminal for workspace in await room.agents(ALICE)] == [alice]
@@ -322,9 +336,9 @@ async def test_the_terminal_toolkit_adds_nothing_to_what_the_shell_gives(tmp_pat
     """It types only into the agent's shell, so an agent with both may do what one with the shell alone may."""
     access = ResponderAccessConfig(users=[ALICE, BOB])
     agents = {
-        "both": AgentConfig(display_name="Both", tools=["shell", "terminal"], access=access),
-        "shell": AgentConfig(display_name="Shell", tools=["shell"], access=access),
-        "terminal": AgentConfig(display_name="Terminal", tools=["terminal"], access=access),
+        "both": AgentConfig(display_name="Both", tools=["shell", "terminal"], access=access, terminals="type"),
+        "shell": AgentConfig(display_name="Shell", tools=["shell"], access=access, terminals="type"),
+        "terminal": AgentConfig(display_name="Terminal", tools=["terminal"], access=access, terminals="type"),
     }
     room = _room(tmp_path, agents, **env)
 
@@ -575,7 +589,7 @@ async def test_a_room_without_a_running_router_answers_503(tmp_path: Path) -> No
 async def test_a_contact_room_opens_no_workspace(tmp_path: Path) -> None:
     """A contact room runs its agent's turns as the agent's owner, so nobody opens that agent's workspace through it."""
     data = _with_template()
-    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"]}
+    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"], "terminals": "type"}
     room = _Room(_load(tmp_path, data, entries=[_personal(ALICE)]), _paths(tmp_path), ("mind_alice",))
     agent_id = room.ids["mind_alice"]
     assert _access(await room.agents(ALICE)) == [("mind_alice", "write", "type")]
