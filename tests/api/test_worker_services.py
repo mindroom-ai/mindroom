@@ -35,9 +35,10 @@ from mindroom.plugin_worker_services import (
     stop_worker_service,
 )
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, subagent_worker_key
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 
 if TYPE_CHECKING:
@@ -609,15 +610,108 @@ async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytes
     """A plugin load or shutdown stops every started service, even when one worker cannot be reached."""
     stopped: list[str] = []
 
-    async def stop(*args: object) -> None:
-        stopped.append(str(args[-1]))
-        if args[-1] == "broken":
+    async def stop(_paths: object, _worker_key: str, _plugin: str, name: str) -> None:
+        stopped.append(name)
+        if name == "broken":
             msg = "worker gone"
             raise WorkerServiceError(msg)
 
-    monkeypatch.setattr(plugin_worker_services, "_stop", stop)
+    monkeypatch.setattr(plugin_worker_services, "_stop_recorded", stop)
     for name in ("broken", "hello"):
-        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
+        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = None  # type: ignore[assignment]
     await plugin_worker_services.stop_started_worker_services()
     assert stopped == ["broken", "hello"]
     assert plugin_worker_services._started == {}
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_load_stops_a_service_whose_ensure_was_under_way(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load waits for an ensure still starting the agent's worker, then stops the service that ensure started."""
+    async with _runner(tmp_path) as runner:
+        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
+        starting, release = threading.Event(), threading.Event()
+        target_worker = plugin_worker_services._target_worker
+
+        def slow_worker_start(*args: object, **kwargs: object) -> object:
+            starting.set()
+            release.wait(10)
+            return target_worker(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(plugin_worker_services, "_target_worker", slow_worker_start)
+        ensure = asyncio.create_task(ensure_worker_service(context, _SERVICE, _TARGET))
+        await _until(starting.is_set)
+        load = asyncio.create_task(plugin_worker_services.stop_started_worker_services())
+        await asyncio.sleep(0.2)
+        assert not load.done()
+        release.set()
+        assert (await ensure).state == "running"
+        await load
+        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+
+
+class _AnyWorkers:
+    """Dedicated workers for any key, each at a runner of its own, recording the keys a stop looks up."""
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def _handle(self, worker_key: str) -> WorkerHandle:
+        return WorkerHandle(
+            worker_id=worker_key,
+            worker_key=worker_key,
+            endpoint=f"http://{abs(hash(worker_key))}.workers/api/sandbox-runner/execute",
+            auth_token=_TOKEN,
+            status="ready",
+            backend_name="docker",
+            last_used_at=0.0,
+            created_at=0.0,
+        )
+
+    def ensure_worker(self, spec: WorkerSpec, *, progress_sink: object = None) -> WorkerHandle:
+        del progress_sink
+        return self._handle(spec.worker_key)
+
+    def touch_worker(self, worker_key: str) -> WorkerHandle | None:
+        self.touched.append(worker_key)
+        return self._handle(worker_key)
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_load_stops_a_service_in_the_worker_it_started_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service a subagent's call started stops in that subagent's own worker, though the load runs outside the call."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    config = _config(plugin_root, paths)
+    publish_test_plugins(config, paths)
+    context = build_plugin_context("demo", config, paths, lambda: config)
+    workers = _AnyWorkers()
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+    sent: list[tuple[str, str]] = []
+
+    async def send(method: str, endpoint: object, path: str, _body: object) -> bytes:
+        sent.append((method, f"{endpoint.root}/{path}"))  # type: ignore[attr-defined]
+        return b'{"state": "running", "port": 1, "exit_code": null}'
+
+    monkeypatch.setattr(plugin_worker_services, "_send", send)
+    identity = ToolExecutionIdentity("matrix", "coder", "@alice:localhost", None, None, None, "session")
+    subagent = "a" * 32
+    with dedicated_worker_placement("session", DedicatedWorkerPlacement(subagent)):
+        await ensure_worker_service(context, _SERVICE, resolve_worker_target("shared", "coder", identity))
+    await plugin_worker_services.stop_started_worker_services()
+
+    subagent_key = subagent_worker_key(_WORKER_KEY, subagent)
+    root = f"http://{abs(hash(subagent_key))}.workers/api/sandbox-runner/plugin-services"
+    assert workers.touched == [subagent_key]
+    assert sent == [("POST", f"{root}/demo/hello"), ("DELETE", f"{root}/demo/hello")]
