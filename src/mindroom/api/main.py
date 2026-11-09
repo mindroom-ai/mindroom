@@ -65,6 +65,7 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
+from mindroom.api.workspace_files import router as workspace_files_router
 from mindroom.call_transcripts.routes import router as call_transcripts_router
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.personal_agents import personal_agent_data
@@ -519,6 +520,7 @@ app.include_router(computers_router)
 app.include_router(agent_terminals_router)  # Authenticates client sessions.
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
+app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.

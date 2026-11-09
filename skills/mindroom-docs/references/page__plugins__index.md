@@ -386,6 +386,7 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
 | `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
+| `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there, which decide `files` as [Workspace Files](https://docs.mindroom.chat/workspace-files/#who-may-open-and-change-a-workspace) describes; a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.19"` |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
@@ -688,7 +689,8 @@ async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
         log.write(f"{ctx.room_id} {line}\n")
 ```
 
-It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, passwords given as `curl -u user:password` or mysql's `-ppassword`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+A secret name that ends its line, such as `password:`, or a quoted value left open, hides everything after it, since the value may continue on the next line.
 `max_length` cuts the result to that many characters, ending in `... [truncated]`.
 It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
 What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
@@ -1200,16 +1202,15 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
-| `terminal` | `none` when the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
+| `files` | `none`, `read`, or `write`, as [Who may open and change a workspace](https://docs.mindroom.chat/workspace-files/#who-may-open-and-change-a-workspace) describes, from each toolkit's [`workspace_writers`](#decorator-fields) |
+| `terminal` | `none` when the agent's [`terminals`](https://docs.mindroom.chat/configuration/agents/) setting is `none`, its default, or the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the setting is `type`, the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
-A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
 MindRoom resolves `root` itself, never from the request; a route that opens files there uses `resolve_agent_file` and `write_agent_file` (see [Agent files](#agent-files)) with `file_access="workspace"`, which refuse a path or link that leaves it, since code the agent runs can plant links in its workspace.
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process, or `watch` for a `static_runner` that does not mount the agents' storage, states `"1.18"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, one that relies on `terminal` being `none` for a shell in the primary process, or `watch` for a `static_runner` that does not mount the agents' storage, states `"1.18"`, and one that relies on `files` being `read` for writing toolkits on such a `static_runner` states `"1.19"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
@@ -1415,6 +1416,140 @@ A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespa
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
+
+## Worker services
+
+A worker service is a long-lived program of a plugin, such as a web server, that runs inside an agent's dedicated worker and never in the process that runs the agents.
+Declare it once with `WorkerService` from `mindroom.plugin_api`, and start it from a tool with `requires_primary_runtime=True`, which has the plugin's [context](#plugin-context) and the agent's worker target:
+
+```python
+# tools.py
+from mindroom.plugin_api import WorkerService, current_plugin_context, ensure_worker_service, get_tool_runtime_context
+
+HELLO = WorkerService("hello", "hello_service.py", idle_timeout_seconds=600)
+
+
+async def open_hello() -> str:
+    runtime = get_tool_runtime_context()
+    state = await ensure_worker_service(current_plugin_context("my-plugin"), HELLO, runtime.resolve_worker_target())
+    return f"{state.state} on port {state.port}"
+```
+
+The program is a Python file in the plugin's folder that the worker runs with its own Python and environment.
+Every process in the worker, including code the agent runs, can reach the service's port, so the worker hands each start a fresh secret on the first line of its stdin, and the program must refuse every request whose `X-MindRoom-Service-Secret` header does not carry it:
+
+```python
+# hello_service.py
+import hmac
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+SECRET = sys.stdin.readline().strip()
+
+
+class Hello(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if not hmac.compare_digest(self.headers.get("X-MindRoom-Service-Secret", ""), SECRET):
+            self.send_error(403)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"hello")
+
+
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Hello).serve_forever()
+```
+
+| Call | Effect |
+|------|--------|
+| `ensure_worker_service(context, service, target)` | Starts the service in the worker `target` names, starting that worker as a tool call does, unless the service already runs there, and returns a `WorkerServiceState` |
+| `stop_worker_service(context, service, target)` | Stops the service; a stopped worker is not started |
+
+`target` is the worker an agent's turns use for one requester: in a tool call, `get_tool_runtime_context().resolve_worker_target()`.
+Neither call checks who may use the agent, so check that before you start a service for someone.
+`WorkerService(name, module, idle_timeout_seconds=600.0)` takes a `name` of 1-64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit, a `module` path relative to the plugin's folder, and a positive, finite `idle_timeout_seconds`.
+`WorkerServiceState` has `state`, `port`, and `exit_code`.
+`state` is `running` once the program accepts connections on its port, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
+Each worker runs one instance of a service, so ensuring a running service returns the same port.
+A service that exited stays reported as exited, and starts again only after `stop_worker_service` or its idle timeout, or when its program file changed.
+The program's output goes to the worker's log.
+
+A service stops when `idle_timeout_seconds` pass without an ensure, when it is stopped, when its worker stops, and when MindRoom reloads plugins or stops.
+A service that replaced plugin code starts during a reload keeps running until its idle timeout.
+Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
+A plugin with worker services states `"mindroom_plugin_api": "1.20"` in its manifest.
+
+### The agent's browser
+
+A worker service can watch the page of its agent's browser and, while it holds the Computer's control, act on it, for example to show and steer that page in a plugin's own panel.
+This needs a worker that runs the [Computer](https://docs.mindroom.chat/tools/worker-computer/) and an agent that browses with the built-in `browser` tool; `browser_mcp` runs its browser in another process, which offers no page.
+The service finds the bridge's WebSocket address in `MINDROOM_AGENT_BROWSER_URL` and opens it with its secret in the `X-MindRoom-Service-Secret` header.
+The worker refuses a connection without the running instance's own secret, and every connection in a worker without a Computer.
+Opening the bridge starts the Computer's display when it is stopped.
+Each connection is a CDP session of its own on the agent's current page, so open one per viewer.
+
+The bridge speaks the JSON of the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/): send `{"id": 1, "method": "Page.startScreencast", "params": {}}` and read `{"id": 1, "result": {}}` or `{"id": 1, "error": {"code": -32000, "message": "..."}}`.
+Commands run side by side and each answers when it completes, so a navigation waiting on a slow server holds up no other command.
+
+| Methods | Allowed |
+|---------|---------|
+| `Page.startScreencast`, `Page.stopScreencast`, `Page.screencastFrameAck`, `Page.enable`, `Page.getNavigationHistory`, `Page.getLayoutMetrics`, `Target.getTargetInfo` | Always |
+| `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`, `Page.navigate`, `Page.navigateToHistoryEntry`, `Page.reload`, `Page.stopLoading`, `Emulation.setDeviceMetricsOverride`, `Emulation.clearDeviceMetricsOverride` | While this connection holds control |
+| `MindRoom.takeControl`, `MindRoom.releaseControl` | Always: take or release the Computer's control |
+
+Every other method, such as `Runtime.evaluate`, answers an error and does nothing, and so do `Page.reload` with `scriptToEvaluateOnLoad`, `Target.getTargetInfo` with a `targetId`, a number JSON cannot carry, such as `NaN`, and any command while the agent's browser shows no page.
+`Page.navigate` opens only `http` and `https` addresses and `about:blank`, and the browser then checks every request as it does the agent's.
+The bridge passes on its session's `Page.screencastFrame`, `Page.screencastVisibilityChanged`, `Page.frameNavigated`, `Page.navigatedWithinDocument`, `Page.frameStartedLoading`, and `Page.frameStoppedLoading` events; all but the first two need `Page.enable`.
+Two events are the bridge's own:
+
+| Event | Sent |
+|-------|------|
+| `{"method": "MindRoom.page", "params": {"page": true}}` | On connect and whenever the agent's browser shows another page or none (`false`); each page has a new session, so start the screencast and `Page.enable` again |
+| `{"method": "MindRoom.control", "params": {"held": true}}` | When this connection takes control, and with `false` when it loses it: by releasing it, or when the Computer stops or restarts |
+
+Control is the Computer's own, shared with the viewers of its desktop: one holder at a time, and while it is held the agent's browser calls fail with `Computer is under user control; resume the agent first.`
+`MindRoom.takeControl` answers an error while someone else holds control or the Computer is stopped, and works while the agent's browser shows no page, so a service that shows a browser of its own can gate it by the same control.
+Releasing control or leaving releases every key and mouse button the connection still holds, and a viewport override lasts until the service clears it or leaves.
+
+The worker trusts every service it runs, so check the person in your plugin's route: admit a viewer with `RoomReader.agent()`, the Computer's own check, before you relay them to the service, and never offer the bridge's control to a viewer your route did not admit.
+A service that keeps the newest frame of the agent's page in `frame.jpg`:
+
+```python
+# page_service.py
+import asyncio
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+
+from websockets.asyncio.client import connect
+
+SECRET = sys.stdin.readline().strip()
+
+
+async def main() -> None:
+    # The worker reports a service as running once it accepts connections on its port.
+    port = int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])
+    server = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", port)
+    headers = {"X-MindRoom-Service-Secret": SECRET}
+    async with server, connect(os.environ["MINDROOM_AGENT_BROWSER_URL"], additional_headers=headers, max_size=None) as bridge:
+        async for raw in bridge:
+            message = json.loads(raw)
+            if message.get("method") == "MindRoom.page" and message["params"]["page"]:
+                await bridge.send(json.dumps({"id": 1, "method": "Page.startScreencast", "params": {"format": "jpeg"}}))
+            elif message.get("method") == "Page.screencastFrame":
+                frame = message["params"]
+                Path("frame.jpg").write_bytes(base64.b64decode(frame["data"]))
+                ack = {"id": 2, "method": "Page.screencastFrameAck", "params": {"sessionId": frame["sessionId"]}}
+                await bridge.send(json.dumps(ack))
+
+
+asyncio.run(main())
+```
+
+A plugin that uses the bridge states `"mindroom_plugin_api": "1.21"` in its manifest.
 
 ## People, agents, and administrators
 

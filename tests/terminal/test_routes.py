@@ -12,10 +12,10 @@ import aiohttp
 import nio
 import pytest
 
-from mindroom.api import agent_terminals
+from mindroom.api import agent_streams, agent_terminals
 from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room
 from tests.terminal.conftest import primary_paths
@@ -33,11 +33,11 @@ _ORIGIN = "https://chat.example.org"
 
 
 def _agents(*users: str) -> dict[str, AgentConfig]:
-    """Two agents with a shell, which ``users`` may use."""
+    """Two agents with a shell whose terminals people may type in, which ``users`` may use."""
     access = ResponderAccessConfig(users=list(users))
     return {
-        "coder": AgentConfig(display_name="Coder", tools=["shell"], access=access),
-        "other": AgentConfig(display_name="Other", tools=["shell"], access=access),
+        "coder": AgentConfig(display_name="Coder", tools=["shell"], access=access, terminals="type"),
+        "other": AgentConfig(display_name="Other", tools=["shell"], access=access, terminals="type"),
     }
 
 
@@ -159,6 +159,32 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
         assert [t["id"] for t in after["terminals"]] == [other["id"]]
 
 
+async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(tmp_path: Path, runner: str) -> None:
+    """With ``terminals: watch`` Alice watches the agent's terminal but may not open one; left unset, she sees nothing.
+
+    Unset, a stream of a terminal she knows the ID of closes as refused before it sends any of its output.
+    """
+    room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
+    coder = f"agents/{room.ids['coder']}/terminals"
+    async with _served(room) as (client, base):
+        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        access = ResponderAccessConfig(users=[ALICE])
+        watching = AgentConfig(display_name="Coder", tools=["shell"], access=access, terminals="watch")
+        unset = AgentConfig(display_name="Coder", tools=["shell"], access=access)
+        for coder_config, listed in ((watching, [(opened["id"], False)]), (unset, [])):
+            room.serve(Config(agents=_agents(ALICE) | {"coder": coder_config}))
+            assert (await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE))))[0] == 403
+            _, seen = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+            assert [(t["id"], t["writable"]) for t in seen["terminals"]] == listed
+            stream = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
+            first = await stream.receive()
+            if listed:
+                assert json.loads(first.data) == {"type": "writable", "writable": False}
+                await stream.close()
+            else:
+                assert (first.type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+
+
 async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
     tmp_path: Path,
     runner: str,
@@ -168,7 +194,7 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
 
     It turns read-only once she can't post, and closes once a config save takes the agent from her.
     """
-    monkeypatch.setattr(agent_terminals, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     room = _Room(Config(agents=_agents(ALICE, BOB)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
@@ -200,13 +226,24 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
         await bob.close()
 
 
-async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"tools": []}, id="no-shell"),
+        pytest.param({"private": AgentPrivateConfig(per="user")}, id="private"),
+    ],
+)
+async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal_or_moves_its_workspace(
     tmp_path: Path,
     runner: str,
     monkeypatch: pytest.MonkeyPatch,
+    change: dict[str, object],
 ) -> None:
-    """Alice may still use the agent, but without its shell it has no terminal for her to watch."""
-    monkeypatch.setattr(agent_terminals, "_RECHECK_SECONDS", 0.05)
+    """Alice may still use the agent, but without its shell it has no terminal for her to watch.
+
+    Once it is private, her workspace is her own, not the one whose terminal she watches.
+    """
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
@@ -214,10 +251,15 @@ async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
         alice = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
         assert await alice.receive_json() == {"type": "writable", "writable": True}
         agents = _agents(ALICE)
-        agents["coder"].tools = []
+        agents["coder"] = agents["coder"].model_copy(update=change)
         room.serve(Config(agents=agents))
         message = await _after_output(alice)
-        assert (message.type, alice.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+
+    assert (message.type, alice.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1008,
+        "This terminal is no longer open to you.",
+    )
 
 
 async def test_a_stream_of_a_terminal_the_workspace_does_not_have_closes(tmp_path: Path, runner: str) -> None:

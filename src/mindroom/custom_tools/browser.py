@@ -343,6 +343,8 @@ class _BrowserSession:
     startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The profile whose tab the agent last brought to the front of a worker display.
+    shown: _BrowserProfileState | None = None
 
 
 # Chromium holds a profile directory for its whole process, and every reply or call builds a fresh toolkit, so a
@@ -710,6 +712,12 @@ class BrowserTools(Toolkit):
             msg = "Only a fresh browser toolkit can receive a worker session."
             raise ValueError(msg)
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
+
+    def worker_shown_page(self) -> Page | None:
+        """Return the open active tab of the profile the agent last brought to the front of its worker display."""
+        state = self._worker_session.shown
+        tab = None if state is None else state.tabs.get(state.active_target_id or "")
+        return None if tab is None or tab.page.is_closed() else tab.page
 
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._worker_session.profiles:
@@ -1895,6 +1903,7 @@ class BrowserTools(Toolkit):
         """Make a tab its profile's active one, and on a worker display bring it to the front."""
         if self._worker_display is not None:
             await page.bring_to_front()
+            self._worker_session.shown = state
         state.active_target_id = target_id
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
