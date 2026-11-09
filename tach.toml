@@ -4940,6 +4940,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.cli.connect"
 depends_on = [
+    "mindroom.cli.config",
     "mindroom.cli.env_file",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
