@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -30,6 +31,7 @@ from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.plugin_api import dump_worker_target, load_worker_target
 from mindroom.plugin_context import build_plugin_context
 from mindroom.plugin_http import WorkerRelay, worker_relay
@@ -49,13 +51,20 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
-from tests.conftest import bind_runtime_paths, publish_test_plugins
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    publish_test_plugins,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_context import PluginContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 pytestmark = [
     pytest.mark.skipif(sys.platform != "linux", reason="Services run in their own process groups."),
@@ -129,6 +138,21 @@ def _config(plugin_root: Path, paths: RuntimePaths) -> Config:
     """A config loading the plugin at ``plugin_root`` with the agent ``coder``, whose worker is shared."""
     agent = AgentConfig(display_name="Coder", worker_scope="shared")
     return bind_runtime_paths(Config(agents={"coder": agent}, plugins=[str(plugin_root)]), paths)
+
+
+def _demo_primary(tmp_path: Path, backend: str) -> tuple[RuntimePaths, Config]:
+    """Return a primary's paths on ``backend`` and its published config, which loads an empty plugin ``demo``."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": backend},
+    )
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    config = _config(plugin_root, paths)
+    publish_test_plugins(config, paths)
+    return paths, config
 
 
 def _body(module: str = "hello.py", idle_timeout_seconds: float = 600.0) -> dict[str, object]:
@@ -599,16 +623,7 @@ async def test_a_service_the_new_code_starts_as_it_loads_keeps_running(
 @pytest.mark.asyncio
 async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_path: Path, backend: str) -> None:
     """Nothing falls back to the primary: the shared runner and no worker at all fail with the setting to change."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": backend},
-    )
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
-    config = _config(plugin_root, paths)
-    publish_test_plugins(config, paths)
+    paths, config = _demo_primary(tmp_path, backend)
     context = build_plugin_context("demo", config, paths, lambda: config)
     expected = "Worker services need a dedicated worker backend: set MINDROOM_WORKER_BACKEND to docker or kubernetes."
     with pytest.raises(WorkerServiceError, match=re.escape(expected)):
@@ -717,16 +732,7 @@ async def test_a_plugin_load_stops_a_service_in_the_worker_it_started_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A service a subagent's call started stops in that subagent's own worker, though the load runs outside the call."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
-    )
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
-    config = _config(plugin_root, paths)
-    publish_test_plugins(config, paths)
+    paths, config = _demo_primary(tmp_path, "docker")
     context = build_plugin_context("demo", config, paths, lambda: config)
     workers = _AnyWorkers()
     monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
@@ -1129,3 +1135,42 @@ async def test_worker_relay_takes_the_plugin_from_a_tools_context(
         assert await _get(await worker_relay(context, _TARGET), "/", service="hello") == (200, "hello", False)
         other = await worker_relay(replace(context, plugin_name="other"), _TARGET)
         assert (await _get(other, "/", service="hello"))[::2] == (503, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [False, True], ids=["in-memory", "stored"])
+async def test_a_target_a_subagent_s_tool_resolves_reaches_the_subagent_s_own_worker_after_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored: bool,
+) -> None:
+    """A tool's target from a subagent turn with its own worker relays there later; a normal turn's to the agent's."""
+    paths, config = _demo_primary(tmp_path, "docker")
+    workers = _AnyWorkers()
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+
+    def tool_context(session_id: str) -> ToolRuntimeContext:
+        return make_test_tool_runtime_context(
+            agent_name="coder",
+            target=replace(MessageTarget.resolve("!room:localhost", "$thread", None), session_id=session_id),
+            requester_id="@alice:localhost",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=paths,
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
+        )
+
+    subagent = "b" * 32
+    session = f"delegate:caller:coder:{subagent}"
+    with dedicated_worker_placement(session, DedicatedWorkerPlacement(subagent, "large")):
+        recorded = tool_context(session).resolve_worker_target()
+    normal = tool_context("parent-session").resolve_worker_target()
+    if stored:
+        recorded, normal = (
+            load_worker_target(json.loads(json.dumps(dump_worker_target(t)))) for t in (recorded, normal)
+        )
+
+    for target in (recorded, normal):
+        await open_worker_relay(paths, target, "demo")
+    assert workers.touched == [subagent_worker_key(_WORKER_KEY, subagent), _WORKER_KEY]

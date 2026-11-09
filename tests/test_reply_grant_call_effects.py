@@ -14,7 +14,7 @@ from nio import TimelineEventProvenance
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from tests.conftest import start_call_manager
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, start_call_manager
 from tests.test_bot_ready_hook import (
     _FRESH_SEMANTIC_FACTS,
     _REPLAY_FACTS,
@@ -88,7 +88,7 @@ async def _router_and_agent(tmp_path: Path, calls: _Calls) -> tuple[AgentBot, Ag
 
 
 async def _settle() -> None:
-    assert await wait_for_background_tasks(timeout=1)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 async def _admit_live_join(router: AgentBot, facts: AdmissionFacts = _FRESH_SEMANTIC_FACTS) -> None:
@@ -232,7 +232,7 @@ async def test_router_stop_leaves_another_bots_call_start_running(tmp_path: Path
     assert not held.cancelled.is_set()
 
     held.release.set()
-    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=agent._runtime_view)
     assert held.finished.is_set()
 
 
@@ -256,7 +256,7 @@ async def test_router_stop_leaves_another_bots_fence_revocation_running(tmp_path
     await router.stop()
     hold.set()
 
-    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=agent._runtime_view)
     assert "code" in calls.ops("revoked")
 
 

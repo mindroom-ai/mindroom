@@ -710,6 +710,24 @@ async def test_failed_membership_queries_log_why_they_failed(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_member_list_raced_by_a_membership_change_is_read_again(tmp_path: Path) -> None:
+    """A room whose member list the client refused for a membership change during the read is read again and ready."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    room_id = "!current:example.com"
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        joined_members_response(room_id, "@alice:example.com"),
+    ]
+    index = AgentReplyMembershipIndex()
+
+    await index.refresh(config, runtime_paths, client)
+
+    assert index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
+
+
+@pytest.mark.asyncio
 async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: Path) -> None:
     """Current-room entries without managed keys must fail closed on control departure."""
     config, runtime_paths = _current_room_runtime_config(tmp_path)

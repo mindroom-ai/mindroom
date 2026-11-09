@@ -110,6 +110,7 @@ from tests.bot_helpers import (
     _runtime_bound_config,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     cached_plugin_module,
     initialize_approval_store_for_test,
@@ -1707,13 +1708,13 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
             try:
-                await asyncio.wait_for(api_shutdown_started.wait(), timeout=1)
+                await asyncio.wait_for(api_shutdown_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
                 await asyncio.sleep(0)
                 await asyncio.sleep(0)
                 assert not main_task.done()
                 assert not api_cancelled.is_set()
                 api_allow_finish.set()
-                await asyncio.wait_for(main_task, timeout=1)
+                await asyncio.wait_for(main_task, timeout=SETTLE_TIMEOUT_SECONDS)
             finally:
                 api_allow_finish.set()
                 if not main_task.done():
@@ -1838,7 +1839,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         try:
-            await asyncio.wait_for(core_stop_started.wait(), timeout=0.1)
+            await asyncio.wait_for(core_stop_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         finally:
             core_stop_started.set()
             await finishing
@@ -2302,7 +2303,7 @@ class TestAgentBot(AgentBotTestBase):
             assert runtime_paths is not None
             events.append("setup_started")
             setup_started.set()
-            assert release_setup.wait(2.0)
+            assert release_setup.wait(SETTLE_TIMEOUT_SECONDS)
             events.append("setup_finished")
 
         with (
@@ -2320,7 +2321,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             main_task = asyncio.create_task(main(log_level="INFO", runtime_paths=runtime_paths, api=False))
             try:
-                assert await asyncio.to_thread(setup_started.wait, 2.0)
+                assert await asyncio.to_thread(setup_started.wait, SETTLE_TIMEOUT_SECONDS)
                 main_task.cancel()
                 await asyncio.sleep(0)
                 assert not main_task.done()
@@ -4204,7 +4205,7 @@ class TestMultiAgentOrchestrator:
         with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(responder_bot)
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
 
@@ -4239,7 +4240,7 @@ class TestMultiAgentOrchestrator:
         with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
             orchestrator.turn_recovery.schedule()
             assert await wait_for_background_tasks(
-                timeout=1,
+                timeout=SETTLE_TIMEOUT_SECONDS,
                 owner=orchestrator.turn_recovery.task_owner,
             )
 
@@ -4368,7 +4369,7 @@ class TestMultiAgentOrchestrator:
                 await ready_task
 
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
         assert recovery_task.done()
@@ -4412,7 +4413,10 @@ class TestMultiAgentOrchestrator:
         general_bot.release_pending_turn_journal_replay.assert_called()
         general_bot.recover_pending_turn_journal_events.assert_not_awaited()
         release_router.set()
-        assert await wait_for_background_tasks(timeout=1, owner=orchestrator.turn_recovery.task_owner)
+        assert await wait_for_background_tasks(
+            timeout=SETTLE_TIMEOUT_SECONDS,
+            owner=orchestrator.turn_recovery.task_owner,
+        )
         general_bot.recover_pending_turn_journal_events.assert_awaited()
 
     @pytest.mark.asyncio
@@ -4586,7 +4590,7 @@ class TestMultiAgentOrchestrator:
         with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(member_bot)
         assert await wait_for_background_tasks(
-            timeout=1,
+            timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
         )
 

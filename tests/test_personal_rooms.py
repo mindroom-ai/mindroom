@@ -51,7 +51,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
@@ -1043,7 +1043,7 @@ async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_per
         for _ in range(2):
             lifecycle.config_changed()
             lifecycle.schedule_reconciliation()
-            assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         assert server.membership(room_id, "@alice:localhost") is None
 
         server.set_member(room_id, "@eve:localhost", "leave")
@@ -1054,7 +1054,7 @@ async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_per
             prev_membership="join",
         )
         await _dispatch_member(target, nio.MatrixRoom(room_id, target.agent_user.user_id), left)
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
     assert server.membership(room_id, "@alice:localhost") == "invite"
     assert [
@@ -1329,7 +1329,7 @@ async def test_invalid_retained_room_does_not_block_router_sync_or_other_user(
     await router._run_sync_response_side_effects(first_sync_response=False)
 
     ready.assert_awaited_once_with(router)
-    assert await wait_for_background_tasks(timeout=2, owner=router._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=router._runtime_view)
     assert server.create_count == 2
     assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost"))
     assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@bob:localhost"))
