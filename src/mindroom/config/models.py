@@ -543,6 +543,13 @@ class DefaultsConfig(BaseModel):
         default=None,
         description="Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
+    allow_shell_without_worker: bool = Field(
+        default=False,
+        description=(
+            "Whether the shell tool may run commands in MindRoom's own process when an agent's shell calls "
+            "do not run in a worker; off refuses each such call"
+        ),
+    )
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
         description=(

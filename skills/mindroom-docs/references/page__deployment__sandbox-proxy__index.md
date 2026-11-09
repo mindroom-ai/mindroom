@@ -297,6 +297,7 @@ When routing is requested but cannot be satisfied, tool calls fail instead of ru
 `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` lets tools that default to workers run locally when `static_runner` routing is requested without a proxy URL.
 It never bypasses dedicated Docker or Kubernetes workers or a configured proxy URL.
 Do not set it in hosted or multi-tenant deployments.
+Neither it nor a local execution mode lets `shell` run commands in the primary runtime; that needs [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults).
 
 ## Worker scopes
 

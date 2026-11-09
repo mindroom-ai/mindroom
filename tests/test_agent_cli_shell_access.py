@@ -232,6 +232,23 @@ def test_worker_shells_use_only_this_primarys_isolated_gateway_listener(
     assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_AGENT_CLI_PRIMARY_URL"]
 
 
+@pytest.mark.usefixtures("api_address", "real_shell_refusal")
+@pytest.mark.parametrize("allowed", [False, True])
+def test_minimal_bash_without_a_worker_needs_the_shell_allowed_there(tmp_path: Path, *, allowed: bool) -> None:
+    """A shell in MindRoom's own process refuses its commands unless `defaults.allow_shell_without_worker` is on."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.defaults.allow_shell_without_worker = allowed
+
+    assert minimal_shell_problems(runtime.config, runtime.runtime_paths, "helper") == (
+        []
+        if allowed
+        else [
+            "Route `shell` to a worker or set `defaults.allow_shell_without_worker: true`, "
+            "because the shell refuses commands in MindRoom's own process.",
+        ]
+    )
+
+
 @pytest.mark.parametrize("worker", [False, True], ids=["local", "worker"])
 def test_minimal_bash_needs_the_running_api(tmp_path: Path, *, worker: bool) -> None:
     """Only this process's API serves the grants, wherever the shell runs, even with an explicit URL."""

@@ -97,6 +97,7 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert list(generated["agents"]) == ["mind"]
     # An explicit worker_tools list would override the chart's sandbox routing for execution tools.
     assert "worker_tools" not in generated["defaults"]
+    assert "allow_shell_without_worker" not in generated["defaults"]
     # The platform upgrades hosted instances, so tenants must not be told to update themselves.
     assert "update_awareness" not in yaml.dump(generated)
     # `script` would run in the primary pod, and tenants cannot log in to matrix-mcp.

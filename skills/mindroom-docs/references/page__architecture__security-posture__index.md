@@ -12,6 +12,7 @@ Tools that run arbitrary programs cannot be confined inside their own process, b
 MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure; it isolates them only by routing them to a worker with `worker_tools`.
 
 An agent whose code-execution tools run in the primary process is trusted with everything that process can reach, so restricting its other tools protects nothing.
+The `shell` tool refuses commands in the primary process unless [`defaults.allow_shell_without_worker`](https://docs.mindroom.chat/configuration/agents/#defaults) records that trust; `python` and the other code-execution tools have no such setting.
 
 An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
 Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive` run in the primary process by default even then, so they follow the agent's [`file_access`](#file-access) setting, which by default keeps them inside the agent workspace.

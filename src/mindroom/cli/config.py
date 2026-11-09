@@ -1357,6 +1357,8 @@ defaults:
   # line — or replace [] with the tools to route, e.g. [shell, file, python].
   # See https://docs.mindroom.chat/deployment/sandbox-proxy/
   worker_tools: []
+  # Lets the shell run in the MindRoom process while it has no worker.
+  allow_shell_without_worker: true
   tools:
     - scheduler
     - update_awareness
