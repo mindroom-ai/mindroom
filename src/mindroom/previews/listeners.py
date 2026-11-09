@@ -1,4 +1,4 @@
-"""Which TCP sockets listen on this machine's ports, and whether only the worker's own processes hold them (Linux).
+"""Which TCP sockets listen on this machine's ports, and whether only the worker's, or one process group's, hold them (Linux).
 
 The kernel's socket diagnostics report only the listening sockets, however many connections the network namespace holds.
 Where the kernel offers none, as under gVisor, ``/proc/net`` answers instead: it lists every connection, and in a Linux
@@ -149,7 +149,7 @@ def _parent(pid: int) -> int | None:
     return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
 
 
-def socket_holders(sockets: frozenset[int]) -> dict[int, set[int]]:
+def _holders(sockets: frozenset[int]) -> dict[int, set[int]]:
     """Return the processes holding each of ``sockets``, among those this process may read, in one pass over them."""
     links = {f"socket:[{inode}]": inode for inode in sockets}
     holders: dict[int, set[int]] = {inode: set() for inode in sockets}
@@ -192,6 +192,23 @@ def workers_sockets(sockets: frozenset[int]) -> frozenset[int]:
     cgroup = _read(_PROC / "self" / "cgroup")
     return frozenset(
         inode
-        for inode, pids in socket_holders(sockets).items()
+        for inode, pids in _holders(sockets).items()
         if pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids)
     )
+
+
+def _in_group(pid: int, group: int) -> bool:
+    try:
+        return os.getpgid(pid) == group
+    except ProcessLookupError:  # It ended as the check looked.
+        return False
+
+
+def group_listens(port: int, group: int) -> bool:
+    """Return whether processes of process group ``group``, and only they, hold the sockets listening on ``port``.
+
+    Blocking. Raises OSError when neither the kernel nor ``/proc`` can say.
+    """
+    sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
+    holders = _holders(sockets).values()
+    return bool(sockets) and all(pids and all(_in_group(pid, group) for pid in pids) for pids in holders)

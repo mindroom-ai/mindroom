@@ -27,7 +27,7 @@ from pydantic import Field
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker, worker_subprocess_env
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN, WorkerServiceState
-from mindroom.previews.listeners import listening_sockets, socket_holders
+from mindroom.previews.listeners import group_listens
 from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.workers.protocol import WorkerFailure, WorkerRoute
 
@@ -240,29 +240,12 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
-def _in_group(pid: int, group: int) -> bool:
-    try:
-        return os.getpgid(pid) == group
-    except ProcessLookupError:
-        return False
-
-
-def _group_listens(port: int, group: int) -> bool:
-    """Return whether processes of process group ``group``, and only they, hold the sockets listening on ``port``.
-
-    Blocking. Raises OSError when ``/proc`` can't say.
-    """
-    sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
-    holders = socket_holders(sockets).values()
-    return bool(sockets) and all(pids and all(_in_group(pid, group) for pid in pids) for pids in holders)
-
-
 async def _settled(instance: _ServiceInstance) -> WorkerServiceState:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
     while instance.process.returncode is None:
         # Another socket can take the port before the service binds it, so only the service's own listener counts.
-        if await asyncio.to_thread(_group_listens, instance.port, instance.process.pid):
+        if await asyncio.to_thread(group_listens, instance.port, instance.process.pid):
             return WorkerServiceState("running", instance.port)
         if loop.time() >= deadline:
             return WorkerServiceState("starting", instance.port)

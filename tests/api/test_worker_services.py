@@ -1038,15 +1038,19 @@ async def test_a_service_runs_once_a_process_it_started_listens_on_its_port(tmp_
         assert state["state"] == "running"
 
 
-def _hide_holders(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(worker_services_module, "socket_holders", lambda sockets: {inode: set() for inode in sockets})
+def _hide_holders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A process table that lists no process this runner may read.
+    monkeypatch.setattr(listeners, "_PROC", tmp_path / "proc")
+    (tmp_path / "proc").mkdir()
 
 
-def _end_holders(monkeypatch: pytest.MonkeyPatch) -> None:
+def _end_holders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    del tmp_path
+
     def ended(pid: int) -> int:
         raise ProcessLookupError(pid)
 
-    monkeypatch.setattr(worker_services_module.os, "getpgid", ended)
+    monkeypatch.setattr(listeners.os, "getpgid", ended)
 
 
 @pytest.mark.parametrize("unknown", [_hide_holders, _end_holders], ids=["unreadable", "ended"])
@@ -1054,11 +1058,11 @@ def _end_holders(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_a_listener_whose_holders_the_runner_cannot_place_is_not_the_service_s(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    unknown: Callable[[pytest.MonkeyPatch], None],
+    unknown: Callable[[pytest.MonkeyPatch, Path], None],
 ) -> None:
     """A socket on the service's port held by processes the runner cannot read, or that end as it looks, is not its own."""
     monkeypatch.setattr(worker_services_module, "_START_SECONDS", 0.5)
-    unknown(monkeypatch)
+    unknown(monkeypatch, tmp_path)
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
         assert state["state"] == "starting"

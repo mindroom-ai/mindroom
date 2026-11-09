@@ -32,7 +32,7 @@ from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
-from mindroom.api.worker_services import running_service
+from mindroom.api.worker_services import RunningService, running_service
 from mindroom.previews.listeners import listening_sockets, workers_sockets
 from mindroom.previews.relay import HandshakeRedirected, no_redirects, relay_websocket
 
@@ -43,8 +43,6 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from starlette.requests import HTTPConnection
     from starlette.types import Receive, Scope, Send
-
-    from mindroom.api.worker_services import RunningService
 
 router = APIRouter(prefix="/api/sandbox-runner", tags=["sandbox-runner"])
 
