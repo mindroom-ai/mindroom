@@ -39,6 +39,8 @@ BOB = "@bob:example.org"
 CAROL = "@carol:example.org"
 OUTSIDER = "@eve:example.org"
 START = 1_000.0
+# How long after a call's end its stretches are still taken and its message waits.
+DELAY = 30
 
 
 def _wav(seconds: float = 2.0, *, rate: int = 16_000) -> bytes:
@@ -592,7 +594,7 @@ async def test_a_call_ends_when_its_last_app_was_last_heard_from_not_when_that_i
     await world.tick()
     world.clock.advance(61)
     await world.tick()
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     stored = world.store.call(call.id)
@@ -613,7 +615,7 @@ async def test_a_live_call_is_checked_every_15_seconds(world: World) -> None:
     call_id = await world.end_by_leaving(ANN)
 
     assert await world.tick() == 15
-    world.clock.advance(10)
+    world.clock.advance(DELAY - 10)
     assert await world.tick() == 10
     world.clock.advance(10)
     assert await world.tick() == 15
@@ -679,7 +681,7 @@ async def test_the_row_is_edited_when_the_call_ends_and_again_once_its_transcrip
         transcript_event_id=None,
     )
     assert world.room.row_edits == [ended]
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     assert len(world.room.transcripts) == 1
@@ -696,7 +698,7 @@ async def test_the_row_of_a_call_without_speech_is_edited_only_for_its_end(world
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
     world.clock.advance(60)
     await world.tick()
@@ -770,7 +772,7 @@ async def test_a_row_posted_after_the_end_is_edited_for_the_end_and_then_its_tra
     """A row that only goes up when the transcript message is due says the call ended before the message is posted."""
     world.room.ready = False
     call_id = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     world.room.ready = True
@@ -793,7 +795,7 @@ async def test_an_edit_for_the_end_is_never_sent_after_the_one_with_the_transcri
     world.room.edit_gate = asyncio.Event()
     await world.service.leave(call.id, ANN)
     await world.room.edit_started.wait()
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.service.tick()
     assert world.room.transcripts == []
 
@@ -876,7 +878,7 @@ async def test_a_row_whose_answer_was_lost_is_found_again_and_edited_though_nobo
 
 
 @pytest.mark.asyncio
-async def test_the_transcript_message_is_posted_about_20_seconds_after_the_end(world: World) -> None:
+async def test_the_transcript_message_is_posted_30_seconds_after_the_end(world: World) -> None:
     """The message goes in the row's thread with the notes, the speech as turns, and the call's length."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
@@ -892,7 +894,7 @@ async def test_the_transcript_message_is_posted_about_20_seconds_after_the_end(w
     await world.service.leave(call.id, ANN)
     await world.service.leave(call.id, BOB)
 
-    world.clock.advance(19)
+    world.clock.advance(DELAY - 1)
     await world.tick()
     assert world.room.transcripts == []
     world.clock.advance(1)
@@ -942,7 +944,7 @@ async def test_consecutive_stretches_of_one_speaker_are_one_turn(world: World) -
     await world.say(call.id, ANN, ago=2, seconds=1)
     await world.service.leave(call.id, ANN)
     await world.service.leave(call.id, BOB)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -965,7 +967,7 @@ async def test_without_a_notes_model_the_message_says_how_long_the_call_was(worl
         await world.service.join(ROOM, ANN)
     await world.say(call.id, ANN)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -985,7 +987,7 @@ async def test_a_call_with_no_speech_posts_nothing(world: World) -> None:
     assert await world.service.speech(call.id, ANN, audio=_wav(), started_at=world.clock.now - 3) is None
     await world.service.pause(call.id, ANN, paused=True)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -994,7 +996,7 @@ async def test_a_call_with_no_speech_posts_nothing(world: World) -> None:
     assert world.store.lines(call.id) == []
     stored = world.store.call(call.id)
     assert stored is not None
-    assert stored.transcript_done_at == START + 50
+    assert stored.transcript_done_at == START + 30 + DELAY
 
 
 @pytest.mark.asyncio
@@ -1002,7 +1004,7 @@ async def test_a_call_whose_every_stretch_failed_to_transcribe_says_so(world: Wo
     """People spoke but none of it could be transcribed: the message says so, with no turns and no notes."""
     world.transcriber.text = None
     call_id = await world.end_by_leaving(ANN, BOB)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -1022,7 +1024,7 @@ async def test_failed_notes_are_retried_once_after_60_seconds_then_the_transcrip
     """Notes that fail twice leave the transcript with the one-line summary instead."""
     world.notes.failing = True
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
     assert world.room.transcripts == []
@@ -1043,7 +1045,7 @@ async def test_notes_that_failed_twice_are_not_asked_for_again_while_posts_fail(
     world.notes.failing = True
     world.room.failed_transcript_posts = 4
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
     for _ in range(5):
@@ -1061,7 +1063,7 @@ async def test_notes_that_never_come_count_as_failed_notes(world: World, monkeyp
     monkeypatch.setattr(service_module, "_NOTES_TIMEOUT_SECONDS", 0.01)
     world.notes.gate = asyncio.Event()
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
     assert world.room.transcripts == []
@@ -1078,7 +1080,7 @@ async def test_notes_that_fail_once_are_used_when_the_retry_works(world: World) 
     """The one retry writes the notes again and posts them."""
     world.notes.failing = True
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     world.notes.failing = False
@@ -1098,7 +1100,7 @@ async def test_only_failed_notes_use_up_the_notes_attempts(world: World, failure
     else:
         world.room.failed_transcript_posts = 2
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
     world.clock.advance(60)
     await world.tick()
@@ -1117,7 +1119,7 @@ async def test_a_failed_post_is_retried_after_60_seconds_with_the_notes_already_
     """A post that fails is tried again a minute later, without asking the notes model twice."""
     world.room.failed_transcript_posts = 1
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
     assert world.room.transcripts == []
 
@@ -1180,7 +1182,7 @@ async def test_without_a_notes_model_the_message_does_not_wait_for_names(world: 
     world.notes.markdown = None
     await world.end_by_leaving(ANN)
     world.room.readable = False
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -1193,9 +1195,9 @@ async def test_a_message_still_not_posted_a_day_after_its_call_is_given_up(world
     """A room the router cannot read for a day gets no message, and the call's lines are not kept any longer."""
     call_id = await world.end_by_leaving(ANN)
     world.room.readable = False
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
-    world.clock.advance(86_370)
+    world.clock.advance(86_390 - DELAY)
     await world.tick()
     assert world.store.lines(call_id) != []
 
@@ -1226,7 +1228,7 @@ async def test_a_message_not_posted_within_a_day_of_the_end_is_given_up_before_a
     assert world.store.lines(ended) == []
     world.clock.advance(61)
     await world.tick()
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     assert world.room.transcripts == []
@@ -1244,7 +1246,7 @@ async def test_a_post_still_under_way_a_day_after_the_end_is_stopped_and_its_mes
     """A post that stalls, as an upload can, is stopped once the day is up: the lines go, and nothing is posted later."""
     world.room.transcript_gate = asyncio.Event()
     call_id = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.service.tick()
     await world.room.transcript_started.wait()
     world.clock.advance(86_400)
@@ -1257,7 +1259,7 @@ async def test_a_post_still_under_way_a_day_after_the_end_is_stopped_and_its_mes
     assert world.store.lines(call_id) == []
     stored = world.store.call(call_id)
     assert stored is not None
-    assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 86_430, None)
+    assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 10 + DELAY + 86_400, None)
 
 
 @pytest.mark.asyncio
@@ -1268,7 +1270,7 @@ async def test_a_row_edit_still_under_way_a_day_after_the_end_is_stopped_though_
     await world.end_by_leaving(ANN)
     world.room.edit_gate = asyncio.Event()
     world.room.edit_started = asyncio.Event()
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.service.tick()
     await world.room.edit_started.wait()
     world.clock.advance(86_400)
@@ -1286,7 +1288,7 @@ async def test_notes_written_after_the_day_is_up_are_not_posted(world: World) ->
     """Each write checks the day first: notes that come back after it leave the message to be given up, not posted."""
     world.notes.gate = asyncio.Event()
     call_id = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.service.tick()
     await world.notes.started.wait()
     world.clock.advance(86_400)
@@ -1391,7 +1393,7 @@ async def test_the_message_of_a_call_in_a_room_the_router_left_is_given_up(world
     """Once the router is no longer in the room, the message is not written or posted, and its lines are deleted."""
     call_id = await world.end_by_leaving(ANN, BOB)
     world.room.router_in_room = False
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -1409,7 +1411,7 @@ async def test_the_message_of_a_call_in_a_room_the_router_may_not_post_in_is_giv
     """A message the router may not post is given up as soon as it is due: no notes, no upload, its lines deleted."""
     call_id = await world.end_by_leaving(ANN, BOB)
     world.room.router_posts = False
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -1477,17 +1479,17 @@ async def test_every_call_logs_how_long_people_spoke_once_its_lines_are_deleted(
     """Posted, with nothing to post, or given up, each call logs its seconds of speech once, as its lines go."""
     with capture_logs() as logs:
         posted = await world.end_by_leaving(ANN)
-        world.clock.advance(20)
+        world.clock.advance(DELAY)
         await world.tick()
         silent = await world.service.join(ROOM, BOB)
         await world.service.pause(silent.id, BOB, paused=True)
         world.clock.advance(5)
         await world.service.leave(silent.id, BOB)
-        world.clock.advance(20)
+        world.clock.advance(DELAY)
         await world.tick()
         world.room.router_in_room = False
         given_up = await world.end_by_leaving(ANN, BOB)
-        world.clock.advance(20)
+        world.clock.advance(DELAY)
         await world.tick()
 
     assert [(log["event"], log["call_id"], log["speech_seconds"]) for log in logs if "speech_seconds" in log] == [
@@ -1512,7 +1514,7 @@ async def test_the_live_call_reads_without_names_while_they_cannot_be_read(world
 async def test_the_transcript_message_is_posted_once(world: World) -> None:
     """Checks running together post it once, and a restart after posting does not post it again."""
     await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await asyncio.gather(world.tick(), world.tick())
     world.restart()
@@ -1527,7 +1529,7 @@ async def test_a_transcript_due_before_a_restart_is_posted_after_it(world: World
     """What was said is on disk, so the message survives a restart before it was posted."""
     call_id = await world.end_by_leaving(ANN)
     world.restart()
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -1839,9 +1841,9 @@ async def test_speech_said_before_the_end_is_accepted_until_the_transcript_is_po
     late = await world.say(call.id, ANN, ago=12, seconds=2)
     await _refused("forbidden", lambda: world.say(call.id, ANN, ago=9, seconds=2))
     await _refused("forbidden", lambda: world.say(call.id, CAROL, ago=12, seconds=2))
-    world.clock.advance(10)
+    world.clock.advance(DELAY - 10)
     await world.tick()
-    await _refused("forbidden", lambda: world.say(call.id, BOB, ago=25, seconds=2))
+    await _refused("forbidden", lambda: world.say(call.id, BOB, ago=DELAY + 5, seconds=2))
 
     assert late.said_at == START + 58
     [message] = world.room.transcripts
@@ -1868,21 +1870,21 @@ async def test_late_speech_from_someone_who_left_before_the_end_is_taken_only_if
 
 
 @pytest.mark.asyncio
-async def test_late_speech_is_taken_for_20_seconds_after_the_end_whatever_the_posting_state(world: World) -> None:
-    """A late stretch gets in only within 20 seconds of the end, so a retried post repeats exactly its first attempt."""
+async def test_late_speech_is_taken_for_30_seconds_after_the_end_whatever_the_posting_state(world: World) -> None:
+    """A late stretch gets in only within 30 seconds of the end, so a retried post repeats exactly its first attempt."""
     world.notes.markdown = None
     world.room.failed_transcript_posts = 1
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(60)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(19)
-    assert (await world.say(call.id, ANN, ago=21)).said_at == START + 58
+    world.clock.advance(DELAY - 1)
+    assert (await world.say(call.id, ANN, ago=DELAY + 1)).said_at == START + 58
 
     world.clock.advance(1)
-    refused = await _refused("forbidden", lambda: world.say(call.id, ANN, ago=22))
+    refused = await _refused("forbidden", lambda: world.say(call.id, ANN, ago=DELAY + 2))
     await world.tick()
     assert world.room.transcripts == []
-    await _refused("forbidden", lambda: world.say(call.id, ANN, ago=23))
+    await _refused("forbidden", lambda: world.say(call.id, ANN, ago=DELAY + 3))
     world.clock.advance(60)
     await world.tick()
 
@@ -1899,8 +1901,8 @@ async def test_the_transcript_waits_for_a_stretch_still_being_transcribed(world:
     await world.service.leave(call.id, ANN)
     await world.settled()
     world.transcriber.gate = asyncio.Event()
-    world.clock.advance(15)
-    upload = asyncio.create_task(world.say(call.id, ANN, ago=17, seconds=1))
+    world.clock.advance(DELAY - 5)
+    upload = asyncio.create_task(world.say(call.id, ANN, ago=DELAY - 3, seconds=1))
     await world.transcriber.started.wait()
     world.clock.advance(5)
 
@@ -1951,8 +1953,8 @@ async def test_a_stretch_still_being_let_in_or_written_when_the_message_falls_du
     world.room.edit_gate = asyncio.Event()
     await world.service.leave(call.id, ANN)
     await world.room.edit_started.wait()
-    world.clock.advance(19)
-    upload = asyncio.create_task(world.say(call.id, ANN, ago=21, seconds=1))
+    world.clock.advance(DELAY - 1)
+    upload = asyncio.create_task(world.say(call.id, ANN, ago=DELAY + 1, seconds=1))
     await storing.wait()
     world.clock.advance(1)
 
@@ -2089,7 +2091,7 @@ async def test_the_store_is_used_off_the_event_loop(world: World) -> None:
     await world.service.pause(call.id, ANN, paused=True)
     await world.service.live(ROOM, ANN)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     assert threads
@@ -2110,7 +2112,7 @@ async def test_someone_never_in_the_call_cannot_add_to_it_by_leaving_it(world: W
     await world.service.leave(call.id, ANN)
     world.clock.advance(5)
     await _refused("forbidden", lambda: world.say(call.id, CAROL, ago=8))
-    world.clock.advance(15)
+    world.clock.advance(DELAY - 5)
     await world.tick()
 
     [message] = world.room.transcripts
@@ -2183,7 +2185,7 @@ async def test_notes_failing_in_any_way_for_one_call_hold_back_only_that_call(wo
     await world.say(second.id, BOB)
     await world.service.leave(first.id, ANN)
     await world.service.leave(second.id, BOB)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -2200,7 +2202,6 @@ async def test_a_slow_transcript_message_holds_up_no_other_call_or_check(world: 
     """While one call's notes take their time, other calls' messages are posted and live calls are still checked."""
     world.notes.gate = asyncio.Event()
     world.notes.gated_rooms = {ROOM}
-    third_room = "!third:example.org"
     slow = await world.service.join(ROOM, ANN)
     quick = await world.service.join(OTHER_ROOM, BOB)
     world.clock.advance(10)
@@ -2208,8 +2209,8 @@ async def test_a_slow_transcript_message_holds_up_no_other_call_or_check(world: 
     await world.say(quick.id, BOB)
     await world.service.leave(slow.id, ANN)
     await world.service.leave(quick.id, BOB)
-    live = await world.service.join(third_room, CAROL)
-    world.clock.advance(20)
+    live = await world.service.join(THIRD_ROOM, CAROL)
+    world.clock.advance(DELAY)
 
     async with asyncio.timeout(5):
         await world.service.tick()
@@ -2232,7 +2233,7 @@ async def test_stopping_cancels_the_messages_being_posted_and_a_restart_posts_th
     """A message whose notes are still being written when MindRoom stops is posted after the next start."""
     world.notes.gate = asyncio.Event()
     call_id = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.service.tick()
     [posting] = world.service._settling.values()
     await world.notes.started.wait()
@@ -2265,7 +2266,7 @@ async def test_a_finish_under_way_when_its_writes_are_cancelled_is_completed_and
 
     monkeypatch.setattr(CallTranscriptStore, "finish_transcript", slow_finish_transcript)
     call_id = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     with capture_logs() as logs:
         await world.service.tick()
@@ -2312,7 +2313,7 @@ async def test_one_failing_call_does_not_stop_the_others(world: World) -> None:
     await world.say(second.id, BOB)
     await world.service.leave(first.id, ANN)
     await world.service.leave(second.id, BOB)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
 
     await world.tick()
 
@@ -2340,7 +2341,7 @@ async def test_a_stuck_transcription_becomes_a_gap_and_does_not_hold_back_the_me
 
     gap = await world.say(call.id, ANN, ago=1, seconds=0.5)
     await world.service.leave(call.id, ANN)
-    world.clock.advance(20)
+    world.clock.advance(DELAY)
     await world.tick()
 
     assert (gap.kind, gap.reason) == ("gap", "not-transcribed")
