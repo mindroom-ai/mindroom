@@ -992,6 +992,16 @@ async def test_a_route_gets_its_services_websocket_redirect_without_following_it
         assert _REFUSED not in redirected.value.headers
 
 
+# A start that records a child it leaves running, then waits before the program binds its port.
+_SLOW_PARENT = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+with open("children", "a") as children:
+    children.write(f"{child.pid}\\n")
+time.sleep(0.5)
+"""
+
+
 @asynccontextmanager
 async def _other_server(
     monkeypatch: pytest.MonkeyPatch,
@@ -1056,10 +1066,13 @@ async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_on
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A service whose probed port another socket took before it bound it starts once more, and every ensure reports that."""
+    """A service whose probed port another socket took before it bound it starts once more, and every ensure reports that.
+
+    The failed start's processes end.
+    """
     async with _runner(tmp_path) as runner:
-        # It binds late, so the second ensure finds the instance that will fail to bind.
-        (runner.plugin_root / "echo.py").write_text("import time\ntime.sleep(0.5)\n" + _ECHO)
+        # It records a child it starts, and binds late, so the second ensure finds the instance that will fail to bind.
+        (runner.plugin_root / "echo.py").write_text(_SLOW_PARENT + _ECHO)
         context, _, relay = await _relay(tmp_path, runner, monkeypatch)
         echo = WorkerService("echo", "echo.py")
         async with _other_server(monkeypatch, once=True) as (taken, connections):
@@ -1071,6 +1084,9 @@ async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_on
                 await upstream.send_str("one")
                 assert (await upstream.receive_str()).endswith(":/a:one")
             assert connections == []
+            failed, running = map(int, (runner.workspace / "children").read_text().split())
+            await _until(lambda: not _pid_alive(failed))
+            assert _pid_alive(running)
 
 
 @pytest.mark.asyncio
@@ -1080,7 +1096,7 @@ async def test_a_stop_while_a_service_fails_on_its_taken_port_keeps_it_stopped(
 ) -> None:
     """The fresh start a taken port calls for never follows a stop that ended the service first."""
     async with _runner(tmp_path) as runner:
-        (runner.plugin_root / "echo.py").write_text("import time\ntime.sleep(0.5)\n" + _ECHO)
+        (runner.plugin_root / "echo.py").write_text(_SLOW_PARENT + _ECHO)
         context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
         echo = WorkerService("echo", "echo.py")
         services = worker_services(sandbox_runner_app.app)
