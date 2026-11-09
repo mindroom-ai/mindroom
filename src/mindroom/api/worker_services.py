@@ -76,6 +76,12 @@ class _WorkerServices:
     def __init__(self) -> None:
         self._instances: dict[tuple[str, str], _ServiceInstance] = {}
         self._lock = asyncio.Lock()
+        # How many stops each service has had, so a start that a stop arrived after refuses to start it.
+        self._stops: dict[tuple[str, str], int] = {}
+
+    def stops(self, plugin: str, name: str) -> int:
+        """Return how many stops the service has had."""
+        return self._stops.get((plugin, name), 0)
 
     def instance(self, plugin: str, name: str) -> _ServiceInstance | None:
         """Return the service's instance, running or exited, or None."""
@@ -92,10 +98,16 @@ class _WorkerServices:
         name: str,
         program: _Program,
         idle_timeout_seconds: float,
+        stops: int,
     ) -> WorkerServiceState:
-        """Start the service unless an instance of this program exists, crashed or not, then report it."""
+        """Start the service unless an instance of this program exists, crashed or not, then report it.
+
+        ``stops`` is the service's stop count as the request arrived; a stop that arrived since refuses the start.
+        """
         key = (plugin, name)
         async with self._lock:
+            if self.stops(plugin, name) != stops:
+                raise HTTPException(409, "The service was stopped while it started.")
             instance = self._instances.get(key)
             if instance is not None and instance.entry_hash != program.entry_hash:
                 await self._end(key, instance)
@@ -107,7 +119,8 @@ class _WorkerServices:
         return await _settled(instance)
 
     async def stop(self, plugin: str, name: str) -> None:
-        """End the service's instance, if any."""
+        """End the service's instance, if any, and refuse the starts that arrived before this stop."""
+        self._stops[(plugin, name)] = self.stops(plugin, name) + 1
         async with self._lock:
             if (instance := self._instances.get((plugin, name))) is not None:
                 await self._end((plugin, name), instance)
@@ -246,8 +259,10 @@ async def ensure_service(request: Request, plugin: str, name: _Name, payload: _E
     """Start the plugin's service unless it runs, and report it."""
     _require_dedicated_worker(request.app)
     runner_url = f"http://127.0.0.1:{request.scope['server'][1]}"
+    services = _services(request.app)
+    stops = services.stops(plugin, name)
     program = await asyncio.to_thread(_program, request.app, payload, plugin, name, runner_url)
-    return await _services(request.app).ensure(plugin, name, program, payload.idle_timeout_seconds)
+    return await services.ensure(plugin, name, program, payload.idle_timeout_seconds, stops)
 
 
 @router.delete("/{plugin}/{name}", status_code=204, dependencies=_GUARDED)
