@@ -343,6 +343,8 @@ openai = [
 ]
 openbb = [
   "openbb",
+  "polars",
+  "pyarrow",
 ]
 openclaw_compat = []
 openweather = [
