@@ -1310,6 +1310,32 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     assert scheduler.scheduled == []
 
 
+@pytest.mark.parametrize("existing_folder", [False, True])
+def test_batch_upload_holding_a_name_too_long_for_the_folder_publishes_none_of_it(
+    tmp_path: Path,
+    existing_folder: bool,
+) -> None:
+    """A batch whose second name is longer than any file name can be fails without publishing its first file."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    if existing_folder:
+        docs.mkdir()
+    publish_api_config(client.app, _knowledge_config(docs))
+    scheduler = _bound_scheduler(client)
+
+    with pytest.raises(OSError, match="File name too long"):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[
+                ("files", ("short.md", b"short", "text/markdown")),
+                ("files", ("名" * 90 + ".md", b"long", "text/markdown")),
+            ],
+        )
+
+    assert list(docs.iterdir()) == []
+    assert scheduler.scheduled == []
+
+
 @pytest.mark.parametrize("prefix", ["", "x" * 245], ids=["short", "long"])
 def test_failed_batch_upload_removes_the_files_it_staged(
     tmp_path: Path,
