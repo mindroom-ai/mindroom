@@ -9,6 +9,8 @@ import shlex
 import signal
 import socket
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from subprocess import DEVNULL, PIPE
@@ -20,11 +22,12 @@ import uvicorn
 from aiohttp import web
 from yarl import URL
 
-from mindroom.api import sandbox_runner_app
+from mindroom.api import sandbox_runner_app, worker_preview
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.previews import listeners
+from mindroom.previews.relay import no_redirects
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -346,6 +349,49 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
     assert ports == sorted(ports)
 
 
+@pytest.mark.asyncio
+async def test_port_list_reads_every_ports_holders_in_one_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Listing ports not yet found to be the worker's reads which processes hold their sockets once, not once per port."""
+    passes: list[frozenset[int]] = []
+
+    def counted(sockets: frozenset[int]) -> frozenset[int]:
+        passes.append(sockets)
+        return listeners.workers_sockets(sockets)
+
+    monkeypatch.setattr(worker_preview, "workers_sockets", counted)
+    monkeypatch.setattr(worker_preview, "_workers_sockets", {})
+    async with (
+        _app() as first,
+        _app() as second,
+        _runner(tmp_path) as runner,
+        aiohttp.ClientSession() as client,
+        client.get(runner.root, headers=_AUTH) as response,
+    ):
+        assert {first, second} <= set(await response.json())
+    assert len(passes) == 1
+
+
+@pytest.mark.asyncio
+async def test_relay_answers_while_tool_calls_hold_every_default_thread(tmp_path: Path) -> None:
+    """Blocking tool calls on all of the loop's default threads delay neither a relayed request nor the port list."""
+    loop = asyncio.get_running_loop()
+    busy = ThreadPoolExecutor(1)
+    loop.set_default_executor(busy)
+    release = threading.Event()
+    blocked = loop.run_in_executor(None, release.wait)
+    try:
+        async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+            async with asyncio.timeout(5):
+                async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+                    assert response.status == 200
+                async with client.get(runner.root, headers=_AUTH) as response:
+                    assert port in await response.json()
+    finally:
+        release.set()
+        await blocked
+        busy.shutdown()
+
+
 async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: int, status: int, detail: str) -> None:
     """Requests and WebSocket handshakes to ``port`` are marked refusals with ``status``."""
     async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
@@ -503,30 +549,6 @@ async def test_relay_reads_a_ports_holders_again_only_once_another_socket_listen
 
 
 @pytest.mark.asyncio
-async def test_relay_follows_no_websocket_redirect_to_a_server_the_worker_does_not_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A WebSocket handshake an app redirects to a server no process of the worker holds is refused."""
-    async with (
-        _app() as port,
-        _app() as other,
-        _runner(tmp_path) as runner,
-        aiohttp.ClientSession() as client,
-    ):
-        # Found to be the worker's while /proc shows its holder, so the app on ``port`` stays reachable below.
-        async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
-            assert response.status == 200
-        _hide_every_holder(tmp_path, monkeypatch)
-        there = f"http://127.0.0.1:{other}/socket"
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)
-        assert refused.value.status == 403
-        async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
-            assert response.status == 200
-
-
-@pytest.mark.asyncio
 async def test_relay_refuses_when_the_app_drops_the_request(tmp_path: Path) -> None:
     """An app that closes the connection without answering is a marked refusal."""
 
@@ -681,24 +703,34 @@ async def test_relay_ends_the_apps_websocket_in_an_error_when_the_caller_drops_m
 
 
 @pytest.mark.asyncio
-async def test_relay_follows_a_websocket_redirect_only_on_loopback(tmp_path: Path) -> None:
-    """A WebSocket handshake the app redirects within loopback connects; one it redirects elsewhere is refused."""
+@pytest.mark.parametrize("target", ["the app", "another address", "the runner"])
+async def test_relay_hands_a_websocket_redirect_back_without_following_it(tmp_path: Path, target: str) -> None:
+    """A handshake the app redirects, within loopback, elsewhere, or to a port the relay refuses, gets the app's redirect."""
     async with (
         _app() as port,
         _app("127.0.0.2") as elsewhere,
         _runner(tmp_path) as runner,
-        aiohttp.ClientSession() as client,
+        # Like the primary's client of the relay, the caller follows no redirect either.
+        aiohttp.ClientSession(middlewares=(no_redirects,)) as client,
     ):
-        here = f"http://127.0.0.1:{port}/socket"
-        async with client.ws_connect(
-            f"{runner.root}/{port}/hop?status=302&location={here}",
-            headers=_AUTH,
-        ) as websocket:
-            assert (await websocket.receive_json())["path"] == "/socket"
-        there = f"http://127.0.0.2:{elsewhere}/socket"
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)
-        assert refused.value.status == 403
+        location = {
+            "the app": f"http://127.0.0.1:{port}/socket",
+            "another address": f"http://127.0.0.2:{elsewhere}/socket",
+            "the runner": f"http://127.0.0.1:{runner.port}/api/sandbox-runner/ports",
+        }[target]
+        with pytest.raises(aiohttp.WSServerHandshakeError) as redirected:
+            await client.ws_connect(
+                f"{runner.root}/{port}/hop",
+                params={"status": "307", "location": location},
+                headers=_AUTH,
+            )
+    assert redirected.value.status == 307
+    headers = redirected.value.headers
+    assert headers is not None
+    assert headers["Location"] == location
+    assert headers.getall("Set-Cookie") == ["a=1", "b=2"]
+    assert len(headers.getall("Date")) == 1
+    assert {_REFUSED, "Proxy-Authenticate"}.isdisjoint(headers)
 
 
 @pytest.mark.asyncio

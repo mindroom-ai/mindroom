@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from yarl import URL
 
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN
-from mindroom.previews.relay import relay_websocket
+from mindroom.previews.relay import no_redirects, relay_websocket
 from mindroom.tool_system.sandbox_proxy import (
     lease_worker_manager,
     sandbox_proxy_config,
@@ -84,11 +84,12 @@ class WorkerRelay:
         ]
 
     @staticmethod
-    def _session() -> aiohttp.ClientSession:
+    def _session(middlewares: tuple[aiohttp.ClientMiddlewareType, ...] = ()) -> aiohttp.ClientSession:
         return aiohttp.ClientSession(
             cookie_jar=aiohttp.DummyCookieJar(),
             skip_auto_headers=_AIOHTTP_DEFAULT_HEADERS,
             timeout=_TIMEOUT,
+            middlewares=middlewares,
         )
 
     @asynccontextmanager
@@ -129,12 +130,12 @@ class WorkerRelay:
     ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
         """Open one WebSocket and yield it until the block ends.
 
-        A refused handshake raises ``aiohttp.WSServerHandshakeError`` with the runner's status and headers.
+        A refused or redirected handshake raises ``aiohttp.WSServerHandshakeError`` with the runner's status and headers.
         """
         url = self._url(path, service, port)
         with worker_call_in_flight(self._backend, self._worker_key):
             async with (
-                self._session() as session,
+                self._session((no_redirects,)) as session,
                 session.ws_connect(
                     url,
                     protocols=tuple(protocols),

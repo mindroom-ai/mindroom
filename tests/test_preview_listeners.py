@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from mindroom.previews import listeners
-from mindroom.previews.listeners import held_by_this_worker, listening_sockets
+from mindroom.previews.listeners import listening_sockets, workers_sockets
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -71,6 +71,15 @@ def proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def net(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fake ``/proc/net`` without tables yet."""
+    root = tmp_path / "net"
+    root.mkdir()
+    monkeypatch.setattr(listeners, "_PROC_NET", root)
+    return root
+
+
+@pytest.fixture
 def no_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the kernel's socket diagnostics unavailable, as under gVisor."""
 
@@ -104,7 +113,7 @@ def test_the_kernel_names_a_real_listener_and_its_holder(listener: socket.socket
     """A socket this process listens on is found once, with its address and port, and is held by the worker."""
     port, inode = listener.getsockname()[1], _inode(listener)
     assert [found for found in _found() if found[2] == inode] == [("127.0.0.1", port, inode)]
-    assert held_by_this_worker(frozenset({inode}))
+    assert workers_sockets(frozenset({inode})) == {inode}
 
 
 @pytest.mark.usefixtures("no_diagnostics")
@@ -127,23 +136,22 @@ def test_the_kernel_names_a_real_ipv6_listener() -> None:
 
 
 @pytest.mark.usefixtures("no_diagnostics")
-def test_proc_net_lists_only_listening_sockets(proc: Path) -> None:
+def test_proc_net_lists_only_listening_sockets(net: Path) -> None:
     """Rows in other states and on other ports are left out, and an IPv4-mapped address reads as IPv4."""
-    (proc / "net").mkdir()
-    (proc / "net" / "tcp").write_text(
+    (net / "tcp").write_text(
         _HEADER
         + _table_line("127.0.0.1", 5173, "0A", 11)
         + _table_line("127.0.0.1", 5173, "01", 12)
         + _table_line("0.0.0.0", 8000, "0A", 13),  # noqa: S104 - a fake socket on every address
     )
-    (proc / "net" / "tcp6").write_text(_HEADER + _table_line("::ffff:127.0.0.1", 5173, "0A", 14))
+    (net / "tcp6").write_text(_HEADER + _table_line("::ffff:127.0.0.1", 5173, "0A", 14))
     assert _found(5173) == [
         ("127.0.0.1", 5173, 11),
         ("127.0.0.1", 5173, 14),
     ]
     assert {inode for _, _, inode in _found()} == {11, 13, 14}
     # A network namespace without IPv6 has no tcp6 table.
-    (proc / "net" / "tcp6").unlink()
+    (net / "tcp6").unlink()
     assert _found(5173) == [("127.0.0.1", 5173, 11)]
 
 
@@ -164,11 +172,10 @@ def test_an_error_the_kernel_answers_a_dump_with_is_raised(kind: int, length: in
 
 @pytest.mark.usefixtures("no_diagnostics")
 @pytest.mark.parametrize("tcp6", [False, True], ids=["no tables", "only tcp6"])
-def test_no_diagnostics_and_no_ipv4_table_cannot_say(proc: Path, tcp6: bool) -> None:
+def test_no_diagnostics_and_no_ipv4_table_cannot_say(net: Path, tcp6: bool) -> None:
     """Without socket diagnostics or ``/proc/net/tcp``, finding the listeners fails instead of finding only some."""
     if tcp6:
-        (proc / "net").mkdir()
-        (proc / "net" / "tcp6").write_text(_HEADER + _table_line("::1", 5173, "0A", 14))
+        (net / "tcp6").write_text(_HEADER + _table_line("::1", 5173, "0A", 14))
     with pytest.raises(FileNotFoundError):
         listening_sockets()
 
@@ -177,42 +184,42 @@ def test_a_socket_the_runners_process_tree_holds_is_the_workers(proc: Path) -> N
     """A server the runner's child started, in any cgroup, is the worker's."""
     _process(proc, 100, parent=_RUNNER, cgroup=_SIDECAR)
     _process(proc, 101, parent=100, cgroup=_SIDECAR, sockets=(11,))
-    assert held_by_this_worker(frozenset({11}))
+    assert workers_sockets(frozenset({11})) == {11}
 
 
 def test_a_socket_a_process_in_the_runners_cgroup_holds_is_the_workers(proc: Path) -> None:
     """A server that outlived the command that started it, left to init in the worker's container, is the worker's."""
     _process(proc, 200, parent=1, cgroup=_WORKER, sockets=(11,))
-    assert held_by_this_worker(frozenset({11}))
+    assert workers_sockets(frozenset({11})) == {11}
 
 
 @pytest.mark.parametrize(
-    ("holders", "sockets"),
+    ("holders", "workers"),
     [
-        pytest.param({300: (11,)}, {11}, id="a sidecar holds it"),
-        pytest.param({100: (11,), 300: (11,)}, {11}, id="a sidecar holds it too"),
-        pytest.param({100: (12,), 300: (11,)}, {11, 12}, id="a sidecar holds one of two"),
-        pytest.param({}, {11}, id="no visible process holds it"),
+        pytest.param({300: (11,)}, set(), id="a sidecar holds it"),
+        pytest.param({100: (11,), 300: (11,)}, set(), id="a sidecar holds it too"),
+        pytest.param({100: (12,), 300: (11,)}, {12}, id="a sidecar holds one of two"),
+        pytest.param({}, set(), id="no visible process holds it"),
     ],
 )
 def test_a_socket_any_other_process_holds_is_not_the_workers(
     proc: Path,
     holders: dict[int, tuple[int, ...]],
-    sockets: set[int],
+    workers: set[int],
 ) -> None:
-    """Sockets count only when the worker's processes, and only they, hold each of them."""
+    """A socket counts only when the worker's processes, and only they, hold it; one pass tells each of them."""
     _process(proc, 1, parent=0, cgroup=_SIDECAR)
     _process(proc, 100, parent=_RUNNER, cgroup=_WORKER, sockets=holders.get(100, ()))
     _process(proc, 300, parent=1, cgroup=_SIDECAR, sockets=holders.get(300, ()))
-    assert not held_by_this_worker(frozenset(sockets))
+    assert workers_sockets(frozenset({11, 12})) == workers
 
 
 def test_a_process_name_cannot_claim_the_runner_as_its_parent(proc: Path) -> None:
     """The parent is read after the name's last parenthesis, so a crafted name neither hides nor fakes it."""
     _process(proc, 100, parent=_RUNNER, cgroup=_SIDECAR, sockets=(11,), name="dev) S 1 (server")
     _process(proc, 300, parent=1, cgroup=_SIDECAR, sockets=(12,), name=f"x) S {_RUNNER} (y")
-    assert held_by_this_worker(frozenset({11}))
-    assert not held_by_this_worker(frozenset({12}))
+    assert workers_sockets(frozenset({11})) == {11}
+    assert not workers_sockets(frozenset({12}))
 
 
 def test_unreadable_cgroups_admit_no_process_by_cgroup(proc: Path) -> None:
@@ -221,20 +228,20 @@ def test_unreadable_cgroups_admit_no_process_by_cgroup(proc: Path) -> None:
     _process(proc, 200, parent=1, cgroup=_WORKER, sockets=(11,))
     _process(proc, 300, parent=1, cgroup=None, sockets=(12,))
     _process(proc, 100, parent=_RUNNER, cgroup=None, sockets=(13,))
-    assert not held_by_this_worker(frozenset({11}))
-    assert not held_by_this_worker(frozenset({12}))
-    assert held_by_this_worker(frozenset({13}))
+    assert not workers_sockets(frozenset({11}))
+    assert not workers_sockets(frozenset({12}))
+    assert workers_sockets(frozenset({13})) == {13}
 
 
 def test_a_parent_loop_ends_outside_the_worker(proc: Path) -> None:
     """Processes whose parents name each other are outside the runner's tree."""
     _process(proc, 300, parent=301, cgroup=_SIDECAR, sockets=(11,))
     _process(proc, 301, parent=300, cgroup=_SIDECAR)
-    assert not held_by_this_worker(frozenset({11}))
+    assert not workers_sockets(frozenset({11}))
 
 
 def test_missing_proc_cannot_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without ``/proc``, telling whose socket it is fails instead of finding no holder."""
     monkeypatch.setattr(listeners, "_PROC", tmp_path / "missing")
     with pytest.raises(FileNotFoundError):
-        held_by_this_worker(frozenset({11}))
+        workers_sockets(frozenset({11}))
