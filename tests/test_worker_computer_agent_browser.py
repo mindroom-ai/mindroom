@@ -568,6 +568,31 @@ async def test_input_during_a_release_is_refused_so_nothing_stays_held() -> None
     await agent.runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_input_while_the_bridge_releases_on_a_page_it_leaves_is_refused() -> None:
+    """While the keys held on the page the agent left go up there, no new press is taken that nothing would release."""
+    old, new = _FakePage(_FakeSession()), _FakePage(_FakeSession())
+    agent = _Agent(cast("Page", old))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft"})
+        slow = old.session.first_key_up = asyncio.Event()
+        agent.shown = cast("Page", new)
+        async with asyncio.timeout(_TIMEOUT):
+            while not old.session.key_ups:  # noqa: ASYNC110 - the release reaches the page from the poll's task
+                await asyncio.sleep(0.01)
+        assert "control" in await service.refused(
+            "Input.dispatchKeyEvent",
+            {"type": "rawKeyDown", "key": "a", "code": "KeyA"},
+        )
+        slow.set()
+        assert await service.event("MindRoom.page") == {"page": True}
+    assert (old.session.key_ups, new.session.key_ups) == (["Shift"], [])
+    await agent.runtime.close()
+
+
 _SECRET_HEADER = "X-MindRoom-Service-Secret"  # noqa: S105 - a header name
 # A service that records its secret, then exits at once.
 _BRIEF = """
