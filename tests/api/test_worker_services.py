@@ -140,6 +140,21 @@ def _config(plugin_root: Path, paths: RuntimePaths) -> Config:
     return bind_runtime_paths(Config(agents={"coder": agent}, plugins=[str(plugin_root)]), paths)
 
 
+def _demo_primary(tmp_path: Path, backend: str) -> tuple[RuntimePaths, Config]:
+    """Return a primary's paths on ``backend`` and its published config, which loads an empty plugin ``demo``."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": backend},
+    )
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    config = _config(plugin_root, paths)
+    publish_test_plugins(config, paths)
+    return paths, config
+
+
 def _body(module: str = "hello.py", idle_timeout_seconds: float = 600.0) -> dict[str, object]:
     return {"protocol": WORKER_PROTOCOL_VERSION, "module": module, "idle_timeout_seconds": idle_timeout_seconds}
 
@@ -608,16 +623,7 @@ async def test_a_service_the_new_code_starts_as_it_loads_keeps_running(
 @pytest.mark.asyncio
 async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_path: Path, backend: str) -> None:
     """Nothing falls back to the primary: the shared runner and no worker at all fail with the setting to change."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": backend},
-    )
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
-    config = _config(plugin_root, paths)
-    publish_test_plugins(config, paths)
+    paths, config = _demo_primary(tmp_path, backend)
     context = build_plugin_context("demo", config, paths, lambda: config)
     expected = "Worker services need a dedicated worker backend: set MINDROOM_WORKER_BACKEND to docker or kubernetes."
     with pytest.raises(WorkerServiceError, match=re.escape(expected)):
@@ -726,16 +732,7 @@ async def test_a_plugin_load_stops_a_service_in_the_worker_it_started_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A service a subagent's call started stops in that subagent's own worker, though the load runs outside the call."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
-    )
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
-    config = _config(plugin_root, paths)
-    publish_test_plugins(config, paths)
+    paths, config = _demo_primary(tmp_path, "docker")
     context = build_plugin_context("demo", config, paths, lambda: config)
     workers = _AnyWorkers()
     monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
@@ -1148,16 +1145,7 @@ async def test_a_target_a_subagent_s_tool_resolves_reaches_the_subagent_s_own_wo
     stored: bool,
 ) -> None:
     """A tool's target from a subagent turn with its own worker relays there later; a normal turn's to the agent's."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
-    )
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
-    config = _config(plugin_root, paths)
-    publish_test_plugins(config, paths)
+    paths, config = _demo_primary(tmp_path, "docker")
     workers = _AnyWorkers()
     monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
 

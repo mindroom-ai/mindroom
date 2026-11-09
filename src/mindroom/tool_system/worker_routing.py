@@ -132,18 +132,20 @@ class ResolvedWorkerTarget:
     worker_key: str | None
     private_agent_names: frozenset[str] | None = None
     # The subagent's own worker the resolving turn ran its calls in, which its calls reach wherever they run later.
-    # Not compared, so the checks that a turn's agent, requester, and worker key stayed the same compare what they did.
+    # Not compared: equality asks whether the agent, requester, and worker key match, not which worker calls run in.
     placement: DedicatedWorkerPlacement | None = field(default=None, compare=False)
 
 
 _STORED_TARGET_VERSION = 2
 # LEGACY_COMPAT: version 1 stored worker targets, which have no placement key.
 # Legacy format: a dump_worker_target object with "version": 1 and no "placement" key.
-# Last legacy release: v2026.11.264 wrote version 1; the next release writes version 2, which adds "placement".
+# Last legacy release: every release from v2026.11.264 (which added stored targets) through the last one before
+# this change writes version 1, v2026.11.265 included; the release with this change writes version 2, which adds
+# "placement".
 # Handling: load_worker_target reads it with no placement, so it reaches the agent's normal worker as before.
 # Coverage: tests/test_worker_target_storage.py::test_a_version_1_target_loads_without_a_placement
 _LEGACY_STORED_TARGET_VERSION = 1
-# The stored format of each version, spelled out so that a new field of either dataclass fails the round trip tests
+# The stored format of each version, spelled out so that a new field of these dataclasses fails the round trip tests
 # instead of changing what plugins have stored.
 _LEGACY_STORED_TARGET_KEYS = frozenset(
     {
@@ -189,11 +191,7 @@ def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
         "account_id": target.account_id,
         "worker_key": target.worker_key,
         "private_agent_names": sorted(names) if names is not None else None,
-        "placement": (
-            {"subagent_id": placement.subagent_id, "resource_profile": placement.resource_profile}
-            if placement is not None
-            else None
-        ),
+        "placement": asdict(placement) if placement is not None else None,
     }
 
 
@@ -204,7 +202,7 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
     resolve, so stored data never pairs one person's or agent's identity with another's worker.
     """
     if not isinstance(data, dict) or "version" not in data:
-        msg = f"A stored worker target has exactly the keys {sorted(_STORED_TARGET_KEYS)}."
+        msg = "A stored worker target is an object with a version key."
         raise ValueError(msg)
     stored = cast("dict[str, object]", data)
     version = stored["version"]
@@ -272,7 +270,7 @@ def _is_stored_placement(placement: object) -> bool:
     return (
         isinstance(subagent_id, str)
         and _SUBAGENT_ID_PATTERN.fullmatch(subagent_id) is not None
-        and (profile is None or (isinstance(profile, str) and profile in SCRIPT_RESOURCE_PROFILE_NAMES))
+        and profile in (None, *SCRIPT_RESOURCE_PROFILE_NAMES)
     )
 
 
