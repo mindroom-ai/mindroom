@@ -27,7 +27,7 @@ from pydantic import Field
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker, worker_subprocess_env
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN, WorkerServiceState
-from mindroom.previews.listeners import group_listens
+from mindroom.previews.listeners import group_listens, group_sockets, listening_sockets
 from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.workers.protocol import WorkerFailure, WorkerRoute
 
@@ -71,8 +71,8 @@ class _ServiceInstance:
     idle_timeout_seconds: float
     idle_until: float = 0.0
     expiry: asyncio.Task[None] | None = None
-    # Whether an exit while another socket holds its port starts the service once more on a fresh port: only until an
-    # ensure reports it running, which says the port was its own.
+    # Whether an exit while another process listens on its port starts the service once more on a fresh port: only until
+    # an ensure reports it running, which says the port was its own.
     may_retry: bool = True
 
 
@@ -107,7 +107,7 @@ class _WorkerServices:
     ) -> WorkerServiceState:
         """Start the service unless an instance of this program exists, crashed or not, then report it.
 
-        An instance that exits, never reported running, while another socket holds its port starts once more.
+        An instance that exits, never reported running, while another process listens on its port starts once more.
 
         ``stops`` is the service's stop count as the request arrived; a stop that arrived since refuses the start.
         """
@@ -130,7 +130,7 @@ class _WorkerServices:
         async with self._lock:
             if self._instances.get(key) is instance:
                 # Another socket took the probed port before the service bound it, as one can between probe and bind.
-                if _port_taken(instance.port):
+                if await asyncio.to_thread(_listened_by_another, instance.port, instance.process.pid):
                     await self._end(key, instance)
                     (await self._add(key, program)).may_retry = False
                     self.touch(plugin, name)
@@ -221,16 +221,13 @@ def _free_loopback_port() -> int:
         return probe.getsockname()[1]
 
 
-def _port_taken(port: int) -> bool:
-    """Return whether a socket holds the loopback port."""
-    with socket.socket() as probe:
-        # So that connections a server that reuses its address closed, waiting out TIME_WAIT, do not count.
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError:
-            return True
-        return False
+def _listened_by_another(port: int, group: int) -> bool:
+    """Return whether a process outside process group ``group`` listens on ``port``. Blocking.
+
+    Connections the group closed, waiting out TIME_WAIT, are no listeners.
+    """
+    sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
+    return group_sockets(sockets, group) != sockets
 
 
 async def _start(program: _Program) -> _ServiceInstance:

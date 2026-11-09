@@ -350,11 +350,14 @@ async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -
 
 
 # A service that records each run, answers one connection, closing it first, and then crashes.
+# Its server does not reuse its address, as socketserver's does not, so the closed connection blocks a bind of its port.
 _ONCE = """
 import os, socket, sys
 
 open("once.log", "a").write("ran\\n")
-server = socket.create_server(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])))
+server = socket.socket()
+server.bind(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])))
+server.listen()
 connection = server.accept()[0]
 connection.sendall(b"bye")
 connection.close()
@@ -374,7 +377,8 @@ async def test_a_service_that_crashes_after_it_served_is_reported_and_not_restar
         writer.close()
         process = worker_services(sandbox_runner_app.app).instance("demo", "once").process  # type: ignore[union-attr]
         await _until(lambda: process.returncode is not None)
-        with socket.create_server(("127.0.0.1", state["port"])):
+        # The closed connection keeps 127.0.0.1 from being bound, but not another loopback address of the port.
+        with socket.create_server(("127.0.0.2", state["port"])):
             _, again = await _call("POST", runner.url("once"), _body("once.py"), _AUTH)
         assert (again["state"], again["exit_code"], again["port"]) == ("exited", 3, state["port"])
         assert (runner.workspace / "once.log").read_text() == "ran\n"
@@ -1271,6 +1275,31 @@ async def test_a_service_runs_once_a_process_it_started_listens_on_its_port(tmp_
         (runner.plugin_root / "launcher.py").write_text(_LAUNCHER)
         _, state = await _call("POST", runner.url("launcher"), _body("launcher.py"), _AUTH)
         assert state["state"] == "running"
+
+
+# A launcher that exits once the server it started listens on the service's port, leaving that server running.
+_DAEMON = """
+import os, socket, subprocess, sys, time
+
+SERVER = "import os, socket\\nserver = socket.create_server(('127.0.0.1', int(os.environ['MINDROOM_WORKER_SERVICE_PORT'])))\\nwhile True: server.accept()[0].close()"
+server = subprocess.Popen([sys.executable, "-c", SERVER])
+with open("children", "a") as children:
+    children.write(f"{server.pid}\\n")
+port = int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])
+while socket.socket().connect_ex(("127.0.0.1", port)) != 0:
+    time.sleep(0.01)
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_own_server_outlives_its_program_is_not_started_again(tmp_path: Path) -> None:
+    """The program's own processes listening on its port never count as another, so its exit starts nothing more."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "daemon.py").write_text(_DAEMON)
+        _, state = await _call("POST", runner.url("daemon"), _body("daemon.py"), _AUTH)
+        assert (state["state"], state["exit_code"]) == ("exited", 0)
+        [server] = (runner.workspace / "children").read_text().split()
+        assert _pid_alive(int(server))
 
 
 def _hide_holders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
