@@ -22,7 +22,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from mindroom.api.agent_streams import close, close_answering, rechecked, until_first
+from mindroom.api import agent_streams
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import RoomReader, client_stream, require_room_reader, stream_room_reader
 from mindroom.room_agent_access import room_execution_identity
@@ -190,14 +190,18 @@ async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str
             terminals = await _workspace_terminals(websocket, room_id, user.user_id, workspace, create=False)
             async with terminals.attach(terminal_id) as terminal:
                 await _Viewer(websocket, terminal, workspace).relay(
-                    rechecked(websocket, user, room_id, agent_user_id),
+                    agent_streams.rechecked(websocket, user, room_id, agent_user_id),
                 )
         except WebSocketException as end:
-            await close(websocket, end.code, end.reason)
+            await agent_streams.close(websocket, end.code, end.reason)
         except (HTTPException, TerminalError) as error:
-            await close_answering(websocket, error.status_code, error.detail)
+            await agent_streams.close_answering(websocket, error.status_code, error.detail)
         except TerminalDetachedError:
-            await close(websocket, status.WS_1013_TRY_AGAIN_LATER, "The terminal's stream ended; attach again.")
+            await agent_streams.close(
+                websocket,
+                status.WS_1013_TRY_AGAIN_LATER,
+                "The terminal's stream ended; attach again.",
+            )
         except WebSocketDisconnect:
             pass
 
@@ -208,14 +212,14 @@ class _Viewer:
     def __init__(self, websocket: WebSocket, terminal: TerminalStream, workspace: AgentWorkspace) -> None:
         self._websocket = websocket
         self._terminal = terminal
-        self._workspace = workspace
+        self._root = workspace.root
         self._writable = workspace.terminal == "type"
         self._sending = asyncio.Lock()
 
     async def relay(self, rechecked: AsyncIterator[AgentWorkspace]) -> None:
         """Relay until the shell exits or the viewer leaves, following in ``rechecked`` what the viewer may do."""
         await self._send({"type": "writable", "writable": self._writable})
-        await until_first(self._output(), self._keys(), self._recheck(rechecked))
+        await agent_streams.until_first(self._output(), self._keys(), self._recheck(rechecked))
 
     async def _send(self, frame: dict[str, object] | bytes) -> None:
         async with self._sending:
@@ -245,7 +249,7 @@ class _Viewer:
 
     async def _recheck(self, rechecked: AsyncIterator[AgentWorkspace]) -> None:
         async for current in rechecked:
-            if current.terminal == "none" or current.root != self._workspace.root:
+            if current.terminal == "none" or current.root != self._root:
                 raise WebSocketException(status.WS_1008_POLICY_VIOLATION, "This terminal is no longer open to you.")
             if (current.terminal == "type") != self._writable:
                 self._writable = not self._writable

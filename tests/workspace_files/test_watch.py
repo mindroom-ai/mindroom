@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def broken_scan(_root: Path) -> dict[str, object]:
+    """Stand in for a scan that breaks with something other than a file error."""
+    msg = "The scan broke."
+    raise RuntimeError(msg)
+
+
 async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) -> set[str]:
     """Collect every reported path until all of ``paths`` show, failing after five seconds."""
     seen: set[str] = set()
@@ -382,12 +388,8 @@ async def test_a_scanner_that_fails_ends_its_streams_and_any_that_join_it(
     root = tmp_path / "workspace"
     root.mkdir()
 
-    def broken(_root: Path) -> dict[str, object]:
-        msg = "The scan broke."
-        raise RuntimeError(msg)
-
     async with workspace_changes(root) as first:
-        monkeypatch.setattr(watch, "_scan", broken)
+        monkeypatch.setattr(watch, "_scan", broken_scan)
         with pytest.raises(HTTPException) as ended:
             async with asyncio.timeout(5):
                 await first()
@@ -410,11 +412,7 @@ async def test_a_first_scan_that_fails_ends_the_stream_instead_of_keeping_it_wai
     root = tmp_path / "workspace"
     root.mkdir()
 
-    def broken(_root: Path) -> dict[str, object]:
-        msg = "The scan broke."
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(watch, "_scan", broken)
+    monkeypatch.setattr(watch, "_scan", broken_scan)
     with pytest.raises(HTTPException) as ended:
         async with asyncio.timeout(5), workspace_changes(root) as next_changes:
             await next_changes()

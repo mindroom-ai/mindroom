@@ -30,6 +30,7 @@ from tests.access_schema_support import joined_members_response
 from tests.api.test_plugin_room_agents import ALICE, BOB, CAROL, ROOM, _agents, _Room, _room, _turn_root
 from tests.conftest import test_runtime_paths
 from tests.test_plugin_client_stream import _serving
+from tests.workspace_files.test_watch import broken_scan
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -466,14 +467,10 @@ async def test_the_change_stream_closes_with_1013_once_its_scanner_fails(
     root = _turn_root(room, "coder", ALICE)
     root.mkdir(parents=True)
 
-    def broken(_root: Path) -> dict[str, object]:
-        msg = "The scan broke."
-        raise RuntimeError(msg)
-
     async with _served(room) as follow:
         stream = await follow(ALICE, "coder")
         await _ready(stream)
-        monkeypatch.setattr(watch, "_scan", broken)
+        monkeypatch.setattr(watch, "_scan", broken_scan)
         async with asyncio.timeout(10):
             message = await stream.receive()
 

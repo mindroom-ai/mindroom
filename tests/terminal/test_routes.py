@@ -226,12 +226,23 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
         await bob.close()
 
 
-async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"tools": []}, id="no-shell"),
+        pytest.param({"private": AgentPrivateConfig(per="user")}, id="private"),
+    ],
+)
+async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal_or_moves_its_workspace(
     tmp_path: Path,
     runner: str,
     monkeypatch: pytest.MonkeyPatch,
+    change: dict[str, object],
 ) -> None:
-    """Alice may still use the agent, but without its shell it has no terminal for her to watch."""
+    """Alice may still use the agent, but without its shell it has no terminal for her to watch.
+
+    Once it is private, her workspace is her own, not the one whose terminal she watches.
+    """
     monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
@@ -240,27 +251,7 @@ async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
         alice = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
         assert await alice.receive_json() == {"type": "writable", "writable": True}
         agents = _agents(ALICE)
-        agents["coder"].tools = []
-        room.serve(Config(agents=agents))
-        message = await _after_output(alice)
-        assert (message.type, alice.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
-
-
-async def test_a_stream_closes_once_a_config_save_moves_the_agent_s_workspace(
-    tmp_path: Path,
-    runner: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Once the agent is private, Alice's workspace is her own, not the one whose terminal she watches."""
-    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
-    room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
-    coder = f"agents/{room.ids['coder']}/terminals"
-    async with _served(room) as (client, base):
-        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
-        alice = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
-        assert await alice.receive_json() == {"type": "writable", "writable": True}
-        agents = _agents(ALICE)
-        agents["coder"].private = AgentPrivateConfig(per="user")
+        agents["coder"] = agents["coder"].model_copy(update=change)
         room.serve(Config(agents=agents))
         message = await _after_output(alice)
 

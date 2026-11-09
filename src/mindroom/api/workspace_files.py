@@ -22,7 +22,6 @@ from mindroom.api import agent_streams
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import (
     AgentWorkspace,
-    ClientUser,
     RoomReader,
     client_stream,
     require_room_reader,
@@ -34,7 +33,7 @@ from mindroom.workspace_files import operations
 from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["workspace-files"])
@@ -182,7 +181,7 @@ async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str)
                 await agent_streams.until_first(
                     _send_changes(websocket, next_changes),
                     _until_closed(websocket),
-                    _recheck(websocket, user, room_id, workspace),
+                    _recheck(agent_streams.rechecked(websocket, user, room_id, agent_user_id), workspace),
                 )
         except HTTPException as error:
             await agent_streams.close_answering(websocket, error.status_code, error.detail)
@@ -207,7 +206,7 @@ async def _until_closed(websocket: WebSocket) -> None:
         pass
 
 
-async def _recheck(websocket: WebSocket, user: ClientUser, room_id: str, workspace: AgentWorkspace) -> None:
-    async for current in agent_streams.rechecked(websocket, user, room_id, workspace.user_id):
+async def _recheck(rechecked: AsyncIterator[AgentWorkspace], workspace: AgentWorkspace) -> None:
+    async for current in rechecked:
         if _with_files(current).root != workspace.root:
             raise HTTPException(403, "The agent's workspace moved for you.")
