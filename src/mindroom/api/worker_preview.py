@@ -232,7 +232,7 @@ def _service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
 
 def _require_service(app: FastAPI, plugin: str, name: str) -> RunningService:
     if (service := _service(app, plugin, name)) is None:
-        msg = f"Service {name!r} of plugin {plugin!r} is not running in this worker; ensure it first."
+        msg = f"Service {name!r} of plugin {plugin!r} is not running in this worker."
         raise _refused(503, msg)
     return service
 
@@ -253,12 +253,19 @@ async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_sec
         task.cancel()
 
 
-async def _relay(request: Request, url: URL, port: int, secret: str | None, held: AsyncExitStack) -> StreamingResponse:
+async def _relay(
+    request: Request,
+    url: URL,
+    secret: str | None,
+    in_use: AbstractAsyncContextManager[None],
+) -> StreamingResponse:
     """Pass the request to ``url``, adding the service's ``secret``, and stream its answer back."""
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
     headers = _end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER, _SERVICE_SECRET_HEADER}))
     if secret is not None:
         headers.append((_SERVICE_SECRET_HEADER, secret))
+    held = AsyncExitStack()
+    await held.enter_async_context(in_use)
     session = await held.enter_async_context(aiohttp.ClientSession(auto_decompress=False, timeout=_TIMEOUT))
     try:
         upstream = await session.request(
@@ -271,7 +278,7 @@ async def _relay(request: Request, url: URL, port: int, secret: str | None, held
         )
     except (aiohttp.ClientError, TimeoutError, OSError):
         await held.aclose()
-        raise _refused(502, f"The app on port {port} did not answer.") from None
+        raise _refused(502, f"The app on port {url.port} did not answer.") from None
     return _AppResponse(upstream, held)
 
 
@@ -323,7 +330,7 @@ async def listening_ports(request: Request) -> list[int]:
 async def relay(request: Request, port: int) -> StreamingResponse:
     """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
     url = await _upstream_url(request, port, 2)
-    return await _relay(request, url, port, None, AsyncExitStack())
+    return await _relay(request, url, None, nullcontext())
 
 
 @router.api_route(
@@ -333,11 +340,11 @@ async def relay(request: Request, port: int) -> StreamingResponse:
 )
 async def relay_to_service(request: Request, plugin: str, name: str) -> StreamingResponse:
     """Pass one request to the plugin's running service and stream its answer back."""
+    _require_dedicated_worker(request)
     service = _require_service(request.app, plugin, name)
     url = await _upstream_url(request, service.port, 3)
-    held = AsyncExitStack()
-    await held.enter_async_context(_service_in_use(request.app, plugin, name, service.idle_timeout_seconds))
-    return await _relay(request, url, service.port, service.secret, held)
+    in_use = _service_in_use(request.app, plugin, name, service.idle_timeout_seconds)
+    return await _relay(request, url, service.secret, in_use)
 
 
 @router.websocket("/ports/{port}/{path:path}")
@@ -357,6 +364,7 @@ async def relay_socket_to_service(websocket: WebSocket, plugin: str, name: str) 
     """Pass one WebSocket to the plugin's running service, message by message, as long as it lasts."""
     try:
         await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
+        _require_dedicated_worker(websocket)
         service = _require_service(websocket.app, plugin, name)
         url = await _upstream_url(websocket, service.port, 3)
     except HTTPException as refusal:

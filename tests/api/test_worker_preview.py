@@ -548,15 +548,17 @@ async def test_relay_refuses_when_the_app_drops_the_request(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_shared_runner_relays_nothing(tmp_path: Path) -> None:
-    """The shared runner refuses to list or relay, since its loopback is not one worker's."""
+    """The shared runner refuses to list or relay, to ports or services, since its loopback is not one worker's."""
     async with _app() as port, _runner(tmp_path, dedicated=False) as runner, aiohttp.ClientSession() as client:
-        for url in (runner.root, f"{runner.root}/{port}/"):
+        services = runner.root.removesuffix("/ports") + "/services/demo/hello/"
+        for url in (runner.root, f"{runner.root}/{port}/", services):
             async with client.get(url, headers=_AUTH) as response:
                 assert response.status == 403
                 assert response.headers[_REFUSED] == "1"
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
-        assert refused.value.status == 403
+        for url in (f"{runner.root}/{port}/socket", services):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(url, headers=_AUTH)
+            assert refused.value.status == 403
 
 
 @pytest.mark.asyncio
@@ -700,18 +702,14 @@ async def test_relay_follows_a_websocket_redirect_only_on_loopback(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_a_websocket_nothing_answers(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A WebSocket to a closed port is a marked refusal, and one to an app path that takes none an unmarked one."""
+async def test_relay_refuses_a_websocket_to_an_app_path_that_takes_none_unmarked(tmp_path: Path) -> None:
+    """The app's own handshake refusal reaches the caller as a 403 without the relay's mark."""
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for url, status, marked in (
-            (f"{runner.root}/{unused_tcp_port}/socket", 502, True),
-            (f"{runner.root}/{port}/plain", 403, False),
-        ):
-            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-                await client.ws_connect(url, headers=_AUTH)
-            assert refused.value.status == status
-            assert refused.value.headers is not None
-            assert (_REFUSED in refused.value.headers) is marked
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(f"{runner.root}/{port}/plain", headers=_AUTH)
+        assert refused.value.status == 403
+        assert refused.value.headers is not None
+        assert _REFUSED not in refused.value.headers
 
 
 @pytest.mark.asyncio

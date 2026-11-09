@@ -741,7 +741,7 @@ async def test_a_relayed_stream_closes_with_the_streams_own_code_when_the_sessio
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    sys.modules[PROBE_MODULE].upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/"
+    sys.modules[PROBE_MODULE].upstream = f"http://127.0.0.1:{runner.addresses[0][1]}/"
     store = client_session_store(app)
     token = store.create(ALICE).token
     try:

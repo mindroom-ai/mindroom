@@ -37,9 +37,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
-    from mindroom.workers.models import WorkerHandle
 
-_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105 - a header name, not a secret
 _REFUSED_HEADER = "x-mindroom-relay-refused"
 # Headers aiohttp adds to a request that lacks them, which the relay leaves to the route.
 _AIOHTTP_DEFAULT_HEADERS = ("Accept", "User-Agent", "Accept-Encoding", "Content-Type")
@@ -76,18 +74,18 @@ class WorkerRelay:
             f"{self._root}/services/{self._plugin}/{service}" if service is not None else f"{self._root}/ports/{port}"
         )
         # Parsed as a path of its own and joined encoded, so its dot segments stay below the service or port.
-        target = URL("/" + path.lstrip("/"))
-        query = target.raw_query_string
-        return URL(f"{base}{target.raw_path}{'?' if query else ''}{query}", encoded=True)
+        return URL(f"{base}{URL('/' + path.lstrip('/')).raw_path_qs}", encoded=True)
 
     def _route_headers(self, headers: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
         """Return the runner token, then the route's ``headers`` without any copy of it."""
-        return [*self._headers.items(), *((name, value) for name, value in headers if name.lower() != _TOKEN_HEADER)]
+        return [
+            *self._headers.items(),
+            *((name, value) for name, value in headers if name.lower() not in self._headers),
+        ]
 
     @staticmethod
-    def _session(*, auto_decompress: bool = True) -> aiohttp.ClientSession:
+    def _session() -> aiohttp.ClientSession:
         return aiohttp.ClientSession(
-            auto_decompress=auto_decompress,
             cookie_jar=aiohttp.DummyCookieJar(),
             skip_auto_headers=_AIOHTTP_DEFAULT_HEADERS,
             timeout=_TIMEOUT,
@@ -108,13 +106,14 @@ class WorkerRelay:
         url = self._url(path, service, port)
         with worker_call_in_flight(self._backend, self._worker_key):
             async with (
-                self._session(auto_decompress=False) as session,
+                self._session() as session,
                 session.request(
                     method,
                     url,
                     headers=self._route_headers(headers),
                     data=body,
                     allow_redirects=False,
+                    auto_decompress=False,
                 ) as response,
             ):
                 yield response
@@ -166,15 +165,16 @@ class WorkerRelay:
             return await response.json()
 
 
-def _running_worker(paths: RuntimePaths, target: ResolvedWorkerTarget) -> tuple[WorkerHandle, WorkerBackend]:
-    """Return the target's dedicated worker while it runs, never starting it, with its backend. Blocking."""
+def _open(paths: RuntimePaths, target: ResolvedWorkerTarget, plugin: str) -> WorkerRelay:
+    """Return the relay into the target's dedicated worker while it runs, never starting it. Blocking."""
     if not worker_backend_kind(paths).dedicated:
         detail = (
             "The worker relay needs a dedicated worker backend: set MINDROOM_WORKER_BACKEND to docker or kubernetes."
         )
         raise HTTPException(503, detail)
+    proxy_config = sandbox_proxy_config(paths)
     try:
-        with lease_worker_manager(paths, sandbox_proxy_config(paths)) as backend:
+        with lease_worker_manager(paths, proxy_config) as backend:
             _, handle = worker_route(
                 runtime_paths=paths,
                 # A config only fills the request body this builds, which the relay never sends.
@@ -190,11 +190,10 @@ def _running_worker(paths: RuntimePaths, target: ResolvedWorkerTarget) -> tuple[
         raise HTTPException(503, f"The agent's worker is unavailable: {error}") from None
     if handle is None or handle.status != "ready":
         raise HTTPException(503, "The agent's worker is not running.")
-    return handle, backend
+    headers = worker_request_headers(handle, config=worker_proxy_client_config(proxy_config, paths))
+    return WorkerRelay(worker_api_root(handle), headers, plugin, backend, handle.worker_key)
 
 
 async def open_worker_relay(paths: RuntimePaths, target: ResolvedWorkerTarget, plugin: str) -> WorkerRelay:
     """Return the relay into the target's running dedicated worker for ``plugin``, or answer 503."""
-    handle, backend = await asyncio.to_thread(_running_worker, paths, target)
-    headers = worker_request_headers(handle, config=worker_proxy_client_config(sandbox_proxy_config(paths), paths))
-    return WorkerRelay(worker_api_root(handle), headers, plugin, backend, handle.worker_key)
+    return await asyncio.to_thread(_open, paths, target, plugin)

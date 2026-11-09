@@ -823,17 +823,22 @@ async def _relay(
     tmp_path: Path,
     runner: _Runner,
     monkeypatch: pytest.MonkeyPatch,
-    plugin: str = "demo",
 ) -> tuple[PluginContext, _Workers, WorkerRelay]:
-    """Start the agent's worker, the test's runner, through an ensure of ``hello``, and open the relay for ``plugin``."""
+    """Start the agent's worker, the test's runner, through an ensure of ``hello``, and open the relay for ``demo``."""
     workers = _Workers(runner.port)
     context = _primary(tmp_path, runner, monkeypatch, workers)
     assert (await ensure_worker_service(context, _SERVICE, _TARGET)).state == "running"
-    return context, workers, await open_worker_relay(context.runtime_paths, _TARGET, plugin)
+    return context, workers, await open_worker_relay(context.runtime_paths, _TARGET, context.plugin_name)
 
 
-async def _get(relay: WorkerRelay, path: str, **target: object) -> tuple[int, str, bool]:
-    async with relay.http("GET", path, **target) as answer:  # type: ignore[arg-type]
+async def _get(
+    relay: WorkerRelay,
+    path: str,
+    *,
+    service: str | None = None,
+    port: int | None = None,
+) -> tuple[int, str, bool]:
+    async with relay.http("GET", path, service=service, port=port) as answer:
         return answer.status, await answer.text(), _REFUSED in answer.headers
 
 
@@ -871,7 +876,7 @@ async def test_a_route_never_reaches_another_plugins_service_or_one_that_is_not_
         status, text, marked = await _get(other, "/", service="hello")
         assert (status, marked) == (503, True)
         assert json.loads(text) == {
-            "detail": "Service 'hello' of plugin 'other' is not running in this worker; ensure it first.",
+            "detail": "Service 'hello' of plugin 'other' is not running in this worker.",
         }
         await stop_worker_service(context, _SERVICE, _TARGET)
         assert (await _get(relay, "/", service="hello"))[::2] == (503, True)
@@ -947,7 +952,7 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
     try:
         async with _runner(tmp_path) as runner:
             _, _, relay = await _relay(tmp_path, runner, monkeypatch)
-            await _until(lambda: unused_tcp_port in _listening())
+            await _until(lambda: unused_tcp_port in {listener.port for listener in listeners.listening_sockets()})
             assert await _get(relay, "/index.html", port=unused_tcp_port) == (200, "the agent's app", False)
             # A redirect reaches the route as the app sent it.
             async with relay.http("GET", "/sub", port=unused_tcp_port) as answer:
@@ -975,10 +980,6 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
     finally:
         server.terminate()
         await server.wait()
-
-
-def _listening() -> set[int]:
-    return {listener.port for listener in listeners.listening_sockets()}
 
 
 @pytest.mark.asyncio
