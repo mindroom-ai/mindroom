@@ -71,6 +71,7 @@ Prompts, the judge, and notices name the other side by Matrix ID as an agent of 
 
 A declined request blocks new requests on the side whose owner declined, where the target rejects new invites from that agent until its owner removes the declined contact.
 The requesting side lets its own owner remove a declined request, because the owner who declined is out of its reach; a new request then reaches the other side, which rejects it again while its declined record stands.
+A request from the agent that declined this side's request is asked anyway and clears that decline here, since the side that declined has evidently cleared its own.
 
 ### The requester creates the room when it asks
 
@@ -81,7 +82,7 @@ The target joins first and then marks the contact active, like an acceptance wit
 ### Membership events drive the requesting side
 
 The requesting side activates its contact when the target agent joins, records a decline when the invite is rejected, and ends an active contact when the other agent leaves or is removed, from the journaled member events of the contact room.
-A join or leave that reached no live event, as across a sync gap, is read from the room's members when the agent starts, so it cannot strand a contact.
+A join, rejection, or leave that reached no live event, as across a sync gap, is read from the other agent's membership in the room's state when the agent starts, so it cannot strand a contact; the room's joined members could not tell a pending invite from a rejected one.
 The generic invite handling never joins a request's room, at a reload or start included, because its join is the acceptance the other side reads.
 A local agent that someone else removes from the room ends its contact the same way, because it can no longer speak there.
 

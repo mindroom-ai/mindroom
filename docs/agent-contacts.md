@@ -235,6 +235,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
 | `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
 | `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or decline it` | The other side withdrew the request, or its homeserver is unreachable |
+| `The invite from <agent> could not be rejected, so the request still waits; decline again later` | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you decline again |
 | A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
 | `The request to <target> could not be posted to its owner's personal room; ask again to retry` | Sending the notice failed; the request is kept, so ask again |

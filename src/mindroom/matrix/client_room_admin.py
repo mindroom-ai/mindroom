@@ -822,6 +822,16 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | 
     return None
 
 
+async def get_room_membership(client: nio.AsyncClient, room_id: str, user_id: str) -> str | None:
+    """Return a user's membership of a room from its state, such as ``invite`` or ``leave``, or ``None`` if unreadable."""
+    response = await client.room_get_state_event(room_id, "m.room.member", user_id)
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        membership = response.content.get("membership")
+        return membership if isinstance(membership, str) else None
+    logger.warning("matrix_room_membership_fetch_failed", room_id=room_id, user_id=user_id, error=str(response))
+    return None
+
+
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     """Get all rooms the client has joined."""
     response = await client.joined_rooms()
@@ -884,6 +894,7 @@ __all__ = [
     "ensure_room_name",
     "get_joined_rooms",
     "get_room_members",
+    "get_room_membership",
     "get_room_name",
     "invite_to_room",
     "join_room",

@@ -6808,6 +6808,7 @@ expose = [
     "ensure_managed_room_power_levels",
     "get_joined_rooms",
     "get_room_members",
+    "get_room_membership",
     "get_room_name",
     "invite_to_room",
     "join_room",

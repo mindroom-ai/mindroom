@@ -239,15 +239,20 @@ def contact_room_ids(
     )
 
 
-def remove_active_contacts(runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
-    """Mark every active contact this agent is a party of removed, and return their IDs.
+def remove_kept_contacts(runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
+    """Mark every contact whose room this agent keeps removed, and return their IDs.
 
-    An agent that no longer has contacts leaves their rooms, so its contacts end for both sides, and restoring its
-    contacts later revives none of them. Nothing is written while it has no active contact.
+    Those are its active contacts and its pending requests to agents of other deployments. An agent that no longer has
+    contacts leaves their rooms, so its contacts end for both sides, and restoring its contacts later revives none of
+    them. Nothing is written while it has no such contact.
     """
 
     def active(record: ContactRecord) -> bool:
-        return record.status == "active" and record.agent_side(agent_name) is not None
+        side = record.agent_side(agent_name)
+        if side is None:
+            return False
+        sent_elsewhere = side == "requester" and record.target.kind == "remote_agent"
+        return record.status == "active" or (record.status == "pending" and sent_elsewhere)
 
     if not any(active(record) for record in read_contacts(runtime_paths).contacts):
         return []

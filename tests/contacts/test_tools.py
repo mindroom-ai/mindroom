@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import yaml
 
@@ -75,6 +76,7 @@ def _runtime() -> _Runtime:
     runtime = _Runtime(orchestrator)
     for name in TOOLS:
         runtime.clients[name] = make_matrix_client_mock(user_id=f"@{name}:localhost")
+        runtime.clients[name].room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
         runtime.bots[name] = bot = MagicMock(running=True, client=runtime.clients[name])
         bot.hook_context.send_message = AsyncMock(return_value="$origin-notice")
         bot.conversation_reader = make_conversation_reader_mock()

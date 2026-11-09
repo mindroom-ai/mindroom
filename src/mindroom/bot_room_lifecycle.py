@@ -21,7 +21,7 @@ from mindroom.contacts.federation import (
 )
 from mindroom.contacts.flow import withdraw_removed_contact_invites
 from mindroom.contacts.parties import agent_party
-from mindroom.contacts.store import contact_room_ids, remove_active_contacts
+from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
@@ -523,11 +523,11 @@ class BotRoomLifecycle:
             self._logger().exception("contacts_end_failed_as_agent_leaves")
 
     async def _end_contacts(self, config: Config) -> None:
-        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides."""
+        """Mark the contacts whose rooms a personal agent keeps removed before it leaves them, ending them for both sides."""
         name = self.deps.agent_name
         if config.personal_agent_instance(name) is None:
             return
-        removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+        removed = await asyncio.to_thread(remove_kept_contacts, self.deps.runtime_paths, name)
         if removed:
             self._logger().info("contacts_removed_as_agent_leaves", contact_ids=removed)
 

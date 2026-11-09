@@ -35,7 +35,7 @@ from mindroom.contacts.store import (
 )
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_room_members, invite_to_room
+from mindroom.matrix.client_room_admin import get_room_membership, invite_to_room
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,12 +90,20 @@ def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str)
 
     Return None, storing nothing, for a room whose request was declined or removed, for a pair with a pending or
     active contact in another room, or one this side declined, which blocks the pair until the owner removes the
-    declined contact.
+    declined contact. A decline of this agent's own request by the other side blocks only that side, so the other
+    agent asking now clears it.
     """
     for stored in book.contacts:
         if stored.room_id == record.room_id and stored.agent_side(agent_name) is not None:
             # A room whose request was answered or withdrawn is no new request.
             return (stored.model_copy(deep=True), False) if stored.status in {"pending", "active"} else None
+    for stored in book.contacts:
+        if (
+            stored.status == "declined"
+            and stored.requester.id == agent_name
+            and stored.target.id == record.requester.id
+        ):
+            stored.status = "removed"
     try:
         if existing_contact(book, record.requester, record.target, rules=None, tools=None) is not None:
             return None
@@ -283,9 +291,9 @@ async def reconcile_remote_contacts(
 ) -> None:
     """Catch up on membership changes of contact rooms with other deployments' agents that no live event delivered.
 
-    A request whose room the other agent joined becomes active, and an active contact whose room the other agent left
-    ends. A room whose members cannot be read changes nothing, and neither does a request the other agent still has
-    not joined, since its invite may still be pending.
+    A request whose room the other agent joined becomes active, one whose invite it rejected is declined, and an active
+    contact whose room the other agent left ends. A membership that cannot be read changes nothing, and neither does an
+    invite still pending.
     """
     found = _agent(config, runtime_paths, agent_name, agent_bot)
     bot = agent_bot(agent_name)
@@ -297,10 +305,11 @@ async def reconcile_remote_contacts(
         pending_request = record.status == "pending" and side == "requester"
         if other.kind != "remote_agent" or record.room_id is None or not (pending_request or record.status == "active"):
             continue
-        members = await get_room_members(bot.client, record.room_id)
-        if members is None:
-            continue
-        if pending_request and other.id in members:
+        membership = await get_room_membership(bot.client, record.room_id, other.id)
+        gone = membership in {"leave", "ban"}
+        if pending_request and membership == "join":
             await _accepted(actor, record, agent_name)
-        elif record.status == "active" and other.id not in members:
+        elif pending_request and gone:
+            await _declined(actor, record, agent_name)
+        elif record.status == "active" and gone:
             await _end(actor, record, agent_name, "active", leave=True)

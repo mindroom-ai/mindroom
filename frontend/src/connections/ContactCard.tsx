@@ -61,15 +61,24 @@ function changedTerms(contact: ContactView, draft: TermsDraft): ContactTerms {
   return terms;
 }
 
+/** Who answers for the other side: its owner, or for another deployment's agent, that agent's unknown owner. */
+function otherOwner(contact: ContactView): string {
+  return contact.other.owner ?? `the owner of ${contact.other.id}`;
+}
+
+function sentenceStart(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function statusLine(contact: ContactView): string | null {
-  const owner = contact.other.owner;
   if (contact.status === "pending" && contact.side === "requester")
-    return `Waiting for ${owner} to answer.`;
-  if (contact.status === "declined")
-    return contact.side === "target"
-      ? "You declined. Remove it to let either of you ask again."
-      : `${owner} declined. They can remove it to let you ask again.`;
-  return null;
+    return `Waiting for ${otherOwner(contact)} to answer.`;
+  if (contact.status !== "declined") return null;
+  if (contact.side === "target")
+    return "You declined. Remove it to let either of you ask again.";
+  return contact.other.kind === "remote_agent"
+    ? `${sentenceStart(otherOwner(contact))} declined. Remove it to ask again; their side refuses until they remove their decline.`
+    : `${sentenceStart(otherOwner(contact))} declined. They can remove it to let you ask again.`;
 }
 
 /** Your side's rules, tools, and judge, as a contact turn uses them now. */
@@ -202,7 +211,8 @@ export function ContactCard({
   const canRemove =
     contact.status === "active" ||
     (pending && contact.side === "requester") ||
-    (contact.status === "declined" && contact.side === "target");
+    (contact.status === "declined" &&
+      (contact.side === "target" || contact.other.kind === "remote_agent"));
   const status = statusLine(contact);
   const removeCopy =
     contact.status === "active"
@@ -215,12 +225,15 @@ export function ContactCard({
       : pending
         ? {
             title: "Withdraw this request?",
-            description: `${contact.other.owner} is no longer asked.`,
+            description: `${sentenceStart(otherOwner(contact))} is no longer asked.`,
             label: "Withdraw…",
           }
         : {
             title: "Remove the declined request?",
-            description: "Either of you can then ask again.",
+            description:
+              contact.side === "requester"
+                ? "You can then ask again, though their side refuses until they remove their decline."
+                : "Either of you can then ask again.",
             label: "Remove…",
           };
   const form = agent && (

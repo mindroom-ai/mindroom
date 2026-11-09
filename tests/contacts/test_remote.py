@@ -849,10 +849,9 @@ async def test_a_start_catches_up_on_an_acceptance_it_never_saw(tmp_path: Path) 
     config, paths = _remote_setup(tmp_path)
     _store(paths, _outgoing())
     runtime = _runtime()
-    members = {_account(paths, "mind_alice"), REMOTE}
     with (
         _matrix() as matrix,
-        patch("mindroom.contacts.federation.get_room_members", new=AsyncMock(return_value=members)),
+        patch("mindroom.contacts.federation.get_room_membership", new=AsyncMock(return_value="join")),
     ):
         await federation.reconcile_remote_contacts(config, paths, "mind_alice", runtime.bots.get)
     assert _statuses(paths) == ["active"]
@@ -866,23 +865,41 @@ async def test_a_start_catches_up_on_a_leave_it_never_saw(tmp_path: Path) -> Non
     config, paths = _remote_setup(tmp_path)
     _store(paths, _incoming(status="active"))
     runtime = _runtime()
-    members = {_account(paths, "mind_bob")}
-    with _matrix(), patch("mindroom.contacts.federation.get_room_members", new=AsyncMock(return_value=members)):
+    with _matrix(), patch("mindroom.contacts.federation.get_room_membership", new=AsyncMock(return_value="leave")):
         await federation.reconcile_remote_contacts(config, paths, "mind_bob", runtime.bots.get)
     assert _statuses(paths) == ["removed"]
     runtime.bots["mind_bob"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
 
 
 @pytest.mark.asyncio
+async def test_a_start_catches_up_on_a_decline_it_never_saw(tmp_path: Path) -> None:
+    """A rejected invite that reached no live event still declines the request, read from the room's state at start."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing())
+    runtime = _runtime()
+    read = AsyncMock(return_value="leave")
+    with _matrix(), _delivered() as send, patch("mindroom.contacts.federation.get_room_membership", new=read):
+        await federation.reconcile_remote_contacts(config, paths, "mind_alice", runtime.bots.get)
+    assert _statuses(paths) == ["declined"]
+    read.assert_awaited_once_with(runtime.clients["mind_alice"], REMOTE_ROOM, REMOTE)
+    [post] = [call for call in send.await_args_list if call.args[1] == ORIGIN_ROOM]
+    assert post.args[2]["body"] == f"{REMOTE} declined contact out; remove it with remove_contact to ask again."
+    runtime.bots["mind_alice"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
+
+
+@pytest.mark.asyncio
 async def test_a_start_changes_nothing_when_the_room_is_as_stored_or_unreadable(tmp_path: Path) -> None:
-    """A pending request the other agent has not joined, an active contact it is still in, and an unreadable room stay."""
+    """A request whose invite is still pending, an active contact the other agent is in, and unreadable state stay."""
     config, paths = _remote_setup(tmp_path)
     _store(paths, _outgoing())
     _store(paths, _incoming(status="active").model_copy(update={"room_id": "!active:other.org"}))
     runtime = _runtime()
-    joined = {REMOTE_ROOM: {_account(paths, "mind_alice")}, "!active:other.org": {_account(paths, "mind_bob"), REMOTE}}
-    for read in (AsyncMock(side_effect=lambda _client, room_id: joined[room_id]), AsyncMock(return_value=None)):
-        with _matrix(), patch("mindroom.contacts.federation.get_room_members", new=read):
+    membership = {REMOTE_ROOM: "invite", "!active:other.org": "join"}
+    for read in (
+        AsyncMock(side_effect=lambda _client, room_id, _user: membership[room_id]),
+        AsyncMock(return_value=None),
+    ):
+        with _matrix(), patch("mindroom.contacts.federation.get_room_membership", new=read):
             for name in ("mind_alice", "mind_bob"):
                 await federation.reconcile_remote_contacts(config, paths, name, runtime.bots.get)
         assert _statuses(paths) == ["pending", "active"]
@@ -895,11 +912,101 @@ async def test_joining_rooms_at_start_catches_up_on_remote_contacts(tmp_path: Pa
     _store(paths, _outgoing())
     runtime = _runtime()
     lifecycle = _room_lifecycle(config, paths, "mind_alice", runtime.bots.get)
-    members = AsyncMock(return_value={_account(paths, "mind_alice"), REMOTE})
     with (
         _matrix(),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
-        patch("mindroom.contacts.federation.get_room_members", new=members),
+        patch("mindroom.contacts.federation.get_room_membership", new=AsyncMock(return_value="join")),
     ):
         await lifecycle.join_configured_rooms()
     assert _statuses(paths) == ["active"]
+
+
+@pytest.mark.asyncio
+async def test_the_other_agent_asking_clears_its_decline_of_our_request(tmp_path: Path) -> None:
+    """Each side enforces only its own owner's decline, so the agent that declined our request may still ask us."""
+    config, paths = _remote_setup(tmp_path)
+    ours = ContactRecord(
+        id="ours",
+        status="declined",
+        requester=ContactParty(kind="agent", id="mind_bob", owner=CO_OWNER),
+        target=remote_party(REMOTE),
+        reason="Lunch?",
+        requester_side=ContactSide(),
+        target_side=ContactSide(),
+        origin_room_id=BOB_ROOM,
+        origin_thread_id=None,
+        room_id="!ours:localhost",
+    )
+    _store(paths, ours)
+    runtime = _runtime()
+    with _delivered():
+        await _invited(config, paths, runtime)
+    cleared, asked = _stored(paths)
+    assert (cleared.id, cleared.status) == ("ours", "removed")
+    assert (asked.requester, asked.status) == (remote_party(REMOTE), "pending")
+    assert not _rejected(runtime)
+
+
+@pytest.mark.asyncio
+async def test_a_request_another_acceptance_activated_while_joining_keeps_its_room(tmp_path: Path) -> None:
+    """Two acceptances of one request join its one room, so the one that finds it already active does not leave."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+
+    async def join_while_accepted(_room_id: str, _membership: str) -> bool:
+        def accept(book: ContactBook) -> None:
+            book.contacts[0].status = "active"
+
+        update_contacts(paths, accept)
+        return True
+
+    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=join_while_accepted)
+    with _matrix() as matrix, pytest.raises(ValueError, match=r"^Only a pending contact can be accepted$"):
+        await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
+    assert [call.args for call in runtime.bots["mind_bob"].change_local_membership.await_args_list] == [
+        (REMOTE_ROOM, "join"),
+    ]
+    assert _statuses(paths) == ["active"]
+    matrix["invite"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_decline_whose_rejection_fails_leaves_the_request_pending(tmp_path: Path) -> None:
+    """The other side learns of a decline only from the rejected invite, so one it cannot see is no decline here."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    runtime.clients["mind_bob"].room_leave = AsyncMock(return_value=nio.RoomLeaveError("unreachable"))
+    refusal = (
+        rf"^The invite from {re.escape(REMOTE)} could not be rejected, so the request still waits; decline again later$"
+    )
+    with _delivered() as send, pytest.raises(ValueError, match=refusal):
+        await flow.decline_contact(_bob(config, paths, runtime), "in")
+    assert _statuses(paths) == ["pending"]
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_loses_contacts_withdraws_its_unanswered_request_elsewhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the asking agent leaves, its request's room has nobody to let the other agent in, so the request ends."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing())
+    assert contact_room_ids(config, paths, "mind_alice") == frozenset({REMOTE_ROOM})
+    without, _ = _setup(tmp_path, contacts=False)
+    left: list[str] = []
+
+    async def record_left(_client: object, room_ids: list[str], **_kwargs: object) -> None:
+        left.extend(room_ids)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[REMOTE_ROOM]))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_left)
+    lifecycle = _room_lifecycle(without, paths, "mind_alice")
+    with _matrix() as matrix:
+        await lifecycle.leave_unconfigured_rooms()
+    assert _statuses(paths) == ["removed"]
+    matrix["kick"].assert_awaited_once_with(lifecycle.deps.runtime.client, REMOTE_ROOM, REMOTE)
+    assert left == [REMOTE_ROOM]
