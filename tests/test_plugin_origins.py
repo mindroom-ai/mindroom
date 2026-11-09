@@ -349,7 +349,7 @@ def test_plugin_origin_url_refuses_a_plugin_without_origins(tmp_path: Path) -> N
 def test_plugin_origin_url_from_a_tools_context(tmp_path: Path, env: dict[str, str], url: str | None) -> None:
     """A tool's context names its own plugin's host, and None while origins are off, since a tool answers no request."""
     _write(tmp_path, "linker", origin=EMPTY_ORIGIN)
-    _write(tmp_path, "plain", routes=ROUTES)
+    _write(tmp_path, "plain")
     app = _api_app(tmp_path, "linker", "plain", **env)
     snapshot = config_lifecycle.require_api_state(app).snapshot
     config = snapshot.runtime_config
