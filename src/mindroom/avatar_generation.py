@@ -250,7 +250,7 @@ async def _generate_avatar(
             )
 
     if not image_bytes:
-        msg = f"No image data found for {target.entity_type}/{target.entity_name} after {_MAX_IMAGE_ATTEMPTS} attempts"
+        msg = f"No image data found for {label} after {_MAX_IMAGE_ATTEMPTS} attempts"
         raise ValueError(msg)
 
     avatar_path.write_bytes(image_bytes)

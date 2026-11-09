@@ -1322,7 +1322,10 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
     )
     target = generate_avatars._AvatarTarget(entity_type="agents", entity_name="general", role="general work")
 
-    with pytest.raises(ValueError, match=f"after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts"):
+    with pytest.raises(
+        ValueError,
+        match=f"^No image data found for agents/general after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts$",
+    ):
         await generate_avatars._generate_avatar(
             client,
             target,
@@ -1456,13 +1459,11 @@ async def test_sync_prints_room_names_whole(
     async def set_avatar(_client: object, room_id: str, _path: Path) -> bool:
         return room_id != room_ids[rejected]
 
-    state = SimpleNamespace(space_room_id=None)
     monkeypatch.setattr(
         generate_avatars,
         "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(
         generate_avatars,
         "create_agent_http_client",

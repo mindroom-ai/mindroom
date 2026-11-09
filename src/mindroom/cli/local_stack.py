@@ -157,18 +157,14 @@ def _write_local_cinny_config(
     return target
 
 
-def _needs_ssl_verify_override(homeserver_url: str) -> bool:
-    """Return whether the local homeserver needs MATRIX_SSL_VERIFY=false for its self-signed certificate.
+def _local_matrix_env_values(homeserver_url: str, server_name: str) -> dict[str, str]:
+    """Return the Matrix settings that point MindRoom at the local stack.
 
+    An https:// homeserver gets MATRIX_SSL_VERIFY=false for its self-signed certificate.
     Plain HTTP needs no certificate override, and a persisted one would stop verifying a hosted homeserver set later.
     """
-    return urlparse(homeserver_url).scheme == "https"
-
-
-def _local_matrix_env_values(homeserver_url: str, server_name: str) -> dict[str, str]:
-    """Return the Matrix settings that point MindRoom at the local stack."""
     values = {"MATRIX_HOMESERVER": homeserver_url, "MATRIX_SERVER_NAME": server_name}
-    if _needs_ssl_verify_override(homeserver_url):
+    if urlparse(homeserver_url).scheme == "https":
         values["MATRIX_SSL_VERIFY"] = "false"
     return values
 
