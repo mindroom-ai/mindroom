@@ -610,7 +610,7 @@ def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: fl
 
 
 @pytest.mark.asyncio
-async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_service_that_fails_to_stop_holds_up_no_other(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A plugin load or shutdown stops every started service, even when one worker cannot be reached, and keeps that one."""
     stopped: list[str] = []
 
@@ -621,8 +621,9 @@ async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytes
             raise WorkerServiceError(msg)
 
     monkeypatch.setattr(plugin_worker_services, "_stop_recorded", stop)
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     for name in ("broken", "hello"):
-        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = None  # type: ignore[assignment]
+        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = paths
     await plugin_worker_services.stop_started_worker_services()
     assert stopped == ["broken", "hello"]
     # The service that failed to stop stays recorded, so the next load or shutdown stops it.
@@ -720,3 +721,31 @@ async def test_a_plugin_load_stops_a_service_in_the_worker_it_started_in(
     root = f"http://{abs(hash(subagent_key))}.workers/api/sandbox-runner/plugin-services"
     assert workers.touched == [subagent_key]
     assert sent == [("POST", f"{root}/demo/hello"), ("DELETE", f"{root}/demo/hello")]
+
+
+@pytest.mark.asyncio
+async def test_an_ensure_during_a_stop_keeps_its_service_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service an ensure records while a load still stops its old instance stays recorded for the next load."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    key = (_WORKER_KEY, "demo", "hello")
+    stopping, release = asyncio.Event(), asyncio.Event()
+
+    async def send(method: str, _endpoint: object, _path: str, _body: object) -> bytes:
+        assert method == "DELETE"
+        stopping.set()
+        await release.wait()
+        return b""
+
+    monkeypatch.setattr(plugin_worker_services, "_recorded_worker", lambda *_args: object())
+    monkeypatch.setattr(plugin_worker_services, "_send", send)
+    plugin_worker_services._started[key] = paths
+    load = asyncio.create_task(plugin_worker_services.stop_started_worker_services())
+    await stopping.wait()
+    # An ensure of the new code records the service while the old instance is still stopping.
+    plugin_worker_services._started[key] = paths
+    release.set()
+    await load
+    assert plugin_worker_services._started == {key: paths}

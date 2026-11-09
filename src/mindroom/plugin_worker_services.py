@@ -181,8 +181,15 @@ async def ensure_worker_service(
 
 
 async def _stop(endpoint: _Endpoint, worker_key: str, plugin: str, name: str) -> None:
-    await _send("DELETE", endpoint, f"{plugin}/{name}", None)
-    _started.pop((worker_key, plugin, name), None)
+    # Forgotten before the stop, so an ensure meanwhile records the service anew; kept again if the stop fails.
+    key = (worker_key, plugin, name)
+    paths = _started.pop(key, None)
+    try:
+        await _send("DELETE", endpoint, f"{plugin}/{name}", None)
+    except WorkerServiceError:
+        if paths is not None:
+            _started.setdefault(key, paths)
+        raise
 
 
 async def stop_worker_service(context: PluginContext, service: WorkerService, target: ResolvedWorkerTarget) -> None:
