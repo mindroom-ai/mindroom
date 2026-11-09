@@ -194,6 +194,9 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # The toolkit's functions that change the workspace's files, by writing them or by running code there. A toolkit
+    # that names none and runs code counts as changing them through every function.
+    workspace_writers: tuple[str, ...] = ()
     # The toolkit's functions, by name, whose calls another function's approval rules judge too.
     approval_aliases: Mapping[str, ApprovalAlias] = field(default_factory=dict)
     # SDK functions that accept, but never use, an injected Agent or Team.

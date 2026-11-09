@@ -440,6 +440,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Per-agent override of defaults.file_access (None = inherit the default)",
     )
+    terminals: Literal["none", "watch", "type"] = Field(
+        default="none",
+        description="What people in the agent's rooms may do with its terminals: none, watch, or type",
+    )
     allow_self_config: bool | None = Field(
         default=None,
         description="Allow this agent to modify its own configuration via a tool",

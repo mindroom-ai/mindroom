@@ -111,6 +111,7 @@ if TYPE_CHECKING:
         "claude_session_status",
         "claude_start_session",
     ),
+    workspace_writers=("claude_send", "claude_start_session"),
 )
 def claude_agent_tools() -> type[ClaudeAgentTools]:
     """Return tools for managing persistent Claude Agent SDK sessions."""

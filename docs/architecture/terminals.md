@@ -17,12 +17,14 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 - A terminal opens from the request a shell call of the agent's shell toolkit would send, prepared by the same runner code as `/execute`, so its environment, workspace, `PATH`, and the call's own environment changes are the ones the agent's commands get.
   `tests/terminal/test_worker_terminals.py` compares the two environments in both runner execution modes.
 - The shell is `bash --noprofile --norc -i`: it reads no startup files, as the Bash that runs a shell command string reads none, so opening a terminal runs nothing that worker code wrote into the workspace's `~/.bashrc` or `~/.profile`.
+  It also starts with `INPUTRC=/dev/null`, which the programs it starts inherit, so neither it nor a readline program started in it reads readline settings, whatever worker code wrote into the workspace's `~/.inputrc` or the call's environment names.
 - Input and resize travel only on a websocket the runner serves its viewers, so there is no second input path to keep consistent with it.
 - Opening a terminal starts the agent's dedicated worker, as a shell call does; listing, attaching, and closing only look the worker up, so a stopped worker has no terminals and nothing starts one to answer.
   An attached viewer marks the worker used every minute, so the worker is not stopped as idle while someone watches it.
 - The primary derives a terminal's owner from the request's worker key, routing agent, and workspace, so agents that share a worker or the shared runner never see each other's terminals, while requesters whose calls reach the same agent workspace share them.
   The runner takes the owner the primary sends, because only the primary holds the runner token.
 - A session ID becomes a path on the runner, so the client accepts only the runner's own ID alphabet, and an ID such as `../../execute` cannot send the runner token to another runner endpoint.
+- People get an agent's terminals only where its `terminals` setting says so, `none` by default, because what a person types passes no approval rule and runs with the worker's access to every workspace it mounts, so the operator opts each agent in.
 - People type in a terminal only where its worker mounts the agent's workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, so what they type acts on the files they see as the agent's `root`; on a runner that sees only its own scratch storage they watch.
 - A terminal's shell never starts with a response's CLI grant: the shell outlives the response, while the grant is only for that response's commands.
   `WorkerTerminals.open` builds its request with the grant unbound rather than removing the grant's names afterwards, so the call's other environment changes stay exactly as a shell call gets them.
@@ -35,7 +37,7 @@ Approval rules judge a command's text, and what text typed into a persistent she
 - Rejected: judging typing through approval aliases as the command its Enter runs, from a record of the terminal's line prepared before approval and checked at the run.
   Seven review rounds each found another way the shell ran something other than the judged text, so a sound version would have to model the shell itself.
 - Rejected: asking before every typing call of a restricted agent, because the card would show text whose effect neither the rules nor the approver can read from it, and an operator's rule for `run_shell_command` would become a card for the same commands through another function.
-- People who may type keep typing whatever the agent's rules say, because their typing is their own and passes no approval.
+- People who may type, under the agent's `terminals: type`, keep typing whatever the agent's rules say, because their typing is their own and passes no approval.
 
 ## The line record
 
@@ -66,7 +68,7 @@ Routes under `/api/rooms/{room_id}` sign the caller in with a client session as 
 The stream signs in with `client_stream`, sends `{"type": "writable", "writable"}` first and whenever it changes, the scrollback and live output as binary frames, and `{"type": "exit", "code"}` before it closes with 1000 when the shell exits.
 It takes `{"type": "input", "data"}` with at most 16384 characters, so a client sends a long paste in parts, and `{"type": "resize", "cols", "rows"}`, dropping both while the viewer may only watch, and closes with 1003 on any other frame.
 Every 15 seconds, as the Computer's stream does, it rechecks `agent()` under the config served then: losing `type` sends `writable: false`, an agent no longer open to the caller or a moved `root` closes it with 1008, and a check that cannot be answered closes it with 1013, which the client may retry.
-It also closes with 1008 for a terminal the workspace does not have, and with 1013 when the terminal's own stream ended, after which the client attaches again.
+It also closes with 1008 for an agent whose `terminal` is `none` and for a terminal the workspace does not have, and with 1013 when the terminal's own stream ended, after which the client attaches again.
 
 ## Lifecycle and limits
 
