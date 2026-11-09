@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -30,6 +31,7 @@ from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.plugin_api import dump_worker_target, load_worker_target
 from mindroom.plugin_context import build_plugin_context
 from mindroom.plugin_http import WorkerRelay, worker_relay
@@ -49,13 +51,20 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
-from tests.conftest import bind_runtime_paths, publish_test_plugins
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    publish_test_plugins,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_context import PluginContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 pytestmark = [
     pytest.mark.skipif(sys.platform != "linux", reason="Services run in their own process groups."),
@@ -1129,3 +1138,51 @@ async def test_worker_relay_takes_the_plugin_from_a_tools_context(
         assert await _get(await worker_relay(context, _TARGET), "/", service="hello") == (200, "hello", False)
         other = await worker_relay(replace(context, plugin_name="other"), _TARGET)
         assert (await _get(other, "/", service="hello"))[::2] == (503, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [False, True], ids=["in-memory", "stored"])
+async def test_a_target_a_subagent_s_tool_resolves_reaches_the_subagent_s_own_worker_after_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored: bool,
+) -> None:
+    """A tool's target from a subagent turn with its own worker relays there later; a normal turn's to the agent's."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text('{"name": "demo"}')
+    config = _config(plugin_root, paths)
+    publish_test_plugins(config, paths)
+    workers = _AnyWorkers()
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+
+    def tool_context(session_id: str) -> ToolRuntimeContext:
+        return make_test_tool_runtime_context(
+            agent_name="coder",
+            target=replace(MessageTarget.resolve("!room:localhost", "$thread", None), session_id=session_id),
+            requester_id="@alice:localhost",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=paths,
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
+        )
+
+    subagent = "b" * 32
+    session = f"delegate:caller:coder:{subagent}"
+    with dedicated_worker_placement(session, DedicatedWorkerPlacement(subagent, "large")):
+        recorded = tool_context(session).resolve_worker_target()
+    normal = tool_context("parent-session").resolve_worker_target()
+    if stored:
+        recorded, normal = (
+            load_worker_target(json.loads(json.dumps(dump_worker_target(t)))) for t in (recorded, normal)
+        )
+
+    for target in (recorded, normal):
+        await open_worker_relay(paths, target, "demo")
+    assert workers.touched == [subagent_worker_key(_WORKER_KEY, subagent), _WORKER_KEY]

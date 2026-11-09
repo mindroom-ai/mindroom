@@ -257,7 +257,8 @@ _SIGNATURES = {
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"
     ),
     "ResolvedWorkerTarget": (
-        "(worker_scope, routing_agent_name, execution_identity, tenant_id, account_id, worker_key, private_agent_names)"
+        "(worker_scope, routing_agent_name, execution_identity, tenant_id, account_id, worker_key, private_agent_names, "
+        "placement)"
     ),
     "ResponseDraft": "(response_text, response_kind, tool_trace, extra_content, envelope, suppress)",
     "ResponseResult": "(response_text, response_event_id, delivery_kind, response_kind, envelope)",
@@ -631,7 +632,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 26), "0c31b3429ad825efcb79c6f3ab7febcb66731e1dc90f21a9177986b9960991d5")
+_PINNED_VERSION = ((1, 27), "467eec7145d159f2481306105b679c35dedbf0de4638ac79ece96f5ae0bea30d")
 
 
 def _is_enum(obj: object) -> bool:

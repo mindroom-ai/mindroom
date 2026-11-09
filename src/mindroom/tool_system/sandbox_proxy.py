@@ -353,7 +353,10 @@ def worker_route(
             raise RuntimeError(msg)
         private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
         spec = WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names)
-    placement = placement_for_session(execution_identity.session_id) if execution_identity is not None else None
+    # A target a subagent's turn resolved keeps that turn's placement; otherwise the running attempt's applies.
+    placement = (worker_target.placement if worker_target is not None else None) or (
+        placement_for_session(execution_identity.session_id) if execution_identity is not None else None
+    )
     # Placements exist only on a dedicated backend (``delegation.workers``), where every call has a worker spec.
     if placement is not None and spec is not None:
         # The subagent's own worker serves its normal worker's workspaces and credentials, in a runtime of its own.
