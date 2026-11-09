@@ -8296,8 +8296,8 @@ path = "mindroom.api.worker_services"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
-    "mindroom.api.worker_preview",
     "mindroom.plugin_worker_services",
+    "mindroom.previews.listeners",
     "mindroom.tool_system.plugins",
 ]
 

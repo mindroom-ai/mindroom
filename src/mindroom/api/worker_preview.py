@@ -11,7 +11,8 @@ Only a dedicated worker's runner relays: the shared runner's loopback is every a
 A dedicated worker's loopback is not only the worker's either: every container of a Kubernetes worker pod shares it,
 as does any container started in the worker's network namespace.
 So the relay reaches a port only when the worker's own processes, those of its runner's process tree or its cgroup,
-hold every socket listening on it, and never the runner's own port.
+hold every socket listening on it, a service's port only when its own process group's do, and never the runner's own
+port.
 The runner marks each refusal with the ``x-mindroom-relay-refused`` header, on a WebSocket's refused handshake too: 403
 for a port the relay never reaches, 502 for one no app answers on, and 503 for a service that is not running.
 The runner's own token never reaches an app.
@@ -32,7 +33,8 @@ from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
-from mindroom.previews.listeners import listening_sockets, workers_sockets
+from mindroom.api.worker_services import RunningService, running_service
+from mindroom.previews.listeners import group_sockets, listening_sockets, workers_sockets
 from mindroom.previews.relay import HandshakeRedirected, no_redirects, relay_websocket
 
 if TYPE_CHECKING:
@@ -42,8 +44,6 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from starlette.requests import HTTPConnection
     from starlette.types import Receive, Scope, Send
-
-    from mindroom.api.worker_services import RunningService
 
 router = APIRouter(prefix="/api/sandbox-runner", tags=["sandbox-runner"])
 
@@ -84,8 +84,10 @@ _CANNOT_TELL = "This runner can't tell which processes hold its ports, so it rel
 # The listening sockets each port was last found to be the worker's by, so their holders are read again only once
 # another socket listens there.
 _found_workers_sockets: dict[int, frozenset[int]] = {}
+# Likewise the listening sockets each service's port was last found to be its process group's by, by port and group.
+_found_service_sockets: dict[tuple[int, int], frozenset[int]] = {}
 # The relay's checks read /proc on a thread of their own, so tool calls busy on the loop's default threads never delay
-# them; one thread also keeps the record above to one writer.
+# them; one thread also keeps the records above to one writer.
 _CHECKS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="worker-relay-checks")
 # The relay reaches an app within this long, then waits on it as long as the stream lasts.
 _CONNECT_SECONDS = 10
@@ -105,7 +107,7 @@ def _require_dedicated_worker(connection: HTTPConnection) -> None:
         raise _refused(403, "Only a dedicated worker's runner relays to its ports.")
 
 
-async def loopback_host(port: int) -> str | None:
+async def _loopback_host(port: int) -> str | None:
     """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers."""
     for host in ("127.0.0.1", "::1"):
         try:
@@ -133,26 +135,48 @@ def _workers_ports(listening: dict[int, frozenset[int]]) -> list[int]:
     return sorted(port for port, sockets in listening.items() if _found_workers_sockets.get(port) == sockets)
 
 
-def _check_reachable(port: int, runner_port: int) -> None:
-    """Raise the relay's refusal unless a server of the worker's own listens on ``port``. Blocking."""
+def _service_holds(port: int, group: int, sockets: frozenset[int]) -> bool:
+    """Return whether processes of the service's process ``group``, and only they, hold ``sockets``.
+
+    Blocking: reads their holders only when ``sockets`` are not the ones last found to be the group's on ``port``.
+    Raises OSError when ``/proc`` can't say.
+    """
+    if _found_service_sockets.get((port, group)) != sockets:
+        if group_sockets(sockets, group) != sockets:
+            return False
+        _found_service_sockets[port, group] = sockets
+    return True
+
+
+def _check_reachable(port: int, runner_port: int, group: int | None) -> None:
+    """Raise the relay's refusal unless a server of the worker's own listens on ``port``. Blocking.
+
+    For a service, ``group`` is its process group, and only that group's processes may hold the port: another socket can
+    take the port before the service binds it.
+    """
     if port == runner_port:
         raise _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
     try:
         sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
-        held = bool(sockets) and port in _workers_ports({port: sockets})
+        if not sockets:
+            raise _no_app(port)
+        held = port in _workers_ports({port: sockets}) if group is None else _service_holds(port, group, sockets)
     except OSError:
         raise _refused(403, _CANNOT_TELL) from None
-    if not sockets:
-        raise _no_app(port)
     if not held:
-        raise _refused(403, f"The server on port {port} is not one this worker runs.")
+        whose = "one this worker runs" if group is None else "the service's own"
+        raise _refused(403, f"The server on port {port} is not {whose}.")
 
 
-async def _upstream_url(connection: HTTPConnection, port: int, segments: int) -> URL:
-    """Return the URL of the app on ``port`` that ``connection`` asks for, below its route's first ``segments``."""
+async def _upstream_url(connection: HTTPConnection, port: int, segments: int, group: int | None) -> URL:
+    """Return the URL of the app on ``port`` that ``connection`` asks for, below its route's first ``segments``.
+
+    ``group`` is the process group of the service the route relays to, which alone may hold the port, or None.
+    """
     _require_dedicated_worker(connection)
-    await asyncio.get_running_loop().run_in_executor(_CHECKS, _check_reachable, port, connection.scope["server"][1])
-    host = await loopback_host(port)
+    runner_port = connection.scope["server"][1]
+    await asyncio.get_running_loop().run_in_executor(_CHECKS, _check_reachable, port, runner_port, group)
+    host = await _loopback_host(port)
     if host is None:
         raise _no_app(port)
     # The path below the route's own segments as the primary sent it, still percent-encoded.
@@ -207,16 +231,8 @@ class _AppResponse(StreamingResponse):
             await self._held.aclose()
 
 
-def _service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
-    """Return the plugin's service while it runs in this worker, counting this as its use, as an ensure does."""
-    # Imported here: the service module imports this one's loopback check.
-    from mindroom.api.worker_services import running_service  # noqa: PLC0415
-
-    return running_service(app, plugin, name)
-
-
 def _require_service(app: FastAPI, plugin: str, name: str) -> RunningService:
-    if (service := _service(app, plugin, name)) is None:
+    if (service := running_service(app, plugin, name)) is None:
         msg = f"Service {name!r} of plugin {plugin!r} is not running in this worker."
         raise _refused(503, msg)
     return service
@@ -228,7 +244,7 @@ async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_sec
 
     async def use() -> None:
         # A periodic use, not a wait for a condition.
-        while _service(app, plugin, name) is not None:  # noqa: ASYNC110
+        while running_service(app, plugin, name) is not None:  # noqa: ASYNC110
             await asyncio.sleep(idle_timeout_seconds / 2)
 
     task = asyncio.create_task(use(), name="worker-service-in-use")
@@ -329,7 +345,7 @@ async def listening_ports(request: Request) -> list[int]:
 @router.api_route("/ports/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
 async def relay(request: Request, port: int) -> StreamingResponse:
     """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
-    url = await _upstream_url(request, port, 2)
+    url = await _upstream_url(request, port, 2, None)
     return await _relay(request, url, None, nullcontext())
 
 
@@ -342,7 +358,7 @@ async def relay_to_service(request: Request, plugin: str, name: str) -> Streamin
     """Pass one request to the plugin's running service and stream its answer back."""
     _require_dedicated_worker(request)
     service = _require_service(request.app, plugin, name)
-    url = await _upstream_url(request, service.port, 3)
+    url = await _upstream_url(request, service.port, 3, service.group)
     in_use = _service_in_use(request.app, plugin, name, service.idle_timeout_seconds)
     return await _relay(request, url, service.secret, in_use)
 
@@ -352,7 +368,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
     """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
     try:
         await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
-        url = await _upstream_url(websocket, port, 2)
+        url = await _upstream_url(websocket, port, 2, None)
     except HTTPException as refusal:
         await _deny(websocket, refusal)
         return
@@ -366,7 +382,7 @@ async def relay_socket_to_service(websocket: WebSocket, plugin: str, name: str) 
         await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
         _require_dedicated_worker(websocket)
         service = _require_service(websocket.app, plugin, name)
-        url = await _upstream_url(websocket, service.port, 3)
+        url = await _upstream_url(websocket, service.port, 3, service.group)
     except HTTPException as refusal:
         await _deny(websocket, refusal)
         return

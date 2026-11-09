@@ -26,8 +26,8 @@ from pydantic import Field
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker, worker_subprocess_env
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
-from mindroom.api.worker_preview import loopback_host
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN, WorkerServiceState
+from mindroom.previews.listeners import group_listens
 from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.workers.protocol import WorkerFailure, WorkerRoute
 
@@ -166,11 +166,12 @@ def worker_services(app: FastAPI) -> _WorkerServices:
 
 @dataclass(frozen=True)
 class RunningService:
-    """A service running in this worker: its loopback port, the secret it requires, and its idle timeout."""
+    """A service running in this worker: its loopback port, secret, idle timeout, and process group."""
 
     port: int
     secret: str = field(repr=False)
     idle_timeout_seconds: float
+    group: int
 
 
 def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
@@ -180,7 +181,7 @@ def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | No
     if instance is None or instance.process.returncode is not None:
         return None
     services.touch(plugin, name)
-    return RunningService(instance.port, instance.secret, instance.idle_timeout_seconds)
+    return RunningService(instance.port, instance.secret, instance.idle_timeout_seconds, instance.process.pid)
 
 
 async def close_worker_services(app: FastAPI) -> None:
@@ -188,10 +189,15 @@ async def close_worker_services(app: FastAPI) -> None:
     await worker_services(app).close()
 
 
-async def _start(program: _Program) -> _ServiceInstance:
+def _free_loopback_port() -> int:
+    """Return a loopback port no socket holds now, which another may take before the service binds it."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+        return probe.getsockname()[1]
+
+
+async def _start(program: _Program) -> _ServiceInstance:
+    port = _free_loopback_port()
     secret = secrets.token_urlsafe(32)
     # 🔒 A pipe's reader end can be opened again through /proc/<pid>/fd/0 by any process of the same user; a socket's not.
     ours, theirs = socket.socketpair()
@@ -239,7 +245,8 @@ async def _settled(instance: _ServiceInstance) -> WorkerServiceState:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _START_SECONDS
     while instance.process.returncode is None:
-        if await loopback_host(instance.port) is not None:
+        # Another socket can take the port before the service binds it, so only the service's own listener counts.
+        if await asyncio.to_thread(group_listens, instance.port, instance.process.pid):
             return WorkerServiceState("running", instance.port)
         if loop.time() >= deadline:
             return WorkerServiceState("starting", instance.port)
