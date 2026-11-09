@@ -792,6 +792,9 @@ class Echo(socketserver.StreamRequestHandler):
         if headers.get("x-mindroom-service-secret") != secret:
             self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
             return
+        if path == "/hop":
+            self.wfile.write(b"HTTP/1.1 302 Found\\r\\nLocation: /a\\r\\nContent-Length: 0\\r\\n\\r\\n")
+            return
         if path == "/gzip":
             body = gzip.compress(b"compressed")
             self.wfile.write(f"HTTP/1.1 200 OK\\r\\nContent-Encoding: gzip\\r\\nContent-Length: {len(body)}\\r\\n\\r\\n".encode() + body)
@@ -933,6 +936,24 @@ async def test_a_relayed_stream_keeps_its_service_and_its_worker_in_use_while_it
 
 
 @pytest.mark.asyncio
+async def test_a_route_gets_its_services_websocket_redirect_without_following_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handshake the service redirects reaches the route as the redirect, and nothing follows it with the secret."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "echo.py").write_text(_ECHO)
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        assert (await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)).state == "running"
+        with pytest.raises(aiohttp.WSServerHandshakeError) as redirected:
+            async with relay.websocket("/hop", service="echo"):
+                pass
+        assert redirected.value.headers is not None
+        assert (redirected.value.status, redirected.value.headers["Location"]) == (302, "/a")
+        assert _REFUSED not in redirected.value.headers
+
+
+@pytest.mark.asyncio
 async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_else(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -966,6 +987,11 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
             # A redirect reaches the route as the app sent it.
             async with relay.http("GET", "/sub", port=unused_tcp_port) as answer:
                 assert (answer.status, answer.headers["Location"]) == (301, "/sub/")
+            with pytest.raises(aiohttp.WSServerHandshakeError) as redirected:
+                async with relay.websocket("/sub", port=unused_tcp_port):
+                    pass
+            assert redirected.value.headers is not None
+            assert (redirected.value.status, redirected.value.headers["Location"]) == (301, "/sub/")
             assert unused_tcp_port in await relay.ports()
             status, text, marked = await _get(relay, "/", port=runner.port)
             assert (status, marked) == (403, True)
@@ -973,7 +999,7 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
             proc = tmp_path / "proc"
             proc.mkdir()
             monkeypatch.setattr(listeners, "_PROC", proc)
-            monkeypatch.setattr("mindroom.api.worker_preview._workers_sockets", {})
+            monkeypatch.setattr("mindroom.api.worker_preview._found_workers_sockets", {})
             assert (await _get(relay, "/", port=unused_tcp_port))[::2] == (403, True)
             assert unused_tcp_port not in await relay.ports()
 

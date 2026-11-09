@@ -1,4 +1,7 @@
-"""Relay one WebSocket message by message between an accepted client socket and an aiohttp client socket."""
+"""Relay one WebSocket message by message between an accepted client socket and an aiohttp client socket.
+
+An aiohttp session that opens such a WebSocket uses ``no_redirects``, so a redirected handshake reaches its caller.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +16,32 @@ if TYPE_CHECKING:
     from starlette.websockets import WebSocket
 
 
+# The statuses aiohttp follows a redirect on.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # The protocol's close codes a close frame may carry (RFC 6455 7.4); applications add 3000 to 4999.
 _SENDABLE_CLOSE_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014})
+
+
+class HandshakeRedirected(aiohttp.WSServerHandshakeError):
+    """A WebSocket handshake the server answered with a redirect, which ``no_redirects`` keeps aiohttp from following."""
+
+
+async def no_redirects(request: aiohttp.ClientRequest, handler: aiohttp.ClientHandlerType) -> aiohttp.ClientResponse:
+    """Raise a redirect as ``HandshakeRedirected``: a middleware for the session that opens a WebSocket.
+
+    ``ws_connect`` follows every redirect, to any host and with every header but the credentials aiohttp knows of.
+    """
+    response = await handler(request)
+    if response.status in _REDIRECT_STATUSES:
+        response.close()
+        raise HandshakeRedirected(
+            response.request_info,
+            (),
+            status=response.status,
+            message="Redirected",
+            headers=response.headers,
+        )
+    return response
 
 
 def _close_code(code: int | None) -> int:

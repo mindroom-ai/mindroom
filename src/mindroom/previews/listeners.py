@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 _PROC = Path("/proc")
+# The network namespace's tables, read apart from the process table.
+_PROC_NET = Path("/proc/net")
 _TCP_LISTEN = 10
 # A netlink message header: length, type, flags, sequence number, and port ID, in host byte order.
 _NETLINK_HEADER = struct.Struct("=IHHII")
@@ -109,7 +111,7 @@ def _proc_net_listeners() -> list[_Listener]:
     found: list[_Listener] = []
     for table in ("tcp", "tcp6"):
         try:
-            lines = (_PROC / "net" / table).read_text(encoding="ascii").splitlines()[1:]
+            lines = (_PROC_NET / table).read_text(encoding="ascii").splitlines()[1:]
         except FileNotFoundError:
             if table == "tcp":
                 raise
@@ -147,9 +149,10 @@ def _parent(pid: int) -> int | None:
     return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
 
 
-def _holders(sockets: frozenset[int]) -> dict[str, set[int]]:
-    """Return the processes holding each of ``sockets``, by its descriptor link, among those this process may read."""
-    holders: dict[str, set[int]] = {f"socket:[{inode}]": set() for inode in sockets}
+def _holders(sockets: frozenset[int]) -> dict[int, set[int]]:
+    """Return the processes holding each of ``sockets``, among those this process may read, in one pass over them."""
+    links = {f"socket:[{inode}]": inode for inode in sockets}
+    holders: dict[int, set[int]] = {inode: set() for inode in sockets}
     for entry in _PROC.iterdir():
         if not entry.name.isdigit():
             continue
@@ -162,8 +165,8 @@ def _holders(sockets: frozenset[int]) -> dict[str, set[int]]:
                 target = str(descriptor.readlink())
             except OSError:
                 continue
-            if target in holders:
-                holders[target].add(int(entry.name))
+            if target in links:
+                holders[links[target]].add(int(entry.name))
     return holders
 
 
@@ -180,13 +183,15 @@ def _of_this_worker(pid: int, runner: int, cgroup: str | None) -> bool:
     return False
 
 
-def held_by_this_worker(sockets: frozenset[int]) -> bool:
-    """Return whether processes of this worker, and only they, hold each of ``sockets``.
+def workers_sockets(sockets: frozenset[int]) -> frozenset[int]:
+    """Return those of ``sockets`` that processes of this worker, and only they, hold.
 
-    Blocking: reads every process's descriptors. Raises OSError when ``/proc`` cannot be read.
+    Blocking: reads every process's descriptors once. Raises OSError when ``/proc`` cannot be read.
     """
     runner = os.getpid()
     cgroup = _read(_PROC / "self" / "cgroup")
-    return all(
-        pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids) for pids in _holders(sockets).values()
+    return frozenset(
+        inode
+        for inode, pids in _holders(sockets).items()
+        if pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids)
     )
