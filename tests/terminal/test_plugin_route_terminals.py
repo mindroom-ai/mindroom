@@ -12,7 +12,6 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.plugin_http import RoomReader, TerminalError, require_room_reader
 from tests.api.test_plugin_room_agents import ALICE, BOB, _Room
-from tests.terminal.conftest import primary_paths
 from tests.terminal.test_routes import _agents, _answer, _auth, _paths, _read_until, _served, _stream
 
 if TYPE_CHECKING:
@@ -105,8 +104,7 @@ async def test_an_agent_without_terminals_for_its_caller_has_none(
     env: dict[str, str],
 ) -> None:
     """A shell in the primary process runs no terminal, and an agent whose config allows none gives none."""
-    (tmp_path / "config.yaml").write_text("router:\n  model: default\n", encoding="utf-8")
-    paths = primary_paths(tmp_path, runner, MINDROOM_NAMESPACE="", MINDROOM_STATIC_RUNNER_AGENT_STORAGE="true", **env)
+    paths = _paths(tmp_path, runner, **env)
     access = ResponderAccessConfig(users=[ALICE])
     room = _Room(
         Config(agents={"coder": AgentConfig(display_name="Coder", tools=["shell"], access=access, **agent)}),

@@ -121,11 +121,7 @@ async def list_terminals(room: _Room) -> _TerminalList:
 
 
 @router.post("/agents/{agent_user_id}/terminals", status_code=201)
-async def open_terminal(
-    room: _Room,
-    agent_user_id: str,
-    size: _OpenTerminal | None = None,
-) -> _Terminal:
+async def open_terminal(room: _Room, agent_user_id: str, size: _OpenTerminal | None = None) -> _Terminal:
     """Open a terminal in the agent's workspace, starting its worker as a shell call would."""
     workspace = await _typing_workspace(room, agent_user_id)
     terminals = await _workspace_terminals(room, workspace, create=True)
@@ -137,11 +133,7 @@ async def open_terminal(
 
 
 @router.delete("/agents/{agent_user_id}/terminals/{terminal_id}", status_code=204)
-async def close_terminal(
-    room: _Room,
-    agent_user_id: str,
-    terminal_id: str,
-) -> Response:
+async def close_terminal(room: _Room, agent_user_id: str, terminal_id: str) -> Response:
     """Close one of the agent's terminals; one the workspace does not have answers 404."""
     workspace = await _typing_workspace(room, agent_user_id)
     terminals = await _workspace_terminals(room, workspace, create=False)
