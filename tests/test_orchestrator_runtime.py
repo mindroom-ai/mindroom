@@ -1126,6 +1126,50 @@ class TestAgentBot(AgentBotTestBase):
         assert provided is committed
 
     @pytest.mark.asyncio
+    async def test_run_api_server_serves_plugin_origins_beside_the_api(self, tmp_path: Path) -> None:
+        """With its port set, the plugin origins listener answers while the API serves, and stops with it."""
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "data",
+            process_env={"MINDROOM_PLUGIN_ORIGIN_PORT": str(port)},
+        )
+        answers: list[httpx.Response] = []
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+            received_signal_name = None
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
+
+            async def serve(self) -> None:
+                # The listener's socket listens before the API serves, so the request waits for it rather than fail.
+                async with httpx.AsyncClient() as client:
+                    answers.append(await client.get(f"http://127.0.0.1:{port}/", headers={"host": "x.demo.localhost"}))
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        await config_lifecycle_module.load_startup_config(runtime_paths, api_enabled=True)
+        with patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer):
+            await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), shutdown_requested)
+
+        [answer] = answers
+        assert (answer.status_code, answer.headers["content-security-policy"]) == (404, "frame-ancestors 'self'")
+        socket.create_server(("127.0.0.1", port)).close()
+
+    @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
         """The API gateway and its dedicated listener must receive the lifecycle-owned broker without replacing it."""
 

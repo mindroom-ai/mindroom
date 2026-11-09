@@ -85,7 +85,8 @@ class _LoadedPlugin:
     # The content-key and event-type prefixes its manifest reserves from agent tools.
     reserved_namespaces: tuple[str, ...]
     # The tools, hooks, and OAuth modules' paths and mtimes as the load began, so validation and worker refreshes know
-    # when the source changed; candidate validation never imports a routes or lifecycle module, so it leaves them out.
+    # when the source changed; candidate validation never imports a routes, origin, or lifecycle module, so it leaves
+    # them out.
     source: tuple[tuple[Path, float], ...]
     tools: Mapping[str, ToolMetadata]
     discovered_hooks: tuple[HookCallback, ...]
@@ -100,6 +101,12 @@ class _LoadedPlugin:
     lifespan: PluginLifespan | None
     # Why a staged load found no ``lifespan`` in the plugin's lifecycle module, which leaves the rest of it loaded.
     lifespan_error: plugin_imports.PluginValidationError | None
+    # The origin module's router as an app of its own, built by staged loads like the routes app, and its optional
+    # ``serves(label)``.
+    origin_app: PluginRoutesApp | None
+    origin_serves: Callable[[str], object] | None
+    # Why a staged load serves no origins from the plugin's origin module, which leaves the rest of it loaded.
+    origin_error: plugin_imports.PluginValidationError | None
 
 
 @dataclass(frozen=True, eq=False)
@@ -826,10 +833,28 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         try:
             routes_entry = _load_plugin_module(plugin, plugin.routes_module_path, kind="routes")
             assert routes_entry is not None
-            routes_app = _plugin_routes_app(routes_entry.module)
+            routes_app = _plugin_routes_app(routes_entry.module, kind="routes")
         except plugin_imports.PluginValidationError as error:
             logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
             routes_error = error
+    origin_app: PluginRoutesApp | None = None
+    origin_serves: Callable[[str], object] | None = None
+    origin_error: plugin_imports.PluginValidationError | None = None
+    if primary_modules and plugin.origin_module_path is not None:
+        # Likewise, a broken origin module costs only the plugin's origins.
+        try:
+            origin_entry = _load_plugin_module(plugin, plugin.origin_module_path, kind="origin")
+            assert origin_entry is not None
+            origin_serves = _origin_serves(origin_entry.module)
+            origin_app = _plugin_routes_app(origin_entry.module, kind="origin")
+        except plugin_imports.PluginValidationError as error:
+            logger.warning(
+                "Plugin origin module failed to load; serving no origins",
+                plugin_name=plugin.name,
+                error=str(error),
+            )
+            origin_serves = None
+            origin_error = error
     lifespan: PluginLifespan | None = None
     lifespan_error: plugin_imports.PluginValidationError | None = None
     if primary_modules and plugin.lifecycle_module_path is not None:
@@ -864,6 +889,9 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         routes_error=routes_error,
         lifespan=lifespan,
         lifespan_error=lifespan_error,
+        origin_app=origin_app,
+        origin_serves=origin_serves,
+        origin_error=origin_error,
     )
 
 
@@ -883,7 +911,15 @@ def _plugin_lifespan(module: ModuleType) -> PluginLifespan:
     return lifespan
 
 
-def _plugin_routes_app(module: ModuleType) -> PluginRoutesApp:
+def _origin_serves(module: ModuleType) -> Callable[[str], object] | None:
+    serves = vars(module).get("serves")
+    if serves is not None and not callable(serves):
+        msg = "Plugin origin module's serves must be callable as serves(label)"
+        raise plugin_imports.PluginValidationError(msg)
+    return serves
+
+
+def _plugin_routes_app(module: ModuleType, *, kind: str) -> PluginRoutesApp:
     """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
     # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
     from fastapi import APIRouter, FastAPI, WebSocket, status  # noqa: PLC0415
@@ -894,7 +930,7 @@ def _plugin_routes_app(module: ModuleType) -> PluginRoutesApp:
 
     router = vars(module).get("router")
     if not isinstance(router, APIRouter):
-        msg = "Plugin routes module must define router: APIRouter"
+        msg = f"Plugin {kind} module must define router: APIRouter"
         raise plugin_imports.PluginValidationError(msg)
 
     async def plugin_inactive(connection: HTTPConnection, error: Exception) -> JSONResponse | None:

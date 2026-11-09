@@ -191,6 +191,7 @@ Matrix sync callback
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
 | `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
 | `api/client_sessions.py` | `/api/client-sessions`: exchanges a Matrix OpenID token from a web client for an in-memory, one-hour session token, resolves the token a request's `Authorization` header or a websocket's subprotocol presents for plugin routes and call transcript routes, checks a websocket's origin, and revokes it at sign-out, which ends the streams it signed in |
+| `api/plugin_origins.py` | The listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, which serves each plugin's `origin_module` router on its hosts `<label>.<plugin>.<domain>` with the API app as `request.app`, adds the frame-ancestors floor to every answer, and answers on-demand TLS `/ask` checks from the plugins' `serves` |
 | `api/plugin_routes.py` | Lists the published plugins to signed-in clients at `/api/plugins`, and serves each one's `routes_module` router under `/api/plugins/<plugin>/` from the app built as the plugin loads, looked up per request so reloads take effect |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
 | `api/connections_contacts.py` | Contacts page routes under `/api/connections/contacts`: the signed-in owner's contacts with their own side's rules and tools, and accepting, declining, editing, and removing them without an approval card |
@@ -246,7 +247,7 @@ Matrix sync callback
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
-| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through |
+| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |

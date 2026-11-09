@@ -563,8 +563,12 @@ def load_plugin(
     update_matrix_state(runtime_paths, save_accounts)
     published = config_plugins(validated, runtime_paths).generation
     generation = prepare_plugins(validated, runtime_paths)
-    # MindRoom serves a plugin whose routes or lifecycle module fails without them; a test fails on it instead.
-    partly = (error for plugin in generation.plugins.values() for error in (plugin.routes_error, plugin.lifespan_error))
+    # MindRoom serves a plugin whose routes, origin, or lifecycle module fails without them; a test fails on it instead.
+    partly = (
+        error
+        for plugin in generation.plugins.values()
+        for error in (plugin.routes_error, plugin.origin_error, plugin.lifespan_error)
+    )
     if errors := [*(plugin.error for plugin in generation.skipped), *filter(None, partly)]:
         dispose_plugins(generation)
         raise errors[0]

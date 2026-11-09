@@ -121,6 +121,8 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     raise plugin.routes_error
                 if plugin.lifespan_error is not None:
                     raise plugin.lifespan_error
+                if plugin.origin_error is not None:
+                    raise plugin.origin_error
                 tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
                     factory = plugin.tools[tool_name].factory
