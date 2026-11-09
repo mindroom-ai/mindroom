@@ -49,7 +49,7 @@ class WorkerService:
     def __post_init__(self) -> None:
         """Refuse a name the runner's routes cannot carry and a timeout that is not positive."""
         if not re.fullmatch(SERVICE_NAME_PATTERN, self.name):
-            msg = f"Worker service name {self.name!r} must be 1-64 lowercase letters, digits, '-' or '_'."
+            msg = f"Worker service name {self.name!r} must be 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
             raise ValueError(msg)
         if self.idle_timeout_seconds <= 0:
             msg = "A worker service's idle_timeout_seconds must be positive."

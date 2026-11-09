@@ -19132,7 +19132,7 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"]
 
 `target` is the worker an agent's turns use for one requester: in a tool call, `get_tool_runtime_context().resolve_worker_target()`.
 Neither call checks who may use the agent, so check that before you start a service for someone.
-`WorkerService(name, module, idle_timeout_seconds=600.0)` takes a `name` of 1-64 lowercase letters, digits, `-`, or `_`, and a `module` path relative to the plugin's folder.
+`WorkerService(name, module, idle_timeout_seconds=600.0)` takes a `name` of 1-64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit, and a `module` path relative to the plugin's folder.
 `WorkerServiceState` has `state`, `port`, and `exit_code`.
 `state` is `running` once the program accepts connections on its port, `starting` when it has not within 10 seconds, so ensure it again, and `exited` once it ended, with its `exit_code`.
 Each worker runs one instance of a service, so ensuring a running service returns the same port.
