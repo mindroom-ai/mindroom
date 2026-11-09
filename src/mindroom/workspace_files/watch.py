@@ -42,10 +42,10 @@ _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
 # Each folder is opened from the root, so a deeper one costs more opens.
 _MAX_DEPTH = 32
-# The UTF-8 bytes, as a batch carries them, of the paths a scan's filter keeps, also those it then skips by type, and of
-# those a follower holds unsent; names of 255 bytes 32 folders deep would let the entry cap alone keep about 800 MB per
-# scan. It leaves the entry cap room for paths of 80 bytes each.
-_MAX_PATH_BYTES = 8 * 1024 * 1024
+# The path text a scan keeps and a follower holds unsent, in UTF-8 bytes as a batch sends it. A scan counts every name
+# its filter keeps, also one it then skips by type. Names of 255 bytes 32 folders deep would let the entry cap alone
+# keep about 800 MB per scan. It leaves the entry cap room for paths of 160 bytes each.
+_MAX_PATH_BYTES = 16 * 1024 * 1024
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
     ignore_dirs=(*watchfiles.DefaultFilter.ignore_dirs, ".cache"),

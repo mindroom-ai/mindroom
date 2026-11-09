@@ -7,6 +7,7 @@ import itertools
 import os
 import shutil
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -19,7 +20,6 @@ from mindroom.workspace_files.watch import workspace_changes
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from contextlib import AbstractContextManager
-    from pathlib import Path
 
 
 def broken_scan(_root: Path) -> dict[str, object]:
@@ -433,11 +433,11 @@ def test_a_folder_swapped_for_a_link_mid_scan_is_never_entered(tmp_path: Path, m
     (outside / "secret.txt").write_text("x")
     real_open = watch.open_directory_within_root
 
-    def open_after_a_swap(directory: Path | int, relative: str = ".") -> AbstractContextManager[int]:
-        if relative == "sub":
+    def open_after_a_swap(root_or_fd: Path | int, relative_path: str | Path = Path()) -> AbstractContextManager[int]:
+        if relative_path == "sub":
             (root / "sub").rename(root / "held")
             (root / "sub").symlink_to(outside)
-        return real_open(directory, relative)
+        return real_open(root_or_fd, relative_path)
 
     monkeypatch.setattr(watch, "open_directory_within_root", open_after_a_swap)
 
@@ -476,11 +476,21 @@ async def test_sent_paths_no_longer_count_toward_the_cap_s_bytes(monkeypatch: py
 
 
 def test_a_follower_of_an_ordinary_workspace_at_the_entry_cap_stays_within_the_byte_cap() -> None:
-    """A workspace at the entry cap whose paths run to 80 bytes still has every change followed."""
+    """A workspace at the entry cap whose paths run to 160 bytes still has every change followed."""
     follower = watch._Follower()
-    follower.add({f"{index:080d}" for index in range(watch._MAX_ENTRIES)})
+    follower.add({f"{index:0160d}" for index in range(watch._MAX_ENTRIES)})
 
     assert follower.ended is None
+
+
+def test_a_follower_holds_up_to_16_mib_of_waiting_paths() -> None:
+    """The waiting paths may reach 16 MiB of UTF-8; one byte more ends the stream."""
+    follower = watch._Follower()
+    follower.add({f"{index:0{1024 * 1024}d}" for index in range(16)})
+    assert follower.ended is None
+
+    follower.add({"x"})
+    assert follower.ended == "Too many changes to follow; connect again."
 
 
 @pytest.mark.asyncio
