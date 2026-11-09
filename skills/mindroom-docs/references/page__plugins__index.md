@@ -688,7 +688,8 @@ async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
         log.write(f"{ctx.room_id} {line}\n")
 ```
 
-It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, passwords given as `curl -u user:password` or mysql's `-ppassword`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+A secret name that ends its line, such as `password:`, or a quoted value left open, hides everything after it, since the value may continue on the next line.
 `max_length` cuts the result to that many characters, ending in `... [truncated]`.
 It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
 What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.

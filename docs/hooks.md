@@ -144,7 +144,7 @@ When a `message:before_response` hook fails, changes it made to the draft before
 When a `message:final_response_transform` hook fails, its changes are discarded and the next hook receives the previous draft.
 
 ```python
-from mindroom.plugin_api import hook
+from mindroom.plugin_api import hook, redact_sensitive_text
 
 
 @hook("message:before_response", priority=10)
@@ -154,7 +154,7 @@ async def add_disclaimer(ctx):
 
 @hook("message:before_response", priority=20)
 async def redact_secrets(ctx):
-    ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
+    ctx.draft.response_text = redact_sensitive_text(ctx.draft.response_text)
 
 
 @hook("message:final_response_transform", priority=10)
