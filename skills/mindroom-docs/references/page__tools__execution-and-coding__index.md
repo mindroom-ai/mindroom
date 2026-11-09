@@ -190,7 +190,7 @@ EOF
 Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
 
 - `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
-- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30) for its next prompt, and returns the output and exit status; a command still running then keeps running.
+- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30, at most 600) for its next prompt, and returns the output and exit status; a command still running then keeps running.
 - `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
 - `terminal_read(session_id)` returns the terminal's recent output as text.
 - `terminal_list()` lists the workspace's terminals, including the ones people opened.
@@ -202,7 +202,7 @@ People who may post messages in the room type in them where the worker mounts th
 After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
-An agent types in terminals only while its `run_shell_command` calls never ask for approval: no [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` may ask, including an approval script, and neither may `tool_approval.default` when no rule matches.
+An agent types in terminals only while its `run_shell_command` calls never ask for approval: the first [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` is `auto_approve`, or no rule matches and `tool_approval.default` is `auto_approve`; a rule with an approval script counts as one that may ask.
 Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people still type in the terminals.
 The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 

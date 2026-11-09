@@ -1314,7 +1314,8 @@ A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its 
 Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
-It answers 409 when MindRoom now serves another runtime, then checks membership again as `require_room_member` does, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
+It raises `HTTPException`, with 409 when MindRoom now serves another runtime and otherwise as `require_room_member` answers when it checks membership again, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
+The websocket is already accepted then, so the route catches the exception and closes the websocket itself, for example with 1008 for a refusal and 1013 for a check it cannot answer.
 A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
 A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.18"` in its manifest.
 
