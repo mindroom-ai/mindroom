@@ -129,28 +129,33 @@ def _own_ports(connection: HTTPConnection) -> set[int]:
     return ports
 
 
-def _refusal(port: int, own_ports: set[int]) -> HTTPException | None:
-    """Return why the relay reaches no server on ``port``, or None when it does.
+def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None:
+    """Return why the relay reaches no server on ``port``, where ``sockets`` listen, or None when only the worker holds them.
 
-    Blocking: reads the sockets listening on ``port``, and which processes hold them unless they are those last found
-    to be the worker's.
+    Blocking: reads which processes hold them, unless they are those last found to be the worker's.
+    Raises OSError when ``/proc`` can't say.
     """
+    if not sockets:
+        return _no_app(port)
+    if _workers_sockets.get(port) == sockets:
+        return None
+    if not held_by_this_worker(sockets):
+        _workers_sockets.pop(port, None)
+        return _refused(403, f"The server on port {port} is not one this worker runs.")
+    _workers_sockets[port] = sockets
+    return None
+
+
+def _refusal(port: int, own_ports: set[int]) -> HTTPException | None:
+    """Return why the relay reaches no server on ``port``, or None when it does. Blocking, like ``_holders_refusal``."""
     if not 0 < port < 65536:
         return _no_app(port)
     if port in own_ports:
         return _refused(403, f"Port {port} is one of MindRoom's own, which the relay never reaches.")
     try:
-        sockets = frozenset(listener.inode for listener in listening_sockets(port))
-        if not sockets:
-            return _no_app(port)
-        if _workers_sockets.get(port) != sockets:
-            if not held_by_this_worker(sockets):
-                _workers_sockets.pop(port, None)
-                return _refused(403, f"The server on port {port} is not one this worker runs.")
-            _workers_sockets[port] = sockets
+        return _holders_refusal(port, frozenset(listener.inode for listener in listening_sockets(port)))
     except OSError:
         return _refused(403, _CANNOT_TELL)
-    return None
 
 
 async def _require_reachable(connection: HTTPConnection, port: int) -> None:
@@ -200,10 +205,13 @@ def _reachable_ports(own_ports: set[int]) -> list[int]:
     """Return each port listening at loopback or every address that the relay reaches. Blocking, like ``_refusal``."""
     try:
         listeners = listening_sockets()
+        sockets: dict[int, set[int]] = {}
+        for listener in listeners:
+            sockets.setdefault(listener.port, set()).add(listener.inode)
+        ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES} - own_ports
+        return sorted(port for port in ports if _holders_refusal(port, frozenset(sockets[port])) is None)
     except OSError:
         raise _refused(403, _CANNOT_TELL) from None
-    ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES}
-    return sorted(port for port in ports if _refusal(port, own_ports) is None)
 
 
 class _AppResponse(StreamingResponse):

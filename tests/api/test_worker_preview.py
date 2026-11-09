@@ -358,7 +358,7 @@ async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path
 
 
 async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: int, status: int, detail: str) -> None:
-    """Requests and WebSockets to ``port`` are marked refusals, and the port list leaves it out."""
+    """Requests and WebSockets to ``port`` are marked refusals."""
     async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
         assert response.status == status
         assert response.headers[_REFUSED] == "1"
@@ -366,6 +366,9 @@ async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: 
     with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
         await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
     assert refused.value.status == 403
+
+
+async def _assert_unlisted(client: aiohttp.ClientSession, runner: _Runner, port: int) -> None:
     async with client.get(runner.root, headers=_AUTH) as response:
         assert response.status == 200
         assert port not in await response.json()
@@ -435,6 +438,7 @@ async def test_relay_refuses_a_port_mindrooms_settings_give_its_own_server(tmp_p
             403,
             f"Port {port} is one of MindRoom's own, which the relay never reaches.",
         )
+        await _assert_unlisted(client, runner, port)
 
 
 @pytest.mark.asyncio
@@ -449,6 +453,7 @@ async def test_relay_refuses_the_runners_port_and_mindrooms_default_ports(tmp_pa
                 403,
                 f"Port {port} is one of MindRoom's own, which the relay never reaches.",
             )
+            await _assert_unlisted(client, runner, port)
 
 
 @pytest.mark.asyncio
@@ -463,20 +468,20 @@ async def test_relay_refuses_a_server_no_process_of_the_worker_holds(
     monkeypatch.setattr(listeners, "_PROC", proc)
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
         await _assert_refused(client, runner, port, 403, f"The server on port {port} is not one this worker runs.")
+        await _assert_unlisted(client, runner, port)
 
 
 @pytest.mark.asyncio
 async def test_relay_refuses_every_port_when_proc_cannot_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without ``/proc`` to tell whose server listens on a port, the relay refuses it and says why."""
+    """Without ``/proc`` to tell whose server listens on a port, the relay and the port list refuse and say why."""
     monkeypatch.setattr(listeners, "_PROC", tmp_path / "missing")
+    cannot_tell = "This runner can't tell which processes hold its ports, so it relays to none."
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        await _assert_refused(
-            client,
-            runner,
-            port,
-            403,
-            "This runner can't tell which processes hold its ports, so it relays to none.",
-        )
+        await _assert_refused(client, runner, port, 403, cannot_tell)
+        async with client.get(runner.root, headers=_AUTH) as response:
+            assert response.status == 403
+            assert response.headers[_REFUSED] == "1"
+            assert await response.json() == {"detail": cannot_tell}
 
 
 @pytest.mark.asyncio
