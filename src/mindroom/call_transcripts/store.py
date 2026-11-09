@@ -345,10 +345,10 @@ class CallTranscriptStore:
         with closing(self._connect()) as connection:
             return line if _insert_line(connection, line) else None
 
-    def _write(self, statement: str, parameters: tuple[object, ...]) -> bool:
-        """Run one statement as its own transaction; return whether it changed a row."""
+    def _write(self, statement: str, parameters: tuple[object, ...]) -> None:
+        """Run one statement as its own transaction."""
         with closing(self._connect()) as connection:
-            return connection.execute(statement, parameters).rowcount > 0
+            connection.execute(statement, parameters)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

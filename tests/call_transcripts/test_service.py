@@ -1843,7 +1843,7 @@ async def test_speech_said_before_the_end_is_accepted_until_the_transcript_is_po
     await _refused("forbidden", lambda: world.say(call.id, CAROL, ago=12, seconds=2))
     world.clock.advance(DELAY - 10)
     await world.tick()
-    await _refused("forbidden", lambda: world.say(call.id, BOB, ago=35, seconds=2))
+    await _refused("forbidden", lambda: world.say(call.id, BOB, ago=DELAY + 5, seconds=2))
 
     assert late.said_at == START + 58
     [message] = world.room.transcripts
@@ -1878,13 +1878,13 @@ async def test_late_speech_is_taken_for_30_seconds_after_the_end_whatever_the_po
     world.clock.advance(60)
     await world.service.leave(call.id, ANN)
     world.clock.advance(DELAY - 1)
-    assert (await world.say(call.id, ANN, ago=31)).said_at == START + 58
+    assert (await world.say(call.id, ANN, ago=DELAY + 1)).said_at == START + 58
 
     world.clock.advance(1)
-    refused = await _refused("forbidden", lambda: world.say(call.id, ANN, ago=32))
+    refused = await _refused("forbidden", lambda: world.say(call.id, ANN, ago=DELAY + 2))
     await world.tick()
     assert world.room.transcripts == []
-    await _refused("forbidden", lambda: world.say(call.id, ANN, ago=33))
+    await _refused("forbidden", lambda: world.say(call.id, ANN, ago=DELAY + 3))
     world.clock.advance(60)
     await world.tick()
 
@@ -1954,7 +1954,7 @@ async def test_a_stretch_still_being_let_in_or_written_when_the_message_falls_du
     await world.service.leave(call.id, ANN)
     await world.room.edit_started.wait()
     world.clock.advance(DELAY - 1)
-    upload = asyncio.create_task(world.say(call.id, ANN, ago=31, seconds=1))
+    upload = asyncio.create_task(world.say(call.id, ANN, ago=DELAY + 1, seconds=1))
     await storing.wait()
     world.clock.advance(1)
 
@@ -2202,7 +2202,6 @@ async def test_a_slow_transcript_message_holds_up_no_other_call_or_check(world: 
     """While one call's notes take their time, other calls' messages are posted and live calls are still checked."""
     world.notes.gate = asyncio.Event()
     world.notes.gated_rooms = {ROOM}
-    third_room = "!third:example.org"
     slow = await world.service.join(ROOM, ANN)
     quick = await world.service.join(OTHER_ROOM, BOB)
     world.clock.advance(10)
@@ -2210,7 +2209,7 @@ async def test_a_slow_transcript_message_holds_up_no_other_call_or_check(world: 
     await world.say(quick.id, BOB)
     await world.service.leave(slow.id, ANN)
     await world.service.leave(quick.id, BOB)
-    live = await world.service.join(third_room, CAROL)
+    live = await world.service.join(THIRD_ROOM, CAROL)
     world.clock.advance(DELAY)
 
     async with asyncio.timeout(5):

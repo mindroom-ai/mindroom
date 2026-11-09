@@ -45,9 +45,9 @@ class Api:
         token = client_session_store(main.app).create(user_id).token
         return {"Authorization": f"Bearer {token}", "Origin": CHAT}
 
-    async def join(self, user_id: str, room_id: str = ROOM) -> httpx.Response:
+    async def join(self, user_id: str) -> httpx.Response:
         """Join or check in to the room's call."""
-        return await self.client.post(f"{PREFIX}/rooms/{quote(room_id)}/call", headers=self.headers(user_id))
+        return await self.client.post(f"{PREFIX}/rooms/{quote(ROOM)}/call", headers=self.headers(user_id))
 
     async def pause(self, call_id: str, user_id: str, *, paused: bool) -> httpx.Response:
         """Pause or resume transcription in the call."""

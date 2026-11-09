@@ -42,7 +42,7 @@ _SPEECH_PER_MINUTE = 240
 _SPEECH_WINDOW_SECONDS = 60.0
 _PRESENCE_SECONDS = 60.0
 _CHECK_SECONDS = 15.0
-# How long after a call's end its stretches are still taken, and its message waits. Chat gives an upload up 30
+# How long after a call's end its stretches are still taken, and its message waits. Chat gives up on an upload 30
 # seconds after it began, its one retry included, so a stretch it began sending before the end arrives by then or never.
 _TRANSCRIPT_DELAY_SECONDS = 30.0
 # How long a call's Matrix writes wait, after one could not be made, before they are tried again.
@@ -153,6 +153,11 @@ class EndedRow:
     ended_at: float
     duration_seconds: int
     transcript_event_id: str | None
+
+    @property
+    def edit(self) -> RowEdit:
+        """Which of the row's two edits this is: ``ended``, then ``transcript`` once it links the transcript message."""
+        return "ended" if self.transcript_event_id is None else "transcript"
 
 
 class _CallRoom(Protocol):
@@ -610,9 +615,11 @@ class CallTranscriptService:
 
         Nothing is owed a day after the call's end, and nothing is tried while the writes wait after a failure.
         """
-        if self._room.router_joined(call.room_id) is not True or (call.retry_at is not None and call.retry_at > now):
-            return False
-        if _past_a_day(call, now):
+        if (
+            self._room.router_joined(call.room_id) is not True
+            or (call.retry_at is not None and call.retry_at > now)
+            or _past_a_day(call, now)
+        ):
             return False
         return call.row_event_id is None or self._transcript_due(call, now) or _owed_row_edit(call) is not None
 
@@ -651,14 +658,13 @@ class CallTranscriptService:
                 await self._postpone(call, reason="row-not-posted")
             else:
                 await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
-        elif (owed := _owed_row_edit(call)) is not None:
-            edit, row = owed
+        elif (row := _owed_row_edit(call)) is not None:
             if await self._room.edit_row(row) is None:
                 await self._postpone(call, reason="row-not-edited")
             else:
-                await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
+                await asyncio.to_thread(self._store.record_row_edit, call.id, row.edit)
         else:
-            await self._post_transcript(call, call.row_event_id)
+            await self._post_transcript(call)
 
     def _transcript_due(self, call: StoredCall, now: float) -> bool:
         """Return whether the ended call's message is due: 30 seconds after the end, with none of its speech in flight."""
@@ -669,12 +675,13 @@ class CallTranscriptService:
             and call.id not in self._speaking.values()
         )
 
-    async def _post_transcript(self, call: StoredCall, row_event_id: str) -> None:
+    async def _post_transcript(self, call: StoredCall) -> None:
         """Post the ended call's one message in its row's thread, with notes while they can be had, or hold it a minute.
 
         A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
         """
         assert call.ended_at is not None
+        assert call.row_event_id is not None
         # Due and read under the room's lock, so every stretch let in before then has its line written first.
         async with self._room_lock(call.room_id):
             if not self._transcript_due(call, self._clock()):
@@ -715,7 +722,7 @@ class CallTranscriptService:
         message = TranscriptMessage(
             room_id=call.room_id,
             call_id=call.id,
-            row_event_id=row_event_id,
+            row_event_id=call.row_event_id,
             body=notes if notes is not None else _summary(transcript),
             transcript=transcript,
         )
@@ -860,7 +867,7 @@ def _past_a_day(call: StoredCall, now: float) -> bool:
     return call.ended_at is not None and now - call.ended_at >= _GIVE_UP_AFTER_SECONDS
 
 
-def _call_view(call: StoredCall, members: Iterable[str] = ()) -> Call:
+def _call_view(call: StoredCall, members: Iterable[str]) -> Call:
     return Call(
         id=call.id,
         room_id=call.room_id,
@@ -900,15 +907,12 @@ def call_minutes(duration_seconds: int) -> int:
     return max(1, round(duration_seconds / 60))
 
 
-def _owed_row_edit(call: StoredCall) -> tuple[RowEdit, EndedRow] | None:
+def _owed_row_edit(call: StoredCall) -> EndedRow | None:
     """Return the edit an ended call's posted row still owes: its end, then also its transcript message once posted."""
     if call.ended_at is None or call.row_event_id is None or call.row_edit == "transcript":
         return None
-    edit: RowEdit = "ended" if call.transcript_event_id is None else "transcript"
-    if call.row_edit == edit:
-        return None
     duration_seconds = round(call.ended_at - call.started_at)
-    return edit, EndedRow(
+    row = EndedRow(
         room_id=call.room_id,
         call_id=call.id,
         row_event_id=call.row_event_id,
@@ -917,6 +921,7 @@ def _owed_row_edit(call: StoredCall) -> tuple[RowEdit, EndedRow] | None:
         duration_seconds=duration_seconds,
         transcript_event_id=call.transcript_event_id,
     )
+    return None if row.edit == call.row_edit else row
 
 
 def iso_time(seconds: float) -> str:

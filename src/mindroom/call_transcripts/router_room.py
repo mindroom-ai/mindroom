@@ -141,20 +141,14 @@ class RouterCallRoom:
         return {user_id: _display_name(state.content("m.room.member", user_id)) for user_id in user_ids}
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post the call's row, a notice that starts no agent reply and mentions nobody."""
-        content = {
-            "msgtype": "m.notice",
-            "body": _ROW_BODY,
-            _CALL_CONTENT_KEY: {"call_id": call_id},
-            "m.mentions": {},
-            SKIP_MENTIONS_KEY: True,
-        }
+        """Post the call's row."""
+        content = _row_content(_ROW_BODY, {"call_id": call_id})
         return await self._post(room_id, content, transaction_id=f"mindroom-call-{call_id}-row", operation="call_row")
 
     async def edit_row(self, row: EndedRow) -> str | None:
         """Edit the row to give the call's end and length, and in its second edit where the transcript message is.
 
-        The edited row is still a notice that starts no agent reply and mentions nobody. Each edit has its own transaction.
+        Each edit has its own transaction.
         """
         call: dict[str, object] = {
             "call_id": row.call_id,
@@ -163,18 +157,11 @@ class RouterCallRoom:
         }
         if row.transcript_event_id is not None:
             call["transcript_event_id"] = row.transcript_event_id
-        content = {
-            "msgtype": "m.notice",
-            "body": row.body,
-            _CALL_CONTENT_KEY: call,
-            "m.mentions": {},
-            SKIP_MENTIONS_KEY: True,
-        }
-        edit = "ended" if row.transcript_event_id is None else "transcript"
+        content = _row_content(row.body, call)
         return await self._post(
             row.room_id,
             build_edit_event_content(event_id=row.row_event_id, new_content=content, new_text=row.body),
-            transaction_id=f"mindroom-call-{row.call_id}-row-{edit}",
+            transaction_id=f"mindroom-call-{row.call_id}-row-{row.edit}",
             operation="call_row_edit",
         )
 
@@ -265,6 +252,11 @@ class RouterCallRoom:
             logger.warning("call_transcript_post_failed", room_id=room_id, operation=operation, error=str(error))
             return None
         return None if delivered is None else delivered.event_id
+
+
+def _row_content(body: str, call: dict[str, object]) -> dict[str, Any]:
+    """Return a row's content: a notice naming its call that starts no agent reply and mentions nobody."""
+    return {"msgtype": "m.notice", "body": body, _CALL_CONTENT_KEY: call, "m.mentions": {}, SKIP_MENTIONS_KEY: True}
 
 
 def _retrieve_failure(read: asyncio.Future[_RoomState | None]) -> None:
