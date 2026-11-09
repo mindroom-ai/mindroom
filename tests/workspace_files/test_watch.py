@@ -373,6 +373,34 @@ async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(mon
     assert overflow.value.status_code == 503
 
 
+@pytest.mark.asyncio
+async def test_a_scanner_that_fails_ends_its_streams_and_any_that_join_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a scan breaks, every stream of the workspace is told to connect again instead of waiting for nothing."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    def broken(_root: Path) -> dict[str, object]:
+        msg = "The scan broke."
+        raise RuntimeError(msg)
+
+    async with workspace_changes(root) as first:
+        monkeypatch.setattr(watch, "_scan", broken)
+        with pytest.raises(HTTPException) as ended:
+            async with asyncio.timeout(5):
+                await first()
+        # The first stream still holds the broken scanner, so the next one joins it.
+        async with workspace_changes(root) as late:
+            with pytest.raises(HTTPException) as late_ended:
+                async with asyncio.timeout(5):
+                    await late()
+
+    assert (ended.value.status_code, late_ended.value.status_code) == (503, 503)
+    assert watch._watches == {}
+
+
 def test_a_scan_leaves_out_folders_past_the_depth_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A deep chain of folders, which each scan would open from the root, costs at most the cap's depth."""
     root = tmp_path / "workspace"

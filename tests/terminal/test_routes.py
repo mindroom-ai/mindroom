@@ -12,7 +12,7 @@ import aiohttp
 import nio
 import pytest
 
-from mindroom.api import agent_terminals
+from mindroom.api import agent_streams, agent_terminals
 from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -194,7 +194,7 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
 
     It turns read-only once she can't post, and closes once a config save takes the agent from her.
     """
-    monkeypatch.setattr(agent_terminals, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     room = _Room(Config(agents=_agents(ALICE, BOB)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
@@ -232,7 +232,7 @@ async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Alice may still use the agent, but without its shell it has no terminal for her to watch."""
-    monkeypatch.setattr(agent_terminals, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):

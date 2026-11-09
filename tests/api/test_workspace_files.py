@@ -19,7 +19,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mindroom.api import main, workspace_files
+from mindroom.api import agent_streams, main, workspace_files
 from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -357,7 +357,7 @@ async def test_the_change_stream_closes_once_the_workspace_is_no_longer_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Carol, whom the agent leaves out, is closed at once; Alice once a save takes the agent from her, Bob once it moves."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.5)
     room = _stream_room(tmp_path)
     async with _served(room) as follow:
         carol = await follow(CAROL, "coder")
@@ -407,7 +407,7 @@ async def test_the_change_stream_closes_once_the_agent_s_tools_no_longer_reach_f
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Alice may still use the agent, but once a config save takes its tools away there are no files to follow."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.5)
     room = _stream_room(tmp_path)
     async with _served(room) as follow:
         stream = await follow(ALICE, "coder")
@@ -431,7 +431,7 @@ async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A recheck that can't finish in time closes the stream for the client to try again."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.5)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.5)
     room = _stream_room(tmp_path)
     root = _turn_root(room, "coder", ALICE)
     root.mkdir(parents=True)
@@ -457,6 +457,34 @@ async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
 
 
 @pytest.mark.asyncio
+async def test_the_change_stream_closes_with_1013_once_its_scanner_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan that breaks with something other than a file error closes the stream for the client to try again."""
+    room = _stream_room(tmp_path)
+    root = _turn_root(room, "coder", ALICE)
+    root.mkdir(parents=True)
+
+    def broken(_root: Path) -> dict[str, object]:
+        msg = "The scan broke."
+        raise RuntimeError(msg)
+
+    async with _served(room) as follow:
+        stream = await follow(ALICE, "coder")
+        await _ready(stream)
+        monkeypatch.setattr(watch, "_scan", broken)
+        async with asyncio.timeout(10):
+            message = await stream.receive()
+
+    assert (message.type, stream.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1013,
+        "The workspace's changes can't be followed now; connect again.",
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_watcher_stops_once_the_client_leaves(tmp_path: Path) -> None:
     """A client that closes its stream releases the workspace's watcher at once, without waiting for a change."""
     room = _stream_room(tmp_path)
@@ -476,7 +504,7 @@ async def test_the_watcher_stops_once_the_client_leaves(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_a_client_that_stops_reading_is_told_to_connect_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """A send that can't finish within one recheck ends the stream, so a stalled client holds nothing for long."""
-    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_streams, "RECHECK_SECONDS", 0.05)
     stalled = asyncio.Event()
 
     class _StalledSocket:
