@@ -18,6 +18,7 @@ from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
 
@@ -379,13 +380,14 @@ async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(mon
     assert overflow.value.status_code == 503
 
 
-def test_a_scan_stops_once_its_paths_reach_the_cap_s_length(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Long names deep down can't make one scan hold more path text than the cap, however few entries it took in."""
+def test_a_scan_stops_once_its_paths_reach_the_cap_s_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Long names of many-byte characters can't make one scan hold more path text than the cap, however few entries."""
     root = tmp_path / "workspace"
     root.mkdir()
     for index in range(10):
-        (root / f"{index}{'x' * 49}").write_text("x")
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 100)
+        # 25 characters, 50 bytes.
+        (root / f"{index}{'é' * 24}x").write_text("x")
+    monkeypatch.setattr(watch, "_MAX_PATH_BYTES", 100)
     examined = Mock(wraps=watch.is_hidden)
     monkeypatch.setattr(watch, "is_hidden", examined)
 
@@ -393,15 +395,65 @@ def test_a_scan_stops_once_its_paths_reach_the_cap_s_length(tmp_path: Path, monk
     assert examined.call_count == 3
 
 
+def test_names_a_scan_leaves_out_by_type_count_toward_its_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipes cost a scan their names and a look at their type, so they count before the scan skips them."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(10):
+        os.mkfifo(root / f"{index}{'p' * 49}")
+    monkeypatch.setattr(watch, "_MAX_PATH_BYTES", 100)
+    examined = Mock(wraps=watch.is_hidden)
+    monkeypatch.setattr(watch, "is_hidden", examined)
+
+    assert watch._scan(root) == {}
+    assert examined.call_count == 3
+
+
+def test_a_name_that_isn_t_utf_8_is_left_out_and_costs_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No answer can carry such a name, so the scan hides it, and it takes no room from the names it keeps."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    os.close(os.open(os.fsencode(root) + b"/" + b"\xff" * 50, os.O_CREAT | os.O_WRONLY, 0o644))
+    (root / "notes.md").write_text("x")
+    monkeypatch.setattr(watch, "_MAX_PATH_BYTES", len("notes.md"))
+
+    assert set(watch._scan(root)) == {"notes.md"}
+
+
+def test_a_folder_swapped_for_a_link_mid_scan_is_never_entered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder the scan saw and then opens may be a link by then; the scan reports nothing from beyond it."""
+    root = tmp_path / "workspace"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "inside.txt").write_text("x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x")
+    real_open = watch.open_directory_within_root
+
+    def open_after_a_swap(directory: Path | int, relative: str = ".") -> AbstractContextManager[int]:
+        if relative == "sub":
+            (root / "sub").rename(root / "held")
+            (root / "sub").symlink_to(outside)
+        return real_open(directory, relative)
+
+    monkeypatch.setattr(watch, "open_directory_within_root", open_after_a_swap)
+
+    assert set(watch._scan(root)) == {"sub"}
+
+
 @pytest.mark.asyncio
-async def test_a_follower_whose_waiting_paths_pass_the_cap_s_length_is_told_to_connect_again(
+async def test_a_follower_whose_waiting_paths_pass_the_cap_s_bytes_is_told_to_connect_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A client that stops reading can't make the path text waiting for it grow without bound, however few the paths."""
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 12)
+    monkeypatch.setattr(watch, "_MAX_PATH_BYTES", 12)
     follower = watch._Follower()
-    follower.add({"aaaaaa"})
-    follower.add({"bbbbbb"})
+    # Three characters, six bytes each.
+    follower.add({"ééé"})
+    follower.add({"ààà"})
     assert follower.ended is None
     follower.add({"c"})
 
@@ -411,9 +463,9 @@ async def test_a_follower_whose_waiting_paths_pass_the_cap_s_length_is_told_to_c
 
 
 @pytest.mark.asyncio
-async def test_sent_paths_no_longer_count_toward_the_cap_s_length(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sent_paths_no_longer_count_toward_the_cap_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the paths still waiting count, and a path changed again while it waits counts once."""
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 6)
+    monkeypatch.setattr(watch, "_MAX_PATH_BYTES", 6)
     follower = watch._Follower()
     follower.add({"aaaaaa"})
     follower.add({"aaaaaa"})
@@ -423,10 +475,10 @@ async def test_sent_paths_no_longer_count_toward_the_cap_s_length(monkeypatch: p
     assert await follower.next() == ["bbbbbb"]
 
 
-def test_a_follower_of_an_ordinary_workspace_at_the_entry_cap_stays_within_the_length_cap() -> None:
-    """A workspace at the entry cap whose paths run to 100 characters still has every change followed."""
+def test_a_follower_of_an_ordinary_workspace_at_the_entry_cap_stays_within_the_byte_cap() -> None:
+    """A workspace at the entry cap whose paths run to 80 bytes still has every change followed."""
     follower = watch._Follower()
-    follower.add({f"{index:0100d}" for index in range(watch._MAX_ENTRIES)})
+    follower.add({f"{index:080d}" for index in range(watch._MAX_ENTRIES)})
 
     assert follower.ended is None
 
