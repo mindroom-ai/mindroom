@@ -22,7 +22,7 @@ from weakref import WeakValueDictionary
 import nio
 import yaml
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.constants import CONVERSATION_CONTENT_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.parties import (
     agent_party,
@@ -907,32 +907,23 @@ async def _join_remote_request(
     assert room_id is not None  # A request from another deployment is its invite into this room.
     withdrawn = (
         f"{record.target.id} could not join the contact room; the request may have been withdrawn, so accept again "
-        "later or decline it"
+        "later or remove it"
     )
-
-    def activate(book: ContactBook) -> ContactRecord | None:
-        current = _by_id(book, record.id)
-        if current.status != "pending":
-            return None
-        current.status = "active"
-        current.decided_at = datetime.now(UTC)
-        _change_side(current.target_side, rules, tools)
-        return current.model_copy(deep=True)
-
-    def put_back(book: ContactBook) -> None:
-        current = _by_id(book, record.id)
-        if current.status == "active":
-            current.status = "pending"
-            current.decided_at = None
-            current.target_side = record.target_side.model_copy(deep=True)
+    paths = actor.runtime_paths
+    activate = partial(_activate_remote_request, record.id, rules, tools)
+    # A cancellation during the write still finds the contact active, so it puts the request back before propagating.
+    activated = await run_blocking_or_compensate(
+        partial(update_contacts, paths, activate),
+        lambda done: done is not None and update_contacts(paths, partial(_put_back_remote_request, done)),
+    )
+    if activated is None:
+        raise ValueError(_NOT_PENDING["accept"])
+    accepted, _before = activated
 
     async def roll_back() -> None:
-        await run_blocking_until_complete(update_contacts, actor.runtime_paths, put_back)
+        await run_blocking_until_complete(update_contacts, paths, partial(_put_back_remote_request, activated))
         await bot.change_local_membership(room_id, "leave")
 
-    accepted = await run_blocking_until_complete(update_contacts, actor.runtime_paths, activate)
-    if accepted is None:
-        raise ValueError(_NOT_PENDING["accept"])
     try:
         joined = await _join_while_asked(bot, client, room_id, record.requester.id)
     except BaseException:
@@ -945,6 +936,34 @@ async def _join_remote_request(
     if not await invite_to_room(client, room_id, owner):
         logger.warning("contact_room_owner_invite_failed", contact_id=record.id, user_id=owner, room_id=room_id)
     return accepted
+
+
+def _activate_remote_request(
+    contact_id: str,
+    rules: str | None,
+    tools: list[str] | None,
+    book: ContactBook,
+) -> tuple[ContactRecord, ContactSide] | None:
+    """Make a pending request active, and return it with its side as it was, which putting it back restores."""
+    current = _by_id(book, contact_id)
+    if current.status != "pending":
+        return None
+    before = current.target_side.model_copy(deep=True)
+    current.status = "active"
+    current.decided_at = datetime.now(UTC)
+    _change_side(current.target_side, rules, tools)
+    return current.model_copy(deep=True), before
+
+
+def _put_back_remote_request(activated: tuple[ContactRecord, ContactSide], book: ContactBook) -> None:
+    """Make an activated request pending again with the side it had, unless the owner changed that side since."""
+    accepted, before = activated
+    current = _by_id(book, accepted.id)
+    if current.status == "active":
+        current.status = "pending"
+        current.decided_at = None
+        if current.target_side == accepted.target_side:
+            current.target_side = before
 
 
 async def _join_while_asked(bot: AgentBot, client: nio.AsyncClient, room_id: str, requester_id: str) -> bool:

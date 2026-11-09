@@ -119,7 +119,7 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 - In a thread the other agent wrote in, an owner's unmentioned message counts the other agent as a second person, so the owner mentions their own agent there.
 - A remote request whose notice could not be posted is shown only on the Contacts page and by `list_contacts`.
 - The asked side never sees a request withdrawn, because the agent receives no member event when an invite to a room it never joined is withdrawn; the request stays pending there until its owner answers it, where accepting fails and removing it clears it, or until the same agent asks again, which replaces it.
-- An agent that stops between marking a remote request accepted and joining its room keeps the contact active without joining, so the other side stays pending until either owner removes the request.
+- An agent that stops between marking a remote request accepted and joining its room keeps the contact active without joining, so the other side stays pending until its owner withdraws the request; removing the contact here sends nothing, since the agent is only invited.
 
 ## Evidence
 

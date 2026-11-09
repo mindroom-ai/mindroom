@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -585,6 +586,61 @@ async def test_a_message_while_the_acceptance_joins_is_admitted(tmp_path: Path) 
     with _matrix(), _delivered():
         await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
     assert admitted == [CO_OWNER]
+
+
+@pytest.mark.asyncio
+async def test_an_acceptance_cancelled_while_it_activates_puts_the_request_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation during the activation write still finds the contact active, so it is put back before any join."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+    writing, release = threading.Event(), threading.Event()
+
+    def slow_first_write(paths_: RuntimePaths, change: Callable[[ContactBook], object]) -> object:
+        result = update_contacts(paths_, change)
+        if not writing.is_set():
+            writing.set()
+            release.wait(5)
+        return result
+
+    monkeypatch.setattr("mindroom.contacts.flow.update_contacts", slow_first_write)
+    with _matrix():
+        accepting = asyncio.create_task(flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None))
+        await asyncio.to_thread(writing.wait, 5)
+        accepting.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await accepting
+    assert _statuses(paths) == ["pending"]
+    runtime.bots["mind_bob"].change_local_membership.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_putting_a_request_back_keeps_a_change_made_while_it_joined(tmp_path: Path) -> None:
+    """The owner may change their side while the join settles, so a failed join keeps that change, not the old side."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    runtime = _runtime()
+
+    async def failed_join_after_an_update(_room_id: str, membership: str) -> bool:
+        if membership != "join":
+            return True
+
+        def update(book: ContactBook) -> None:
+            book.contacts[0].target_side.rules = "Changed meanwhile."
+
+        update_contacts(paths, update)
+        return False
+
+    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=failed_join_after_an_update)
+    with _matrix(), pytest.raises(ValueError, match=r"could not join the contact room"):
+        await flow.accept_contact(_bob(config, paths, runtime), "in", rules="Accepted rules.", tools=None)
+    [stored] = _stored(paths)
+    assert stored.status == "pending"
+    assert stored.target_side.rules == "Changed meanwhile."
 
 
 @pytest.mark.asyncio
