@@ -110,6 +110,7 @@ from tests.bot_helpers import (
     _runtime_bound_config,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     cached_plugin_module,
     initialize_approval_store_for_test,
@@ -4412,7 +4413,10 @@ class TestMultiAgentOrchestrator:
         general_bot.release_pending_turn_journal_replay.assert_called()
         general_bot.recover_pending_turn_journal_events.assert_not_awaited()
         release_router.set()
-        assert await wait_for_background_tasks(timeout=1, owner=orchestrator.turn_recovery.task_owner)
+        assert await wait_for_background_tasks(
+            timeout=SETTLE_TIMEOUT_SECONDS,
+            owner=orchestrator.turn_recovery.task_owner,
+        )
         general_bot.recover_pending_turn_journal_events.assert_awaited()
 
     @pytest.mark.asyncio

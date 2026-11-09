@@ -72,6 +72,19 @@ async def _read_until(stream: TerminalStream, marker: bytes) -> bytes:
     return seen
 
 
+async def _interrupt(stream: TerminalStream) -> None:
+    """Interrupt the running command and wait for the shell's next prompt.
+
+    Bash misses an interrupt that lands while it starts a child process, so each output before the prompt sends another.
+    """
+    prompt = stream.prompt
+    async with asyncio.timeout(20):
+        while stream.prompt == prompt:
+            await stream.send_input("\x03")
+            event = await stream.receive()
+            assert event.type == "output", event
+
+
 async def _exit_code(stream: TerminalStream) -> int | None:
     async with asyncio.timeout(20):
         while (event := await stream.receive()).type != "exit":
@@ -172,7 +185,7 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
         assert scrollback.type == "output"
         assert b"n1\r\n" in scrollback.data
         await _read_until(second, b"\r\n")
-        await second.send_input("\x03")
+        await _interrupt(second)
         await second.resize(100, 30)
         await second.send_input("stty size; echo $((2*3))sized\r")
         assert b"30 100" in await _read_until(second, b"6sized")

@@ -146,6 +146,7 @@ from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_ingress_facts,
@@ -2759,7 +2760,7 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
         event.source["content"]["m.mentions"] = {"user_ids": [mentioned]}
 
     await harness.ingress.handle_text_event(room, event)
-    await wait_for_background_tasks(timeout=5.0, owner=harness.ingress.deps.runtime)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=harness.ingress.deps.runtime)
 
     waits = held and mention in {None, "general"}
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])

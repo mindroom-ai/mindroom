@@ -21,6 +21,7 @@ from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_AGENT_STARTED, HookRegistry, hook
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, ShutdownBudget
 from mindroom.turn_record import TurnRecord
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.journal_helpers import admit_dispatch_event
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
@@ -277,7 +278,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         async def publish_frame() -> None:
             await bot._run_sync_response_side_effects(first_sync_response=False)
-            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+            await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         with (
             patch.object(bot, "_schedule_delivery_recovery"),
@@ -319,7 +320,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
             bot._next_handled_turn_cleanup_at = 0.0
             await bot._run_sync_response_side_effects(first_sync_response=False)
-            assert await wait_for_background_tasks(timeout=0.2, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         assert cleanup.await_count == 1
 
@@ -341,11 +342,11 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         )
 
         await asyncio.wait_for(other_task_started.wait(), timeout=1.0)
-        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert not other_task.done()
 
         release_other_task.set()
-        await wait_for_background_tasks(timeout=1.0, owner=other_owner)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=other_owner)
         assert other_task.done()
 
     @pytest.mark.asyncio

@@ -47,6 +47,7 @@ from tests.authorization_helpers import (
 )
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
@@ -542,7 +543,10 @@ class TestRoutingRegression:
                 while await router_bot._journal_dispatcher.store.is_pending(event_id):
                     await router_bot.recover_pending_turn_journal_events()
                     await drain_coalescing(router_bot)
-                    assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+                    assert await wait_for_background_tasks(
+                        timeout=SETTLE_TIMEOUT_SECONDS,
+                        owner=router_bot._runtime_view,
+                    )
                     await asyncio.sleep(0.01)
 
         room_id = room.room_id

@@ -54,6 +54,7 @@ from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
@@ -1169,7 +1170,7 @@ async def test_initial_sync_invite_is_current_membership_work(
     room = _cache_current_invite(bot, "!invited:localhost", event.sender)
 
     await bot._room_lifecycle.on_invite(room, event)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)

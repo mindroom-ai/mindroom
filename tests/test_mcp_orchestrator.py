@@ -25,7 +25,7 @@ from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.slack.integration import bound_slack_runtime
-from tests.conftest import install_bots, published_config_load, swap_fleet_bot
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_bots, published_config_load, swap_fleet_bot
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -856,7 +856,10 @@ async def test_mcp_catalog_change_reported_during_a_turn_restarts_outside_the_tu
             await orchestrator._notify_mcp_catalog_change("demo")
     finally:
         _TURN_OWNER.reset(token)
-    assert await wait_for_background_tasks(timeout=1, owner=orchestrator._mcp_catalog_change_task_owner)
+    assert await wait_for_background_tasks(
+        timeout=SETTLE_TIMEOUT_SECONDS,
+        owner=orchestrator._mcp_catalog_change_task_owner,
+    )
 
     assert observed == [None]
 
@@ -883,7 +886,10 @@ async def test_mcp_catalog_changes_merge_into_one_queued_restart(tmp_path: Path)
                 for _ in range(3):
                     await asyncio.sleep(0)
             assert replace_calls == 0
-        assert await wait_for_background_tasks(timeout=5, owner=orchestrator._mcp_catalog_change_task_owner)
+        assert await wait_for_background_tasks(
+            timeout=SETTLE_TIMEOUT_SECONDS,
+            owner=orchestrator._mcp_catalog_change_task_owner,
+        )
 
     assert replace_calls == 2
     assert orchestrator._pending_mcp_catalog_restarts == {}
@@ -904,7 +910,10 @@ async def test_unreferenced_mcp_catalog_change_does_not_absorb_later_changes(tmp
     ) as mock_restarts:
         for _ in range(2):
             await orchestrator._notify_mcp_catalog_change("demo")
-            assert await wait_for_background_tasks(timeout=1, owner=orchestrator._mcp_catalog_change_task_owner)
+            assert await wait_for_background_tasks(
+                timeout=SETTLE_TIMEOUT_SECONDS,
+                owner=orchestrator._mcp_catalog_change_task_owner,
+            )
 
     assert mock_restarts.call_count == 2
     assert orchestrator._pending_mcp_catalog_restarts == {}

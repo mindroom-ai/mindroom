@@ -31,6 +31,7 @@ from mindroom.embeddings.errors import (
 )
 from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -410,7 +411,7 @@ async def test_reload_with_embedder_change_resets_health_and_reprobes(
     new = _config(memory={"backend": "mem0", "embedder": {"config": {"model": "other-model"}}})
 
     handle_embedder_config_reload(current, new, _runtime_paths(tmp_path))
-    await wait_for_background_tasks(timeout=5)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert get_embedder_failure() is None
     assert probes == ["config_reload"]
@@ -457,7 +458,7 @@ async def test_reload_enabling_embedder_use_probes_without_embedder_change(
         _config(memory={"backend": "mem0"}),
         _runtime_paths(tmp_path),
     )
-    await wait_for_background_tasks(timeout=5)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert probes == ["config_reload"]
 
