@@ -392,6 +392,51 @@ async def test_a_page_the_bridge_cannot_attach_to_reads_as_no_page_once() -> Non
     await agent.runtime.close()
 
 
+class _FakeSession:
+    """A CDP session whose events the test delivers by hand; one Chromium had in flight arrives during the detach."""
+
+    def __init__(self, late_frame: str | None = None) -> None:
+        self.handlers: dict[str, Any] = {}
+        self.late_frame = late_frame
+
+    def on(self, event: str, handler: object) -> None:
+        self.handlers[event] = handler
+
+    async def send(self, _method: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {}
+
+    async def detach(self) -> None:
+        if self.late_frame is not None:
+            self.frame(self.late_frame)
+
+    def frame(self, data: str) -> None:
+        self.handlers["Page.screencastFrame"]({"data": data})
+
+
+class _FakePage:
+    def __init__(self, session: _FakeSession) -> None:
+        self.context = self
+        self.session = session
+
+    async def new_cdp_session(self, _page: object) -> _FakeSession:
+        return self.session
+
+
+@pytest.mark.asyncio
+async def test_an_event_the_left_page_delivers_never_reaches_the_service() -> None:
+    """Once the bridge moves to the agent's next page, a late frame of the page it left is dropped."""
+    old, new = _FakePage(_FakeSession(late_frame="old")), _FakePage(_FakeSession())
+    agent = _Agent(cast("Page", old))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        agent.shown = cast("Page", new)
+        assert await service.event("MindRoom.page") == {"page": True}
+        new.session.frame("new")
+        assert await service.event("Page.screencastFrame") == {"data": "new"}
+    await agent.runtime.close()
+
+
 _SECRET_HEADER = "X-MindRoom-Service-Secret"  # noqa: S105 - a header name
 # A service that records its secret, then exits at once.
 _BRIEF = """
