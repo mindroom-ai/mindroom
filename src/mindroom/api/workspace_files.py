@@ -208,7 +208,13 @@ async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str)
 
 async def _send_changes(websocket: WebSocket, next_changes: Callable[[], Awaitable[list[str]]]) -> None:
     while True:
-        await websocket.send_json({"type": "changed", "paths": await next_changes()})
+        paths = await next_changes()
+        # A client that stopped reading blocks the send, and with it the follower's own overflow answer.
+        try:
+            async with asyncio.timeout(_RECHECK_SECONDS):
+                await websocket.send_json({"type": "changed", "paths": paths})
+        except TimeoutError:
+            raise HTTPException(503, "The client stopped reading changes; connect again.") from None
 
 
 async def _until_closed(websocket: WebSocket) -> None:

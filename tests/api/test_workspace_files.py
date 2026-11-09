@@ -16,6 +16,7 @@ from urllib.parse import quote
 import aiohttp
 import nio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom.api import main, workspace_files
@@ -470,3 +471,23 @@ async def test_the_watcher_stops_once_the_client_leaves(tmp_path: Path) -> None:
         async with asyncio.timeout(5):
             while watch._watches:  # noqa: ASYNC110 - the watcher table signals nothing
                 await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_stops_reading_is_told_to_connect_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A send that can't finish within one recheck ends the stream, so a stalled client holds nothing for long."""
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    stalled = asyncio.Event()
+
+    class _StalledSocket:
+        async def send_json(self, _message: object) -> None:
+            await stalled.wait()
+
+    async def next_changes() -> list[str]:
+        return ["notes.md"]
+
+    with pytest.raises(HTTPException) as ended:
+        async with asyncio.timeout(5):
+            await workspace_files._send_changes(_StalledSocket(), next_changes)  # type: ignore[arg-type]
+
+    assert ended.value.status_code == 503
