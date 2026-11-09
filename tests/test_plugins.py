@@ -1386,20 +1386,22 @@ def test_validating_an_edited_package_plugin_executes_it_apart_from_its_loaded_m
 
 @_PRIMARY_AND_WORKER
 @pytest.mark.parametrize("inner_first", [False, True], ids=["outer-first", "inner-first"])
-def test_reloading_a_package_plugin_keeps_the_modules_of_a_plugin_nested_in_it(
+def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load: Callable[[Config, RuntimePaths], ConfigPlugins],
     inner_first: bool,
 ) -> None:
-    """A plugin inside a package plugin's package keeps its modules under their names when the outer one reloads."""
+    """A plugin inside a package plugin's package keeps its modules apart, so both load before and after a reload."""
     site_packages = tmp_path / "site-packages"
     outer_root = site_packages / "outer_pkg"
     inner_root = outer_root / "plugins" / "inner"
     inner_root.mkdir(parents=True)
     (outer_root / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "plugins" / "__init__.py").write_text("", encoding="utf-8")
     (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
-    (outer_root / "tools.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tools_path = outer_root / "tools.py"
+    tools_path.write_text("import outer_pkg.plugins.inner.hooks as inner_hooks\n", encoding="utf-8")
     (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
     (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
     monkeypatch.syspath_prepend(str(site_packages))
@@ -1408,16 +1410,15 @@ def test_reloading_a_package_plugin_keeps_the_modules_of_a_plugin_nested_in_it(
     runtime_paths = runtime_paths_for(config)
 
     def installed_inner_hooks() -> ModuleType:
+        assert sorted(plugin.name for plugin in load(config, runtime_paths).loaded_plugins) == ["inner", "outer"]
         inner_hooks = cached_plugin_module(inner_root / "hooks.py")
-        assert sys.modules["outer_pkg.plugins.inner.hooks"] is inner_hooks
-        assert plugins_module._PUBLISHED.modules["outer_pkg.plugins.inner.hooks"] is inner_hooks
+        assert inner_hooks.__name__.startswith(PLUGIN_MODULE_PREFIX)
+        assert plugins_module._PUBLISHED.modules[inner_hooks.__name__] is inner_hooks
         return inner_hooks
 
     with _forgetting_modules("outer_pkg"):
-        load(config, runtime_paths)
         first = installed_inner_hooks()
-        _bump_mtime(outer_root / "tools.py")
-        load(config, runtime_paths)
+        _bump_mtime(tools_path)
         # A worker keeps the unchanged plugin's module; a primary load runs every plugin again.
         assert (installed_inner_hooks() is first) is (load is plugins_module.refresh_plugins)
 

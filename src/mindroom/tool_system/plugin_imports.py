@@ -164,7 +164,12 @@ def _collect_plugin_bases(
 
         plugin_bases.append((plugin_base, plugin_entry))
     _reject_duplicate_plugin_manifest_names(plugin_bases)
-    return plugin_bases, skipped
+    # A plugin inside another one's root keeps names of its own, so the outer plugin's package names never reach it.
+    roots = {base.root for base, _ in plugin_bases}
+    nested = {root for root in roots if any(root != other and root.is_relative_to(other) for other in roots)}
+    return [
+        (replace(base, package=None) if base.root in nested else base, entry) for base, entry in plugin_bases
+    ], skipped
 
 
 def _log_failed_plugin_entry(plugin_entry: PluginEntryConfig, root: Path | None, exc: BaseException) -> None:
@@ -526,10 +531,12 @@ def _install_plugin_package_chain(
     plugin_root: Path,
     module_path: Path,
     prefix: str,
+    *,
+    packages: bool = True,
 ) -> None:
     for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path, prefix):
         sys.path_importer_cache[str(package_root)] = machinery.FileFinder(str(package_root), *_PLUGIN_FILE_LOADERS)
-        if package_name in sys.modules:
+        if not packages or package_name in sys.modules:
             continue
         package = ModuleType(package_name)
         package.__file__ = str(package_root / "__init__.py")
@@ -555,9 +562,9 @@ def _prepare_module(
     *,
     by_name: bool = False,
 ) -> _PreparedPluginModule:
-    """Make one plugin module and its separate namespace's packages: the module in sys.modules, or ``by_name`` not yet."""
-    previous_packages = _snapshot_plugin_package_chain(name, root, path, prefix)
-    _install_plugin_package_chain(name, root, path, prefix)
+    """Make one plugin module, in sys.modules under its separate namespace, or for ``_import_by_name`` when ``by_name``."""
+    previous_packages = {} if by_name else _snapshot_plugin_package_chain(name, root, path, prefix)
+    _install_plugin_package_chain(name, root, path, prefix, packages=not by_name)
     loader = _PreparedModuleLoader(module_name, str(path)) if by_name else None
     if (spec := util.spec_from_file_location(module_name, path, loader=loader)) is None or spec.loader is None:
         _restore_plugin_package_chain(previous_packages)

@@ -49,7 +49,7 @@ def plugin_load_active(caller: str) -> bool:
     return False
 
 
-def recorded_plugin_root(module_name: str) -> Path | None:
+def _plugin_root(module_name: str) -> Path | None:
     """Return the recorded plugin directory holding module ``module_name``'s file, if any."""
     module_file = getattr(sys.modules.get(module_name), "__file__", None)
     if not isinstance(module_file, str):
@@ -74,7 +74,7 @@ def register_tool(metadata: ToolMetadata) -> None:
     if module_name.startswith((PLUGIN_MODULE_PREFIX, CANDIDATE_PLUGIN_MODULE_PREFIX)):
         msg = f"Plugin tool '{metadata.name}' must register while its plugin module loads, not later."
         raise ToolMetadataValidationError(msg)
-    plugin_root = recorded_plugin_root(module_name)
+    plugin_root = _plugin_root(module_name)
     if plugin_root is not None:
         # Its plugin's load registers it; another import of the module only executes it again.
         logger.warning(

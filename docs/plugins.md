@@ -1404,7 +1404,7 @@ MindRoom starts each plugin's lifespan once the plugin loads at startup, in the 
 `mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
 The plugin's routes, tools, and hooks can import the lifecycle module, such as `from .lifecycle import STATE`, to use what its lifespan set up, and they share one copy of it with the lifespan.
 Any of the plugin's modules can import another the same way and gets the copy MindRoom serves, and so does importing a [package plugin](#python-package-plugins)'s module by its package name, such as `from my_plugin.hooks import STATE`.
-A directory plugin's modules have no package name, and a plugin that puts its own directory on `sys.path` and imports a module by its bare name, such as `import hooks`, gets a separate copy.
+A directory plugin's modules have no package name, nor do those of a plugin inside another configured plugin's directory, and a plugin that puts its own directory on `sys.path` and imports a module by its bare name, such as `import hooks`, gets a separate copy.
 A worker that loads a module importing the lifecycle module imports it too.
 Every plugin reload, and every config reload that changes `plugins:`, runs every plugin's code again, so it restarts every lifespan, including those of plugins that did not change.
 The new lifespan starts while the old one still runs, so hand over what only one holder can have, such as a listening port or a lock file, through `process_state` instead of opening it again, or the new start fails.
