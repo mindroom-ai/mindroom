@@ -79,6 +79,6 @@ The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` fi
 Changes show within about a second, but can take several seconds to show in very large workspaces, such as one with thousands of folders.
 A workspace made after the stream opened reports everything it was made with.
 It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, and the hidden credentials, and it follows no links: a change inside a folder reached through a link is reported under that folder's own path when it lies in the workspace, and not at all when it lies outside.
-It signs in as [plugin websocket routes](plugins.md#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
+It signs in as [plugin websocket routes](plugins.md#websocket-routes) do, counting toward their 16 open streams per user, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell or once the client stopped reading; the client then connects again and lists afresh.
 In a workspace with more than 10,000 folders or 100,000 files and folders, changes in the deepest of them are not reported, nor are changes more than 32 folders deep.
