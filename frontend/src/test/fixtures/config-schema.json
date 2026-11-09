@@ -514,6 +514,17 @@
           "description": "Per-agent override of defaults.file_access (None = inherit the default)",
           "title": "File Access"
         },
+        "terminals": {
+          "default": "none",
+          "description": "What people in the agent's rooms may do with its terminals: none, watch, or type",
+          "enum": [
+            "none",
+            "watch",
+            "type"
+          ],
+          "title": "Terminals",
+          "type": "string"
+        },
         "allow_self_config": {
           "anyOf": [
             {

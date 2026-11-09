@@ -46,7 +46,7 @@ _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
 _ABOUT = (
     "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can "
-    "watch and type in from a chat client that shows terminals."
+    "watch, and type in, where your config allows it, from a chat client that shows terminals."
 )
 _READ_ONLY = (
     f"{_ABOUT} You can't type in them, because your run_shell_command calls may ask for approval: run commands with "
@@ -174,7 +174,7 @@ def _refused(error: TerminalError, session_id: str | None = None) -> str:
 
 
 class TerminalTools(Toolkit):
-    """Persistent terminals in the agent's workspace, which people in the room watch and type in."""
+    """Persistent terminals in the agent's workspace, which people in the room watch and type in where its config allows."""
 
     name = "terminal"
     instructions = (
@@ -210,7 +210,7 @@ class TerminalTools(Toolkit):
         return self._terminals
 
     async def terminal_open(self, cwd: str | None = None) -> str:
-        """Open a new terminal in your workspace, which people in the room can watch.
+        """Open a new terminal in your workspace, which people in the room can watch where your config allows it.
 
         Args:
             cwd: Folder to start in, relative to your workspace; the workspace by default.

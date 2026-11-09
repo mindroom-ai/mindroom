@@ -94,6 +94,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "show_tool_calls",
         "skill_learning",
         "skills",
+        "terminals",
         "thread_exports",
         "thread_mode",
         "timezone",
