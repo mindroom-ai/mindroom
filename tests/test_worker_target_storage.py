@@ -14,6 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.plugin_api import ResolvedWorkerTarget, dump_worker_target, load_worker_target
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.workers.placements import DedicatedWorkerPlacement
 from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
@@ -56,13 +57,24 @@ def test_a_dumped_target_loads_back_as_the_same_target_after_passing_through_jso
     tmp_path: Path,
     agent: AgentConfig,
 ) -> None:
-    """Every field survives a JSON round trip, the identity's included."""
-    target = _target(tmp_path, agent)
+    """Every field survives a JSON round trip, the identity's and a subagent turn's placement included."""
+    target = replace(_target(tmp_path, agent), placement=DedicatedWorkerPlacement("c" * 32, "large"))
 
     stored = _through_json(target)
+    loaded = load_worker_target(stored)
 
-    assert load_worker_target(stored) == target
-    assert stored["version"] == 1
+    # Equality leaves the placement out, so it is compared on its own.
+    assert (loaded, loaded.placement) == (target, target.placement)
+    assert stored["version"] == 2
+
+
+def test_a_version_1_target_loads_without_a_placement(tmp_path: Path) -> None:
+    """A target an earlier MindRoom stored loads with no placement, so it reaches the agent's normal worker as before."""
+    stored = {key: value for key, value in _stored(tmp_path).items() if key != "placement"}
+
+    loaded = load_worker_target({**stored, "version": 1})
+
+    assert (loaded, loaded.placement) == (_target(tmp_path, _AGENTS["private per user and agent"]), None)
 
 
 def _through_json(target: ResolvedWorkerTarget) -> dict[str, Any]:
@@ -79,11 +91,16 @@ def _identity(stored: dict[str, Any], **changes: object) -> dict[str, Any]:
     return {**stored, "execution_identity": {**identity, **changes}}
 
 
+def _placement(stored: dict[str, Any], **changes: object) -> dict[str, Any]:
+    return {**stored, "placement": {"subagent_id": "c" * 32, "resource_profile": None, **changes}}
+
+
 _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "not an object": lambda _: [],
-    "a future version": lambda stored: {**stored, "version": 2},
+    "a future version": lambda stored: {**stored, "version": 3},
     "true for the version": lambda stored: {**stored, "version": True},
-    "a float for the version": lambda stored: {**stored, "version": 1.0},
+    "a float for the version": lambda stored: {**stored, "version": 2.0},
+    "a placement in version 1": lambda stored: {**stored, "version": 1},
     "no version": lambda stored: {key: value for key, value in stored.items() if key != "version"},
     "an unknown field": lambda stored: {**stored, "extra": None},
     "a missing field": lambda stored: {key: value for key, value in stored.items() if key != "worker_key"},
@@ -95,6 +112,11 @@ _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "an identity that is not an object": lambda stored: {**stored, "execution_identity": "alice"},
     "an unknown identity channel": lambda stored: _identity(stored, channel="email"),
     "an unknown identity field": lambda stored: _identity(stored, extra=None),
+    "a placement that is not an object": lambda stored: {**stored, "placement": "c" * 32},
+    "an unknown placement field": lambda stored: _placement(stored, extra=None),
+    "a subagent ID that is not one": lambda stored: _placement(stored, subagent_id="C" * 32),
+    "an unknown resource profile": lambda stored: _placement(stored, resource_profile="huge"),
+    "a list for the resource profile": lambda stored: _placement(stored, resource_profile=["large"]),
     # A worker key that is not the one its scope, agent, and identity resolve to, here another person's worker.
     "another person's worker key": lambda stored: {
         **stored,
