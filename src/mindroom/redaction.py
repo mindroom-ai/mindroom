@@ -83,16 +83,18 @@ _COMMAND_PATTERN = re.compile(
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
 _PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
-# An unquoted option value is one shell word, in which a backslash escapes the next character on its line; a quoted
-# value ends at its own unescaped quote.
-_OPTION_WORD = r"(?:[^\s\"'\\]|\\[^\r\n])++"
+# A shell word: unquoted characters, each one a backslash escapes on its line, and quoted parts, as in `-p'a'"b"`.
+_SHELL_WORD = r"(?:[^\s\"'\\;|&<>]|\\[^\r\n]|'[^']*+'?|\"(?:[^\"\\]|\\[\s\S])*+\"?)++"
+_SHELL_WORD_PATTERN = re.compile(_SHELL_WORD)
+_LEADING_WHITESPACE_PATTERN = re.compile(r"\s*+")
+# The space between two arguments of a command, which a backslash line break may continue.
+_ARGUMENT_GAP_PATTERN = re.compile(r"(?:[^\S\r\n]|\\\r?\n)*+")
+# A quoted `user:password` ends at its own unescaped quote.
 _CURL_USER_OPTION_PATTERN = re.compile(
     r"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
-    rf"(?P<token>(?(quote)(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])++|{_OPTION_WORD}))",
+    rf"(?P<token>(?(quote)(?:\\[\s\S]|(?!(?P=quote))[^\\\r\n])++|{_SHELL_WORD}))",
 )
-_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(
-    rf"(?<!\S)-p(?P<token>'[^']*+'?|\"(?:[^\"\\]|\\[\s\S])*+\"?|{_OPTION_WORD})",
-)
+_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(rf"(?<!\S)-p(?P<token>{_SHELL_WORD})")
 # Words that run the word after them as a program, as in `sudo mysql`.
 _COMMAND_PREFIX_WORDS = frozenset(
     {"command", "do", "elif", "else", "env", "exec", "if", "nohup", "sudo", "then", "time", "until", "while", "xargs"},
@@ -170,7 +172,7 @@ _PROSE_WORD_PATTERN = re.compile(r"[A-Z]?[a-z]+(?:-[a-z]+)*\.?")
 _BARE_CREDENTIAL_PHRASE_PATTERN = re.compile(r"(?:api\s+key|bearer(?:\s+token)?)\s+", re.IGNORECASE)
 # GitHub Actions grants a job's OIDC token with `id-token: write`, so one of these words names a permission, alone
 # or before a YAML comment or the end of a Markdown code span.
-_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))")
+_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))", re.IGNORECASE)
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
@@ -428,7 +430,7 @@ def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int]
 
 def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
     """Return the text from ``start`` on, without its leading whitespace, as a value whose end cannot be known."""
-    start = len(value) - len(value[start:].lstrip())
+    start = cast("re.Match[str]", _LEADING_WHITESPACE_PATTERN.match(value, start)).end()
     return (start, len(value), len(value)) if start < len(value) else None
 
 
@@ -451,13 +453,16 @@ def _assignment_value_span(
     """Return the start and end of one assigned value and where the scan resumes, or None when nothing is assigned.
 
     ``key_quote`` is the quote that opened a string holding the key, as in ``grep "password=" .``, so the same quote
-    right after the key closes that string instead of opening a value; a value can still follow it directly, as the
-    shell reads ``"password="hunter2``.
+    right after the key closes that string. The shell word after it, attached or after spaces, may still be the value,
+    as in ``"password="hunter2`` or ``echo "password:" hunter2``, so it is hidden; a shell operator there opens none.
     """
     if value_start < len(value) and value[value_start] == key_quote:
-        value_start += 1
-        if value_start < len(value) and value[value_start] in " \t;|<>":
+        value_start = cast("re.Match[str]", _ARGUMENT_GAP_PATTERN.match(value, value_start + 1)).end()
+        if value_start >= len(value) or value[value_start] in ";|&<>":
             return None
+        word = _SHELL_WORD_PATTERN.match(value, value_start)
+        if word is not None and value[value_start] not in "'\"":
+            return value_start, word.end(), word.end()
     if value_start >= len(value):
         return None
     # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
@@ -507,11 +512,14 @@ def _redact_secret_assignments(value: str) -> str:
         if value_span is None:
             continue
         value_start, value_end, search_start = value_span
-        assignment_value = value[value_start:value_end].lower()
         if (
             classification.normalized == "authorization"
-            and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
-        ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
+            and value_end - value_start <= len(f"bearer {REDACTED}")
+            and value[value_start:value_end].lower() in {"basic", "bearer", f"bearer {REDACTED}"}
+        ) or (
+            classification.normalized == "id_token"
+            and _ID_TOKEN_PERMISSION_PATTERN.match(value, value_start, value_end)
+        ):
             # A value that is not a credential may still hold later assignments, as the rest of a text does.
             search_start = value_start
             continue
@@ -705,7 +713,7 @@ def _redact_password_options(command_match: re.Match[str]) -> str:
     program = _PASSWORD_PROGRAM_PATTERN.search(command)
     if program is None:
         return command
-    words_before = command[: program.start()].split()
+    words_before = [word for word in command[: program.start()].split() if word != "\\"]
     if words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS:
         return command
     option = _CURL_USER_OPTION_PATTERN if program.group("curl") else _MYSQL_PASSWORD_OPTION_PATTERN

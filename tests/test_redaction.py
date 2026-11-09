@@ -138,6 +138,7 @@ def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
         "Your API keys are expiring soon: 1 API key for Acme.",
         "Send a bearer token with each request, as bearer tokens expire.",
         "permissions:\n  contents: read\n  id-token: write",
+        "permissions:\n  id-token: Write",
         "permissions:\n  id-token: write  # federate the OIDC token",
         "Never give that job `id-token: write`, since any ref could run it.",
     ],
@@ -863,19 +864,21 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("command", "expected"),
     [
-        'grep -rn "password=" .',
-        "rg 'api_key:' src",
-        'read -rsp "Password: " pw && echo done',
-        'grep -rn "token=" src | grep -v test',
-        'grep -rn "password=" "src/" | grep "x"',
-        'grep -rn "password="; echo done',
+        ('grep -rn "password=" .', f'grep -rn "password=" {REDACTED}'),
+        ("rg 'api_key:' src", f"rg 'api_key:' {REDACTED}"),
+        ('read -rsp "Password: " pw && echo done', f'read -rsp "Password: " {REDACTED} && echo done'),
+        ('grep -rn "token=" src | grep -v test', f'grep -rn "token=" {REDACTED} | grep -v test'),
+        ('grep -rn "password=" "src/" | grep "x"', f'grep -rn "password=" "{REDACTED}" | grep "x"'),
+        ('echo "password:" hunter2 > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
+        ('echo "password:" \\\n  hunter2 > config.yaml', f'echo "password:" \\\n  {REDACTED} > config.yaml'),
+        ('grep -rn "password="; echo done', 'grep -rn "password="; echo done'),
     ],
 )
-def test_a_quote_closing_the_string_that_holds_a_secret_name_keeps_the_command_readable(command: str) -> None:
-    """A search for a secret name quotes it, so the quote after the name ends that string and opens no value."""
-    assert redact_sensitive_text(command) == command
+def test_a_quoted_secret_name_hides_the_word_after_it(command: str, expected: str) -> None:
+    """The quote after the name ends the string holding it, and the next word, a search path or a value, is hidden."""
+    assert redact_sensitive_text(command) == expected
 
 
 @pytest.mark.parametrize(
@@ -948,6 +951,9 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
         ('mysql -e "select \\\r\n 1" -ppw app', f'mysql -e "select \\\r\n 1" -p{REDACTED} app'),
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ("sudo \\\n  mysql -ppw app", f"sudo \\\n  mysql -p{REDACTED} app"),
+        ("mysql -p'first'\"second\" app", f"mysql -p{REDACTED} app"),
+        ('curl -u admin:"my pw" https://example.test/x', f"curl -u admin:{REDACTED} https://example.test/x"),
         ('while read db; do mysql -ppw "$db"; done', f'while read db; do mysql -p{REDACTED} "$db"; done'),
         (
             "if true; then curl -u admin:pw https://example.test/x; fi",
@@ -1013,8 +1019,20 @@ def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote
         "curl -u a:b;",
         'password="\n',
         "curl -u a:b \\\n",
+        "id_token: write #",
+        "id-token:\n  write # x\n",
     ],
-    ids=["closing-quotes", "line-ends", "assignments", "mysql", "curl", "unclosed-quotes", "continued-commands"],
+    ids=[
+        "closing-quotes",
+        "line-ends",
+        "assignments",
+        "mysql",
+        "curl",
+        "unclosed-quotes",
+        "continued-commands",
+        "permissions",
+        "line-ending-permissions",
+    ],
 )
 def test_redaction_stays_linear_over_many_command_patterns(unit: str) -> None:
     """Each pattern a command can repeat is read once, however often it repeats."""
