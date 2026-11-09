@@ -8395,9 +8395,7 @@ depends_on = [
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_http"]
 
-# Public: plugin routes import it to require a signed-in Matrix client, live room membership, or a platform
-# administrator, to read and change a room's modes, to learn the agents a caller may use in a room with their workspaces,
-# for their plugin context, and to post to a room as the router.
+# Public: plugin routes and tools import it, and its `__all__` lists what they may use.
 [[modules]]
 path = "mindroom.plugin_http"
 depends_on = [
