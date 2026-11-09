@@ -704,6 +704,8 @@ def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> No
 def test_a_secret_name_that_ends_its_line_hides_the_rest_of_the_text(text: str, expected: str) -> None:
     """A value can sit on any line after its key, as in YAML or a following message; the text before it stays readable."""
     assert redact_sensitive_text(text) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
@@ -883,6 +885,8 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
 def test_a_quoted_secret_name_hides_the_value_that_may_follow_it(command: str, expected: str) -> None:
     """A word attached to the quote that ends the name's string, or the arguments after a space, may be the value."""
     assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 @pytest.mark.parametrize(
@@ -899,6 +903,8 @@ def test_a_quoted_secret_name_hides_the_value_that_may_follow_it(command: str, e
 def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expected: str) -> None:
     """A quoted value left unclosed can continue on later lines, so the rest is hidden instead of the whole text failing."""
     assert redact_sensitive_text(text) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 @pytest.mark.parametrize(
@@ -918,6 +924,8 @@ def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expecte
 def test_an_unquoted_value_leaves_the_whitespace_before_its_end(command: str, expected: str) -> None:
     """The space before the operator or punctuation that ends an unquoted value stays, so the command stays readable."""
     assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 @pytest.mark.parametrize(
@@ -947,8 +955,8 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
     [
         ("curl -u admin:pw https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
         ("curl -sS --user=admin:pw https://example.test/x", f"curl -sS --user=admin:{REDACTED} https://example.test/x"),
-        ('curl -u "admin:my pw" https://example.test/x', f'curl -u "admin:{REDACTED} https://example.test/x'),
-        ('curl -u "admin:"hunter2 https://example.test/x', f'curl -u "admin:{REDACTED} https://example.test/x'),
+        ('curl -u "admin:my pw" https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
+        ('curl -u "admin:"hunter2 https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
         ("curl -uadmin:pw https://example.test/x", f"curl -uadmin:{REDACTED} https://example.test/x"),
         ("mysql -u root -p'pw' app", f"mysql -u root -p{REDACTED} app"),
         ("mysql -uroot -ppw app", f"mysql -uroot -p{REDACTED} app"),
@@ -964,8 +972,8 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
             "if true; then curl -u admin:pw https://example.test/x; fi",
             f"if true; then curl -u admin:{REDACTED} https://example.test/x; fi",
         ),
-        ("curl -u 'admin:p\"ssw0rd' https://example.test/x", f"curl -u 'admin:{REDACTED} https://example.test/x"),
-        ('curl -u "admin:ab\\"cd" https://example.test/x', f'curl -u "admin:{REDACTED} https://example.test/x'),
+        ("curl -u 'admin:p\"ssw0rd' https://example.test/x", f"curl -u 'admin:{REDACTED}' https://example.test/x"),
+        ('curl -u "admin:ab\\"cd" https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
         ("curl -u admin:my\\ pw https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
         ("curl -u admin:pw\\\n  https://example.test/x", f"curl -u admin:{REDACTED}\\\n  https://example.test/x"),
         ('mysql -p"ab\\"cd" app', f"mysql -p{REDACTED} app"),
@@ -982,6 +990,8 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
 def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: str) -> None:
     """Curl takes `user:password` after `-u`, and mysql takes a password attached to `-p`."""
     assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 @pytest.mark.parametrize(
@@ -994,6 +1004,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "docker run --user 1000:0 alpine id",
         "curl --user-agent=Mozilla:5.0 https://example.test/x",
         "curl -u admin https://example.test/x",
+        "curl -u admin: https://example.test/x",
         "date -u +%H:%M:%S",
         "rsync -u host:/srv/data ./data",
         "docker run --name mysql -p3306:3306 -d mysql:8",

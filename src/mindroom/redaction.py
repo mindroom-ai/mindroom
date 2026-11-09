@@ -724,10 +724,13 @@ def _redact_password_options(command_match: re.Match[str]) -> str:
 
 
 def _redact_curl_password(match: re.Match[str]) -> str:
-    user, colon, _password = match.group("word").partition(":")
-    if not colon:
+    user, colon, password = match.group("word").partition(":")
+    if not password:
         return match.group(0)
-    return match.group(0)[: match.start("word") - match.start()] + user + colon + REDACTED
+    # A quote opened before the colon is closed again, so redacting the result again reads the same word.
+    open_quote = next((quote for quote in "\"'" if user.count(quote) % 2), "")
+    closing = open_quote if open_quote and open_quote in password else ""
+    return match.group(0)[: match.start("word") - match.start()] + user + colon + REDACTED + closing
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
