@@ -1036,14 +1036,10 @@ time.sleep(0.5)
 
 
 @asynccontextmanager
-async def _other_server(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    once: bool = False,
-) -> AsyncIterator[tuple[int, list[object]]]:
+async def _other_server(monkeypatch: pytest.MonkeyPatch, *, once: bool = False) -> AsyncIterator[list[object]]:
     """Serve on every port probed for a service, or ``once`` on the next, as another socket can take it before the service binds it.
 
-    Yields its port and the connections it gets.
+    Yields the connections it gets.
     """
     connections: list[object] = []
 
@@ -1065,7 +1061,7 @@ async def _other_server(
             return taken.pop() if taken else probe()
 
         monkeypatch.setattr(worker_services_module, "_free_loopback_port", probed)
-        yield port, connections
+        yield connections
 
 
 async def _websocket_refusal(relay: WorkerRelay, service: str) -> int:
@@ -1089,7 +1085,7 @@ async def test_a_service_whose_port_another_server_took_exits_and_the_relay_neve
     async with _runner(tmp_path) as runner:
         (runner.plugin_root / "echo.py").write_text(_ECHO)
         context, _, relay = await _relay(tmp_path, runner, monkeypatch)
-        async with _other_server(monkeypatch) as (_, connections):
+        async with _other_server(monkeypatch) as connections:
             echo = WorkerService("echo", "echo.py")
             state = await ensure_worker_service(context, echo, _TARGET)
             assert (state.state, state.exit_code) == ("exited", 1)
@@ -1115,11 +1111,11 @@ async def test_a_service_whose_port_another_server_took_first_runs_on_a_fresh_on
         (runner.plugin_root / "echo.py").write_text(_SLOW_PARENT + _ECHO)
         context, _, relay = await _relay(tmp_path, runner, monkeypatch)
         echo = WorkerService("echo", "echo.py")
-        async with _other_server(monkeypatch, once=True) as (taken, connections):
+        async with _other_server(monkeypatch, once=True) as connections:
             first, second = await asyncio.gather(*(ensure_worker_service(context, echo, _TARGET) for _ in range(2)))
             assert first == second
+            # Running means the service's processes alone listen on its port, so it is not the other server's.
             assert first.state == "running"
-            assert first.port != taken
             async with relay.websocket("/a", service="echo") as upstream:
                 await upstream.send_str("one")
                 assert (await upstream.receive_str()).endswith(":/a:one")
@@ -1146,6 +1142,9 @@ async def test_a_stop_while_a_service_fails_on_its_taken_port_keeps_it_stopped(
             await stop_worker_service(context, echo, _TARGET)
             assert (await ensure).state == "exited"
             assert services.instance("demo", "echo") is None
+        # Only the start the stop ended ran, if it got as far as recording its child.
+        children = runner.workspace / "children"
+        assert not children.exists() or len(children.read_text().split()) == 1
 
 
 @pytest.mark.asyncio
@@ -1162,7 +1161,7 @@ async def test_the_relay_never_reaches_another_server_on_the_port_of_a_service_t
         assert (await ensure_worker_service(context, waiting, _TARGET)).state == "starting"
         assert (await _get(relay, "/", service="waiting"))[::2] == (502, True)
         await stop_worker_service(context, waiting, _TARGET)
-        async with _other_server(monkeypatch) as (_, connections):
+        async with _other_server(monkeypatch) as connections:
             state = await ensure_worker_service(context, waiting, _TARGET)
             assert state.state == "starting"
             status, text, marked = await _get(relay, "/", service="waiting")

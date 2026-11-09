@@ -71,9 +71,9 @@ class _ServiceInstance:
     idle_timeout_seconds: float
     idle_until: float = 0.0
     expiry: asyncio.Task[None] | None = None
-    # Whether an exit while another socket holds its port starts the service once more on a fresh one: only until an
-    # ensure reports the instance, which may then have run, so that its own closed connections may hold the port.
-    retries: bool = True
+    # Whether an exit while another socket holds its port starts the service once more on a fresh port. Only until an
+    # ensure reports the instance: after that it may have served, and its own closed connections can hold the port.
+    may_retry: bool = True
 
 
 class _WorkerServices:
@@ -107,6 +107,8 @@ class _WorkerServices:
     ) -> WorkerServiceState:
         """Start the service unless an instance of this program exists, crashed or not, then report it.
 
+        An instance that exits before any ensure reported it, while another socket holds its port, starts once more.
+
         ``stops`` is the service's stop count as the request arrived; a stop that arrived since refuses the start.
         """
         key = (plugin, name)
@@ -121,18 +123,18 @@ class _WorkerServices:
                 instance = await self._add(key, program)
             self.touch(plugin, name)
         state = await _settled(instance)
-        if state.state != "exited" or not instance.retries:
-            instance.retries = False
+        if state.state != "exited" or not instance.may_retry:
+            instance.may_retry = False
             return state
         async with self._lock:
             if self._instances.get(key) is instance:
                 # Another socket took the probed port before the service bound it, as one can between probe and bind.
                 if _port_taken(instance.port):
                     await self._end(key, instance)
-                    (await self._add(key, program)).retries = False
+                    (await self._add(key, program)).may_retry = False
                     self.touch(plugin, name)
                 else:
-                    instance.retries = False
+                    instance.may_retry = False
             current = self._instances.get(key)
         # A concurrent ensure may have started it once more already, and a stop may have ended it.
         return state if current is None else await _settled(current)
@@ -219,7 +221,7 @@ def _free_loopback_port() -> int:
 
 
 def _port_taken(port: int) -> bool:
-    """Return whether a socket holds the loopback port, as one that took it before a service bound it does."""
+    """Return whether a socket holds the loopback port."""
     with socket.socket() as probe:
         try:
             probe.bind(("127.0.0.1", port))
