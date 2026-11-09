@@ -427,20 +427,17 @@ def _print_exports(
     import shlex  # noqa: PLC0415
 
     console.print("\nExport these variables before running MindRoom:")
-    console.print(
-        f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(result.client_id)}", markup=False, soft_wrap=True)
-    console.print(
-        f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(result.client_secret)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(result.namespace)}", markup=False, soft_wrap=True)
+    exports = {
+        "MINDROOM_PROVISIONING_URL": provisioning_url,
+        "MINDROOM_LOCAL_CLIENT_ID": result.client_id,
+        "MINDROOM_LOCAL_CLIENT_SECRET": result.client_secret,
+        "MINDROOM_NAMESPACE": result.namespace,
+    }
     if result.owner_user_id:
-        print_literal("  ", f"export MINDROOM_OWNER_USER_ID={shlex.quote(result.owner_user_id)}", console=console)
+        exports["MINDROOM_OWNER_USER_ID"] = result.owner_user_id
+    for name, value in exports.items():
+        print_literal("  ", f"export {name}={shlex.quote(value)}", console=console)
+    if result.owner_user_id:
         print_literal(
             "\nOwner user ID from pairing: ",
             result.owner_user_id,
@@ -563,7 +560,7 @@ def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession],
 def _print_plain_pairing_request(console: Console, session: DevicePairSession, *, with_qr: bool) -> None:
     """Print the approval link on its own line with the pair code, for logs, the macOS app, and dumb terminals."""
     console.print("\nConnect this machine to MindRoom:")
-    console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
+    print_literal("  ", session.approve_url, console=console)
     console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
     console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
     if with_qr:

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 import typer
 from dotenv import dotenv_values
 from rich.console import Console
-from rich.markup import escape
 from rich.panel import Panel
 
 from mindroom.constants import PROVIDER_ENV_KEYS, resolve_primary_runtime_paths
@@ -261,19 +260,19 @@ def _ask_for_login_service() -> ServiceManager | None:
 
 def _print_installed_service(manager: ServiceManager, result: InstallResult) -> None:
     """Print where to check on a service that was just installed and started, and whether its dashboard is open."""
-    log_hint = f"View logs: [cyan]{escape(manager.get_log_command())}[/cyan]"
-    if result.log_dir is not None:
-        log_hint = f"View logs: [cyan]{escape(str(result.log_dir))}/[/cyan]"
+    log_location = manager.get_log_command() if result.log_dir is None else f"{result.log_dir}/"
     _console.print(
         Panel(
             f"[green]{result.message}[/green]\n\n"
             "The service is pinned to this MindRoom version.\n"
             "After upgrading, rerun [cyan]mindroom service install[/cyan].\n\n"
-            f"Check status: [cyan]mindroom service status[/cyan]\n{log_hint}",
+            "Check status: [cyan]mindroom service status[/cyan]",
             title="Service Installed",
             border_style="green",
         ),
     )
+    # Below the panel, which would wrap a long log folder or command at its border.
+    print_literal("View logs: ", log_location, console=_console)
     _warn_if_service_dashboard_is_open(manager.get_service_environment())
 
 

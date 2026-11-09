@@ -1511,7 +1511,7 @@ def test_pair_local_install_does_not_ask_about_an_unidentified_approver(tmp_path
 
 
 def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line(narrow_markup_dir: Path) -> None:
-    """A retry warning, saved paths, owner notes, and accounts with an emoji code print as written, whole on one line."""
+    """Retry warnings, links, exports, saved paths, and owner notes keep emoji codes as written, whole on one line."""
     text = str(narrow_markup_dir)
     runtime_paths = _approval_install(narrow_markup_dir)
     config_path = runtime_paths.config_path
@@ -1519,17 +1519,20 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
     # A server name that is also an emoji code, such as `office`, is part of a valid Matrix user ID.
     lan_owner = "@alice:office:8448"
 
+    provisioning_url = f"https://provisioning.example/:rocket:/{'a-long-path-segment-' * 3}"
+    approve_url = f"https://chat.example/connect?code=ABCD-EFGH&from=:rocket:{'-a-long-query-value' * 3}"
+
     def pair(owner_user_id: str, *first: httpx.Response, persist_env: bool = True) -> list[str]:
         out = io.StringIO()
         responses = [
             *first,
-            httpx.Response(200, json=_START),
+            httpx.Response(200, json=_START | {"approve_url": approve_url}),
             httpx.Response(200, json=_CONNECTED | {"owner_user_id": owner_user_id}),
         ]
         cli_connect.pair_local_install(
             runtime_paths,
             console=Console(file=out, width=80),
-            provisioning_url="https://provisioning.example",
+            provisioning_url=provisioning_url,
             persist_env=persist_env,
             post_request=_fake_transport(responses, []),
             sleep=lambda _seconds: None,
@@ -1553,6 +1556,9 @@ def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line
         "room_defaults.invite_users, and room_defaults.admins."
     ) in repaired
     assert f"Approved by '{rejected_owner}', which is not a valid Matrix user ID." in rejected
+    assert f"  {approve_url}" in first
+    assert f"  export MINDROOM_PROVISIONING_URL={provisioning_url}" in printed
+    assert "  export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in printed
     assert f"  export MINDROOM_OWNER_USER_ID={lan_owner}" in printed
     assert f"Owner user ID from pairing: {lan_owner} (not persisted in --no-persist-env mode)." in printed
     assert any(

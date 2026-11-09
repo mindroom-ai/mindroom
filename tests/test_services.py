@@ -1378,14 +1378,14 @@ def test_login_service_prints_the_env_path_and_errors_whole_on_one_line(
 
 
 @pytest.mark.parametrize("log_dir", [True, False], ids=["log-folder", "log-command"])
-def test_installed_service_panel_names_a_markup_like_log_location_as_written(
-    tmp_path: Path,
+def test_installed_service_prints_its_log_location_whole_on_one_line(
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     log_dir: bool,
 ) -> None:
-    """The install summary shows a log folder or log command whose path Rich would read as markup as written."""
-    folder = tmp_path / "[work]" / "[" / "x]" / "logs"
-    config_path = tmp_path / "config.yaml"
+    """The install summary shows a long, markup-like log folder or log command with an emoji code whole on one line."""
+    folder = narrow_markup_dir / ":fire:" / "logs"
+    config_path = narrow_markup_dir / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     manager = _login_service_manager(
@@ -1402,4 +1402,4 @@ def test_installed_service_panel_names_a_markup_like_log_location_as_written(
 
     assert result.exit_code == 0, result.output
     expected = f"View logs: {folder}/" if log_dir else f"View logs: tail -f {folder}/stdout.log"
-    assert expected in result.output
+    assert expected in result.stdout.splitlines()
