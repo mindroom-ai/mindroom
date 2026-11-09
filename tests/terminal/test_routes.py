@@ -33,11 +33,11 @@ _ORIGIN = "https://chat.example.org"
 
 
 def _agents(*users: str) -> dict[str, AgentConfig]:
-    """Two agents with a shell, which ``users`` may use."""
+    """Two agents with a shell whose terminals people may type in, which ``users`` may use."""
     access = ResponderAccessConfig(users=list(users))
     return {
-        "coder": AgentConfig(display_name="Coder", tools=["shell"], access=access),
-        "other": AgentConfig(display_name="Other", tools=["shell"], access=access),
+        "coder": AgentConfig(display_name="Coder", tools=["shell"], access=access, terminals="type"),
+        "other": AgentConfig(display_name="Other", tools=["shell"], access=access, terminals="type"),
     }
 
 
@@ -157,6 +157,22 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
         assert (await _answer(client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, ALICE))))[0] == 204
         _, after = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
         assert [t["id"] for t in after["terminals"]] == [other["id"]]
+
+
+async def test_people_get_an_agent_s_terminals_only_as_far_as_its_config_allows(tmp_path: Path, runner: str) -> None:
+    """With ``terminals: watch`` Alice sees the agent's terminal but may not open one; left unset, the agent has none."""
+    room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
+    coder = f"agents/{room.ids['coder']}/terminals"
+    async with _served(room) as (client, base):
+        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        access = ResponderAccessConfig(users=[ALICE])
+        watching = AgentConfig(display_name="Coder", tools=["shell"], access=access, terminals="watch")
+        unset = AgentConfig(display_name="Coder", tools=["shell"], access=access)
+        for coder_config, listed in ((watching, [(opened["id"], False)]), (unset, [])):
+            room.serve(Config(agents=_agents(ALICE) | {"coder": coder_config}))
+            assert (await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE))))[0] == 403
+            _, seen = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+            assert [(t["id"], t["writable"]) for t in seen["terminals"]] == listed
 
 
 async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(

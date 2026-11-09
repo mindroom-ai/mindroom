@@ -23,6 +23,7 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 - The primary derives a terminal's owner from the request's worker key, routing agent, and workspace, so agents that share a worker or the shared runner never see each other's terminals, while requesters whose calls reach the same agent workspace share them.
   The runner takes the owner the primary sends, because only the primary holds the runner token.
 - A session ID becomes a path on the runner, so the client accepts only the runner's own ID alphabet, and an ID such as `../../execute` cannot send the runner token to another runner endpoint.
+- People get an agent's terminals only where its `terminals` setting says so, `none` by default, because what a person types passes no approval rule and runs with the worker's access to every workspace it mounts, so the operator opts each agent in.
 - People type in a terminal only where its worker mounts the agent's workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, so what they type acts on the files they see as the agent's `root`; on a runner that sees only its own scratch storage they watch.
 - A terminal's shell never starts with a response's CLI grant: the shell outlives the response, while the grant is only for that response's commands.
   `WorkerTerminals.open` builds its request with the grant unbound rather than removing the grant's names afterwards, so the call's other environment changes stay exactly as a shell call gets them.
@@ -35,7 +36,7 @@ Approval rules judge a command's text, and what text typed into a persistent she
 - Rejected: judging typing through approval aliases as the command its Enter runs, from a record of the terminal's line prepared before approval and checked at the run.
   Seven review rounds each found another way the shell ran something other than the judged text, so a sound version would have to model the shell itself.
 - Rejected: asking before every typing call of a restricted agent, because the card would show text whose effect neither the rules nor the approver can read from it, and an operator's rule for `run_shell_command` would become a card for the same commands through another function.
-- People who may type keep typing whatever the agent's rules say, because their typing is their own and passes no approval.
+- People who may type, under the agent's `terminals: type`, keep typing whatever the agent's rules say, because their typing is their own and passes no approval.
 
 ## The line record
 

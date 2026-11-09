@@ -43,7 +43,10 @@ router = APIRouter(prefix="/api/rooms/{room_id}", tags=["terminals"])
 
 # As often as the Computer's stream rechecks its viewer, and each check as long.
 _RECHECK_SECONDS = 15.0
-_NO_TYPING = "Typing in this agent's terminals needs a shell in a worker that mounts its workspace and power to post."
+_NO_TYPING = (
+    "Typing in this agent's terminals needs `terminals: type` in its config, a shell in a worker that mounts its "
+    "workspace, and power to post."
+)
 _Cols = Annotated[int, Field(ge=2, le=1000)]
 _Rows = Annotated[int, Field(ge=1, le=500)]
 
