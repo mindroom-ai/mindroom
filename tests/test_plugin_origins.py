@@ -295,7 +295,7 @@ def test_ask_answers_200_only_for_a_host_its_plugins_serves_says_it_serves(
 ) -> None:
     """Caddy's on-demand TLS check gets 200 only while ``serves`` returns True within the deadline."""
     _write(tmp_path, "demo", origin=ORIGIN)
-    _write(tmp_path, "plain", origin=ORIGIN.split("async def serves", maxsplit=1)[0])
+    _write(tmp_path, "plain", origin=EMPTY_ORIGIN)
     _write(tmp_path, "other", routes=ROUTES)
     client = _client(_api_app(tmp_path, "demo", "plain", "other"), "127.0.0.1:9100")
 

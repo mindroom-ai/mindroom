@@ -27,6 +27,7 @@ from mindroom.api.config_lifecycle import (
     rebind_current_request_snapshot,
     require_api_state,
 )
+from mindroom.api.plugin_routes import published_plugins
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_directory import entity_directory
@@ -611,15 +612,15 @@ def plugin_origin_url(connection: HTTPConnection, label: str) -> str:
     raises ``RuntimeError`` for a plugin without an ``origin_module``, whose hosts answer only 404.
     """
     plugin_name = _route_plugin_name(connection, "plugin_origin_url")
-    snapshot = require_api_state(connection.app).snapshot
+    plugins = published_plugins(connection.app)
     # A staged load sets one of these exactly when the manifest names an origin module.
-    if snapshot.runtime_config is None or not any(
+    if plugins is None or not any(
         plugin.name == plugin_name and (plugin.origin_app is not None or plugin.origin_error is not None)
-        for plugin in config_plugins(snapshot.runtime_config, snapshot.runtime_paths).loaded_plugins
+        for plugin in plugins.loaded_plugins
     ):
         msg = f"Plugin {plugin_name!r} has no origin_module, so plugin_origin_url() has no host of it to name"
         raise RuntimeError(msg)
-    url = plugin_origins.plugin_origin_url(snapshot.runtime_paths, plugin_name, label)
+    url = plugin_origins.plugin_origin_url(plugins.runtime_paths, plugin_name, label)
     if url is None:
         raise HTTPException(503, "Plugin origins are off.")
     return url
