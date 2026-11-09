@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from mindroom.plugin_http import RoomPower
     from mindroom.tool_system.agent_tools import AgentTools
     from mindroom.tool_system.declarations import ToolMetadata
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -238,6 +238,8 @@ class AgentWorkspace:
     """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
     the workspace, as a dedicated worker does, and the caller may post messages in the room; never more than the
     agent's ``terminals`` setting allows."""
+    worker_target: ResolvedWorkerTarget = field(repr=False)
+    """The worker the agent's turns for this caller use, which ``mindroom.plugin_http.worker_relay`` reaches."""
     config: Config = field(repr=False)
     """The config this answer was resolved under, the one the API served when the request arrived."""
 
@@ -355,6 +357,7 @@ def _workspace(
         root=workspace.root,
         files="none" if not path_toolkits else "write" if may_send and any(path_toolkits.values()) else "read",
         terminal=terminal,
+        worker_target=storage.execution.worker_target,
         config=config,
     )
 

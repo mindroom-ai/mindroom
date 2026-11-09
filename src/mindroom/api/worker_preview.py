@@ -4,13 +4,16 @@
 ``/api/sandbox-runner/ports/{port}/{path}`` passes a GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS request, its body
 streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{port}``, or at ``[::1]:{port}`` when it
 listens only there.
+``/api/sandbox-runner/services/{plugin}/{name}/{path}`` relays the same way to the plugin's worker service while it
+runs, adding the secret only that service knows and dropping any copy the caller sent; each request counts as use, as an
+ensure does, and so does every half idle timeout a stream to it stays open.
 Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
 A dedicated worker's loopback is not only the worker's either: every container of a Kubernetes worker pod shares it,
 as does any container started in the worker's network namespace.
 So the relay reaches a port only when the worker's own processes, those of its runner's process tree or its cgroup,
 hold every socket listening on it, and never the runner's own port.
-The runner marks each refusal with the ``x-mindroom-relay-refused`` header: 403 for a port the relay never reaches,
-and 502 for one no app answers on.
+The runner marks each refusal with the ``x-mindroom-relay-refused`` header, on a WebSocket's refused handshake too: 403
+for a port the relay never reaches, 502 for one no app answers on, and 503 for a service that is not running.
 The runner's own token never reaches an app.
 """
 
@@ -18,13 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-from contextlib import suppress
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext, suppress
 from functools import partial
 from typing import TYPE_CHECKING
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
@@ -33,16 +36,21 @@ from mindroom.previews.listeners import held_by_this_worker, listening_sockets
 from mindroom.previews.relay import relay_websocket
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import AsyncIterator, Iterable
+    from contextlib import AbstractAsyncContextManager
 
+    from fastapi import FastAPI
     from starlette.requests import HTTPConnection
     from starlette.types import Receive, Scope, Send
 
-router = APIRouter(prefix="/api/sandbox-runner/ports", tags=["sandbox-runner"])
+    from mindroom.api.worker_services import RunningService
+
+router = APIRouter(prefix="/api/sandbox-runner", tags=["sandbox-runner"])
 
 # Marks the runner's own refusals, so a caller tells them from an app's answers.
 _REFUSED_HEADER = "x-mindroom-relay-refused"
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105 - a header name, not a secret
+_SERVICE_SECRET_HEADER = "x-mindroom-service-secret"  # noqa: S105 - a header name, not a secret
 _METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Hop-by-hop headers (RFC 9110 7.6.1) belong to one connection, so the relay passes them on in neither direction.
 _HOP_HEADERS = frozenset(
@@ -154,15 +162,16 @@ async def _reachable_only(
     return await handler(request)
 
 
-async def _upstream_url(connection: HTTPConnection, port: int) -> URL:
-    """Return the URL of the app on ``port`` that ``connection`` asks for."""
+async def _upstream_url(connection: HTTPConnection, port: int, segments: int) -> URL:
+    """Return the URL of the app on ``port`` that ``connection`` asks for, below its route's first ``segments``."""
     _require_dedicated_worker(connection)
     await _require_reachable(connection, port)
     host = await loopback_host(port)
     if host is None:
         raise _no_app(port)
-    # The path below the port as the primary sent it, still percent-encoded.
-    target = connection.scope["raw_path"].decode("latin-1").removeprefix(f"{router.prefix}/").partition("/")[2]
+    # The path below the route's own segments as the primary sent it, still percent-encoded.
+    raw_path = connection.scope["raw_path"].decode("latin-1").removeprefix(f"{router.prefix}/")
+    target = raw_path.split("/", segments)[segments]
     query = connection.scope["query_string"].decode("latin-1")
     return URL(f"http://{host}:{port}/{target}{'?' if query else ''}{query}", encoded=True)
 
@@ -189,9 +198,9 @@ def _reachable_ports(runner_port: int) -> list[int]:
 
 
 class _AppResponse(StreamingResponse):
-    """An app's answer, streamed as it arrives, whose connection closes however the stream ends."""
+    """An app's answer, streamed as it arrives, whose connection, and what ``held`` keeps, close however it ends."""
 
-    def __init__(self, upstream: aiohttp.ClientResponse, session: aiohttp.ClientSession) -> None:
+    def __init__(self, upstream: aiohttp.ClientResponse, held: AsyncExitStack) -> None:
         super().__init__(upstream.content.iter_any(), status_code=upstream.status)
         self.raw_headers = [
             (name.encode("latin-1"), value.encode("latin-1"))
@@ -202,7 +211,7 @@ class _AppResponse(StreamingResponse):
             )
         ]
         self._upstream = upstream
-        self._session = session
+        self._held = held
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Stream the answer, then close the app connection."""
@@ -210,48 +219,83 @@ class _AppResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             self._upstream.close()
-            await self._session.close()
+            await self._held.aclose()
 
 
-@router.get("", dependencies=[Depends(validate_runner_token)])
-async def listening_ports(request: Request) -> list[int]:
-    """List the ports the worker's own apps listen on at its loopback: those the relay reaches."""
-    _require_dedicated_worker(request)
-    return await asyncio.to_thread(_reachable_ports, request.scope["server"][1])
+def _service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
+    """Return the plugin's service while it runs in this worker, counting this as its use, as an ensure does."""
+    # Imported here: the service module imports this one's loopback check.
+    from mindroom.api.worker_services import running_service  # noqa: PLC0415
+
+    return running_service(app, plugin, name)
 
 
-@router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
-async def relay(request: Request, port: int) -> StreamingResponse:
-    """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
-    url = await _upstream_url(request, port)
+def _require_service(app: FastAPI, plugin: str, name: str) -> RunningService:
+    if (service := _service(app, plugin, name)) is None:
+        msg = f"Service {name!r} of plugin {plugin!r} is not running in this worker; ensure it first."
+        raise _refused(503, msg)
+    return service
+
+
+@asynccontextmanager
+async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_seconds: float) -> AsyncIterator[None]:
+    """Count the service as used every half idle timeout while a stream to it lasts, and once more as it ends."""
+
+    async def use() -> None:
+        # A periodic use, not a wait for a condition.
+        while _service(app, plugin, name) is not None:  # noqa: ASYNC110
+            await asyncio.sleep(idle_timeout_seconds / 2)
+
+    task = asyncio.create_task(use(), name="worker-service-in-use")
+    try:
+        yield
+    finally:
+        task.cancel()
+        _service(app, plugin, name)
+
+
+async def _relay(request: Request, url: URL, port: int, secret: str | None, held: AsyncExitStack) -> StreamingResponse:
+    """Pass the request to ``url``, adding the service's ``secret``, and stream its answer back."""
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
-    session = aiohttp.ClientSession(auto_decompress=False, timeout=_TIMEOUT)
+    headers = _end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER, _SERVICE_SECRET_HEADER}))
+    if secret is not None:
+        headers.append((_SERVICE_SECRET_HEADER, secret))
+    session = await held.enter_async_context(aiohttp.ClientSession(auto_decompress=False, timeout=_TIMEOUT))
     try:
         upstream = await session.request(
             request.method,
             url,
-            headers=_end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER})),
+            headers=headers,
             data=request.stream() if has_body else None,
             allow_redirects=False,
             skip_auto_headers=(*_AIOHTTP_DEFAULT_HEADERS, "Content-Type"),
         )
     except (aiohttp.ClientError, TimeoutError, OSError):
-        await session.close()
+        await held.aclose()
         raise _refused(502, f"The app on port {port} did not answer.") from None
-    return _AppResponse(upstream, session)
+    return _AppResponse(upstream, held)
 
 
-@router.websocket("/{port}/{path:path}")
-async def relay_socket(websocket: WebSocket, port: int) -> None:
-    """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
-    try:
-        await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
-        url = await _upstream_url(websocket, port)
-    except HTTPException:
-        await websocket.close(code=1008)
-        return
+async def _deny(websocket: WebSocket, refusal: HTTPException) -> None:
+    """Refuse the handshake with the refusal's status, detail, and headers, as an HTTP answer carries them."""
+    response = JSONResponse({"detail": refusal.detail}, status_code=refusal.status_code, headers=refusal.headers)
+    # The server frames the denial itself, and some of its WebSocket implementations add these after the app's own.
+    del response.headers["content-length"]
+    del response.headers["content-type"]
+    await websocket.send_denial_response(response)
+
+
+async def _relay_socket(
+    websocket: WebSocket,
+    url: URL,
+    secret: str | None,
+    in_use: AbstractAsyncContextManager[None],
+) -> None:
+    """Pass the WebSocket to ``url``, adding the service's ``secret``, message by message."""
     protocols = [name.strip() for offer in websocket.scope["subprotocols"] for name in offer.split(",") if name.strip()]
     headers = [(name, value) for name, value in websocket.headers.items() if name in _WEBSOCKET_HEADERS]
+    if secret is not None:
+        headers.append((_SERVICE_SECRET_HEADER, secret))
     try:
         async with (
             aiohttp.ClientSession(
@@ -260,9 +304,64 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
                 skip_auto_headers=_AIOHTTP_DEFAULT_HEADERS,
             ) as session,
             session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,
+            in_use,
         ):
             await websocket.accept(subprotocol=upstream.protocol)
             await relay_websocket(websocket, upstream)
     except (aiohttp.ClientError, TimeoutError, OSError):
         with suppress(RuntimeError, OSError):
             await websocket.close(code=1011)
+
+
+@router.get("/ports", dependencies=[Depends(validate_runner_token)])
+async def listening_ports(request: Request) -> list[int]:
+    """List the ports the worker's own apps listen on at its loopback: those the relay reaches."""
+    _require_dedicated_worker(request)
+    return await asyncio.to_thread(_reachable_ports, request.scope["server"][1])
+
+
+@router.api_route("/ports/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
+async def relay(request: Request, port: int) -> StreamingResponse:
+    """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
+    url = await _upstream_url(request, port, 2)
+    return await _relay(request, url, port, None, AsyncExitStack())
+
+
+@router.api_route(
+    "/services/{plugin}/{name}/{path:path}",
+    methods=_METHODS,
+    dependencies=[Depends(validate_runner_token)],
+)
+async def relay_to_service(request: Request, plugin: str, name: str) -> StreamingResponse:
+    """Pass one request to the plugin's running service and stream its answer back."""
+    service = _require_service(request.app, plugin, name)
+    url = await _upstream_url(request, service.port, 3)
+    held = AsyncExitStack()
+    await held.enter_async_context(_service_in_use(request.app, plugin, name, service.idle_timeout_seconds))
+    return await _relay(request, url, service.port, service.secret, held)
+
+
+@router.websocket("/ports/{port}/{path:path}")
+async def relay_socket(websocket: WebSocket, port: int) -> None:
+    """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
+    try:
+        await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
+        url = await _upstream_url(websocket, port, 2)
+    except HTTPException as refusal:
+        await _deny(websocket, refusal)
+        return
+    await _relay_socket(websocket, url, None, nullcontext())
+
+
+@router.websocket("/services/{plugin}/{name}/{path:path}")
+async def relay_socket_to_service(websocket: WebSocket, plugin: str, name: str) -> None:
+    """Pass one WebSocket to the plugin's running service, message by message, as long as it lasts."""
+    try:
+        await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
+        service = _require_service(websocket.app, plugin, name)
+        url = await _upstream_url(websocket, service.port, 3)
+    except HTTPException as refusal:
+        await _deny(websocket, refusal)
+        return
+    in_use = _service_in_use(websocket.app, plugin, name, service.idle_timeout_seconds)
+    await _relay_socket(websocket, url, service.secret, in_use)
