@@ -118,12 +118,13 @@ async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> di
     only, refused as too large from its declared length before it is read, and as soon as it passes the limit while it
     is read.
     """
-    taken_at = await caller.service.reserve_upload(call_id, caller.user_id)
+    slot = await caller.service.reserve_upload(call_id, caller.user_id)
     try:
         audio, started_at = await _speech_form(request)
+        slot.sent = True
         line = await caller.service.speech(call_id, caller.user_id, audio=audio, started_at=started_at)
     finally:
-        caller.service.release_upload(caller.user_id, taken_at)
+        caller.service.release_upload(caller.user_id, slot)
     return {"line": None if line is None else _line_json(line)}
 
 

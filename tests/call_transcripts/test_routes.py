@@ -501,7 +501,10 @@ async def test_speech_from_outside_the_call_or_with_a_stretch_in_flight_is_refus
 async def test_a_second_upload_at_once_or_one_from_a_member_not_in_the_call_is_refused_before_its_body_is_read(
     api: Api,
 ) -> None:
-    """One upload at a time per person, from someone in the call: a second is 429 and a member not in the call 403."""
+    """One upload at a time per person, from someone in the call: a second is 429 and a member not in the call 403.
+
+    An upload still being sent holds its slot however long it takes.
+    """
     call_id = (await api.join(ANN)).json()["call"]["id"]
     api.world.clock.advance(10)
     path = f"{PREFIX}/calls/{call_id}/speech"
@@ -513,11 +516,14 @@ async def test_a_second_upload_at_once_or_one_from_a_member_not_in_the_call_is_r
 
     second = await _drive(path, {**api.headers(ANN), **form}, chunks)
     member = await _drive(path, {**api.headers(CAROL), **form}, chunks)
+    api.world.clock.advance(30)
+    later = await _drive(path, {**api.headers(ANN), **form}, chunks)
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
 
     assert (second[0], second[1]["code"], second[2], second[3]["retry-after"]) == (429, "too-many-requests", 0, "3")
     assert (member[0], member[1]["code"], member[2]) == (403, "forbidden", 0)
+    assert (later[0], later[1]["code"], later[2]) == (429, "too-many-requests", 0)
     assert (await api.speech(call_id, ANN)).status_code == 200
     assert len(api.world.transcriber.requests) == 1
 

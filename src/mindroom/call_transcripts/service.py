@@ -49,9 +49,10 @@ _TRANSCRIPT_DELAY_SECONDS = 30.0
 _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
 _SPEAKING_RETRY_AFTER_SECONDS = 3
-# How long a person's upload slot is held at most. Chat gives up on an upload 30 seconds after it began, its one retry
-# included, and then sends the next stretch, so a slot held longer would refuse that stretch and its retry, losing it,
-# for a stretch Chat no longer waits on. The slow stretch is still transcribed and written.
+# How long a person's upload slot is held at most once its audio has arrived. Chat gives up on an upload 30 seconds
+# after it began, its one retry included, and then sends the next stretch, so a slot held longer would refuse that
+# stretch and its retry, losing it, for a stretch Chat no longer waits on. The slow stretch is still transcribed and
+# written. A slot whose audio is still arriving stays held, so nobody has more than one upload's audio in memory.
 _UPLOAD_SLOT_SECONDS = 25.0
 _TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 # Notes not written in this long count as failed notes, so a model that never answers holds up no other call for long.
@@ -88,6 +89,15 @@ class CallRefusedError(Exception):
         self.message = message
         self.retry_after = retry_after
         """Whole seconds to wait before trying again, for ``too-many-requests``."""
+
+
+@dataclass(slots=True)
+class _UploadSlot:
+    """A person's one upload slot, taken before a stretch's audio is read."""
+
+    taken_at: float
+    sent: bool = False
+    """Whether all of the stretch's audio has arrived."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,8 +254,8 @@ class CallTranscriptService:
         self._started_at = clock()
         """When this MindRoom began serving calls: every app gets a full minute from then to check in."""
         self._room_locks: dict[str, asyncio.Lock] = {}
-        self._uploading: dict[str, float] = {}
-        """When each person sending a stretch now took their slot, from before its audio is read until it is answered."""
+        self._uploading: dict[str, _UploadSlot] = {}
+        """The slot of each person sending a stretch now, from before its audio is read until it is answered."""
         self._speaking: dict[object, str] = {}
         """The call of each stretch let in and not yet written."""
         self._recent_speech: dict[str, deque[float]] = {}
@@ -357,27 +367,29 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         return line
 
-    async def reserve_upload(self, call_id: str, user_id: str) -> float:
-        """Take the person's one upload slot before a stretch's audio is read, until ``release_upload`` or 25 seconds on.
+    async def reserve_upload(self, call_id: str, user_id: str) -> _UploadSlot:
+        """Take the person's one upload slot before a stretch's audio is read, until ``release_upload``.
 
-        Refused from someone not in the call, for a call ended more than 30 seconds ago, or while their last upload runs.
-        Returns when the slot was taken, to give it back with.
+        Refused from someone not in the call, for a call ended more than 30 seconds ago, or while their last upload holds
+        the slot: until all its audio has arrived, then for at most 25 seconds after it was taken.
         """
         call = await self._call_for(call_id, user_id)
         now = self._clock()
         await self._require_in_call(call, user_id, now)
-        if now - self._uploading.get(user_id, -math.inf) < _UPLOAD_SLOT_SECONDS:
+        held = self._uploading.get(user_id)
+        if held is not None and (not held.sent or now - held.taken_at < _UPLOAD_SLOT_SECONDS):
             raise CallRefusedError(
                 code="too-many-requests",
                 message="Your previous stretch of speech is still being sent.",
                 retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
             )
-        self._uploading[user_id] = now
-        return now
+        slot = _UploadSlot(taken_at=now)
+        self._uploading[user_id] = slot
+        return slot
 
-    def release_upload(self, user_id: str, taken_at: float) -> None:
-        """Give back the person's upload slot taken at ``taken_at``, unless their next upload has taken it since."""
-        if self._uploading.get(user_id) == taken_at:
+    def release_upload(self, user_id: str, slot: _UploadSlot) -> None:
+        """Give back the person's upload slot ``slot``, unless their next upload has taken it since."""
+        if self._uploading.get(user_id) is slot:
             del self._uploading[user_id]
 
     async def live(self, room_id: str, user_id: str, *, after: str | None = None) -> LiveCall:

@@ -365,7 +365,7 @@ The rules:
 - A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
 - A call's length runs to the last check-in or leave MindRoom recorded from anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down shows as shorter than it really was.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
-- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed or 25 seconds have passed, and at most 240 a minute.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed or, once all of it has arrived, until 25 seconds after its upload began, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
 - A stretch said before the call ended is still added when it arrives within 30 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.

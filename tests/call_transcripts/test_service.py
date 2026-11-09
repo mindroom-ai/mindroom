@@ -1778,6 +1778,7 @@ async def test_an_upload_slot_is_free_again_25_seconds_after_it_was_taken(world:
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
     stuck = await world.service.reserve_upload(call.id, ANN)
+    stuck.sent = True
     first = asyncio.create_task(world.say(call.id, ANN))
     await world.transcriber.started.wait()
 
@@ -1785,6 +1786,7 @@ async def test_an_upload_slot_is_free_again_25_seconds_after_it_was_taken(world:
     await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
     world.clock.advance(0.1)
     taken = await world.service.reserve_upload(call.id, ANN)
+    taken.sent = True
     second = asyncio.create_task(world.say(call.id, ANN))
     world.transcriber.gate.set()
     lines = await asyncio.gather(first, second)
