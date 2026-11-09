@@ -166,11 +166,12 @@ def worker_services(app: FastAPI) -> _WorkerServices:
 
 @dataclass(frozen=True)
 class RunningService:
-    """A service running in this worker: its loopback port, the secret it requires, and its idle timeout."""
+    """A service running in this worker: its loopback port, secret, idle timeout, and process group."""
 
     port: int
     secret: str = field(repr=False)
     idle_timeout_seconds: float
+    group: int
 
 
 def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
@@ -180,7 +181,7 @@ def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | No
     if instance is None or instance.process.returncode is not None:
         return None
     services.touch(plugin, name)
-    return RunningService(instance.port, instance.secret, instance.idle_timeout_seconds)
+    return RunningService(instance.port, instance.secret, instance.idle_timeout_seconds, instance.process.pid)
 
 
 async def close_worker_services(app: FastAPI) -> None:

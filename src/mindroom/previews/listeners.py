@@ -204,12 +204,20 @@ def _in_group(pid: int, group: int) -> bool:
         return False
 
 
+def group_sockets(sockets: frozenset[int], group: int) -> frozenset[int]:
+    """Return those of ``sockets`` that processes of process group ``group``, and only they, hold.
+
+    Blocking: reads every process's descriptors once. Raises OSError when ``/proc`` cannot be read.
+    """
+    return frozenset(
+        inode for inode, pids in _holders(sockets).items() if pids and all(_in_group(pid, group) for pid in pids)
+    )
+
+
 def group_listens(port: int, group: int) -> bool:
     """Return whether processes of process group ``group``, and only they, hold the sockets listening on ``port``.
 
     Blocking. Raises OSError when neither the kernel nor ``/proc`` can say.
     """
     sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
-    if not sockets:
-        return False
-    return all(pids and all(_in_group(pid, group) for pid in pids) for pids in _holders(sockets).values())
+    return bool(sockets) and group_sockets(sockets, group) == sockets

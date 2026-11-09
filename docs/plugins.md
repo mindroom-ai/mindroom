@@ -1730,6 +1730,7 @@ A route on a [plugin host](#origins-of-your-own) may pass the browser's `Origin`
 A service gets its secret from the relay, and never one the route sends.
 The relay refuses with its own answer, marked with the `x-mindroom-relay-refused` header, so a route tells it from the app's: 403 for a port it never reaches, such as the worker runner's own or one a process outside the worker holds, 502 when nothing answers there, and 503 for a service that is not running: ensure it, and stop it first when the ensure reports it `exited`.
 The marked 502 also answers a relay to a service that is still `starting`: ensure it again instead of stopping it.
+A marked 403 answers a relay to a service whose port a process other than the service's own holds: such a service cannot start on that port, so stop it and ensure it again.
 While an answer or WebSocket is open, idle cleanup leaves the worker running.
 Without an answer from the worker, the calls raise `aiohttp.ClientError`.
 A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_api": "1.22"` in its manifest, one that passes `headers` to `websocket()` states `"1.24"`, and one whose tool calls `worker_relay` states `"1.25"`.

@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 
 from mindroom import plugin_worker_services
-from mindroom.api import config_lifecycle, sandbox_runner_app
+from mindroom.api import config_lifecycle, sandbox_runner_app, worker_preview
 from mindroom.api import worker_services as worker_services_module
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
@@ -990,12 +990,12 @@ async def test_a_route_gets_its_services_websocket_redirect_without_following_it
         assert _REFUSED not in redirected.value.headers
 
 
-@pytest.mark.asyncio
-async def test_a_service_whose_port_another_server_took_exits_and_the_relay_never_reaches_that_server(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Another server that listens on the port probed for a service is never reported as it nor relayed to."""
+@asynccontextmanager
+async def _other_server(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[object]]:
+    """Serve on the next port probed for a service, as another socket can take it before the service binds it.
+
+    Yields the connections it gets.
+    """
     connections: list[object] = []
 
     async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1005,19 +1005,80 @@ async def test_a_service_whose_port_another_server_took_exits_and_the_relay_neve
         await writer.drain()
         writer.close()
 
-    async with _runner(tmp_path) as runner, await asyncio.start_server(answer, "127.0.0.1", 0) as other:
+    async with await asyncio.start_server(answer, "127.0.0.1", 0) as other:
+        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: other.sockets[0].getsockname()[1])
+        yield connections
+
+
+async def _websocket_refusal(relay: WorkerRelay, service: str) -> int:
+    with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+        async with relay.websocket("/", service=service):
+            pass
+    assert refused.value.headers is not None
+    assert refused.value.headers[_REFUSED] == "1"
+    return refused.value.status
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_port_another_server_took_exits_and_the_relay_never_reaches_that_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another server that listens on the port probed for a service is never reported as it nor relayed to."""
+    async with _runner(tmp_path) as runner:
         (runner.plugin_root / "echo.py").write_text(_ECHO)
         context, _, relay = await _relay(tmp_path, runner, monkeypatch)
-        # The other server takes the port as the probe for it closes, before the service binds it.
-        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: other.sockets[0].getsockname()[1])
-        state = await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)
-        assert (state.state, state.exit_code) == ("exited", 1)
-        assert (await _get(relay, "/", service="echo"))[::2] == (503, True)
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            async with relay.websocket("/", service="echo"):
-                pass
-        assert refused.value.status == 503
-        assert connections == []
+        async with _other_server(monkeypatch) as connections:
+            state = await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)
+            assert (state.state, state.exit_code) == ("exited", 1)
+            assert (await _get(relay, "/", service="echo"))[::2] == (503, True)
+            assert await _websocket_refusal(relay, "echo") == 503
+            assert connections == []
+
+
+@pytest.mark.asyncio
+async def test_the_relay_never_reaches_another_server_on_the_port_of_a_service_that_is_still_starting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service that has not bound its port yet gets the relay's 502, and its 403 while another server holds it."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "waiting.py").write_text("import sys, time\n\nsys.stdin.readline()\ntime.sleep(600)\n")
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        monkeypatch.setattr(worker_services_module, "_START_SECONDS", 0.5)
+        waiting = WorkerService("waiting", "waiting.py")
+        assert (await ensure_worker_service(context, waiting, _TARGET)).state == "starting"
+        assert (await _get(relay, "/", service="waiting"))[::2] == (502, True)
+        await stop_worker_service(context, waiting, _TARGET)
+        async with _other_server(monkeypatch) as connections:
+            state = await ensure_worker_service(context, waiting, _TARGET)
+            assert state.state == "starting"
+            status, text, marked = await _get(relay, "/", service="waiting")
+            assert (status, marked) == (403, True)
+            assert json.loads(text) == {"detail": f"The server on port {state.port} is not the service's own."}
+            assert await _websocket_refusal(relay, "waiting") == 403
+            assert connections == []
+
+
+@pytest.mark.asyncio
+async def test_the_relay_reads_a_services_holders_again_only_once_another_socket_listens_on_its_port(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relaying to a running service reads which processes hold its port once, not on every request."""
+    reads: list[int] = []
+    read = worker_preview.group_sockets
+
+    def counted(sockets: frozenset[int], group: int) -> frozenset[int]:
+        reads.append(group)
+        return read(sockets, group)
+
+    monkeypatch.setattr(worker_preview, "group_sockets", counted)
+    async with _runner(tmp_path) as runner:
+        _, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        for _ in range(3):
+            assert await _get(relay, "/", service="hello") == (200, "hello", False)
+        assert len(reads) == 1
 
 
 # A service whose server is a process it starts, as a launcher's is, while the program itself only waits for it.
