@@ -7010,10 +7010,14 @@ expose = [
     "_PLUGIN_CACHE",
     "_PluginBase",
     "_collect_plugin_bases",
+    "_import_by_name",
+    "_import_name",
     "_install_plugin_package_chain",
     "_load_plugin_base",
     "_log_failed_plugin_entry",
     "_module_name",
+    "_outside_other_plugins",
+    "_package_parts",
     "_plugin_package_name",
     "_prepare_module",
     "_reject_duplicate_plugin_manifest_names",
@@ -7493,6 +7497,7 @@ expose = [
     "WorkerAttachmentSaveReceipt",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
+    "lease_worker_manager",
     "worker_stand_ins",
     "runner_config_snapshot",
     "sandbox_proxy_config",
@@ -8233,8 +8238,13 @@ path = "mindroom.api.worker_preview"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
+    "mindroom.previews.listeners",
     "mindroom.previews.relay",
 ]
+
+[[modules]]
+path = "mindroom.previews.listeners"
+depends_on = []
 
 [[modules]]
 path = "mindroom.previews.relay"
@@ -8244,6 +8254,7 @@ depends_on = []
 path = "mindroom.api.worker_computer"
 depends_on = [
     "mindroom.api.sandbox_runner",
+    "mindroom.api.worker_services",
     "mindroom.worker_computer.agent_browser",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
@@ -8255,7 +8266,6 @@ path = "mindroom.api.worker_services"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
-    "mindroom.api.worker_computer",
     "mindroom.api.worker_preview",
     "mindroom.plugin_worker_services",
     "mindroom.tool_system.plugins",

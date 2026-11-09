@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSock
 from pydantic import BaseModel, Field
 
 from mindroom.api.sandbox_runner import app_runner_token, validate_runner_token
+from mindroom.api.worker_services import worker_services
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.worker_computer.protocol import ComputerStatus
@@ -204,7 +205,7 @@ async def _forward_commands(websocket: WebSocket, receive: Callable[[str], None]
         receive(text)
 
 
-async def serve_agent_browser(websocket: WebSocket) -> None:
+async def _serve_agent_browser(websocket: WebSocket) -> None:
     """Give an admitted worker service its own CDP session on the agent's page; it acts only under the control lease.
 
     Opening it starts a stopped Computer, as creating a Computer session does; in a worker without a Computer, or one
@@ -253,3 +254,18 @@ async def serve_agent_browser(websocket: WebSocket) -> None:
             await run_coroutine_until_complete(cleanup())
         except Exception as error:
             logger.warning("Agent browser bridge cleanup failed", error_type=type(error).__name__)
+
+
+@router.websocket("/agent-browser/{plugin}/{name}")
+async def agent_browser(websocket: WebSocket, plugin: str, name: str) -> None:
+    """Bridge the agent's browser page to the running instance of this service, which presents its own secret."""
+    instance = worker_services(websocket.app).instance(plugin, name)
+    supplied = websocket.headers.get("x-mindroom-service-secret", "").encode()
+    if (
+        instance is None
+        or instance.process.returncode is not None
+        or not secrets.compare_digest(supplied, instance.secret.encode())
+    ):
+        await websocket.close(code=1008)
+        return
+    await _serve_agent_browser(websocket)

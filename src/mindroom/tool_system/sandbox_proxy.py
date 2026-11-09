@@ -414,7 +414,7 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
     return worker_config_snapshot(runtime_config)
 
 
-def _lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
+def lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
     """Borrow the primary worker manager for one request under these proxy settings."""
     return lease_primary_worker_manager(
         runtime_paths,
@@ -465,7 +465,7 @@ def save_attachment_to_worker(
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
@@ -522,7 +522,7 @@ def view_file_from_worker(
 ) -> ToolValue:
     """View one file in the selected worker, for an agent whose workspace tools run in a worker."""
     proxy_config = sandbox_proxy_config(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
@@ -847,7 +847,7 @@ def _call_proxy_sync(
         if pump is not None or reply_timing is not None
         else None
     )
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         request, worker_handle = _build_execute_request(
             stand_ins,
             worker_manager=worker_manager,
@@ -1027,7 +1027,7 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
     """
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         request, worker_handle = _build_execute_request(
             stand_ins,
             worker_manager=worker_manager,
@@ -1061,6 +1061,7 @@ __all__ = [
     "WorkerStandIns",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
+    "lease_worker_manager",
     "primary_owns_tool_settings",
     "runner_config_snapshot",
     "sandbox_proxy_config",

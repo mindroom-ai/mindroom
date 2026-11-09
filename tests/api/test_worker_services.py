@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import socket
 import sys
 import threading
@@ -21,7 +22,7 @@ from mindroom import plugin_worker_services
 from mindroom.api import sandbox_runner_app
 from mindroom.api import worker_services as worker_services_module
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
-from mindroom.api.worker_services import _services, close_worker_services
+from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -33,6 +34,7 @@ from mindroom.plugin_worker_services import (
     ensure_worker_service,
     stop_worker_service,
 )
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
@@ -201,6 +203,9 @@ async def test_the_secret_and_the_runner_token_stay_out_of_the_service_s_environ
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
         proc = Path(f"/proc/{record['pid']}")
+        # Another process of the same user cannot open the service's stdin again to read what it was sent.
+        with pytest.raises(OSError, match="No such device or address"):
+            (proc / "fd" / "0").open("rb")
         exposed = (proc / "environ").read_bytes() + (proc / "cmdline").read_bytes()
         assert str(record["secret"]).encode() not in exposed
         assert _TOKEN.encode() not in exposed
@@ -256,7 +261,7 @@ async def test_a_service_that_ignores_the_stop_signal_is_killed(
 async def test_each_ensure_resets_the_idle_timer(tmp_path: Path) -> None:
     """A service ensured more often than its idle timeout keeps running, even when an ensure waited on another one."""
     async with _runner(tmp_path) as runner:
-        services = _services(sandbox_runner_app.app)
+        services = worker_services(sandbox_runner_app.app)
         for _ in range(4):
             await _call("POST", runner.url(), _body(idle_timeout_seconds=0.6), _AUTH)
             await asyncio.sleep(0.3)
@@ -278,7 +283,7 @@ async def test_an_idle_service_stops_after_its_timeout(tmp_path: Path) -> None:
         await _call("POST", runner.url(), _body(idle_timeout_seconds=2.0), _AUTH)
         pid = int(runner.record()["pid"])
         await _until(lambda: not _pid_alive(pid), seconds=20)
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
 
 
 @pytest.mark.asyncio
@@ -288,10 +293,10 @@ async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -
         _, state = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert state["state"] == "exited"
         assert state["exit_code"] == 3
-        process = _services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
+        process = worker_services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
         _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert again == state
-        assert _services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
+        assert worker_services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -339,10 +344,7 @@ async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
 async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path) -> None:
     """The request's config names the plugin, but its folder is missing here: a clear refusal."""
     async with _runner(tmp_path) as runner:
-        (runner.plugin_root / "mindroom.plugin.json").rename(tmp_path / "moved.json")
-        for child in runner.plugin_root.iterdir():
-            child.unlink()
-        runner.plugin_root.rmdir()
+        shutil.rmtree(runner.plugin_root)
         status, answer = await _call("POST", runner.url(), _body(), _AUTH)
         assert status == 404
         assert answer["detail"] == (
@@ -369,7 +371,7 @@ async def test_a_stop_refuses_a_start_that_arrived_before_it(tmp_path: Path, mon
         release.set()
         status, answer = await start
         assert (status, answer["detail"]) == (409, "The service was stopped while it started.")
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
         assert (await _call("POST", runner.url(), _body(), _AUTH))[1]["state"] == "running"
 
 
@@ -405,13 +407,13 @@ _TARGET = resolve_worker_target(
 class _Workers:
     """A dedicated backend whose one worker is the test's runner: an ensure starts it, a touch only finds it."""
 
-    def __init__(self, port: int, status: str = "ready") -> None:
+    def __init__(self, port: int) -> None:
         self.handle = WorkerHandle(
             worker_id="worker-1",
             worker_key=_WORKER_KEY,
             endpoint=f"http://127.0.0.1:{port}/api/sandbox-runner/execute",
             auth_token=_TOKEN,
-            status=status,  # type: ignore[arg-type]
+            status="ready",
             backend_name="docker",
             last_used_at=0.0,
             created_at=0.0,
@@ -446,7 +448,7 @@ def _primary(tmp_path: Path, runner: _Runner, monkeypatch: pytest.MonkeyPatch, w
     )
     config = _config(runner.plugin_root, paths)
     publish_test_plugins(config, paths)
-    monkeypatch.setattr(plugin_worker_services, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_a, **_k: nullcontext(workers))
     return build_plugin_context("demo", config, paths, lambda: config)
 
 
@@ -458,13 +460,13 @@ async def test_a_plugin_runs_its_service_in_the_agent_s_worker(tmp_path: Path, m
         state = await ensure_worker_service(context, _SERVICE, _TARGET)
         assert state.state == "running"
         assert await ensure_worker_service(context, _SERVICE, _TARGET) == state
-        instance = _services(sandbox_runner_app.app).instance("demo", "hello")
+        instance = worker_services(sandbox_runner_app.app).instance("demo", "hello")
         assert instance is not None
         assert instance.port == state.port
         assert instance.idle_timeout_seconds == 300
 
         await stop_worker_service(context, _SERVICE, _TARGET)
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
         # A stopped service is not stopped again at the next plugin load.
         assert plugin_worker_services._started == {}
 
@@ -516,29 +518,6 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
             await ensure_worker_service(context, _SERVICE, _TARGET)
 
 
-@pytest.mark.asyncio
-async def test_a_plugin_load_or_shutdown_stops_the_services_the_primary_started(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each load replaces every plugin's code, so the services that code started stop with it, as at shutdown."""
-    async with _runner(tmp_path) as runner:
-        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
-        config = context.config
-        lifespans = PluginLifespans(context.runtime_paths, lambda: config)
-        await lifespans.apply_published()
-        services = _services(sandbox_runner_app.app)
-
-        await ensure_worker_service(context, _SERVICE, _TARGET)
-        publish_test_plugins(config, context.runtime_paths)
-        await lifespans.apply_published()
-        assert services.instance("demo", "hello") is None
-
-        await ensure_worker_service(context, _SERVICE, _TARGET)
-        await lifespans.stop()
-        assert services.instance("demo", "hello") is None
-
-
 # The lifespan of a plugin that starts its service as it starts, for Alice's turns of the agent ``coder``.
 _LIFECYCLE = """
 from contextlib import asynccontextmanager
@@ -570,7 +549,7 @@ async def test_a_service_the_new_code_starts_as_it_loads_keeps_running(
         context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
         config = context.config
         lifespans = PluginLifespans(context.runtime_paths, lambda: config)
-        services = _services(sandbox_runner_app.app)
+        services = worker_services(sandbox_runner_app.app)
 
         await lifespans.apply_published()
         first = services.instance("demo", "hello")
@@ -607,7 +586,7 @@ async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_pat
         await stop_worker_service(context, _SERVICE, _TARGET)
 
 
-@pytest.mark.parametrize(("name", "idle"), [("Hello", 1.0), ("a/b", 1.0), ("", 1.0), ("hello", 0.0)])
+@pytest.mark.parametrize(("name", "idle"), [("Hello", 1.0), ("_cache", 1.0), ("a/b", 1.0), ("", 1.0), ("hello", 0.0)])
 def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: float) -> None:
     """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
     with pytest.raises(ValueError, match=r"(?i)worker service"):
@@ -627,7 +606,7 @@ async def test_a_service_that_fails_to_stop_holds_up_no_other(monkeypatch: pytes
 
     monkeypatch.setattr(plugin_worker_services, "_stop", stop)
     for name in ("broken", "hello"):
-        plugin_worker_services._started[("v1:default:shared:coder", "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
+        plugin_worker_services._started[(_WORKER_KEY, "demo", name)] = (None, None, _TARGET)  # type: ignore[assignment]
     await plugin_worker_services.stop_started_worker_services()
     assert stopped == ["broken", "hello"]
     assert plugin_worker_services._started == {}

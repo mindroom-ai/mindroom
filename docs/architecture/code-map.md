@@ -499,7 +499,8 @@ Matrix sync callback
 | `tool_system/sandbox_proxy.py` | The one tool placement decision (`ToolPlacement`) and the proxy that routes worker calls |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
-| `api/worker_preview.py` | Dedicated-worker runner routes that list the ports apps listen on at the worker's loopback and relay the primary's HTTP requests and WebSockets to them |
+| `api/worker_preview.py` | Dedicated-worker runner routes that list the ports the worker's own apps listen on at its loopback and relay the primary's HTTP requests and WebSockets to them, refusing other containers' servers and the runner's own port |
+| `previews/listeners.py` | Lists the TCP sockets listening on this machine's ports, through the kernel's socket diagnostics or `/proc/net`, and whether only the runner's process tree or cgroup holds them |
 | `previews/relay.py` | Passes one WebSocket's messages both ways between an accepted socket and a client socket until either closes |
 | `api/worker_services.py` | Dedicated-worker runner routes that start, report, and stop plugins' worker services, each with its process group, port, secret, and idle timer |
 | `worker_computer/agent_browser.py` | A worker service's own CDP session on the agent's browser page: an allowlist of watching commands, acting ones only under the Computer's control lease, following the agent between pages, and releasing held input |

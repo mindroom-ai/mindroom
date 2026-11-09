@@ -644,7 +644,7 @@ async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_sta
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
         url = _bridge_url(record["pid"])
-        assert url == f"ws://127.0.0.1:{runner.port}/api/sandbox-runner/plugin-services/demo/hello/agent-browser"
+        assert url == f"ws://127.0.0.1:{runner.port}/computer/agent-browser/demo/hello"
         for headers in ({}, _AUTH, {_SECRET_HEADER: other_secret}, {_SECRET_HEADER: f"{record['secret']}x"}):
             assert await _refused(url, headers)
         assert computer.status()["state"] == "stopped"
@@ -667,7 +667,7 @@ async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_sta
         _, brief = await _call("POST", runner.url("brief"), _body("brief.py"), _AUTH)
         assert brief["state"] == "exited"
         brief_secret = _secret(runner.record())
-        assert await _refused(url.replace("/hello/", "/brief/"), brief_secret)
+        assert await _refused(url.replace("/demo/hello", "/demo/brief"), brief_secret)
 
 
 @pytest.mark.asyncio
