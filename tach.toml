@@ -6982,6 +6982,7 @@ expose = [
     "plugin_load_active",
     "plugin_module_registrations",
     "record_plugin_root",
+    "recorded_plugin_root",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
@@ -7008,6 +7009,7 @@ expose = [
     "_load_plugin_base",
     "_log_failed_plugin_entry",
     "_module_name",
+    "_package_parts",
     "_plugin_package_name",
     "_prepare_module",
     "_reject_duplicate_plugin_manifest_names",

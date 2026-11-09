@@ -482,13 +482,17 @@ def _module_name(plugin_name: str, plugin_root: Path, module_path: Path, prefix:
     return f"{package_name}.{_relative_module_name(plugin_root, module_path)}"
 
 
+def _package_parts(root: Path, module_path: Path) -> tuple[str, ...]:
+    """Return the parts of the name a module file inside ``root`` has below it, a package by its ``__init__.py``."""
+    parts = module_path.relative_to(root).with_suffix("").parts
+    return parts[:-1] if parts[-1:] == ("__init__",) else parts
+
+
 def _import_name(plugin: _PluginBase, module_path: Path) -> str | None:
     """Return the name Python's import system gives one of a package plugin's modules, or None when it gives none."""
     if plugin.package is None:
         return None
-    parts = (*plugin.package.split("."), *module_path.relative_to(plugin.root).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
+    parts = (*plugin.package.split("."), *_package_parts(plugin.root, module_path))
     return ".".join(parts) if all(part.isidentifier() for part in parts) else None
 
 

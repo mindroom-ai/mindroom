@@ -36,6 +36,7 @@ from mindroom.tool_system.registry import (
     ToolRegistry,
     compose_tool_registry,
     plugin_module_registrations,
+    recorded_plugin_root,
 )
 
 if TYPE_CHECKING:
@@ -372,14 +373,16 @@ def _canonical_plugin_modules() -> dict[str, ModuleType]:
 
 
 def _plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, ModuleType]:
-    """Return one plugin's canonical modules: those under its own packages and under the package names of its root."""
-    return _modules_named(
-        (
-            plugin_imports._plugin_package_name(plugin.name, plugin.root),
-            *filter(None, (plugin.package,)),
-            *(package for package, root in tuple(_ROOT_PACKAGES.items()) if root == plugin.root),
-        ),
-    )
+    """Return one plugin's canonical modules: those under its own packages and under the package names of its root.
+
+    A module under a package name whose file lies in the root of another plugin inside this one's belongs to that one.
+    """
+    root_packages = (package for package, root in tuple(_ROOT_PACKAGES.items()) if root == plugin.root)
+    named = _modules_named((*([] if plugin.package is None else [plugin.package]), *root_packages))
+    return {
+        **_modules_named((plugin_imports._plugin_package_name(plugin.name, plugin.root),)),
+        **{name: module for name, module in named.items() if recorded_plugin_root(name) in (None, plugin.root)},
+    }
 
 
 def _modules_named(packages: tuple[str, ...], *prefixes: str) -> dict[str, ModuleType]:
@@ -420,9 +423,7 @@ def _root_packages(root: Path, loaded_before: set[str]) -> set[str]:
     """Return the package names the modules imported since ``loaded_before`` reached ``root`` under."""
     packages: set[str] = set()
     for module_name, module in _imported_from_root(root, loaded_before).items():
-        relative = Path(cast("str", module.__file__)).resolve().relative_to(root).with_suffix("").parts
-        if relative[-1:] == ("__init__",):
-            relative = relative[:-1]
+        relative = plugin_imports._package_parts(root, Path(cast("str", module.__file__)).resolve())
         parts = tuple(module_name.split("."))
         depth = len(parts) - len(relative)
         # A vendored package maps to no root package.
