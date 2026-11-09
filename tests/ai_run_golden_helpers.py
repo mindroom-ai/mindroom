@@ -288,6 +288,7 @@ async def _team_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[
     shown = continued_team_pause(
         TeamStreamPresentation.new(team.member_names, ["Writer", "Checker"], show_tool_calls=False),
         attempt,
+        quiet=False,
     )
     [requirement] = paused.requirements or []
     call = requirement.tool_execution

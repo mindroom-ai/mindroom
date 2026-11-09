@@ -112,8 +112,10 @@ class PostResponseEffectsSupport:
         thread_id: str,
         entity_name: str | None,
         delivered_response: DeliveredResponse,
+        *,
+        retitle: bool = False,
     ) -> None:
-        """Queue background thread summarization with timing instrumentation."""
+        """Queue background thread summarization with timing instrumentation; ``retitle`` summarizes whatever the count."""
         summary_coro = maybe_generate_thread_summary(
             client=self._client(),
             room_id=room_id,
@@ -124,6 +126,7 @@ class PostResponseEffectsSupport:
             delivered_response=delivered_response,
             entity_name=entity_name or self.agent_name,
             membership_index=self.runtime.agent_reply_memberships,
+            retitle=retitle,
         )
         create_background_task(
             self._timed_thread_summary(
@@ -131,6 +134,16 @@ class PostResponseEffectsSupport:
             ),
             name=f"thread_summary_{room_id}_{thread_id}",
             owner=self.runtime,
+        )
+
+    def retitle_thread(self, room_id: str, thread_id: str, *, event_id: str, body: str) -> None:
+        """Queue a summary of the thread now, whatever its count, counting the message this bot just posted there."""
+        self._queue_thread_summary(
+            room_id,
+            thread_id,
+            None,
+            DeliveredResponse(event_id=event_id, body=body),
+            retitle=True,
         )
 
     def build_deps(

@@ -324,8 +324,13 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     delivered_response: DeliveredResponse,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
+    retitle: bool = False,
 ) -> None:
-    """Generate an early summary, then one-shot initial tags on its first refresh."""
+    """Generate an early summary, then one-shot initial tags on its first refresh.
+
+    ``retitle`` summarizes now, whatever the thread's count, for a message that changes what the thread is about,
+    such as a call's notes. A pinned or resolved thread keeps its title all the same.
+    """
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
@@ -375,7 +380,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             # Keep the cheap pre-check from loading history on every pinned turn.
             baselines.record(room_id, thread_id, message_count)
             return
-        if message_count < baselines.next_threshold(room_id, thread_id, config):
+        if not retitle and message_count < baselines.next_threshold(room_id, thread_id, config):
             return
         if await _thread_is_resolved(client, room_id, thread_id):
             logger.debug(

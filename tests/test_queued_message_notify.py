@@ -903,6 +903,56 @@ async def _run_queued_summary(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("thread_summary_baselines")
+async def test_retitling_a_thread_summarizes_it_now_counting_the_message_just_posted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread titled again after a post is summarized at once, far short of its threshold, with the posted text in it."""
+    model = ScriptedModel([answer('{"summary": "Launch plan call"}')])
+    install_model_providers(monkeypatch, {"default": model})
+    config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 50
+    runtime_paths = runtime_paths_for(config)
+    client = make_matrix_client_mock()
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
+    conversation_reader = make_conversation_reader_mock()
+    support = PostResponseEffectsSupport(
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths), client=client),
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
+        agent_name="router",
+    )
+    row = ResolvedVisibleMessage.synthetic(
+        sender=client.user_id,
+        body="Call ended · 2 min",
+        timestamp=1,
+        event_id="$thread",
+    )
+    serve_conversation_reader(conversation_reader, [row])
+    tasks: list[asyncio.Task[None]] = []
+
+    with patch(
+        "mindroom.post_response_effects.create_background_task",
+        side_effect=lambda coro, **_: tasks.append(asyncio.create_task(coro)),
+    ):
+        support.retitle_thread("!room:localhost", "$thread", event_id="$notes", body="We planned the launch.")
+        await asyncio.gather(*tasks)
+
+    (request,) = model.requests
+    assert summarized_lines(request) == [
+        f"{client.user_id}: Call ended · 2 min",
+        f"{client.user_id}: We planned the launch.",
+    ]
+    (sent,) = [call.kwargs["content"] for call in client.room_send.await_args_list]
+    assert sent["body"] == "Launch plan call"
+    assert sent["m.relates_to"]["event_id"] == "$thread"
+    assert sent[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_summary_baselines")
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

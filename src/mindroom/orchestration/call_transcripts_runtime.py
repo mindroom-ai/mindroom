@@ -84,7 +84,7 @@ class CallTranscriptsRuntimeCoordinator:
         if self._service is None:
             self._service = CallTranscriptService(
                 CallTranscriptStore(self.runtime_paths.storage_root),
-                RouterCallRoom(client=self._router_client),
+                RouterCallRoom(client=self._router_client, retitle=self._retitle),
                 SpeechTranscriber(self.config_provider, self.runtime_paths),
                 ModelNotesWriter(self.config_provider, self.runtime_paths),
                 clock=self.clock,
@@ -97,6 +97,12 @@ class CallTranscriptsRuntimeCoordinator:
         if router is None or not router.running or not router.first_sync_complete:
             return None
         return router.client if self.config_provider().calls.transcripts.enabled else None
+
+    def _retitle(self, room_id: str, thread_id: str, event_id: str, body: str) -> None:
+        """Have the bound router summarize the thread now, whatever its count, counting the message it just posted."""
+        router = self._router
+        if router is not None and self._router_client() is not None:
+            router.post_response_effects.retitle_thread(room_id, thread_id, event_id=event_id, body=body)
 
     async def _run(self) -> None:
         while True:
