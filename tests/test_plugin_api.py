@@ -697,7 +697,7 @@ def test_each_exported_constant_keeps_its_value() -> None:
 def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
     """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
     root = tmp_path.resolve()
-    module_files = ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py", "origin.py")
+    module_files = tuple(value for key, value in _MANIFEST.items() if key.endswith("_module"))
     for module in module_files:
         (root / module).touch()
     (root / "skills").mkdir()

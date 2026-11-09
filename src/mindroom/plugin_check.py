@@ -117,12 +117,9 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     msg = f"Expected one loaded plugin, got {len(plugins.loaded_plugins)}"
                     raise ValueError(msg)
                 [plugin] = plugins.loaded_plugins
-                if plugin.routes_error is not None:
-                    raise plugin.routes_error
-                if plugin.lifespan_error is not None:
-                    raise plugin.lifespan_error
-                if plugin.origin_error is not None:
-                    raise plugin.origin_error
+                for error in (plugin.routes_error, plugin.lifespan_error, plugin.origin_error):
+                    if error is not None:
+                        raise error
                 tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
                     factory = plugin.tools[tool_name].factory

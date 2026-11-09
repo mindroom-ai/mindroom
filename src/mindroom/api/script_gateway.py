@@ -58,7 +58,7 @@ logger = get_logger(__name__)
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _LISTENER_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
-# Matches the primary API's shutdown grace; Uvicorn cancels gateway requests still open after it.
+# Matches the primary API's shutdown grace; Uvicorn cancels listener requests still open after it.
 _LISTENER_SHUTDOWN_GRACE_SECONDS = 5
 
 
@@ -233,7 +233,7 @@ async def get_script_call(
     return ScriptCallReceiptResponse.from_domain(receipt)
 
 
-class _GatewayListenerServer(uvicorn.Server):
+class _ListenerServer(uvicorn.Server):
     """Uvicorn server that leaves process signals to the primary API server it runs beside."""
 
     def __init__(self, config: uvicorn.Config) -> None:
@@ -291,7 +291,7 @@ async def serve_listener(
     access_log: bool,
 ) -> AsyncIterator[None]:
     """Serve ``app`` on ``port`` beside the primary API server, as the listener ``name``, until the caller leaves."""
-    server = _GatewayListenerServer(
+    server = _ListenerServer(
         uvicorn.Config(
             app,
             lifespan="off",

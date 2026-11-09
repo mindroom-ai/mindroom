@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import socket
-import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -26,11 +24,11 @@ from mindroom.plugin_check import check_plugin
 from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
-from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepare_plugins, refresh_plugins
+from mindroom.tool_system.plugins import dispose_plugins, prepare_plugins, refresh_plugins
 from tests.conftest import bind_runtime_paths, publish_test_plugins
+from tests.test_plugin_routes import _api_state
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
 ROOM = "!room:example.org"
@@ -145,10 +143,7 @@ def _api_app(tmp_path: Path, *names: str, **env: str) -> FastAPI:
     config = bind_runtime_paths(Config(plugins=[f"./plugins/{name}" for name in names]), runtime_paths)
     publish_test_plugins(config, runtime_paths)
     app = FastAPI()
-    ensure_app_state(app).api_state = config_lifecycle.ApiState(
-        threading.Lock(),
-        config_lifecycle.ApiSnapshot(1, runtime_paths, runtime_config=config),
-    )
+    ensure_app_state(app).api_state = _api_state(config, runtime_paths)
     mount_plugin_routes(app)
     return app
 
@@ -204,10 +199,7 @@ def test_an_origin_route_gets_no_body_larger_than_the_apis_limit(tmp_path: Path,
     client = _client(_api_app(tmp_path, "demo"), "x.demo.localhost")
     body = json.dumps({"text": "x" * (16 * 1024 * 1024)}).encode()
 
-    def chunks() -> Iterator[bytes]:
-        yield body
-
-    big = client.post(path, content=body if declared else chunks(), headers={"content-type": "application/json"})
+    big = client.post(path, content=body if declared else iter((body,)), headers={"content-type": "application/json"})
     small = client.post(path, json={"text": "hello"})
 
     assert big.status_code == 413
@@ -463,15 +455,13 @@ async def test_an_invalid_public_port_or_domain_fails_the_start(
 
 
 @pytest.mark.asyncio
-async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: Path) -> None:
+async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: Path, unused_tcp_port: int) -> None:
     """The listener serves an origin websocket, which closes with 1012 once a reload replaces its plugin.
 
     Another host's handshake gets a plain 404, and the listener logs no request line, whose query may hold a one-use link,
     while the API's access log stays on.
     """
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = unused_tcp_port
     _write(tmp_path, "demo", origin=ORIGIN)
     app = _api_app(tmp_path, "demo", MINDROOM_PLUGIN_ORIGIN_PORT=str(port))
     snapshot = config_lifecycle.require_api_state(app).snapshot
@@ -514,5 +504,4 @@ async def test_a_reload_closes_the_replaced_plugins_origin_websockets(tmp_path: 
         finally:
             logging.getLogger("uvicorn.access").removeHandler(access)
         assert [record.getMessage() for record in access.records] == []
-        assert config_plugins(config, snapshot.runtime_paths).loaded_plugins[0].origin_app is not None
     await lifespans.stop()

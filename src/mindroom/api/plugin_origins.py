@@ -100,27 +100,25 @@ class _PluginOrigins:
         send = _with_frame_floor(send, allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV))
         if scope["type"] == "websocket":
             send = framed_by_server(send)
-        host = _plugin_host(Headers(scope=scope).get("host", ""), _domain(paths))
-        not_found = JSONResponse({"detail": "Not Found"}, status_code=404)
-        if host is not None:
-            _, plugin_name = host
-            origin = self._origin(plugin_name)
-            if origin is not None:
-                origin_app, _ = origin
-                # Bodies are capped as on the API, since FastAPI reads a body before a route's gate runs, and no path
-                # here is the API's knowledge upload.
-                await RequestBodyLimitMiddleware(origin_app, knowledge_uploads=False)(
-                    {**scope, "app": self._api_app, PLUGIN_NAME_SCOPE_KEY: plugin_name},
-                    receive,
-                    send,
-                )
-                return
-            # A websocket gets the same 404 as its handshake's denial response.
-            response: Response = not_found
-        elif scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == _ASK_PATH:
-            response = await self._ask(QueryParams(scope["query_string"]).get("domain", ""), _domain(paths))
+        domain = _domain(paths)
+        host = _plugin_host(Headers(scope=scope).get("host", ""), domain)
+        origin = self._origin(host[1]) if host is not None else None
+        if host is not None and origin is not None:
+            origin_app, _ = origin
+            # Bodies are capped as on the API, since FastAPI reads a body before a route's gate runs, and no path here
+            # is the API's knowledge upload.
+            await RequestBodyLimitMiddleware(origin_app, knowledge_uploads=False)(
+                {**scope, "app": self._api_app, PLUGIN_NAME_SCOPE_KEY: host[1]},
+                receive,
+                send,
+            )
+            return
+        if host is None and scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == _ASK_PATH:
+            served = await self._serves(QueryParams(scope["query_string"]).get("domain", ""), domain)
+            response = Response(status_code=200 if served else 404, headers={"cache-control": "no-store"})
         else:
-            response = not_found
+            # A websocket gets the same 404 as its handshake's denial response.
+            response = JSONResponse({"detail": "Not Found"}, status_code=404)
         await response(scope, receive, send)
 
     def _origin(self, name: str) -> tuple[PluginRoutesApp, Callable[[str], object] | None] | None:
@@ -131,22 +129,20 @@ class _PluginOrigins:
                 return plugin.origin_app, plugin.origin_serves
         return None
 
-    async def _ask(self, domain: str, origin_domain: str) -> Response:
-        """Answer 200 when ``domain`` is a host whose plugin's ``serves`` says yes within the deadline, else 404."""
-        host = _plugin_host(domain, origin_domain)
-        if host is None:
-            return Response(status_code=404, headers={"cache-control": "no-store"})
-        label, plugin_name = host
-        origin = self._origin(plugin_name)
-        served = False
-        if origin is not None and (serves := origin[1]) is not None:
-            try:
-                async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
-                    answer = serves(label)
-                    served = (await answer if inspect.isawaitable(answer) else answer) is True
-            except Exception:
-                logger.exception("Plugin origin serves() failed", plugin_name=plugin_name)
-        return Response(status_code=200 if served else 404, headers={"cache-control": "no-store"})
+    async def _serves(self, host: str, domain: str) -> bool:
+        """Return whether ``host`` is a plugin host under ``domain`` whose plugin's ``serves`` says yes in time."""
+        parsed = _plugin_host(host, domain)
+        origin = self._origin(parsed[1]) if parsed is not None else None
+        if parsed is None or origin is None or (serves := origin[1]) is None:
+            return False
+        label, plugin_name = parsed
+        try:
+            async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
+                answer = serves(label)
+                return (await answer if inspect.isawaitable(answer) else answer) is True
+        except Exception:
+            logger.exception("Plugin origin serves() failed", plugin_name=plugin_name)
+            return False
 
 
 def _with_frame_floor(send: Send, chat_origins: tuple[str, ...]) -> Send:
@@ -176,8 +172,9 @@ async def serve_plugin_origins(
         return
     # An invalid public port or domain fails the start, rather than each link a route makes.
     listener_port(runtime_paths, _PUBLIC_PORT_ENV)
-    if not all(DNS_LABEL.fullmatch(part) for part in _domain(runtime_paths).split(".")):
-        msg = f"{_DOMAIN_ENV} must be a domain name, such as example-apps.net, not {_domain(runtime_paths)!r}."
+    domain = _domain(runtime_paths)
+    if not all(DNS_LABEL.fullmatch(part) for part in domain.split(".")):
+        msg = f"{_DOMAIN_ENV} must be a domain name, such as example-apps.net, not {domain!r}."
         raise ValueError(msg)
     async with serve_listener(
         _PluginOrigins(api_app),

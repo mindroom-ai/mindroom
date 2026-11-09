@@ -1126,11 +1126,13 @@ class TestAgentBot(AgentBotTestBase):
         assert provided is committed
 
     @pytest.mark.asyncio
-    async def test_run_api_server_serves_plugin_origins_beside_the_api(self, tmp_path: Path) -> None:
+    async def test_run_api_server_serves_plugin_origins_beside_the_api(
+        self,
+        tmp_path: Path,
+        unused_tcp_port: int,
+    ) -> None:
         """With its port set, the plugin origins listener answers while the API serves, and stops with it."""
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        port = unused_tcp_port
         config_path = tmp_path / "config.yaml"
         config_path.write_text("router:\n  model: default\n", encoding="utf-8")
         runtime_paths = resolve_runtime_paths(

@@ -175,8 +175,8 @@ _PROCESS_STATE: dict[str, dict[str, Any]] = {}
 # that root. The modules under it, whenever imported, are the plugin's modules too, so its next load imports them again.
 _ROOT_PACKAGES: dict[str, Path] = {}
 
-# The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
-# ``mindroom.plugin_http``'s ``plugin_context`` and ``require_room_messenger`` read it.
+# The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` and
+# ``mindroom.api.plugin_origins`` set it, and ``mindroom.plugin_http``'s helpers read it.
 PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
 
 
@@ -732,7 +732,7 @@ def _load_plugins(
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...], dict[str, ModuleType]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
 
-    Their routes and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
+    Their routes, origin, and lifecycle modules are imported only with ``primary_modules``. Also returns the modules that the
     plugins loading afresh replaced. A structural error raises with the canonical modules as they were before the load
     and stops what it executed.
     """
@@ -826,50 +826,31 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         else _load_plugin_module(plugin, plugin.hooks_module_path, kind="hooks")
     )
     oauth_entry = _load_plugin_module(plugin, plugin.oauth_module_path, kind="oauth")
-    routes_app: PluginRoutesApp | None = None
-    routes_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.routes_module_path is not None:
-        # A broken routes module costs only the routes: a reload must not take the plugin's tools from agents.
-        try:
-            routes_entry = _load_plugin_module(plugin, plugin.routes_module_path, kind="routes")
-            assert routes_entry is not None
-            routes_app = _plugin_routes_app(routes_entry.module, kind="routes")
-        except plugin_imports.PluginValidationError as error:
-            logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
-            routes_error = error
-    origin_app: PluginRoutesApp | None = None
-    origin_serves: Callable[[str], object] | None = None
-    origin_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.origin_module_path is not None:
-        # Likewise, a broken origin module costs only the plugin's origins.
-        try:
-            origin_entry = _load_plugin_module(plugin, plugin.origin_module_path, kind="origin")
-            assert origin_entry is not None
-            origin_serves = _origin_serves(origin_entry.module)
-            origin_app = _plugin_routes_app(origin_entry.module, kind="origin")
-        except plugin_imports.PluginValidationError as error:
-            logger.warning(
-                "Plugin origin module failed to load; serving no origins",
-                plugin_name=plugin.name,
-                error=str(error),
-            )
-            origin_error = error
-    lifespan: PluginLifespan | None = None
-    lifespan_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.lifecycle_module_path is not None:
-        # Likewise, a broken lifecycle module costs only the lifespan. It loads last, so a helper module it shares with
-        # the tools module registers its tools while the tools module loads.
-        try:
-            lifecycle_entry = _load_plugin_module(plugin, plugin.lifecycle_module_path, kind="lifecycle")
-            assert lifecycle_entry is not None
-            lifespan = _plugin_lifespan(lifecycle_entry.module)
-        except plugin_imports.PluginValidationError as error:
-            logger.warning(
-                "Plugin lifecycle module failed to load; running no lifespan",
-                plugin_name=plugin.name,
-                error=str(error),
-            )
-            lifespan_error = error
+    # A broken routes, origin, or lifecycle module costs only what it serves: a reload must not take the plugin's tools
+    # from agents. The lifecycle module loads last, so a helper module it shares with the tools module registers its
+    # tools while the tools module loads.
+    routes_app, routes_error = _load_primary_module(
+        plugin,
+        plugin.routes_module_path if primary_modules else None,
+        kind="routes",
+        build=lambda module: _plugin_routes_app(module, kind="routes"),
+        failure="Plugin routes failed to load; serving none",
+    )
+    origin, origin_error = _load_primary_module(
+        plugin,
+        plugin.origin_module_path if primary_modules else None,
+        kind="origin",
+        build=lambda module: (_origin_serves(module), _plugin_routes_app(module, kind="origin")),
+        failure="Plugin origin module failed to load; serving no origins",
+    )
+    origin_serves, origin_app = origin or (None, None)
+    lifespan, lifespan_error = _load_primary_module(
+        plugin,
+        plugin.lifecycle_module_path if primary_modules else None,
+        kind="lifecycle",
+        build=_plugin_lifespan,
+        failure="Plugin lifecycle module failed to load; running no lifespan",
+    )
     hooks_module = hooks_entry.module if hooks_entry is not None else None
     return _LoadedPlugin(
         name=plugin.name,
@@ -892,6 +873,26 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, *, primary_modules: 
         origin_serves=origin_serves,
         origin_error=origin_error,
     )
+
+
+def _load_primary_module[T](
+    plugin: plugin_imports._PluginBase,
+    module_path: Path | None,
+    *,
+    kind: str,
+    build: Callable[[ModuleType], T],
+    failure: str,
+) -> tuple[T | None, plugin_imports.PluginValidationError | None]:
+    """Load the module at ``module_path`` and build what it serves, or log ``failure`` and return why it cannot."""
+    if module_path is None:
+        return None, None
+    try:
+        entry = _load_plugin_module(plugin, module_path, kind=kind)
+        assert entry is not None
+        return build(entry.module), None
+    except plugin_imports.PluginValidationError as error:
+        logger.warning(failure, plugin_name=plugin.name, error=str(error))
+        return None, error
 
 
 def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
@@ -920,7 +921,7 @@ def _origin_serves(module: ModuleType) -> Callable[[str], object] | None:
 
 def _plugin_routes_app(module: ModuleType, *, kind: str) -> PluginRoutesApp:
     """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
-    # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
+    # Deferred: workers and slim entry points load plugins too, and only routes and origin modules need FastAPI.
     from fastapi import APIRouter, FastAPI, WebSocket, status  # noqa: PLC0415
     from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
     from fastapi.responses import JSONResponse  # noqa: PLC0415
@@ -958,7 +959,7 @@ def _plugin_routes_app(module: ModuleType, *, kind: str) -> PluginRoutesApp:
 
 @dataclass(eq=False)
 class PluginRoutesApp:
-    """One plugin's routes app, which tracks its open websockets so a reload that replaces it can close them."""
+    """One plugin's routes or origin app, which tracks its open websockets so a reload that replaces it can close them."""
 
     app: ASGIApp
     # Closes one open websocket each.

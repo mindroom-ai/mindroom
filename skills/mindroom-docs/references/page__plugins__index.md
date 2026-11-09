@@ -1825,8 +1825,8 @@ async def relay(request: Request) -> Response:
     async with (await worker_relay(request, target)).http(
         request.method, path, port=app.port, headers=headers, body=await request.body()
     ) as answer:
-        headers = {name: answer.headers[name] for name in ("content-type", "location") if name in answer.headers}
-        return Response(await answer.read(), answer.status, headers=headers)
+        kept = {name: answer.headers[name] for name in ("content-type", "location") if name in answer.headers}
+        return Response(await answer.read(), answer.status, headers=kept)
 ```
 
 Every host of the domain is same-site with every other, so a browser sends a host's cookies with requests that pages on its sibling hosts make to it.
