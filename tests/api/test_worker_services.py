@@ -991,6 +991,67 @@ async def test_a_route_gets_its_services_websocket_redirect_without_following_it
 
 
 @pytest.mark.asyncio
+async def test_a_service_whose_port_another_server_took_exits_and_the_relay_never_reaches_that_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another server that listens on the port probed for a service is never reported as it nor relayed to."""
+    connections: list[object] = []
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        connections.append(writer.get_extra_info("peername"))
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    async with _runner(tmp_path) as runner, await asyncio.start_server(answer, "127.0.0.1", 0) as other:
+        (runner.plugin_root / "echo.py").write_text(_ECHO)
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        # The other server takes the port as the probe for it closes, before the service binds it.
+        monkeypatch.setattr(worker_services_module, "_free_loopback_port", lambda: other.sockets[0].getsockname()[1])
+        state = await ensure_worker_service(context, WorkerService("echo", "echo.py"), _TARGET)
+        assert (state.state, state.exit_code) == ("exited", 1)
+        assert (await _get(relay, "/", service="echo"))[::2] == (503, True)
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            async with relay.websocket("/", service="echo"):
+                pass
+        assert refused.value.status == 503
+        assert connections == []
+
+
+# A service whose server is a process it starts, as a launcher's is, while the program itself only waits for it.
+_LAUNCHER = """
+import subprocess, sys
+
+SERVER = "import os, socket; server = socket.create_server(('127.0.0.1', int(os.environ['MINDROOM_WORKER_SERVICE_PORT']))); server.accept()"
+subprocess.run([sys.executable, "-c", SERVER])
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_service_runs_once_a_process_it_started_listens_on_its_port(tmp_path: Path) -> None:
+    """The listener may be another process of the service's process group."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "launcher.py").write_text(_LAUNCHER)
+        _, state = await _call("POST", runner.url("launcher"), _body("launcher.py"), _AUTH)
+        assert state["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_listener_held_by_processes_the_runner_cannot_see_is_not_the_service_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A socket on the service's port whose holders the runner cannot read, such as another user's, is not its own."""
+    monkeypatch.setattr(worker_services_module, "_START_SECONDS", 0.5)
+    monkeypatch.setattr(worker_services_module, "socket_holders", lambda sockets: {inode: set() for inode in sockets})
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+        assert state["state"] == "starting"
+
+
+@pytest.mark.asyncio
 async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_else(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

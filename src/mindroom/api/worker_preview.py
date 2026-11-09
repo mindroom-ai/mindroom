@@ -32,6 +32,7 @@ from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
+from mindroom.api.worker_services import running_service
 from mindroom.previews.listeners import listening_sockets, workers_sockets
 from mindroom.previews.relay import HandshakeRedirected, no_redirects, relay_websocket
 
@@ -105,7 +106,7 @@ def _require_dedicated_worker(connection: HTTPConnection) -> None:
         raise _refused(403, "Only a dedicated worker's runner relays to its ports.")
 
 
-async def loopback_host(port: int) -> str | None:
+async def _loopback_host(port: int) -> str | None:
     """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers."""
     for host in ("127.0.0.1", "::1"):
         try:
@@ -152,7 +153,7 @@ async def _upstream_url(connection: HTTPConnection, port: int, segments: int) ->
     """Return the URL of the app on ``port`` that ``connection`` asks for, below its route's first ``segments``."""
     _require_dedicated_worker(connection)
     await asyncio.get_running_loop().run_in_executor(_CHECKS, _check_reachable, port, connection.scope["server"][1])
-    host = await loopback_host(port)
+    host = await _loopback_host(port)
     if host is None:
         raise _no_app(port)
     # The path below the route's own segments as the primary sent it, still percent-encoded.
@@ -207,16 +208,8 @@ class _AppResponse(StreamingResponse):
             await self._held.aclose()
 
 
-def _service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
-    """Return the plugin's service while it runs in this worker, counting this as its use, as an ensure does."""
-    # Imported here: the service module imports this one's loopback check.
-    from mindroom.api.worker_services import running_service  # noqa: PLC0415
-
-    return running_service(app, plugin, name)
-
-
 def _require_service(app: FastAPI, plugin: str, name: str) -> RunningService:
-    if (service := _service(app, plugin, name)) is None:
+    if (service := running_service(app, plugin, name)) is None:
         msg = f"Service {name!r} of plugin {plugin!r} is not running in this worker."
         raise _refused(503, msg)
     return service
@@ -228,7 +221,7 @@ async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_sec
 
     async def use() -> None:
         # A periodic use, not a wait for a condition.
-        while _service(app, plugin, name) is not None:  # noqa: ASYNC110
+        while running_service(app, plugin, name) is not None:  # noqa: ASYNC110
             await asyncio.sleep(idle_timeout_seconds / 2)
 
     task = asyncio.create_task(use(), name="worker-service-in-use")

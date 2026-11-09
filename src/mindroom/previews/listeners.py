@@ -149,7 +149,7 @@ def _parent(pid: int) -> int | None:
     return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
 
 
-def _holders(sockets: frozenset[int]) -> dict[int, set[int]]:
+def socket_holders(sockets: frozenset[int]) -> dict[int, set[int]]:
     """Return the processes holding each of ``sockets``, among those this process may read, in one pass over them."""
     links = {f"socket:[{inode}]": inode for inode in sockets}
     holders: dict[int, set[int]] = {inode: set() for inode in sockets}
@@ -192,6 +192,6 @@ def workers_sockets(sockets: frozenset[int]) -> frozenset[int]:
     cgroup = _read(_PROC / "self" / "cgroup")
     return frozenset(
         inode
-        for inode, pids in _holders(sockets).items()
+        for inode, pids in socket_holders(sockets).items()
         if pids and all(_of_this_worker(pid, runner, cgroup) for pid in pids)
     )
