@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import re
 import shutil
@@ -17,26 +18,34 @@ from typing import TYPE_CHECKING
 import aiohttp
 import pytest
 import uvicorn
+from fastapi import FastAPI, HTTPException
+from starlette.requests import Request
 
 from mindroom import plugin_worker_services
-from mindroom.api import sandbox_runner_app
+from mindroom.api import config_lifecycle, sandbox_runner_app
 from mindroom.api import worker_services as worker_services_module
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.plugin_context import build_plugin_context
+from mindroom.plugin_http import WorkerRelay, worker_relay
 from mindroom.plugin_lifecycle import PluginLifespans
+from mindroom.plugin_worker_relay import open_worker_relay
 from mindroom.plugin_worker_services import (
     WorkerService,
     WorkerServiceError,
     ensure_worker_service,
     stop_worker_service,
 )
+from mindroom.previews import listeners
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, subagent_worker_key
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
+from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.conftest import bind_runtime_paths, publish_test_plugins
@@ -47,7 +56,17 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_context import PluginContext
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Services run in their own process groups.")
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "linux", reason="Services run in their own process groups."),
+    # The runner serves WebSockets with uvicorn's default implementation, the deprecated websockets.legacy one.
+    pytest.mark.filterwarnings(r"ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy"),
+    pytest.mark.filterwarnings(
+        r"ignore:websockets\.server\.WebSocketServerProtocol is deprecated:DeprecationWarning:uvicorn\.protocols\.websockets\.websockets_impl",
+    ),
+    pytest.mark.filterwarnings(
+        r"ignore:remove second argument of ws_handler:DeprecationWarning:websockets\.legacy\.server",
+    ),
+]
 
 _TOKEN = "runner-secret"  # noqa: S105 - isolated test credential
 _AUTH = {"X-Mindroom-Sandbox-Token": _TOKEN}
@@ -408,6 +427,8 @@ _TARGET = resolve_worker_target(
 class _Workers:
     """A dedicated backend whose one worker is the test's runner: an ensure starts it, a touch only finds it."""
 
+    cleanup_locator: str | None = None
+
     def __init__(self, port: int) -> None:
         self.handle = WorkerHandle(
             worker_id="worker-1",
@@ -420,6 +441,7 @@ class _Workers:
             created_at=0.0,
         )
         self.running = False
+        self.touches = 0
 
     def ensure_worker(self, spec: WorkerSpec, *, progress_sink: object = None) -> WorkerHandle:
         del progress_sink
@@ -429,6 +451,7 @@ class _Workers:
 
     def touch_worker(self, worker_key: str) -> WorkerHandle | None:
         assert worker_key == _WORKER_KEY
+        self.touches += 1
         return self.handle if self.running else None
 
 
@@ -749,3 +772,264 @@ async def test_an_ensure_during_a_stop_keeps_its_service_recorded(
     release.set()
     await load
     assert plugin_worker_services._started == {key: paths}
+
+
+# A service that echoes each WebSocket text message with its pid and path, refusing a handshake without its secret.
+# The worker's Python here has only the standard library, so it speaks the protocol's few frames itself.
+_ECHO = """
+import base64, gzip, hashlib, os, socketserver, struct, sys, time
+
+secret = sys.stdin.readline().strip()
+
+
+class Echo(socketserver.StreamRequestHandler):
+    def handle(self):
+        path = self.rfile.readline().split()[1].decode()
+        headers = {}
+        while (line := self.rfile.readline().strip()):
+            name, _, value = line.decode().partition(":")
+            headers[name.lower()] = value.strip()
+        if headers.get("x-mindroom-service-secret") != secret:
+            self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
+            return
+        if path == "/gzip":
+            body = gzip.compress(b"compressed")
+            self.wfile.write(f"HTTP/1.1 200 OK\\r\\nContent-Encoding: gzip\\r\\nContent-Length: {len(body)}\\r\\n\\r\\n".encode() + body)
+            return
+        if "upgrade" not in headers:
+            # A slow answer, as a stream of events is, whose second part comes after the idle timeout.
+            self.wfile.write(b"HTTP/1.1 200 OK\\r\\nConnection: close\\r\\n\\r\\nfirst;")
+            self.wfile.flush()
+            time.sleep(1.5)
+            self.wfile.write(f"second from {os.getpid()}".encode())
+            return
+        accept = base64.b64encode(hashlib.sha1((headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+        self.wfile.write(b"HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + b"\\r\\n\\r\\n")
+        while True:
+            first, second = self.rfile.read(2)
+            size = second & 0x7F
+            if size == 126:
+                size = struct.unpack("!H", self.rfile.read(2))[0]
+            mask = self.rfile.read(4)
+            data = bytes(byte ^ mask[i % 4] for i, byte in enumerate(self.rfile.read(size)))
+            if first & 0x0F == 8:
+                self.wfile.write(bytes([0x88, len(data)]) + data)
+                return
+            reply = f"{os.getpid()}:{path}:{data.decode()}".encode()
+            self.wfile.write(bytes([0x81, len(reply)]) + reply)
+
+
+socketserver.ThreadingTCPServer(("127.0.0.1", int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])), Echo).serve_forever()
+"""
+_REFUSED = "x-mindroom-relay-refused"
+
+
+async def _relay(
+    tmp_path: Path,
+    runner: _Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[PluginContext, _Workers, WorkerRelay]:
+    """Start the agent's worker, the test's runner, through an ensure of ``hello``, and open the relay for ``demo``."""
+    workers = _Workers(runner.port)
+    context = _primary(tmp_path, runner, monkeypatch, workers)
+    assert (await ensure_worker_service(context, _SERVICE, _TARGET)).state == "running"
+    return context, workers, await open_worker_relay(context.runtime_paths, _TARGET, context.plugin_name)
+
+
+async def _get(
+    relay: WorkerRelay,
+    path: str,
+    *,
+    service: str | None = None,
+    port: int | None = None,
+) -> tuple[int, str, bool]:
+    async with relay.http("GET", path, service=service, port=port) as answer:
+        return answer.status, await answer.text(), _REFUSED in answer.headers
+
+
+@pytest.mark.asyncio
+async def test_a_route_reaches_its_own_service_by_name_with_the_secret_only_the_runner_adds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service answers through the relay, which sends its secret, never the route's copy of it or of the token."""
+    async with _runner(tmp_path) as runner:
+        _, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        assert await _get(relay, "/", service="hello") == (200, "hello", False)
+        forged = [("X-MindRoom-Service-Secret", "forged"), ("X-Mindroom-Sandbox-Token", "forged")]
+        async with relay.http("GET", "/", service="hello", headers=forged) as answer:
+            assert (answer.status, await answer.text()) == (200, "hello")
+        # Its path stays below the service, dot segments included.
+        assert await _get(relay, f"/../../../ports/{runner.port}/", service="hello") == (200, "hello", False)
+        with pytest.raises(ValueError, match="exactly one of service and port"):
+            await _get(relay, "/")
+        with pytest.raises(ValueError, match="exactly one of service and port"):
+            await _get(relay, "/", service="hello", port=1)
+        with pytest.raises(ValueError, match="is no worker service name"):
+            await _get(relay, "/", service="../ports")
+
+
+@pytest.mark.asyncio
+async def test_a_route_never_reaches_another_plugins_service_or_one_that_is_not_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another plugin's relay and a stopped service get the relay's 503, telling the route to ensure the service."""
+    async with _runner(tmp_path) as runner:
+        context, _, relay = await _relay(tmp_path, runner, monkeypatch)
+        other = await open_worker_relay(context.runtime_paths, _TARGET, "other")
+        status, text, marked = await _get(other, "/", service="hello")
+        assert (status, marked) == (503, True)
+        assert json.loads(text) == {
+            "detail": "Service 'hello' of plugin 'other' is not running in this worker.",
+        }
+        await stop_worker_service(context, _SERVICE, _TARGET)
+        assert (await _get(relay, "/", service="hello"))[::2] == (503, True)
+        crash = WorkerService("crash", "crash.py")
+        assert (await ensure_worker_service(context, crash, _TARGET)).state == "exited"
+        assert (await _get(relay, "/", service="crash"))[::2] == (503, True)
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            async with relay.websocket("/", service="hello"):
+                pass
+        assert refused.value.status == 503
+        assert refused.value.headers is not None
+        assert refused.value.headers[_REFUSED] == "1"
+
+
+@pytest.mark.asyncio
+async def test_a_relayed_stream_keeps_its_service_and_its_worker_in_use_while_it_lasts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebSocket outlasts the service's idle timeout, and idle cleanup refreshes its worker until it closes."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "echo.py").write_text(_ECHO)
+        context, workers, relay = await _relay(tmp_path, runner, monkeypatch)
+        echo = WorkerService("echo", "echo.py", idle_timeout_seconds=0.5)
+        assert (await ensure_worker_service(context, echo, _TARGET)).state == "running"
+        services = worker_services(sandbox_runner_app.app)
+        instance = services.instance("demo", "echo")
+        assert instance is not None
+        async with relay.websocket("/a/b?c=d", service="echo") as upstream:
+            await upstream.send_str("one")
+            assert (await upstream.receive_str()) == f"{instance.process.pid}:/a/b?c=d:one"
+            await asyncio.sleep(1.5)
+            assert services.instance("demo", "echo") is instance
+            await upstream.send_str("two")
+            assert (await upstream.receive_str()).endswith(":two")
+            touches = workers.touches
+            touch_workers_in_flight(workers)  # type: ignore[arg-type]
+            assert workers.touches == touches + 1
+        touch_workers_in_flight(workers)  # type: ignore[arg-type]
+        assert workers.touches == touches + 1
+        # An answer passes as the service sent it, compressed or not.
+        async with relay.http("GET", "/gzip", service="echo") as answer:
+            assert answer.headers["Content-Encoding"] == "gzip"
+            assert gzip.decompress(await answer.read()) == b"compressed"
+        # A slow answer outlasts the idle timeout too.
+        async with relay.http("GET", "/slow", service="echo") as answer:
+            assert await answer.text() == f"first;second from {instance.process.pid}"
+        await _until(lambda: services.instance("demo", "echo") is None)
+
+
+@pytest.mark.asyncio
+async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_else(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unused_tcp_port: int,
+) -> None:
+    """A server a worker process runs answers by port; the runner's own port and an unowned server are refused."""
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("the agent's app")
+    (site / "sub").mkdir()
+    command = [
+        sys.executable,
+        "-m",
+        "http.server",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        str(site),
+        str(unused_tcp_port),
+    ]
+    server = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        async with _runner(tmp_path) as runner:
+            _, _, relay = await _relay(tmp_path, runner, monkeypatch)
+            await _until(lambda: unused_tcp_port in {listener.port for listener in listeners.listening_sockets()})
+            assert await _get(relay, "/index.html", port=unused_tcp_port) == (200, "the agent's app", False)
+            # A redirect reaches the route as the app sent it.
+            async with relay.http("GET", "/sub", port=unused_tcp_port) as answer:
+                assert (answer.status, answer.headers["Location"]) == (301, "/sub/")
+            assert unused_tcp_port in await relay.ports()
+            status, text, marked = await _get(relay, "/", port=runner.port)
+            assert (status, marked) == (403, True)
+            assert "this runner's own" in text
+            proc = tmp_path / "proc"
+            proc.mkdir()
+            monkeypatch.setattr(listeners, "_PROC", proc)
+            monkeypatch.setattr("mindroom.api.worker_preview._workers_sockets", {})
+            assert (await _get(relay, "/", port=unused_tcp_port))[::2] == (403, True)
+            assert unused_tcp_port not in await relay.ports()
+
+            def cannot_tell() -> list[object]:
+                raise OSError
+
+            monkeypatch.setattr("mindroom.api.worker_preview.listening_sockets", cannot_tell)
+            with pytest.raises(HTTPException) as refused:
+                await relay.ports()
+            assert refused.value.status_code == 403
+            assert refused.value.headers == {_REFUSED: "1"}
+            assert "can't tell which processes hold its ports" in str(refused.value.detail)
+    finally:
+        server.terminate()
+        await server.wait()
+
+
+@pytest.mark.asyncio
+async def test_the_relay_starts_no_worker_and_needs_a_dedicated_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that is not running answers 503 and stays stopped; without a dedicated backend nothing opens."""
+    async with _runner(tmp_path) as runner:
+        workers = _Workers(runner.port)
+        context = _primary(tmp_path, runner, monkeypatch, workers)
+        with pytest.raises(HTTPException) as stopped:
+            await open_worker_relay(context.runtime_paths, _TARGET, "demo")
+        assert (stopped.value.status_code, stopped.value.detail) == (503, "The agent's worker is not running.")
+        assert not workers.running
+        workers.running = True
+        workers.handle = replace(workers.handle, status="starting")
+        with pytest.raises(HTTPException) as starting:
+            await open_worker_relay(context.runtime_paths, _TARGET, "demo")
+        assert (starting.value.status_code, starting.value.detail) == (503, "The agent's worker is not running.")
+    paths = resolve_runtime_paths(config_path=tmp_path / "c.yaml", storage_path=tmp_path / "s", process_env={})
+    with pytest.raises(HTTPException) as shared:
+        await open_worker_relay(paths, _TARGET, "demo")
+    assert shared.value.status_code == 503
+    assert "needs a dedicated worker backend" in str(shared.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_worker_relay_takes_the_plugin_from_the_route_that_serves_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route's relay reaches its own plugin's service; outside a plugin's route it raises."""
+    async with _runner(tmp_path) as runner:
+        context, _, _ = await _relay(tmp_path, runner, monkeypatch)
+        app = FastAPI()
+        ensure_app_state(app).api_state = config_lifecycle.ApiState(
+            threading.Lock(),
+            config_lifecycle.ApiSnapshot(1, context.runtime_paths, runtime_config=context.config),
+        )
+        route = Request({"type": "http", "app": app, PLUGIN_NAME_SCOPE_KEY: "demo"})
+        assert await _get(await worker_relay(route, _TARGET), "/", service="hello") == (200, "hello", False)
+        with pytest.raises(RuntimeError, match=r"worker_relay\(\) serves only a plugin's own routes"):
+            await worker_relay(Request({"type": "http", "app": app}), _TARGET)

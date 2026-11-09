@@ -347,14 +347,16 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
 
 
 async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: int, status: int, detail: str) -> None:
-    """Requests and WebSockets to ``port`` are marked refusals."""
+    """Requests and WebSocket handshakes to ``port`` are marked refusals with ``status``."""
     async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
         assert response.status == status
         assert response.headers[_REFUSED] == "1"
         assert await response.json() == {"detail": detail}
     with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
         await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
-    assert refused.value.status == 403
+    assert refused.value.status == status
+    assert refused.value.headers is not None
+    assert refused.value.headers[_REFUSED] == "1"
 
 
 def _hide_every_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -546,15 +548,17 @@ async def test_relay_refuses_when_the_app_drops_the_request(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_shared_runner_relays_nothing(tmp_path: Path) -> None:
-    """The shared runner refuses to list or relay, since its loopback is not one worker's."""
+    """The shared runner refuses to list or relay, to ports or services, since its loopback is not one worker's."""
     async with _app() as port, _runner(tmp_path, dedicated=False) as runner, aiohttp.ClientSession() as client:
-        for url in (runner.root, f"{runner.root}/{port}/"):
+        services = runner.root.removesuffix("/ports") + "/services/demo/hello/"
+        for url in (runner.root, f"{runner.root}/{port}/", services):
             async with client.get(url, headers=_AUTH) as response:
                 assert response.status == 403
                 assert response.headers[_REFUSED] == "1"
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
-        assert refused.value.status == 403
+        for url in (f"{runner.root}/{port}/socket", services):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(url, headers=_AUTH)
+            assert refused.value.status == 403
 
 
 @pytest.mark.asyncio
@@ -566,7 +570,7 @@ async def test_relay_requires_the_runner_token(tmp_path: Path) -> None:
                 assert response.status == 401
         with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
             await client.ws_connect(f"{runner.root}/{port}/socket", headers={"X-Mindroom-Sandbox-Token": "wrong"})
-        assert refused.value.status == 403
+        assert refused.value.status == 401
 
 
 @pytest.mark.asyncio
@@ -698,13 +702,14 @@ async def test_relay_follows_a_websocket_redirect_only_on_loopback(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_a_websocket_nothing_answers(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A WebSocket to a closed port, or to an app path that takes none, is refused at the handshake."""
+async def test_relay_refuses_a_websocket_to_an_app_path_that_takes_none_unmarked(tmp_path: Path) -> None:
+    """The app's own handshake refusal reaches the caller as a 403 without the relay's mark."""
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for url in (f"{runner.root}/{unused_tcp_port}/socket", f"{runner.root}/{port}/plain"):
-            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-                await client.ws_connect(url, headers=_AUTH)
-            assert refused.value.status == 403
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(f"{runner.root}/{port}/plain", headers=_AUTH)
+        assert refused.value.status == 403
+        assert refused.value.headers is not None
+        assert _REFUSED not in refused.value.headers
 
 
 @pytest.mark.asyncio

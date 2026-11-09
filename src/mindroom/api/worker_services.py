@@ -164,6 +164,25 @@ def worker_services(app: FastAPI) -> _WorkerServices:
         return services
 
 
+@dataclass(frozen=True)
+class RunningService:
+    """A service running in this worker: its loopback port, the secret it requires, and its idle timeout."""
+
+    port: int
+    secret: str = field(repr=False)
+    idle_timeout_seconds: float
+
+
+def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
+    """Return the plugin's service while its program runs, resetting its idle timer as an ensure does; else None."""
+    services = worker_services(app)
+    instance = services.instance(plugin, name)
+    if instance is None or instance.process.returncode is not None:
+        return None
+    services.touch(plugin, name)
+    return RunningService(instance.port, instance.secret, instance.idle_timeout_seconds)
+
+
 async def close_worker_services(app: FastAPI) -> None:
     """End this runner's services as it stops."""
     await worker_services(app).close()
