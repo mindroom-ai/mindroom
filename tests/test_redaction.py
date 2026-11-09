@@ -966,6 +966,7 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
         ("curl -u \\\n  'admin:pw' https://example.test/x", f"curl -u \\\n  'admin:{REDACTED}' https://example.test/x"),
         ("curl -u 7f3a9c1e2b4d6f8a0c2e: https://example.test/api", f"curl -u {REDACTED}: https://example.test/api"),
+        ('curl -u "7f3a9c1e2b4d6f8a0c2e:" https://example.test/api', f'curl -u "{REDACTED}:" https://example.test/api'),
         ("sudo \\\n  mysql -ppw app", f"sudo \\\n  mysql -p{REDACTED} app"),
         ("mysql -p'first'\"second\" app", f"mysql -p{REDACTED} app"),
         ('curl -u admin:"my pw" https://example.test/x', f"curl -u admin:{REDACTED} https://example.test/x"),
