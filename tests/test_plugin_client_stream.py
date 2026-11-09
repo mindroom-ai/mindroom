@@ -7,7 +7,7 @@ import json
 import socket
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import ModuleType
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -19,7 +19,7 @@ from aiohttp import web
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from mindroom import plugin_http
 from mindroom.api import client_sessions
@@ -39,9 +39,13 @@ if TYPE_CHECKING:
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
+BOB = "@bob:example.org"
 CLIENT_ORIGIN = "https://chat.example.org"
 NO_SESSION = "Missing, invalid or expired client session."
 REFUSED = "The route refused this stream; try again later."
+# Each user may hold this many open streams across every route on client_stream.
+STREAMS_PER_USER = 16
+TOO_MANY = "This user has too many open streams; close one and try again."
 
 # The routes reach the test through this module, which the autouse plugin-state restore removes after each test.
 PROBE_MODULE = "mindroom_test_probe_client_stream"
@@ -631,6 +635,87 @@ def test_a_stream_that_ends_stops_its_membership_rechecks(
     time.sleep(0.1)
 
     assert membership.calls == calls
+
+
+def _open_streams(client: TestClient, streams: ExitStack, token: str, count: int) -> None:
+    """Open ``count`` streams for ``token``'s user, alternating between the routes in and outside the room."""
+    for index in range(count):
+        streams.enter_context(_connect(client, token, _echo_path() if index % 2 else "/api/plugins/demo/echo"))
+
+
+def _refused_for_too_many(client: TestClient, token: str) -> bool:
+    denial = _denial(client, "/api/plugins/demo/waits", _offers(token), {"origin": CLIENT_ORIGIN})
+    return (denial.status_code, denial.json()) == (503, {"detail": TOO_MANY})
+
+
+def test_a_users_streams_across_routes_are_capped_before_accept(app: FastAPI, client: TestClient) -> None:
+    """Past the limit, a user's next stream on any route is refused with 503, and another user's still opens."""
+    store = client_session_store(app)
+    alice = store.create(ALICE).token
+    bob = store.create(BOB).token
+
+    with ExitStack() as streams:
+        _open_streams(client, streams, alice, STREAMS_PER_USER)
+        assert _refused_for_too_many(client, alice)
+        # A second session of the same user shares the user's limit.
+        assert _refused_for_too_many(client, store.create(ALICE).token)
+        with _connect(client, bob, "/api/plugins/demo/echo") as websocket:
+            websocket.send_text("hi")
+            assert websocket.receive_text() == f"{BOB}: hi"
+
+
+def test_closing_a_stream_lets_the_users_next_one_in(app: FastAPI, client: TestClient) -> None:
+    """A closed stream gives its place back, whichever way it ends."""
+    store = client_session_store(app)
+    token = store.create(ALICE).token
+
+    with ExitStack() as streams:
+        _open_streams(client, streams, token, STREAMS_PER_USER - 1)
+        with _connect(client, token):
+            assert _refused_for_too_many(client, token)
+        ended = store.create(ALICE).token
+        with _connect(client, ended, "/api/plugins/demo/waits") as websocket:
+            assert websocket.receive_text() == ALICE
+            _revoke(client, ended)
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_text()
+        with _connect(client, token) as websocket:
+            websocket.send_text("hi")
+            assert websocket.receive_text() == f"{ALICE}: hi"
+
+
+def test_a_refused_or_failed_handshake_takes_no_place(
+    app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handshake refused by any check, or failing once it took its place, leaves the user's limit untouched."""
+    _admit_with(lambda _user: False)
+    store = client_session_store(app)
+    token = store.create(ALICE).token
+    accept = WebSocket.accept
+
+    async def failing_accept(_websocket: WebSocket, *_args: object, **_kwargs: object) -> None:
+        monkeypatch.setattr(WebSocket, "accept", accept)
+        msg = "client went away"
+        raise RuntimeError(msg)
+
+    with ExitStack() as streams:
+        _open_streams(client, streams, token, STREAMS_PER_USER - 1)
+        for path, protocols, origin, status in (
+            (_echo_path(), _offers(token), "https://evil.example.org", 403),
+            (_echo_path(), ["mindroom-session"], CLIENT_ORIGIN, 401),
+            (_echo_path("!other:example.org"), _offers(token), CLIENT_ORIGIN, 403),
+            (_admits_path(), _offers(token), CLIENT_ORIGIN, 503),
+        ):
+            assert _denial(client, path, protocols, {"origin": origin}).status_code == status
+        monkeypatch.setattr(WebSocket, "accept", failing_accept)
+        with pytest.raises(RuntimeError, match="client went away"), _connect(client, token):
+            pass
+        with _connect(client, token) as websocket:
+            websocket.send_text("hi")
+            assert websocket.receive_text() == f"{ALICE}: hi"
+            assert _refused_for_too_many(client, token)
 
 
 async def _handshake(port: int, path: str, origin: str, protocols: str) -> tuple[list[str], bytes]:
