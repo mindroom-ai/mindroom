@@ -1665,7 +1665,7 @@ A plugin that uses `worker_relay` or `worker_target` states `"mindroom_plugin_ap
 ## Origins of your own
 
 A plugin serves pages a browser renders, such as a web app an agent runs in its worker, on hosts of its own, `<label>.<plugin>.<domain>`, where `<plugin>` is the manifest `name` and `<label>` is one DNS label the plugin picks, such as one per app it shows.
-Each host is an origin of its own, so its pages share nothing with the dashboard, the API, or another plugin's hosts.
+Each host is an origin of its own, so its pages share no origin with the dashboard, the API, or another plugin's hosts.
 
 | Variable | Description | Default |
 | --- | --- | --- |
@@ -1679,7 +1679,7 @@ A proxy in front of the listener must pass the browser's `Host` header on.
 MindRoom's API refuses cookie-authenticated changes from any other origin, but a page can set cookies for every parent domain of its host, which every other site under that domain then receives.
 
 The manifest's `origin_module` names a module defining `router`, a FastAPI `APIRouter`, which answers every request on the plugin's hosts, at their root.
-MindRoom loads it as it loads a routes module: `request.app` is MindRoom's API app, so the helpers of `mindroom.plugin_http` work in its routes, a reload closes its open websockets with 1012, and a module that fails to load costs the plugin only its origins, logging `Plugin origin module failed to load; serving no origins`.
+MindRoom loads it as it loads a routes module: `request.app` is MindRoom's API app, so the helpers of `mindroom.plugin_http` work in its routes, except `client_stream`, which admits only MindRoom Chat's origins, a reload closes its open websockets with 1012, and a module that fails to load costs the plugin only its origins, logging `Plugin origin module failed to load; serving no origins`.
 A route reads which host it serves from `request.url.hostname`.
 A host whose plugin is not loaded or has no `origin_module` answers 404, and a route that raises answers 500 without the error's detail.
 A plugin name with `_` is not a valid DNS label, so a plugin with such a name and an `origin_module` fails to load, and `mindroom plugins check` says `Plugin 'my_plugin' cannot serve origins`.

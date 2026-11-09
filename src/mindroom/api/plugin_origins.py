@@ -70,8 +70,10 @@ def plugin_origin_url(paths: RuntimePaths, plugin_name: str, label: str) -> str 
     local = domain == "localhost" or domain.endswith(".localhost")
     # Browsers reach a local listener directly, so its own port is the one in its URLs.
     public_port = listener_port(paths, _PUBLIC_PORT_ENV) or (port if local else None)
-    authority = f"{label}.{plugin_name}.{domain}" + (f":{public_port}" if public_port else "")
-    return f"{'http' if local else 'https'}://{authority}"
+    scheme = "http" if local else "https"
+    # Browsers leave a scheme's default port out of an origin, so its URLs do too.
+    shown_port = public_port not in (None, 80 if local else 443)
+    return f"{scheme}://{label}.{plugin_name}.{domain}" + (f":{public_port}" if shown_port else "")
 
 
 def _plugin_host(host: str, domain: str) -> tuple[str, str] | None:
@@ -105,8 +107,9 @@ class _PluginOrigins:
             origin = self._origin(plugin_name)
             if origin is not None:
                 origin_app, _ = origin
-                # Bodies are capped as on the API, since FastAPI reads a body before a route's gate runs.
-                await RequestBodyLimitMiddleware(origin_app)(
+                # Bodies are capped as on the API, since FastAPI reads a body before a route's gate runs, and no path
+                # here is the API's knowledge upload.
+                await RequestBodyLimitMiddleware(origin_app, knowledge_uploads=False)(
                     {**scope, "app": self._api_app, PLUGIN_NAME_SCOPE_KEY: plugin_name},
                     receive,
                     send,
@@ -131,10 +134,12 @@ class _PluginOrigins:
     async def _ask(self, domain: str, origin_domain: str) -> Response:
         """Answer 200 when ``domain`` is a host whose plugin's ``serves`` says yes within the deadline, else 404."""
         host = _plugin_host(domain, origin_domain)
-        origin = self._origin(host[1]) if host is not None else None
+        if host is None:
+            return Response(status_code=404, headers={"cache-control": "no-store"})
+        label, plugin_name = host
+        origin = self._origin(plugin_name)
         served = False
-        if host is not None and origin is not None and (serves := origin[1]) is not None:
-            label, plugin_name = host
+        if origin is not None and (serves := origin[1]) is not None:
             try:
                 async with asyncio.timeout(_SERVES_TIMEOUT_SECONDS):
                     answer = serves(label)

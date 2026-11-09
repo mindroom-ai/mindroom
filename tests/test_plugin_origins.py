@@ -193,18 +193,22 @@ def test_the_frame_floor_stands_beside_the_routes_own_policy(tmp_path: Path) -> 
     assert answer.headers.get_list("content-security-policy") == ["default-src 'self'", FLOOR]
 
 
+@pytest.mark.parametrize("path", ["/save", "/api/knowledge/bases/x/upload"])
 @pytest.mark.parametrize("declared", [True, False], ids=["declared", "streamed"])
-def test_an_origin_route_gets_no_body_larger_than_the_apis_limit(tmp_path: Path, declared: bool) -> None:
-    """FastAPI reads a body before the route's gate runs, so one over 16 MiB answers 413, as on the API."""
-    _write(tmp_path, "demo", origin=ORIGIN)
+def test_an_origin_route_gets_no_body_larger_than_the_apis_limit(tmp_path: Path, declared: bool, path: str) -> None:
+    """FastAPI reads a body before the route's gate runs, so one over 16 MiB answers 413, as on the API.
+
+    The API's knowledge uploads keep their own limit there, but no path on a plugin's host is one.
+    """
+    _write(tmp_path, "demo", origin=ORIGIN.replace('@router.post("/save")', f'@router.post("{path}")'))
     client = _client(_api_app(tmp_path, "demo"), "x.demo.localhost")
     body = json.dumps({"text": "x" * (16 * 1024 * 1024)}).encode()
 
     def chunks() -> Iterator[bytes]:
         yield body
 
-    big = client.post("/save", content=body if declared else chunks(), headers={"content-type": "application/json"})
-    small = client.post("/save", json={"text": "hello"})
+    big = client.post(path, content=body if declared else chunks(), headers={"content-type": "application/json"})
+    small = client.post(path, json={"text": "hello"})
 
     assert big.status_code == 413
     assert big.headers.get_list("content-security-policy") == [FLOOR]
@@ -343,6 +347,11 @@ def test_plugin_origin_url_names_the_calling_plugins_host(tmp_path: Path) -> Non
         ({}, "http://a.demo.localhost:9100"),
         ({"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "apps.localhost"}, "http://a.demo.apps.localhost:9100"),
         ({"MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT": "8080"}, "http://a.demo.localhost:8080"),
+        ({"MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT": "80"}, "http://a.demo.localhost"),
+        (
+            {"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "apps.example.org", "MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT": "443"},
+            "https://a.demo.apps.example.org",
+        ),
         ({"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "Apps.Example.org."}, "https://a.demo.apps.example.org"),
         (
             {"MINDROOM_PLUGIN_ORIGIN_DOMAIN": "apps.example.org", "MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT": "8443"},
