@@ -2783,14 +2783,6 @@ def cached_plugin_module(module_path: Path) -> ModuleType:
     return cached_plugin_entry(module_path).module
 
 
-def fake_mindroom_site_packages(path: Path) -> Path:
-    """Return a site-packages directory holding a MindRoom distribution, so a test's optional dependency lock is its own."""
-    info = path / "mindroom-0.dist-info"
-    info.mkdir(parents=True)
-    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: mindroom\nVersion: 0\n")
-    return path
-
-
 def register_test_tool(monkeypatch: pytest.MonkeyPatch, metadata: ToolMetadata) -> None:
     """Register ``metadata`` as one built-in tool for the rest of the test.
 

@@ -45,7 +45,7 @@ from mindroom.tool_system.dependencies import (
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, plugin_module_registrations
-from tests.conftest import fake_mindroom_site_packages, register_test_tool
+from tests.conftest import register_test_tool
 
 _BUILTINS = builtin_tool_registry()
 
@@ -782,6 +782,14 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     assert calls["env"] == 1
 
 
+def _fake_mindroom_site_packages(path: Path) -> Path:
+    """Return a site-packages directory holding a MindRoom distribution, as a test process's own installation."""
+    info = path / "mindroom-0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: mindroom\nVersion: 0\n")
+    return path
+
+
 _DEPENDENCY_PROCESS_SCRIPT = """
 import importlib.metadata
 import json
@@ -893,7 +901,7 @@ def _stop_dependency_processes(*processes: subprocess.Popen[str] | None) -> None
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
     # The scripts put this directory first on sys.path, so its MindRoom distribution holds their lock.
-    environment = fake_mindroom_site_packages(tmp_path / "environment")
+    environment = _fake_mindroom_site_packages(tmp_path / "environment")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (environment / "uv-receipt.toml").write_text(
@@ -962,7 +970,7 @@ with optional_dependency_environment(exclusive=mode == 'installer'):
 @pytest.mark.parametrize("importer_prefix", ["primary", "worker-venv"])
 def test_dependency_lock_is_shared_across_temporary_directories(tmp_path: Path, importer_prefix: str) -> None:
     """An import waits for an install from a process with another TMPDIR, also from a local worker's own venv."""
-    site_packages = fake_mindroom_site_packages(tmp_path / "site-packages")
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
 
     def start(mode: str, prefix: str) -> subprocess.Popen[str]:
         scratch = tmp_path / f"{mode}-tmp"
@@ -995,6 +1003,38 @@ def test_dependency_lock_is_shared_across_temporary_directories(tmp_path: Path, 
         assert importer_output.strip() == "locked"
     finally:
         _stop_dependency_processes(installer, importer)
+
+
+_REINSTALLED_MINDROOM_SCRIPT = """
+import shutil
+import sys
+from pathlib import Path
+
+site_packages = Path(sys.argv[1])
+sys.path.insert(0, str(site_packages))
+
+from mindroom.tool_system.dependencies import _environment_lock_path, optional_dependency_environment
+
+with optional_dependency_environment():
+    pass
+# An install that reinstalls MindRoom itself removes its metadata before writing the new one.
+shutil.rmtree(site_packages / 'mindroom-0.dist-info')
+print(_environment_lock_path())
+"""
+
+
+def test_dependency_lock_stays_put_while_mindroom_itself_is_reinstalled(tmp_path: Path) -> None:
+    """The lock does not move, or fail to resolve, while an install replaces MindRoom's own metadata."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+    result = subprocess.run(
+        [sys.executable, "-c", _REINSTALLED_MINDROOM_SCRIPT, str(site_packages)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(site_packages / ".mindroom-optional-dependencies.lock")
 
 
 def test_unrelated_tool_constructors_run_in_parallel(
@@ -1048,8 +1088,9 @@ def test_optional_dependency_lock_is_private_to_the_current_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Other local accounts that can read the installation cannot open its lock to hold it."""
-    site_packages = fake_mindroom_site_packages(tmp_path / "site-packages")
-    monkeypatch.syspath_prepend(str(site_packages))
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    monkeypatch.setattr(dependencies, "_installation_site_packages", lambda: site_packages)
     with optional_dependency_environment():
         pass
     assert (site_packages / ".mindroom-optional-dependencies.lock").stat().st_mode & 0o777 == 0o600
@@ -1064,8 +1105,9 @@ def test_optional_dependency_lock_directory_must_be_private(
     installation: str,
 ) -> None:
     """When this user cannot open the installation's lock, other local users cannot share or plant its own lock."""
-    site_packages = fake_mindroom_site_packages(tmp_path / "site-packages")
-    monkeypatch.syspath_prepend(str(site_packages))
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    monkeypatch.setattr(dependencies, "_installation_site_packages", lambda: site_packages)
     if installation == "read-only":
         site_packages.chmod(0o555)
     else:

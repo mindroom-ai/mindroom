@@ -42,6 +42,15 @@ class _EnvironmentLockState(threading.local):
 _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 
 
+@cache
+def _installation_site_packages() -> Path:
+    """Return the site-packages directory MindRoom is installed in.
+
+    Found once, so an install that replaces MindRoom's own metadata cannot move the lock or hide it.
+    """
+    return Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
+
+
 def _environment_lock_path() -> Path:
     """Return the lock that every process running this MindRoom installation takes.
 
@@ -53,8 +62,7 @@ def _environment_lock_path() -> Path:
     created it, a private per-user directory in the OS temporary directory keeps other local users
     from creating or holding the lock.
     """
-    site_packages = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
-    lock_path = site_packages / ".mindroom-optional-dependencies.lock"
+    lock_path = _installation_site_packages() / ".mindroom-optional-dependencies.lock"
     with suppress(OSError):
         os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
         return lock_path

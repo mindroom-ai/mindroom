@@ -62,7 +62,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
 from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.tool_system.dependencies import optional_dependency_environment
-from tests.conftest import fake_mindroom_site_packages, orchestrator_runtime_paths
+from tests.conftest import orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1271,7 +1271,8 @@ class TestMemoryConfig:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
-        monkeypatch.syspath_prepend(str(fake_mindroom_site_packages(tmp_path / "site-packages")))
+        # Its own installation, so its exclusive hold stays off the real environment's lock.
+        monkeypatch.setattr("mindroom.tool_system.dependencies._installation_site_packages", lambda: tmp_path)
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="sentence_transformers",
