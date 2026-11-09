@@ -643,9 +643,9 @@ def _open_many(client: TestClient, streams: ExitStack, token: str, count: int) -
         streams.enter_context(_connect(client, token, _echo_path() if index % 2 else "/api/plugins/demo/echo"))
 
 
-def _refused_for_too_many(client: TestClient, token: str) -> bool:
+def _assert_refused_for_too_many(client: TestClient, token: str) -> None:
     denial = _denial(client, "/api/plugins/demo/waits", _offers(token), {"origin": CLIENT_ORIGIN})
-    return (denial.status_code, denial.json()) == (503, {"detail": TOO_MANY})
+    assert (denial.status_code, denial.json()) == (503, {"detail": TOO_MANY})
 
 
 def test_a_users_streams_across_routes_are_capped_before_accept(app: FastAPI, client: TestClient) -> None:
@@ -656,9 +656,9 @@ def test_a_users_streams_across_routes_are_capped_before_accept(app: FastAPI, cl
 
     with ExitStack() as streams:
         _open_many(client, streams, alice, STREAMS_PER_USER)
-        assert _refused_for_too_many(client, alice)
+        _assert_refused_for_too_many(client, alice)
         # A second session of the same user shares the user's limit.
-        assert _refused_for_too_many(client, store.create(ALICE).token)
+        _assert_refused_for_too_many(client, store.create(ALICE).token)
         with _connect(client, bob, "/api/plugins/demo/echo") as websocket:
             websocket.send_text("hi")
             assert websocket.receive_text() == f"{BOB}: hi"
@@ -672,7 +672,7 @@ def test_closing_a_stream_lets_the_users_next_one_in(app: FastAPI, client: TestC
     with ExitStack() as streams:
         _open_many(client, streams, token, STREAMS_PER_USER - 1)
         with _connect(client, token):
-            assert _refused_for_too_many(client, token)
+            _assert_refused_for_too_many(client, token)
         ended = store.create(ALICE).token
         with _connect(client, ended, "/api/plugins/demo/waits") as websocket:
             assert websocket.receive_text() == ALICE
@@ -716,7 +716,7 @@ def test_a_refused_or_failed_handshake_takes_no_place(
         with _connect(client, token) as websocket:
             websocket.send_text("hi")
             assert websocket.receive_text() == f"{ALICE}: hi"
-            assert _refused_for_too_many(client, token)
+            _assert_refused_for_too_many(client, token)
 
 
 async def _handshake(port: int, path: str, origin: str, protocols: str) -> tuple[list[str], bytes]:
