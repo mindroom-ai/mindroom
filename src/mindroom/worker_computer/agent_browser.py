@@ -183,10 +183,9 @@ class AgentBrowserBridge:
             self._post({"method": "MindRoom.page", "params": {"page": showing}})
 
     async def _leave_page(self) -> None:
+        # What this bridge still presses is released on the page it leaves, which alone saw it go down.
+        await self._release_input()
         previous, self._cdp, self._page = self._cdp, None, None
-        # Buttons and keys pressed on the page the bridge leaves are not its to release on another page.
-        self._buttons.clear()
-        self._keys.clear()
         if previous is not None:
             await _detach(previous)
 

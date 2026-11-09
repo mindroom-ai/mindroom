@@ -281,8 +281,8 @@ async def test_the_bridge_follows_the_agent_to_another_tab_and_to_none(agent: _A
 
 
 @pytest.mark.asyncio
-async def test_a_key_held_on_the_page_the_agent_left_is_not_released_on_the_next(agent: _Agent) -> None:
-    """The next page never saw that key go down, so it never sees it go up either."""
+async def test_a_key_held_on_the_page_the_agent_left_is_released_there_and_not_on_the_next(agent: _Agent) -> None:
+    """The page the bridge leaves sees its keys go up; the next page never saw them go down, so it sees nothing."""
     first = cast("Page", agent.shown)
     second = await first.context.new_page()
     await second.set_content(_FORM)
@@ -293,6 +293,7 @@ async def test_a_key_held_on_the_page_the_agent_left_is_not_released_on_the_next
         agent.shown = second
         assert await service.event("MindRoom.page") == {"page": True}
         await service.call("MindRoom.releaseControl")
+    assert await first.evaluate("released") == ["Shift"]
     assert await second.evaluate("released") == []
 
 
