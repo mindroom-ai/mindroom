@@ -7002,6 +7002,8 @@ expose = [
     "_PLUGIN_CACHE",
     "_PluginBase",
     "_collect_plugin_bases",
+    "_import_by_name",
+    "_import_name",
     "_install_plugin_package_chain",
     "_load_plugin_base",
     "_log_failed_plugin_entry",

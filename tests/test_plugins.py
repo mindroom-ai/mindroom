@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import importlib
 import json
 import os
 import py_compile
@@ -39,7 +40,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
-from mindroom.tool_system.registry import ToolMetadataValidationError
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError
 from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -1294,6 +1295,49 @@ def test_a_package_plugins_module_imported_by_its_package_name_is_the_module_min
         _bump_mtime(edited_path)
         load(config, runtime_paths)
         assert _published_hooks_module(plugin_root) is not first
+
+
+@pytest.mark.parametrize(
+    ("plugin_path", "hooks_path", "hooks_name"),
+    [
+        pytest.param(
+            "pkg:outer_pkg:plugins/state",
+            "outer_pkg/plugins/state/hooks.py",
+            "outer_pkg.plugins.state.hooks",
+            id="subpath",
+        ),
+        pytest.param("python:outer_pkg.state", "outer_pkg/state/hooks.py", "outer_pkg.state.hooks", id="dotted"),
+        pytest.param("outer_pkg", "outer_pkg/__init__.py", "outer_pkg", id="init"),
+        pytest.param("outer_pkg", "outer_pkg/hooks.v2.py", None, id="no-import-name"),
+    ],
+)
+def test_a_package_plugins_module_loads_under_the_name_python_gives_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_path: str,
+    hooks_path: str,
+    hooks_name: str | None,
+) -> None:
+    """Importing a package plugin's module by the name Python gives it returns the loaded module, when it has one."""
+    site_packages = tmp_path / "site-packages"
+    hooks_file = site_packages / hooks_path
+    hooks_file.parent.mkdir(parents=True)
+    (site_packages / "outer_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    hooks_file.write_text("STATE = {}\n", encoding="utf-8")
+    (hooks_file.parent / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "named", "hooks_module": hooks_file.name, "skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site_packages))
+    config = _bind_runtime_paths(Config(plugins=[plugin_path]), tmp_path / "config.yaml")
+
+    with _forgetting_modules("outer_pkg"):
+        _load(config, runtime_paths_for(config))
+        hooks = cached_plugin_module(hooks_file)
+        if hooks_name is None:
+            assert hooks.__name__.startswith(PLUGIN_MODULE_PREFIX)
+        else:
+            assert importlib.import_module(hooks_name) is hooks
 
 
 def test_removing_a_package_plugin_drops_its_modules_package_names(
