@@ -72,15 +72,11 @@ async def _read_until(stream: TerminalStream, marker: bytes) -> bytes:
     return seen
 
 
-async def _interrupt(stream: TerminalStream) -> None:
-    """Interrupt the running command and wait for the shell's next prompt.
-
-    Bash misses an interrupt that lands while it starts a child process, so each output before the prompt sends another.
-    """
+async def _until_prompt(stream: TerminalStream) -> None:
+    """Read the output until the shell's next prompt."""
     prompt = stream.prompt
     async with asyncio.timeout(20):
         while stream.prompt == prompt:
-            await stream.send_input("\x03")
             event = await stream.receive()
             assert event.type == "output", event
 
@@ -177,7 +173,8 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
     terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
     info = await terminals.open(cols=80, rows=24)
     async with terminals.attach(info.id) as first:
-        await first.send_input("for i in $(seq 1 100000); do echo n$i; sleep 0.05; done\r")
+        # The loop waits in a builtin: bash ignores an interrupt that lands while it starts a child such as `sleep`.
+        await first.send_input("for i in $(seq 1 100000); do echo n$i; read -t 0.05; done\r")
         await _read_until(first, b"n3\r\n")
 
     async with terminals.attach(info.id) as second:
@@ -185,7 +182,8 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
         assert scrollback.type == "output"
         assert b"n1\r\n" in scrollback.data
         await _read_until(second, b"\r\n")
-        await _interrupt(second)
+        await second.send_input("\x03")
+        await _until_prompt(second)
         await second.resize(100, 30)
         await second.send_input("stty size; echo $((2*3))sized\r")
         assert b"30 100" in await _read_until(second, b"6sized")
