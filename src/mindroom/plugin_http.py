@@ -590,9 +590,9 @@ async def worker_relay(connection: HTTPConnection, target: ResolvedWorkerTarget)
     """Return the relay into the dedicated worker ``target`` names, for the plugin whose route serves ``connection``.
 
     ``target`` is an ``AgentWorkspace``'s ``worker_target``, which ``RoomReader.agent()`` and ``agents()`` return once
-    the caller may use the agent, or one a tool of the plugin recorded. By name, the relay reaches only that plugin's own
-    worker services. It never starts the worker: it answers 503 while the worker is not running, and without a dedicated worker
-    backend.
+    the caller may use the agent, or one a tool of the plugin recorded. By name, the relay reaches only that plugin's
+    own worker services. It never starts the worker: it answers 503 while the worker is not running, and without a
+    dedicated worker backend.
     """
     plugin_name = _route_plugin_name(connection, "worker_relay")
     return await open_worker_relay(require_api_state(connection.app).snapshot.runtime_paths, target, plugin_name)

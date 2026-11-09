@@ -1558,7 +1558,41 @@ A route reaches a worker service of its own plugin, or a server the agent runs i
 `target` is the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` returned, so the caller's room and agent checks have run, or one a tool of the plugin recorded.
 It never starts the worker: it answers 503 with `The agent's worker is not running.` until the agent's first tool call there or an `ensure_worker_service` starts it, and after idle cleanup stops it, and 503 without a dedicated worker backend.
 
-This websocket route lets a room member who may use the agent talk to the `hello` service, refusing anyone else at the handshake:
+A WebSocket service greets each message it gets, and like every service refuses a connection without its secret:
+
+```python
+# greeter_service.py
+import asyncio
+import hmac
+import os
+import sys
+
+from websockets.asyncio.server import serve
+
+SECRET = sys.stdin.readline().strip()
+
+
+def check_secret(connection, request):
+    if not hmac.compare_digest(request.headers.get("X-MindRoom-Service-Secret", ""), SECRET):
+        return connection.respond(403, "Forbidden\n")
+    return None
+
+
+async def greet(websocket) -> None:
+    async for message in websocket:
+        await websocket.send(f"hello {message}")
+
+
+async def main() -> None:
+    port = int(os.environ["MINDROOM_WORKER_SERVICE_PORT"])
+    async with serve(greet, "127.0.0.1", port, process_request=check_secret) as server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
+```
+
+This websocket route lets a room member who may use the agent talk to it, refusing anyone else at the handshake:
 
 ```python
 # routes.py
@@ -1567,12 +1601,12 @@ from fastapi import APIRouter, WebSocket
 from mindroom.plugin_api import WorkerService, ensure_worker_service
 from mindroom.plugin_http import AgentWorkspace, ClientUser, client_stream, plugin_context, stream_room_reader, worker_relay
 
-HELLO = WorkerService("hello", "hello_service.py")
+GREETER = WorkerService("greeter", "greeter_service.py")
 router = APIRouter()
 
 
-@router.websocket("/rooms/{room_id}/agents/{agent_user_id}/hello")
-async def hello(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
+@router.websocket("/rooms/{room_id}/agents/{agent_user_id}/greeter")
+async def greeter(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
     agents: list[AgentWorkspace] = []
 
     async def may_use_agent(user: ClientUser) -> bool:
@@ -1581,34 +1615,31 @@ async def hello(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
 
     async with client_stream(websocket, room_id, admit=may_use_agent):
         target = agents[0].worker_target
-        await ensure_worker_service(plugin_context(websocket), HELLO, target)
+        await ensure_worker_service(plugin_context(websocket), GREETER, target)
         relay = await worker_relay(websocket, target)
-        async with relay.websocket("/", service="hello") as upstream:
+        async with relay.websocket("/", service="greeter") as upstream:
             await relay.relay_messages(websocket, upstream)
 ```
 
-The relay ends with the client's stream, which `client_stream` closes when the session ends or the caller leaves the room; a route that must also notice the agent's access rules changing calls `stream_room_reader(...).agent()` again as often as it needs.
-This HTTP route relays to the server the agent started on port 5173:
+The relay ends with the client's stream, which `client_stream` closes when the session ends or the caller leaves the room, with its own close code; a route that must also notice the agent's access rules changing calls `stream_room_reader(...).agent()` again as often as it needs.
+Plugin routes answer JSON, never pages for a browser, so this HTTP route reads the status a server the agent started on port 5173 reports:
 
 ```python
 # routes.py
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from mindroom.plugin_http import RoomReader, require_room_reader, worker_relay
 
 router = APIRouter()
 
 
-@router.get("/rooms/{room_id}/agents/{agent_user_id}/app/{path:path}")
-async def app_page(
-    request: Request,
-    agent_user_id: str,
-    path: str,
-    room: RoomReader = Depends(require_room_reader),
-) -> Response:
+@router.get("/rooms/{room_id}/agents/{agent_user_id}/build-status")
+async def build_status(request: Request, agent_user_id: str, room: RoomReader = Depends(require_room_reader)) -> object:
     relay = await worker_relay(request, (await room.agent(agent_user_id)).worker_target)
-    async with relay.http("GET", path, port=5173) as answer:
-        return Response(await answer.read(), status_code=answer.status, media_type=answer.content_type)
+    async with relay.http("GET", "/status.json", port=5173) as answer:
+        if answer.status != 200:
+            raise HTTPException(502, "The agent's app did not answer.")
+        return await answer.json()
 ```
 
 | Call | Effect |
