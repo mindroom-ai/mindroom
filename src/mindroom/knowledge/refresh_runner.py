@@ -553,7 +553,6 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
         with suppress(ProcessLookupError):
             os.killpg(process_group_id, signal.SIGKILL)
         await _wait_for_process_group_exit(process_group_id)
-    await process.wait()
 
 
 @asynccontextmanager
