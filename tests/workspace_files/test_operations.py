@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -233,6 +234,8 @@ def test_a_folder_that_keeps_a_credential_by_its_place_is_never_moved_or_deleted
     assert _status(lambda: delete(root, "here/.config")) == 403
     move(root, ".config/app.toml", "app.toml")
     assert (root / "app.toml").is_file()
+    shutil.rmtree(root / ".config" / "gh")
+    assert _status(lambda: delete(root, ".config")) == 403
 
 
 def test_a_folder_lists_folders_first_then_by_name_with_sizes_and_times(root: Path) -> None:

@@ -415,6 +415,7 @@ def delete(root: Path, raw_path: str) -> None:
     parent, name = _leaf(root, path)
     removed = parent.relative / name
     _refuse_git(removed)
+    _refuse_credential_place(removed)
     with _refusals(), open_directory_within_root(parent.base, parent.relative) as directory:
         if stat.S_ISDIR(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
             _refuse_holding_kept(directory, name, removed)

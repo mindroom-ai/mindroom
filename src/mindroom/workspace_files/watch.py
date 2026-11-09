@@ -21,6 +21,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 import watchfiles
+from fastapi import HTTPException
 
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.workspace_files.operations import ENTRY_KINDS, is_hidden
@@ -53,15 +54,24 @@ class _Follower:
 
     pending: set[str] = field(default_factory=set)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once more changes wait than one scan examines, as for a client that stopped reading: it lists again once it
+    # connects again, so what waited is dropped.
+    overflowed: bool = False
 
     def add(self, paths: set[str]) -> None:
-        self.pending |= paths
+        if not self.overflowed:
+            self.pending |= paths
+            if len(self.pending) > _MAX_ENTRIES:
+                self.overflowed = True
+                self.pending.clear()
         self.ready.set()
 
     async def next(self) -> list[str]:
-        """Wait for changes and return them sorted."""
+        """Wait for changes and return them sorted; answer 503 once too many waited."""
         await self.ready.wait()
         self.ready.clear()
+        if self.overflowed:
+            raise HTTPException(503, "Too many changes to follow; connect again.")
         paths, self.pending = sorted(self.pending), set()
         return paths
 

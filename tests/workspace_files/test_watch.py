@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+from fastapi import HTTPException
 
 from mindroom.workspace_files import watch
 from mindroom.workspace_files.watch import workspace_changes
@@ -352,3 +353,21 @@ def test_entries_a_scan_leaves_out_count_toward_its_cap(tmp_path: Path, monkeypa
     watch._scan(root)
 
     assert len(examined) <= 5
+
+
+@pytest.mark.asyncio
+async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that stops reading can't make the changes waiting for it grow without bound."""
+    monkeypatch.setattr(watch, "_MAX_ENTRIES", 3)
+    follower = watch._Follower()
+    follower.add({"a", "b"})
+    assert await follower.next() == ["a", "b"]
+
+    follower.add({"c", "d"})
+    follower.add({"e", "f"})
+    follower.add({"g", "h"})
+    assert not follower.pending
+
+    with pytest.raises(HTTPException) as overflow:
+        await follower.next()
+    assert overflow.value.status_code == 503
