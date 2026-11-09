@@ -164,12 +164,7 @@ def _collect_plugin_bases(
 
         plugin_bases.append((plugin_base, plugin_entry))
     _reject_duplicate_plugin_manifest_names(plugin_bases)
-    # A plugin inside another one's root keeps names of its own, so the outer plugin's package names never reach it.
-    roots = {base.root for base, _ in plugin_bases}
-    nested = {root for root in roots if any(root != other and root.is_relative_to(other) for other in roots)}
-    return [
-        (replace(base, package=None) if base.root in nested else base, entry) for base, entry in plugin_bases
-    ], skipped
+    return plugin_bases, skipped
 
 
 def _log_failed_plugin_entry(plugin_entry: PluginEntryConfig, root: Path | None, exc: BaseException) -> None:
@@ -279,7 +274,9 @@ def _locate_python_plugin(plugin_path: str) -> tuple[Path, str | None] | None:
     if not resolved_root.exists() or not resolved_root.is_dir():
         return None
 
-    return resolved_root, package
+    # A plugin inside another plugin's package keeps names of its own, so that plugin's package names never reach it.
+    outer = resolved_root.parents[: len(package.split(".")) - 1] if package else ()
+    return resolved_root, None if any((parent / _PLUGIN_MANIFEST).exists() for parent in outer) else package
 
 
 def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
@@ -570,6 +567,7 @@ def _prepare_module(
         _restore_plugin_package_chain(previous_packages)
         return None
 
+    # Made before ``loader.module`` is set, so this one call creates it; the import's own call then returns it.
     module = util.module_from_spec(spec)
     if loader is None:
         sys.modules[module_name] = module

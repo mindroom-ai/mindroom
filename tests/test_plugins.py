@@ -1425,6 +1425,36 @@ def test_a_plugin_nested_in_a_package_plugin_keeps_its_own_module_names(
         assert (installed_inner_hooks() is first) is (load is plugins_module.refresh_plugins)
 
 
+def test_a_worker_keeps_a_nested_plugins_modules_when_the_plugin_around_it_is_added(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested plugin's module names do not depend on whether the config also loads the plugin around it."""
+    site_packages = tmp_path / "site-packages"
+    outer_root = site_packages / "outer_pkg"
+    inner_root = outer_root / "plugins" / "inner"
+    inner_root.mkdir(parents=True)
+    (outer_root / "__init__.py").write_text("", encoding="utf-8")
+    (outer_root / "mindroom.plugin.json").write_text(json.dumps({"name": "outer", "tools_module": "tools.py"}))
+    (outer_root / "tools.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (inner_root / "mindroom.plugin.json").write_text(json.dumps({"name": "inner", "hooks_module": "hooks.py"}))
+    (inner_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    config_path = tmp_path / "config.yaml"
+    inner_only = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner"]), config_path)
+    both = _bind_runtime_paths(Config(plugins=["pkg:outer_pkg:plugins/inner", "outer_pkg"]), config_path)
+
+    with _forgetting_modules("outer_pkg"):
+        plugins_module.refresh_plugins(inner_only, runtime_paths_for(inner_only))
+        inner_hooks = cached_plugin_module(inner_root / "hooks.py")
+        plugins_module.refresh_plugins(both, runtime_paths_for(both))
+
+        assert cached_plugin_module(inner_root / "hooks.py") is inner_hooks
+        assert (
+            sys.modules[inner_hooks.__name__] is plugins_module._PUBLISHED.modules[inner_hooks.__name__] is inner_hooks
+        )
+
+
 def test_removing_a_package_plugin_drops_its_modules_package_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
