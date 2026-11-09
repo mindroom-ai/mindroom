@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -294,6 +295,29 @@ async def test_the_toolkit_says_who_was_asked(tmp_path: Path) -> None:
     )
 
 
+async def _receive(
+    config: Config,
+    paths: RuntimePaths,
+    agent_name: str,
+    agent_bot: Callable[[str], object],
+    *,
+    room_id: str,
+    inviter: str,
+    reason: object,
+) -> None:
+    """Hand an invite to contacts as the room lifecycle does: store the request, then answer it."""
+    answer = await federation.store_contact_invite(
+        config,
+        paths,
+        agent_name,
+        room_id=room_id,
+        inviter=inviter,
+        reason=reason,
+    )
+    if answer is not None:
+        await federation.answer_contact_invite(config, paths, agent_name, agent_bot, answer)
+
+
 async def _invited(
     config: Config,
     paths: RuntimePaths,
@@ -304,7 +328,7 @@ async def _invited(
     reason: object = "Find a slot",
 ) -> None:
     """Bob's agent receives another deployment's invite."""
-    await federation.receive_contact_invite(
+    await _receive(
         config,
         paths,
         "mind_bob",
@@ -415,7 +439,7 @@ async def test_a_request_nobody_could_answer_is_rejected(tmp_path: Path) -> None
     config.agents["mind_bob"].contacts = None
     runtime = _runtime()
     with _delivered():
-        await federation.receive_contact_invite(
+        await _receive(
             config,
             paths,
             "work_bob",
@@ -442,10 +466,12 @@ async def test_the_room_lifecycle_hands_a_request_to_contacts(tmp_path: Path) ->
             "content": {"membership": "invite", "reason": "Find a slot"},
         },
     )
-    with _delivered():
+    with _delivered() as send:
         await lifecycle.on_invite(nio.MatrixInvitedRoom(REMOTE_ROOM, _account(paths, "mind_bob")), event)
+        # Stored before the handling returns, since nothing hands the invite to it again after a restart.
+        assert [record.room_id for record in _stored(paths)] == [REMOTE_ROOM]
         await wait_for_background_tasks(owner=lifecycle.deps.runtime)
-    assert [record.room_id for record in _stored(paths)] == [REMOTE_ROOM]
+    send.assert_awaited_once()
     assert lifecycle._pending_room_invites == {}
 
 
@@ -741,7 +767,7 @@ async def test_two_deployments_ask_accept_talk_and_end_a_contact(tmp_path: Path)
 
     async def invite(_client: object, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         if user_id == bob.agent_id:
-            await federation.receive_contact_invite(
+            await _receive(
                 bob.config,
                 bob.paths,
                 bob.agent_name,
@@ -964,27 +990,54 @@ async def test_the_other_agent_asking_clears_its_decline_of_our_request(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_request_another_acceptance_activated_while_joining_keeps_its_room(tmp_path: Path) -> None:
-    """Two acceptances of one request join its one room, so the one that finds it already active does not leave."""
+@pytest.mark.parametrize("second", ["accept", "decline"])
+async def test_answers_to_one_request_from_elsewhere_run_one_at_a_time(tmp_path: Path, second: str) -> None:
+    """Every answer joins or leaves the request's one room, so a second answer waits and then finds it accepted."""
     config, paths = _remote_setup(tmp_path)
     _store(paths, _incoming_with_notice())
     runtime = _runtime()
+    paused, resume = asyncio.Event(), asyncio.Event()
 
-    async def join_while_accepted(_room_id: str, _membership: str) -> bool:
-        def accept(book: ContactBook) -> None:
-            book.contacts[0].status = "active"
-
-        update_contacts(paths, accept)
+    async def slow_join(_room_id: str, _membership: str) -> bool:
+        paused.set()
+        await resume.wait()
         return True
 
-    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=join_while_accepted)
-    with _matrix() as matrix, pytest.raises(ValueError, match=r"^Only a pending contact can be accepted$"):
-        await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
+    runtime.bots["mind_bob"].change_local_membership = AsyncMock(side_effect=slow_join)
+    actor = _bob(config, paths, runtime)
+    with _matrix(), _delivered():
+        first = asyncio.create_task(flow.accept_contact(actor, "in", rules=None, tools=None))
+        await paused.wait()
+        answer = (
+            flow.accept_contact(actor, "in", rules=None, tools=None)
+            if second == "accept"
+            else flow.decline_contact(actor, "in")
+        )
+        late = asyncio.create_task(answer)
+        await asyncio.sleep(0)
+        resume.set()
+        assert (await first).status == "active"
+        with pytest.raises(ValueError, match=r"^Only a pending contact can be (accepted|declined)$"):
+            await late
+    assert _statuses(paths) == ["active"]
     assert [call.args for call in runtime.bots["mind_bob"].change_local_membership.await_args_list] == [
         (REMOTE_ROOM, "join"),
     ]
-    assert _statuses(paths) == ["active"]
-    matrix["invite"].assert_not_awaited()
+    runtime.clients["mind_bob"].room_leave.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_request_from_an_agent_no_longer_listed_cannot_be_accepted(tmp_path: Path) -> None:
+    """An operator who stops naming an agent in remote_agents revokes it, so its waiting request can only be declined."""
+    _, paths = _remote_setup(tmp_path)
+    _store(paths, _incoming_with_notice())
+    config, _ = _setup(tmp_path)
+    runtime = _runtime()
+    refusal = rf"^{re.escape(REMOTE)} is no longer among the agents remote_agents names; decline the request$"
+    with _matrix(), pytest.raises(ValueError, match=refusal):
+        await flow.accept_contact(_bob(config, paths, runtime), "in", rules=None, tools=None)
+    runtime.bots["mind_bob"].change_local_membership.assert_not_awaited()
+    assert _statuses(paths) == ["pending"]
 
 
 @pytest.mark.asyncio

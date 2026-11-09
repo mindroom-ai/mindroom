@@ -70,6 +70,7 @@ Prompts, the judge, and notices name the other side by Matrix ID as an agent of 
 
 ### Each side enforces only its own owner's decisions
 
+The owner's answers to one request from another deployment run one at a time, because every one of them joins or leaves the request's one room, while an acceptance within one deployment opens a room of its own.
 A declined request blocks new requests on the side whose owner declined, where the target rejects new invites from that agent until its owner removes the declined contact.
 The requesting side lets its own owner remove a declined request, because the owner who declined is out of its reach; a new request then reaches the other side, which rejects it again while its declined record stands.
 A request from the agent that declined this side's request is asked anyway and clears that decline here, since the side that declined has evidently cleared its own.
@@ -99,6 +100,7 @@ Treating every remote contact agent as a `bot_accounts` entry everywhere was rej
 
 ### Notices of remote requests
 
+A remote request is stored before the invite's handling returns, and its notice is posted after, because the homeserver hands an invite to that handling once and a restart restores it without the reason.
 A remote request's notice is posted when the invite arrives, and again whenever the same invite is seen while its notice is missing.
 A request whose notice could not be posted still waits on the owner's Contacts page and in `list_contacts`.
 A new invite to a room whose request was declined or removed is rejected, so a settled room never waits as a dangling invite.
@@ -109,6 +111,7 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 
 ## Accepted Limitations
 
+- A request sent before the other deployment lists the asking agent is not picked up once it does, because a restored invite carries no reason; the asking owner removes it and asks again.
 - An agent whose deployment does not list the asking agent in `remote_agents` treats the request as an ordinary invite, and one that accepts every invitation joins, which the asking side reads as an acceptance its owner never gave; nobody answers in that room.
   Telling that join from a real acceptance needs a signal on the join, such as a `reason`, which the agent's membership commands cannot send.
 - People on another deployment cannot be contacted and cannot ask, and `party="me"` reaches only this deployment.

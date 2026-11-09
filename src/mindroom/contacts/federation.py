@@ -7,6 +7,7 @@ from the membership of the contact room.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
@@ -113,34 +114,48 @@ def _store_request(book: ContactBook, *, record: ContactRecord, agent_name: str)
     return record.model_copy(deep=True), True
 
 
-async def receive_contact_invite(
+@dataclass(frozen=True)
+class _InviteAnswer:
+    """What answering one invite from another deployment still has to send, once its request is stored."""
+
+    room_id: str
+    inviter: str
+    # Why the invite is rejected, or None when it is a stored request.
+    rejection: str | None
+    # The request whose notice the owner still needs, or None when nothing is posted.
+    notice: ContactRecord | None
+
+
+async def store_contact_invite(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    agent_bot: Callable[[str], AgentBot | None],
     *,
     room_id: str,
     inviter: str,
     reason: object,
-) -> None:
-    """Store another deployment's request to this agent and ask its owner in their personal room, or reject it.
+) -> _InviteAnswer | None:
+    """Store another deployment's request to this agent, or decide to reject it, and return what answering still sends.
 
-    It is rejected without a reason, without a personal-room agent that can answer it, and for a pair that already has
-    a pending or active contact or whose last request this side declined. The same invite seen again stores nothing
-    new. A notice that cannot be posted is only logged, because the request still waits on the Contacts page.
+    The request is stored before the invite's handling returns, so a process that stops before the network work still
+    has it. It is rejected without a reason, without a personal-room agent that can answer it, and for a pair that
+    already has a pending or active contact or whose last request this side declined. The same invite seen again
+    stores nothing new and posts the notice only while it is missing.
     """
-    found = _agent(config, runtime_paths, agent_name, agent_bot)
-    if found is None:
-        return
-    actor, target = found
+    target = agent_party(config, agent_name)
+    if target is None:
+        return None
     text = reason.strip() if isinstance(reason, str) else ""
-    poster = personal_room_agent(config, actor.owner)
-    if not text:
-        await _reject(actor, agent_name, room_id, inviter, "no_reason")
-        return
-    if poster is None or agent_party(config, poster) is None:
-        await _reject(actor, agent_name, room_id, inviter, "owner_cannot_answer")
-        return
+    poster = personal_room_agent(config, target.local_owner)
+    rejection = (
+        "no_reason"
+        if not text
+        else "owner_cannot_answer"
+        if poster is None or agent_party(config, poster) is None
+        else None
+    )
+    if rejection is not None:
+        return _InviteAnswer(room_id, inviter, rejection, None)
     record = ContactRecord(
         id=uuid4().hex[:12],
         status="pending",
@@ -157,15 +172,41 @@ async def receive_contact_invite(
     store = partial(_store_request, record=record, agent_name=agent_name)
     stored = await run_blocking_until_complete(update_contacts, runtime_paths, store)
     if stored is None:
-        await _reject(actor, agent_name, room_id, inviter, "pair_has_a_contact")
-        return
+        return _InviteAnswer(room_id, inviter, "pair_has_a_contact", None)
     record, new = stored
-    if not new and (record.status != "pending" or record.notice_event_id is not None):
+    unposted = new or (record.status == "pending" and record.notice_event_id is None)
+    return _InviteAnswer(room_id, inviter, None, record if unposted else None)
+
+
+async def answer_contact_invite(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    agent_bot: Callable[[str], AgentBot | None],
+    answer: _InviteAnswer,
+) -> None:
+    """Reject the invite, or ask the owner in their personal room; a notice that cannot be posted is only logged.
+
+    The request still waits on the Contacts page when its notice fails.
+    """
+    found = _agent(config, runtime_paths, agent_name, agent_bot)
+    if found is None:
+        return
+    actor, _party = found
+    if answer.rejection is not None:
+        await _reject(actor, agent_name, answer.room_id, answer.inviter, answer.rejection)
+        return
+    if answer.notice is None:
         return
     try:
-        await post_request_notice(actor, record)
+        await post_request_notice(actor, answer.notice)
     except ValueError as exc:
-        logger.warning("contact_request_notice_failed", contact_id=record.id, agent_name=agent_name, error=str(exc))
+        logger.warning(
+            "contact_request_notice_failed",
+            contact_id=answer.notice.id,
+            agent_name=agent_name,
+            error=str(exc),
+        )
 
 
 def _settle(

@@ -10,11 +10,14 @@ Every refusal is a ``ValueError`` whose text is meant for whoever acted.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import nio
 import yaml
@@ -131,6 +134,20 @@ def _running_bot(actor: ContactActor, agent_name: str) -> tuple[AgentBot, nio.As
     if bot is None or not bot.running or bot.client is None:
         return None
     return bot, bot.client
+
+
+# Every answer to a request from another deployment joins or leaves that request's one room, so they run one at a time.
+# A lock lives only while an answer holds or awaits it, so none outlives the event loop it belongs to.
+_REMOTE_ANSWERS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+
+def _answering(record: ContactRecord) -> AbstractAsyncContextManager[None]:
+    """Return what makes this owner's answers to one request from another deployment run one at a time."""
+    if record.requester.kind != "remote_agent":
+        return nullcontext()
+    if (lock := _REMOTE_ANSWERS.get(record.id)) is None:
+        lock = _REMOTE_ANSWERS[record.id] = asyncio.Lock()
+    return lock
 
 
 def _validate_side_tools(
@@ -861,8 +878,25 @@ async def _accept_remote(
 
     Joining is the acceptance the other side sees, so a contact that stopped being pending meanwhile leaves the room
     again, which the other side reads as its end. An owner whose invitation fails is only logged, because the other
-    side already took the join as the acceptance.
+    side already took the join as the acceptance. Answers to the request run one at a time, and an agent that
+    ``remote_agents`` no longer names is not accepted.
     """
+    async with _answering(record):
+        await _pending_request(actor, record.id, "accept")
+        if remote_target(actor.config, actor.runtime_paths, record.target.id, record.requester.id) is None:
+            msg = f"{record.requester.id} is no longer among the agents remote_agents names; decline the request"
+            raise ValueError(msg)
+        return await _join_remote_request(actor, record, agents, rules, tools)
+
+
+async def _join_remote_request(
+    actor: ContactActor,
+    record: ContactRecord,
+    agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
+    rules: str | None,
+    tools: list[str] | None,
+) -> ContactRecord:
+    """Join a pending request's room and make the contact active, or leave again when that cannot stand."""
     bot, client = agents[record.target.id]
     room_id = record.room_id
     assert room_id is not None  # A request from another deployment is its invite into this room.
@@ -878,21 +912,18 @@ async def _accept_remote(
         await bot.change_local_membership(room_id, "leave")
         raise ValueError(withdrawn)
 
-    def activate(book: ContactBook) -> tuple[ContactRecord | None, bool]:
-        """Return the activated contact, or None and whether another acceptance already activated it in this room."""
+    def activate(book: ContactBook) -> ContactRecord | None:
         current = _by_id(book, record.id)
         if current.status != "pending":
-            return None, current.status == "active" and current.room_id == room_id
+            return None
         current.status = "active"
         current.decided_at = datetime.now(UTC)
         _change_side(current.target_side, rules, tools)
-        return current.model_copy(deep=True), False
+        return current.model_copy(deep=True)
 
-    accepted, accepted_meanwhile = await run_blocking_until_complete(update_contacts, actor.runtime_paths, activate)
+    accepted = await run_blocking_until_complete(update_contacts, actor.runtime_paths, activate)
     if accepted is None:
-        # The join of an acceptance that finished meanwhile is that contact's, so only another outcome leaves.
-        if not accepted_meanwhile:
-            await bot.change_local_membership(room_id, "leave")
+        await bot.change_local_membership(room_id, "leave")
         raise ValueError(_NOT_PENDING["accept"])
     owner = record.target.local_owner
     if not await invite_to_room(client, room_id, owner):
@@ -906,11 +937,24 @@ async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord
     A request from another deployment is declined by rejecting its invite first, so a rejection that fails leaves the
     request pending, to be declined again, rather than declined here while the other side still waits.
     """
-    asked, personal = await _pending_request(actor, contact_id, "decline")
-    remote_room = asked.room_id if asked.requester.kind == "remote_agent" else None
-    if remote_room is not None and not await reject_contact_invite(actor, asked.target.id, remote_room):
-        msg = f"The invite from {asked.requester.id} could not be rejected, so the request still waits; decline again later"
-        raise ValueError(msg)
+    asked, _ = await _pending_request(actor, contact_id, "decline")
+    async with _answering(asked):
+        asked, personal = await _pending_request(actor, contact_id, "decline")
+        if not await _reject_remote_request(actor, asked):
+            msg = f"The invite from {asked.requester.id} could not be rejected, so the request still waits; decline again later"
+            raise ValueError(msg)
+        return await _decline(actor, contact_id, personal)
+
+
+async def _reject_remote_request(actor: ContactActor, record: ContactRecord) -> bool:
+    """Reject the invite that is a request from another deployment, and return whether none is left; True otherwise."""
+    if record.requester.kind != "remote_agent" or record.room_id is None:
+        return True
+    return await reject_contact_invite(actor, record.target.id, record.room_id)
+
+
+async def _decline(actor: ContactActor, contact_id: str, personal: tuple[str, str]) -> ContactRecord:
+    """Record the decline and tell the thread the request came from."""
 
     def decline(book: ContactBook) -> ContactRecord:
         record = _by_id(book, contact_id)
@@ -975,14 +1019,27 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
     invitations of owners who never joined; a creator that is not running does so when it leaves at its next start.
     A pending request from another deployment is removed by rejecting its invite first, as a decline is.
     """
+    asked, _ = _owned(await run_blocking_until_complete(read_contacts, actor.runtime_paths), contact_id, actor.owner)
+    async with _answering(asked):
+        record, was_pending = await _remove(actor, contact_id)
+    if record.room_id is not None:
+        if (running := _running_bot(actor, _room_admin(record))) is not None:
+            _, client = running
+            if not (was_pending and _with_another_deployment(record)):
+                await withdraw_unjoined_owner_invites(client, record, record.room_id)
+            elif record.target.kind == "remote_agent":
+                # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
+                await kick_from_room(client, record.room_id, record.target.id)
+        if not (was_pending and record.requester.kind == "remote_agent"):
+            # The invite of a request from another deployment was rejected first, and the agent never joined its room.
+            await leave_contact_room(actor, record, record.room_id)
+    return record
+
+
+async def _remove(actor: ContactActor, contact_id: str) -> tuple[ContactRecord, bool]:
+    """Mark a contact removed and return it with whether it was pending, rejecting first a request from elsewhere."""
     asked, side = _owned(await run_blocking_until_complete(read_contacts, actor.runtime_paths), contact_id, actor.owner)
-    if (
-        side == "target"
-        and asked.status == "pending"
-        and asked.requester.kind == "remote_agent"
-        and asked.room_id is not None
-        and not await reject_contact_invite(actor, asked.target.id, asked.room_id)
-    ):
+    if side == "target" and asked.status == "pending" and not await _reject_remote_request(actor, asked):
         msg = f"The invite from {asked.requester.id} could not be rejected, so the request still waits; remove it again later"
         raise ValueError(msg)
 
@@ -1000,19 +1057,7 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
         record.status = "removed"
         return record.model_copy(deep=True), was_pending
 
-    record, was_pending = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
-    if record.room_id is not None:
-        if (running := _running_bot(actor, _room_admin(record))) is not None:
-            _, client = running
-            if not (was_pending and _with_another_deployment(record)):
-                await withdraw_unjoined_owner_invites(client, record, record.room_id)
-            elif record.target.kind == "remote_agent":
-                # Withdraw the invite that is the request, so the other agent cannot join a room nobody is left in.
-                await kick_from_room(client, record.room_id, record.target.id)
-        if not (was_pending and record.requester.kind == "remote_agent"):
-            # The invite of a request from another deployment was rejected above, and the agent never joined its room.
-            await leave_contact_room(actor, record, record.room_id)
-    return record
+    return await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
 
 
 def _listed(config: Config, runtime_paths: RuntimePaths, record: ContactRecord, side: SideName) -> dict[str, object]:

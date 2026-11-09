@@ -14,10 +14,11 @@ from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.federation import (
+    answer_contact_invite,
     contact_member_event,
     is_contact_invite,
-    receive_contact_invite,
     reconcile_remote_contacts,
+    store_contact_invite,
 )
 from mindroom.contacts.flow import withdraw_removed_contact_invites
 from mindroom.contacts.parties import agent_party
@@ -301,19 +302,21 @@ class BotRoomLifecycle:
             return
         config, paths, name = self._config(), self.deps.runtime_paths, self.deps.agent_name
         if is_contact_invite(config, paths, name, event.sender):
-            # A contact request joins only once the owner accepts, so no invite policy may join it.
-            create_background_task(
-                receive_contact_invite(
-                    config,
-                    paths,
-                    name,
-                    self.deps.get_agent_bot,
-                    room_id=room.room_id,
-                    inviter=event.sender,
-                    reason=event.content.get("reason"),
-                ),
-                owner=self.deps.runtime,
+            # A contact request joins only once the owner accepts, so no invite policy may join it. It is stored before
+            # its handling returns, since nothing hands an invite to this handler again.
+            answer = await store_contact_invite(
+                config,
+                paths,
+                name,
+                room_id=room.room_id,
+                inviter=event.sender,
+                reason=event.content.get("reason"),
             )
+            if answer is not None:
+                create_background_task(
+                    answer_contact_invite(config, paths, name, self.deps.get_agent_bot, answer),
+                    owner=self.deps.runtime,
+                )
             return
         await self._record_pending_room_invite(room.room_id, event.sender)
         # The bot's runtime owns the handling, so its shutdown drains it.
