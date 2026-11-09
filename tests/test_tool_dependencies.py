@@ -797,12 +797,13 @@ import sys
 import tomllib
 from pathlib import Path
 
-from mindroom.tool_system import dependencies
-
 root = Path(sys.argv[1])
 mode = sys.argv[2]
 sys.prefix = str(root)
 sys.path.insert(0, str(root))
+
+from mindroom.tool_system import dependencies
+
 receipt = root / 'uv-receipt.toml'
 info = root / 'transient_embedding-1.dist-info'
 
@@ -900,7 +901,8 @@ def _stop_dependency_processes(*processes: subprocess.Popen[str] | None) -> None
 @pytest.mark.parametrize("contender", ["reader", "mem0_reader", "installer"])
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
-    # The scripts put this directory first on sys.path, so its MindRoom distribution holds their lock.
+    # The scripts put this directory first on sys.path before importing MindRoom,
+    # so its MindRoom distribution holds their lock.
     environment = _fake_mindroom_site_packages(tmp_path / "environment")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -942,6 +944,7 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
         assert reader.returncode == 0, reader_error
         expected = "installed" if contender == "installer" else "imported complete metadata"
         assert expected in reader_output
+        assert (environment / ".mindroom-optional-dependencies.lock").exists()
         extras = tomllib.loads((environment / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
         assert set(extras) == (
             {"duckduckgo", "website"} if contender != "installer" else {"browser", "duckduckgo", "website"}
