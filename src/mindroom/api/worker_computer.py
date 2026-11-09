@@ -1,4 +1,4 @@
-"""Runner-authenticated computer routes, filtered private RFB transport, page screencast, and agent's browser bridge."""
+"""Runner-authenticated computer routes, filtered private RFB transport, and the browser page screencast."""
 
 import asyncio
 import secrets
@@ -18,7 +18,6 @@ from mindroom.worker_computer.rfb import RfbClientFilter, RfbProtocolError
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
 
 if TYPE_CHECKING:
-    from mindroom.worker_computer.agent_browser import AgentBrowserBridge
     from mindroom.worker_computer.screencast import ScreencastViewer
 
 logger = get_logger(__name__)
@@ -262,7 +261,7 @@ async def screencast(websocket: WebSocket, session_id: str, generation: str) -> 
         await _end_stream(websocket, computer, session_id, lease, tasks, close_viewer)
 
 
-async def _service_to_bridge(websocket: WebSocket, bridge: "AgentBrowserBridge") -> None:
+async def _forward_commands(websocket: WebSocket, receive: Callable[[str], None]) -> None:
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
@@ -270,7 +269,7 @@ async def _service_to_bridge(websocket: WebSocket, bridge: "AgentBrowserBridge")
         text = message.get("text")
         if not isinstance(text, str):
             raise WebSocketDisconnect(code=1003)
-        bridge.receive(text)
+        receive(text)
 
 
 async def serve_agent_browser(websocket: WebSocket) -> None:
@@ -304,7 +303,7 @@ async def serve_agent_browser(websocket: WebSocket) -> None:
     try:
         await websocket.accept()
         tasks = [
-            asyncio.create_task(_service_to_bridge(websocket, bridge), name="service"),
+            asyncio.create_task(_forward_commands(websocket, bridge.receive), name="service"),
             asyncio.create_task(bridge.follow(), name="page"),
             asyncio.create_task(bridge.send(), name="answers"),
         ]

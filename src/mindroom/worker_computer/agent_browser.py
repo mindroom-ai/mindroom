@@ -1,9 +1,9 @@
-"""A worker service's CDP session on the agent's browser page, under the Computer's control lease.
+"""A worker service's own CDP session on the agent's browser page, gated by the Computer's control lease.
 
-The agent's ``browser`` tool runs Chromium in this worker process through Playwright, which speaks CDP to it over a
-pipe, so a bridge reaches the page without any debugging port.
-Each bridge holds its own CDP session on the page the tool shows and moves it when the agent shows another page.
-A service may watch with a few commands, and act only while its bridge holds the Computer's control lease.
+The agent's ``browser`` tool drives Chromium from this runner process through Playwright, so the bridge opens its CDP
+sessions through Playwright too, and the browser needs no debugging port.
+A service may always send the watching commands, and the acting ones only while its bridge holds the Computer's
+control; every other command is refused before it reaches the page.
 The wire protocol is described in docs/plugins.md#the-agents-browser.
 """
 
@@ -29,9 +29,9 @@ if TYPE_CHECKING:
 
     from mindroom.worker_computer.runtime import WorkerComputerRuntime
 
+# How often the bridge looks at which page the agent's browser shows.
 _POLL_SECONDS = 1.0
-# A page its script froze never answers input or a detach, so input, releasing what a leaving controller holds, and
-# detaching give up after this.
+# A page whose script hangs answers neither input nor a detach, so the bridge stops waiting on those after this.
 _INPUT_SECONDS = 2.0
 _WATCH = frozenset(
     {
@@ -121,90 +121,8 @@ async def _detach(cdp: CDPSession) -> None:
             await cdp.detach()
 
 
-class AgentPage:
-    """One CDP session on the agent's current page that moves with the agent, and the input a controller holds there."""
-
-    def __init__(
-        self,
-        agent_page: Callable[[], Page | None],
-        moved: Callable[[CDPSession | None], Awaitable[None]],
-    ) -> None:
-        self.cdp: CDPSession | None = None
-        self._agent_page = agent_page
-        self._moved = moved
-        self._page: Page | None = None
-        self._shown = False
-        self._buttons: set[str] = set()
-        self._keys: dict[str, dict[str, Any]] = {}
-        self._pointer: tuple[object, object] = (0, 0)
-
-    async def update(self) -> None:
-        """Move this session to the agent's current page if the agent shows another, and report each move."""
-        page = self._agent_page()
-        if self._shown and page is self._page:
-            return
-        self._shown = True
-        previous, self.cdp, self._page = self.cdp, None, None
-        # Buttons and keys held on the page left behind belong to that page.
-        self._buttons.clear()
-        self._keys.clear()
-        if previous is not None:
-            await _detach(previous)
-        if page is not None:
-            # A page that closes meanwhile is no longer the agent's at the next poll, which moves on.
-            with suppress(PlaywrightError):
-                self.cdp = await page.context.new_cdp_session(page)
-                self._page = page
-        with suppress(PlaywrightError):
-            await self._moved(self.cdp)
-
-    async def input(self, cdp: CDPSession, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Send one input event, remembering which buttons and keys it leaves held."""
-        if method == "Input.dispatchMouseEvent":
-            self._pointer = (params.get("x", 0), params.get("y", 0))
-            button = params.get("button")
-            if params.get("type") == "mousePressed" and isinstance(button, str) and button != "none":
-                self._buttons.add(button)
-            elif params.get("type") == "mouseReleased" and isinstance(button, str):
-                self._buttons.discard(button)
-        elif method == "Input.dispatchKeyEvent":
-            key = params.get("code") or params.get("key")
-            if params.get("type") in ("keyDown", "rawKeyDown") and isinstance(key, str):
-                self._keys[key] = params
-            elif params.get("type") == "keyUp" and isinstance(key, str):
-                self._keys.pop(key, None)
-        async with asyncio.timeout(_INPUT_SECONDS):
-            return await cdp.send(method, params)
-
-    async def release(self) -> None:
-        """Release the buttons and keys still held, so the page does not see them stuck."""
-        cdp, buttons, keys = self.cdp, list(self._buttons), list(self._keys.values())
-        self._buttons.clear()
-        self._keys.clear()
-        if cdp is None:
-            return
-        with suppress(PlaywrightError, TimeoutError):
-            async with asyncio.timeout(_INPUT_SECONDS):
-                for button in buttons:
-                    x, y = self._pointer
-                    await cdp.send(
-                        "Input.dispatchMouseEvent",
-                        {"type": "mouseReleased", "x": x, "y": y, "button": button},
-                    )
-                for key in keys:
-                    up = {name: value for name, value in key.items() if name not in ("text", "unmodifiedText")}
-                    await cdp.send("Input.dispatchKeyEvent", {**up, "type": "keyUp"})
-
-    async def close(self) -> None:
-        """Release what is still held and detach from the page."""
-        await self.release()
-        cdp, self.cdp, self._page = self.cdp, None, None
-        if cdp is not None:
-            await _detach(cdp)
-
-
 class AgentBrowserBridge:
-    """Answer one worker service's CDP commands on the agent's page under the Computer's rules, and send its events."""
+    """Answer one worker service's CDP commands on the agent's current page under the Computer's rules."""
 
     def __init__(
         self,
@@ -218,12 +136,18 @@ class AgentBrowserBridge:
         self._poll_seconds = poll_seconds
         # The Computer leases control to this bridge under an ID no viewer session uses.
         self._id = f"agent-browser-{uuid4().hex}"
-        self._agent = AgentPage(computer.agent_page, self._moved)
         self._outbox: asyncio.Queue[str] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
         self._control = asyncio.Lock()
         self._lease: asyncio.Event | None = None
-        self._showing: bool | None = None
+        self._page: Page | None = None
+        self._cdp: CDPSession | None = None
+        # Whether the service was last told that there is a page, and None before it was told anything.
+        self._reported: bool | None = None
+        # The buttons and keys this bridge pressed and has not released yet, and where it last moved the pointer.
+        self._buttons: set[str] = set()
+        self._keys: dict[str, dict[str, Any]] = {}
+        self._pointer: tuple[object, object] = (0, 0)
 
     def _post(self, message: dict[str, Any]) -> None:
         self._outbox.put_nowait(json.dumps(message))
@@ -234,25 +158,36 @@ class AgentBrowserBridge:
         task.add_done_callback(self._tasks.discard)
 
     async def follow(self) -> None:
-        """Follow the agent's current page until cancelled."""
+        """Keep this bridge's session on the page the agent's browser shows, until cancelled."""
         while True:
-            await self._agent.update()
+            await self._attach(self._computer.agent_page())
             await asyncio.sleep(self._poll_seconds)
 
-    async def _moved(self, cdp: CDPSession | None) -> None:
-        if cdp is not None:
-            for event in _EVENTS:
-                cdp.on(event, partial(self._forward, cdp, event))
-        elif self._showing is False:
-            # A page that cannot be attached to is tried again at each poll, which the service need not hear about.
+    async def _attach(self, page: Page | None) -> None:
+        if page is self._page and self._reported is not None:
             return
-        self._showing = cdp is not None
-        # The service starts what it needs, such as a screencast, again on the new page's session.
-        self._post({"method": "MindRoom.page", "params": {"page": self._showing}})
+        previous, self._cdp, self._page = self._cdp, None, None
+        # Buttons and keys pressed on the page the agent left are not this bridge's to release on the next one.
+        self._buttons.clear()
+        self._keys.clear()
+        if previous is not None:
+            await _detach(previous)
+        if page is not None:
+            # A page that closes meanwhile stays unattached, and the next poll tries the page the agent shows then.
+            with suppress(PlaywrightError):
+                cdp = await page.context.new_cdp_session(page)
+                for event in _EVENTS:
+                    cdp.on(event, partial(self._forward, cdp, event))
+                self._cdp, self._page = cdp, page
+        showing = self._cdp is not None
+        # Every new page is reported, because its session needs a screencast started again; a missing page once.
+        if showing or self._reported is not False:
+            self._reported = showing
+            self._post({"method": "MindRoom.page", "params": {"page": showing}})
 
     def _forward(self, cdp: CDPSession, method: str, params: dict[str, Any]) -> None:
-        # The page this bridge is leaving can still deliver an event while its session detaches.
-        if cdp is self._agent.cdp:
+        # A session the bridge is detaching from can still deliver an event, which belongs to the page it left.
+        if cdp is self._cdp:
             self._post({"method": method, "params": params})
 
     async def send(self) -> None:
@@ -287,7 +222,7 @@ class AgentBrowserBridge:
             await self._release_control()
             return {}
         _check(method, params)
-        cdp = self._agent.cdp
+        cdp = self._cdp
         if cdp is None:
             msg = "The agent's browser shows no page."
             raise _RefusedError(msg)
@@ -296,11 +231,48 @@ class AgentBrowserBridge:
         if self._lease is None or not self._computer.allows_input(self._id, self._lease):
             msg = "Take control of the Computer first."
             raise _RefusedError(msg)
-        if method.startswith("Input."):
-            return await self._agent.input(cdp, method, params)
         if method == "Page.navigate":
             params = _navigation(params)
-        return await cdp.send(method, params)
+        if not method.startswith("Input."):
+            return await cdp.send(method, params)
+        self._press(method, params)
+        async with asyncio.timeout(_INPUT_SECONDS):
+            return await cdp.send(method, params)
+
+    def _press(self, method: str, params: dict[str, Any]) -> None:
+        """Note which buttons and keys an input event leaves pressed."""
+        kind = params.get("type")
+        if method == "Input.dispatchMouseEvent":
+            self._pointer = (params.get("x", 0), params.get("y", 0))
+            button = params.get("button")
+            if kind == "mousePressed" and isinstance(button, str) and button != "none":
+                self._buttons.add(button)
+            elif kind == "mouseReleased" and isinstance(button, str):
+                self._buttons.discard(button)
+        elif method == "Input.dispatchKeyEvent":
+            key = params.get("code") or params.get("key")
+            if kind in ("keyDown", "rawKeyDown") and isinstance(key, str):
+                self._keys[key] = params
+            elif kind == "keyUp" and isinstance(key, str):
+                self._keys.pop(key, None)
+
+    async def _release_input(self) -> None:
+        """Release the buttons and keys this bridge still presses, so the agent never resumes with one held down."""
+        cdp, buttons, keys = self._cdp, list(self._buttons), list(self._keys.values())
+        self._buttons.clear()
+        self._keys.clear()
+        if cdp is None:
+            return
+        x, y = self._pointer
+        with suppress(PlaywrightError, TimeoutError):
+            async with asyncio.timeout(_INPUT_SECONDS):
+                for button in buttons:
+                    await cdp.send(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mouseReleased", "x": x, "y": y, "button": button},
+                    )
+                for key in keys:
+                    await cdp.send("Input.dispatchKeyEvent", {**key, "type": "keyUp"})
 
     async def _take_control(self) -> None:
         async with self._control:
@@ -320,8 +292,7 @@ class AgentBrowserBridge:
     async def _release_control(self) -> None:
         async with self._control:
             if self._lease is not None:
-                # The agent resumes on a page that sees nothing still held.
-                await self._agent.release()
+                await self._release_input()
                 await self._computer.release_control(self._id)
 
     async def _lease_ended(self, lease: asyncio.Event) -> None:
@@ -332,13 +303,15 @@ class AgentBrowserBridge:
             self._post({"method": "MindRoom.control", "params": {"held": False}})
 
     async def close(self) -> None:
-        """Release what this bridge holds on the page and its control lease, then detach from the page."""
+        """Release what this bridge presses and its control lease, then detach from the page."""
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self._release_input()
         lease, self._lease = self._lease, None
         if lease is not None:
-            await self._agent.release()
             await self._computer.detach_stream(self._id, lease)
-        await self._agent.close()
+        cdp, self._cdp, self._page = self._cdp, None, None
+        if cdp is not None:
+            await _detach(cdp)

@@ -1,7 +1,8 @@
 """One viewer's CDP screencast of the agent's browser page, and the input that viewer sends while it holds control.
 
-Each viewer opens its own CDP session on the page the agent's browser shows, as a worker service's bridge does, and
-moves to another page when the agent does.
+The agent's ``browser`` tool runs Chromium in this worker process through Playwright, which speaks CDP to it over a
+pipe, so a viewer reaches the page without any debugging port.
+Each viewer opens its own CDP session on the page the tool shows and moves to another page when the agent does.
 Each frame is acknowledged as it arrives, so Chromium never waits on a slow viewer, which gets the newest frame instead
 of a queue.
 The wire protocol is described in docs/tools/worker-computer.md#page-stream.
@@ -19,7 +20,6 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from playwright.async_api import Error as PlaywrightError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from mindroom.worker_computer.agent_browser import AgentPage
 from mindroom.worker_computer.protocol import MAX_WORKER_STREAM_MESSAGE_BYTES
 
 if TYPE_CHECKING:
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
 
 _POLL_SECONDS = 1.0
+# A page its script froze never answers input, so input, and releasing what a leaving viewer holds, give up after this.
+_INPUT_SECONDS = 2.0
 _JPEG_QUALITY = 80
 # Chromium scales frames down to fit, which keeps them well below MAX_WORKER_STREAM_MESSAGE_BYTES.
 _MAX_FRAME_WIDTH = 1920
@@ -117,11 +119,13 @@ class ScreencastViewer:
         *,
         poll_seconds: float = _POLL_SECONDS,
     ) -> None:
-        self._agent = AgentPage(agent_page, self._moved)
+        self._agent_page = agent_page
         self._controls = controls
         self._send_text = send_text
         self._send_bytes = send_bytes
         self._poll_seconds = poll_seconds
+        self._page: Page | None = None
+        self._cdp: CDPSession | None = None
         # What the viewer was last sent, and what it should see next; send() closes the gap.
         self._sent_location: dict[str, str] | None = None
         self._location: dict[str, str] | None = None
@@ -130,37 +134,52 @@ class ScreencastViewer:
         # The newest frame not yet sent.
         self._frame: dict[str, Any] | None = None
         self._wake = asyncio.Event()
+        self._buttons: set[str] = set()
+        self._keys: dict[str, _Key] = {}
+        self._pointer = (0.0, 0.0)
 
     async def follow(self) -> None:
         """Show the agent's current page until cancelled, moving to another page when the agent does."""
         while True:
-            await self._agent.update()
+            page = self._agent_page()
+            if page is not self._page:
+                await self._show(page)
             await self._refresh_location()
             await asyncio.sleep(self._poll_seconds)
 
-    async def _moved(self, cdp: CDPSession | None) -> None:
-        self._frame, self._viewport = None, None
-        if cdp is None:
+    async def _show(self, page: Page | None) -> None:
+        previous, self._cdp, self._page, self._frame, self._viewport = self._cdp, None, None, None, None
+        # Buttons and keys held on the page this viewer leaves belong to that page.
+        self._buttons.clear()
+        self._keys.clear()
+        if previous is not None:
+            with suppress(PlaywrightError):
+                await previous.detach()
+        if page is None:
             return
-        # Frames can arrive before startScreencast answers, so the session is current first.
-        cdp.on("Page.screencastFrame", partial(self._on_frame, cdp))
-        # The viewer learns which page it sees before that page's first frame.
-        await self._refresh_location()
-        await cdp.send(
-            "Page.startScreencast",
-            {
-                "format": "jpeg",
-                "quality": _JPEG_QUALITY,
-                "maxWidth": _MAX_FRAME_WIDTH,
-                "maxHeight": _MAX_FRAME_HEIGHT,
-            },
-        )
+        with suppress(PlaywrightError):
+            # A page that closes meanwhile is no longer the agent's at the next poll, which moves on.
+            self._cdp = await page.context.new_cdp_session(page)
+            self._page = page
+            # Frames can arrive before startScreencast answers, so the session is current first.
+            self._cdp.on("Page.screencastFrame", partial(self._on_frame, self._cdp))
+            # The viewer learns which page it sees before that page's first frame.
+            await self._refresh_location()
+            await self._cdp.send(
+                "Page.startScreencast",
+                {
+                    "format": "jpeg",
+                    "quality": _JPEG_QUALITY,
+                    "maxWidth": _MAX_FRAME_WIDTH,
+                    "maxHeight": _MAX_FRAME_HEIGHT,
+                },
+            )
 
     async def _refresh_location(self) -> None:
         location = {"url": "", "title": ""}
-        if (cdp := self._agent.cdp) is not None:
+        if self._cdp is not None:
             try:
-                target = (await cdp.send("Target.getTargetInfo"))["targetInfo"]
+                target = (await self._cdp.send("Target.getTargetInfo"))["targetInfo"]
             except PlaywrightError:
                 return
             location = {"url": target["url"], "title": target["title"]}
@@ -169,7 +188,7 @@ class ScreencastViewer:
             self._wake.set()
 
     async def _on_frame(self, cdp: CDPSession, params: dict[str, Any]) -> None:
-        if cdp is not self._agent.cdp:
+        if cdp is not self._cdp:
             # The page this viewer is leaving can still deliver a frame while its session detaches.
             return
         self._frame = params
@@ -209,21 +228,26 @@ class ScreencastViewer:
             self._invalid = True
             self._wake.set()
             return
-        cdp = self._agent.cdp
+        cdp = self._cdp
         if cdp is None or not self._controls():
             return
         # The page may close under this input, and the next poll moves to the agent's next page.
         with suppress(PlaywrightError, TimeoutError):
-            await self._dispatch(cdp, message)
+            async with asyncio.timeout(_INPUT_SECONDS):
+                await self._dispatch(cdp, message)
 
     async def _dispatch(self, cdp: CDPSession, message: _ViewerInput) -> None:
         if isinstance(message, _Mouse):
+            if message.event == "down" and message.button != "none":
+                self._buttons.add(message.button)
+            elif message.event == "up":
+                self._buttons.discard(message.button)
+            self._pointer = (message.x, message.y)
             button = message.button
             if message.event == "move" and button == "none":
                 # Chromium drags only when a move names a held button, which DOM pointer moves report in buttons alone.
                 button = next((name for name, bit in _BUTTON_BITS if message.buttons & bit), "none")
-            await self._agent.input(
-                cdp,
+            await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
                     "type": _MOUSE_EVENTS[message.event],
@@ -236,8 +260,7 @@ class ScreencastViewer:
                 },
             )
         elif isinstance(message, _Wheel):
-            await self._agent.input(
-                cdp,
+            await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
                     "type": "mouseWheel",
@@ -249,10 +272,25 @@ class ScreencastViewer:
                 },
             )
         elif isinstance(message, _Key):
-            await self._agent.input(cdp, "Input.dispatchKeyEvent", _key_event(message))
+            if message.event == "down":
+                self._keys[message.code or message.key] = message
+            else:
+                self._keys.pop(message.code or message.key, None)
+            await cdp.send("Input.dispatchKeyEvent", _key_event(message))
         else:
-            await self._agent.input(cdp, "Input.insertText", {"text": message.text})
+            await cdp.send("Input.insertText", {"text": message.text})
 
     async def close(self) -> None:
         """Release the buttons and keys this viewer still holds, so the page does not see them stuck, and detach."""
-        await self._agent.close()
+        cdp = self._cdp
+        if cdp is not None:
+            with suppress(PlaywrightError, TimeoutError):
+                async with asyncio.timeout(_INPUT_SECONDS):
+                    for button in self._buttons:
+                        await cdp.send(
+                            "Input.dispatchMouseEvent",
+                            {"type": "mouseReleased", "x": self._pointer[0], "y": self._pointer[1], "button": button},
+                        )
+                    for key in self._keys.values():
+                        await cdp.send("Input.dispatchKeyEvent", _key_event(key.model_copy(update={"event": "up"})))
+        await self._show(None)
