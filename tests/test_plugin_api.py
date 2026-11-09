@@ -622,7 +622,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 21), "cd6a449d271244b555943014349932a0e3ee808ea090fc9281b5f39d82b58802")
+_PINNED_VERSION = ((1, 22), "cd6a449d271244b555943014349932a0e3ee808ea090fc9281b5f39d82b58802")
 
 
 def _is_enum(obj: object) -> bool:

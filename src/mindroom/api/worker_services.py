@@ -2,7 +2,8 @@
 
 A service is a program in the plugin's folder, which the request's config places as it does for ``/execute``, started as
 a tool's subprocess is: with the worker's Python and sanitized environment, in a process group of its own. It serves on
-the loopback port in ``MINDROOM_WORKER_SERVICE_PORT``, and ``MINDROOM_WORKER_SERVICE_RUNNER_URL`` is this runner's URL.
+the loopback port in ``MINDROOM_WORKER_SERVICE_PORT``, ``MINDROOM_WORKER_SERVICE_RUNNER_URL`` is this runner's URL, and
+``MINDROOM_AGENT_BROWSER_URL`` is its bridge to the agent's browser page.
 Every process in the worker can reach that port, so each start gets a fresh secret on stdin, a socket that other
 processes cannot open through ``/proc`` as they could a pipe, or read as they read the environment and command line;
 the program refuses requests whose ``X-MindRoom-Service-Secret`` header lacks it, and the secret never leaves this runner.
@@ -154,7 +155,7 @@ class _WorkerServices:
                     return
 
 
-def _services(app: FastAPI) -> _WorkerServices:
+def worker_services(app: FastAPI) -> _WorkerServices:
     """Return this runner's service instances, created on first use."""
     try:
         return app.state.worker_services
@@ -174,7 +175,7 @@ class RunningService:
 
 def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | None:
     """Return the plugin's service while its program runs, resetting its idle timer as an ensure does; else None."""
-    services = _services(app)
+    services = worker_services(app)
     instance = services.instance(plugin, name)
     if instance is None or instance.process.returncode is not None:
         return None
@@ -184,7 +185,7 @@ def running_service(app: FastAPI, plugin: str, name: str) -> RunningService | No
 
 async def close_worker_services(app: FastAPI) -> None:
     """End this runner's services as it stops."""
-    await _services(app).close()
+    await worker_services(app).close()
 
 
 async def _start(program: _Program) -> _ServiceInstance:
@@ -251,7 +252,7 @@ def _require_dedicated_worker(app: FastAPI) -> None:
         raise HTTPException(403, "Only a dedicated worker's runner runs plugin services.")
 
 
-def _program(app: FastAPI, payload: _Ensure, plugin: str, runner_url: str) -> _Program:
+def _program(app: FastAPI, payload: _Ensure, plugin: str, name: str, runner_url: str) -> _Program:
     """Return the service's program in the plugin's folder, where the request's config places it here. Blocking."""
     route = prepare_route(app, payload)
     if isinstance(route, WorkerFailure):
@@ -270,7 +271,12 @@ def _program(app: FastAPI, payload: _Ensure, plugin: str, runner_url: str) -> _P
     # A dedicated worker's runner prepares every route's worker, which tool subprocesses run in too.
     assert route.worker is not None
     paths = route.worker.paths
-    env = {**worker_subprocess_env(paths), "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url}
+    env = {
+        **worker_subprocess_env(paths),
+        "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url,
+        # The Computer serves the bridge (api/worker_computer.py) without the runner token this router requires.
+        "MINDROOM_AGENT_BROWSER_URL": f"ws{runner_url.removeprefix('http')}/computer/agent-browser/{plugin}/{name}",
+    }
     entry_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     python, workspace = str(paths.venv_dir / "bin" / "python"), str(paths.workspace)
     return _Program(path, entry_hash, python, env, workspace, payload.idle_timeout_seconds)
@@ -281,9 +287,9 @@ async def ensure_service(request: Request, plugin: str, name: _Name, payload: _E
     """Start the plugin's service unless it runs, and report it."""
     _require_dedicated_worker(request.app)
     runner_url = f"http://127.0.0.1:{request.scope['server'][1]}"
-    services = _services(request.app)
+    services = worker_services(request.app)
     stops = services.stops(plugin, name)
-    program = await asyncio.to_thread(_program, request.app, payload, plugin, runner_url)
+    program = await asyncio.to_thread(_program, request.app, payload, plugin, name, runner_url)
     return await services.ensure(plugin, name, program, stops)
 
 
@@ -291,4 +297,4 @@ async def ensure_service(request: Request, plugin: str, name: _Name, payload: _E
 async def stop_service(request: Request, plugin: str, name: _Name) -> None:
     """End the plugin's service, if it runs."""
     _require_dedicated_worker(request.app)
-    await _services(request.app).stop(plugin, name)
+    await worker_services(request.app).stop(plugin, name)

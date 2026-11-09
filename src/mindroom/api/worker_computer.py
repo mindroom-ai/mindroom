@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSock
 from pydantic import BaseModel, Field
 
 from mindroom.api.sandbox_runner import app_runner_token, validate_runner_token
+from mindroom.api.worker_services import worker_services
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.worker_computer.protocol import ComputerStatus
@@ -191,3 +192,80 @@ async def stream(websocket: WebSocket, session_id: str, generation: str) -> None
         logger.warning("Worker computer stream failed", error_type=type(error).__name__)
     finally:
         await _end_stream(websocket, computer, session_id, lease, tasks, close_display)
+
+
+async def _forward_commands(websocket: WebSocket, receive: Callable[[str], None]) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise WebSocketDisconnect(code=1003)
+        receive(text)
+
+
+async def _serve_agent_browser(websocket: WebSocket) -> None:
+    """Give an admitted worker service its own CDP session on the agent's page; it acts only under the control lease.
+
+    Opening it starts a stopped Computer, as creating a Computer session does; in a worker without a Computer, or one
+    whose display cannot start, the handshake is refused.
+    """
+    try:
+        computer = _app_computer(websocket.app)
+        # Starting takes the lock an agent's browser call holds, so a running Computer is not started again.
+        if computer.status()["state"] != "ready":
+            await computer.ensure_started()
+    except (HTTPException, OSError, RuntimeError, TimeoutError, ExceptionGroup):
+        await websocket.close(code=1008)
+        return
+    # Playwright loads only once a service reaches the agent's browser, which already runs it.
+    from mindroom.worker_computer.agent_browser import AgentBrowserBridge  # noqa: PLC0415
+
+    bridge = AgentBrowserBridge(computer, websocket.send_text)
+    tasks: list[asyncio.Task[None]] = []
+
+    async def cleanup() -> None:
+        try:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await bridge.close()
+        finally:
+            with suppress(RuntimeError, OSError):
+                await websocket.close()
+
+    try:
+        await websocket.accept()
+        tasks = [
+            asyncio.create_task(_forward_commands(websocket, bridge.receive), name="service"),
+            asyncio.create_task(bridge.follow(), name="page"),
+            asyncio.create_task(bridge.send(), name="answers"),
+        ]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except (WebSocketDisconnect, OSError):
+        pass
+    except Exception as error:
+        logger.warning("Agent browser bridge failed", error_type=type(error).__name__)
+    finally:
+        try:
+            await run_coroutine_until_complete(cleanup())
+        except Exception as error:
+            logger.warning("Agent browser bridge cleanup failed", error_type=type(error).__name__)
+
+
+@router.websocket("/agent-browser/{plugin}/{name}")
+async def agent_browser(websocket: WebSocket, plugin: str, name: str) -> None:
+    """Bridge the agent's browser page to the running instance of this service, which presents its own secret."""
+    instance = worker_services(websocket.app).instance(plugin, name)
+    supplied = websocket.headers.get("x-mindroom-service-secret", "").encode()
+    if (
+        instance is None
+        or instance.process.returncode is not None
+        or not secrets.compare_digest(supplied, instance.secret.encode())
+    ):
+        await websocket.close(code=1008)
+        return
+    await _serve_agent_browser(websocket)
