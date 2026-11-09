@@ -16,6 +16,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.federation import (
     answer_contact_invite,
     contact_member_event,
+    contact_room_left,
     is_contact_invite,
     reconcile_remote_contacts,
     store_contact_invite,
@@ -332,7 +333,16 @@ class BotRoomLifecycle:
             room_id=room_id,
             user_id=event.state_key,
             membership=event.membership,
-            sender=event.sender,
+        )
+
+    async def on_contact_room_left(self, room_id: str) -> None:
+        """End a contact with another deployment's agent whose room this agent is no longer in."""
+        await contact_room_left(
+            self._config(),
+            self.deps.runtime_paths,
+            self.deps.agent_name,
+            self.deps.get_agent_bot,
+            room_id=room_id,
         )
 
     async def _record_pending_room_invite(self, room_id: str, sender_id: str) -> None:

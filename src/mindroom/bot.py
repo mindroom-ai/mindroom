@@ -1397,6 +1397,7 @@ class AgentBot:
                 # Nobody here can see or cancel the work this entity leaves behind.
                 await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
+            await self._room_lifecycle.on_contact_room_left(room_id)
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.

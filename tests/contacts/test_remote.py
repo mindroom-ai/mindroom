@@ -687,7 +687,6 @@ async def _member(
     *,
     user_id: str = REMOTE,
     membership: str,
-    sender: str = REMOTE,
     room_id: str = REMOTE_ROOM,
 ) -> None:
     """One membership change in the contact room, as the agent's bot sees it."""
@@ -699,7 +698,6 @@ async def _member(
         room_id=room_id,
         user_id=user_id,
         membership=membership,
-        sender=sender,
     )
 
 
@@ -757,27 +755,38 @@ async def test_the_other_agent_leaving_ends_the_contact_here(tmp_path: Path, mem
 
 
 @pytest.mark.asyncio
-async def test_being_removed_from_the_room_ends_the_contact(tmp_path: Path) -> None:
-    """An agent removed from the room, as a homeserver administrator can do, can no longer speak there, so its contact ends."""
+@pytest.mark.parametrize("contact", ["active", "sent"])
+async def test_being_removed_from_the_room_ends_the_contact(tmp_path: Path, contact: str) -> None:
+    """An agent removed from the room, as a homeserver administrator can do, can no longer speak there, so it ends."""
     config, paths = _remote_setup(tmp_path)
-    _store(paths, _outgoing(status="active"))
+    _store(paths, _outgoing(status="active") if contact == "active" else _outgoing())
     runtime = _runtime()
     with _matrix():
-        await _member(config, paths, runtime, "mind_alice", user_id=_account(paths, "mind_alice"), membership="leave")
+        await federation.contact_room_left(config, paths, "mind_alice", runtime.bots.get, room_id=REMOTE_ROOM)
     assert _statuses(paths) == ["removed"]
+    runtime.bots["mind_alice"].change_local_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_a_withdrawn_invite_ends_the_request_it_was(tmp_path: Path) -> None:
-    """A member event of Bob's agent removed from a request's room, should one arrive, ends the request waiting for Bob.
-
-    A withdrawn invite of a room the agent never joined reaches no member event, so this is defensive.
-    """
+async def test_leaving_a_request_room_after_a_failed_acceptance_keeps_the_request(tmp_path: Path) -> None:
+    """A failed acceptance leaves the room it joined again, and the request still waits for its owner."""
     config, paths = _remote_setup(tmp_path)
     _store(paths, _incoming_with_notice())
     runtime = _runtime()
     with _matrix():
-        await _member(config, paths, runtime, "mind_bob", user_id=_account(paths, "mind_bob"), membership="leave")
+        await federation.contact_room_left(config, paths, "mind_bob", runtime.bots.get, room_id=REMOTE_ROOM)
+    assert _statuses(paths) == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_departure_reaches_contacts(tmp_path: Path) -> None:
+    """The room lifecycle hands this agent's own departure to contacts, which no member event of the room carries."""
+    config, paths = _remote_setup(tmp_path)
+    _store(paths, _outgoing(status="active"))
+    runtime = _runtime()
+    lifecycle = _room_lifecycle(config, paths, "mind_alice", runtime.bots.get)
+    with _matrix():
+        await lifecycle.on_contact_room_left(REMOTE_ROOM)
     assert _statuses(paths) == ["removed"]
 
 
@@ -789,8 +798,8 @@ async def test_other_membership_changes_change_nothing(tmp_path: Path) -> None:
     runtime = _runtime()
     own = _account(paths, "mind_alice")
     with _matrix() as matrix:
-        await _member(config, paths, runtime, "mind_alice", user_id=OWNER, membership="leave", sender=OWNER)
-        await _member(config, paths, runtime, "mind_alice", user_id=own, membership="leave", sender=own)
+        await _member(config, paths, runtime, "mind_alice", user_id=OWNER, membership="leave")
+        await _member(config, paths, runtime, "mind_alice", user_id=own, membership="leave")
         await _member(config, paths, runtime, "mind_alice", membership="leave", room_id="!other:localhost")
         await _member(config, paths, runtime, "mind_alice", membership="join")
     assert _statuses(paths) == ["active"]
@@ -883,7 +892,6 @@ async def test_two_deployments_ask_accept_talk_and_end_a_contact(tmp_path: Path)
                 room_id=room_id,
                 user_id=side.agent_id,
                 membership=target,
-                sender=side.agent_id,
             )
             return True
 

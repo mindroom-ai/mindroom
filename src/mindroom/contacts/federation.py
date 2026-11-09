@@ -31,10 +31,10 @@ from mindroom.contacts.store import (
     ContactRecord,
     ContactSide,
     ContactStatus,
+    SideName,
     agent_contacts,
     update_contacts,
 )
-from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import ensure_managed_room_power_levels, get_room_membership, invite_to_room
 
@@ -227,6 +227,19 @@ def _settle(
     return change
 
 
+def _remote_contact_in(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    room_id: str,
+) -> tuple[ContactRecord, SideName] | None:
+    """Return this agent's pending or active contact with another deployment's agent in the room, with its side."""
+    for record, side in agent_contacts(config, runtime_paths, agent_name):
+        if record.room_id == room_id and record.status in {"pending", "active"}:
+            return (record, side) if record.counterparty(side).kind == "remote_agent" else None
+    return None
+
+
 async def contact_member_event(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -236,44 +249,53 @@ async def contact_member_event(
     room_id: str,
     user_id: str,
     membership: str,
-    sender: str,
 ) -> None:
-    """Apply a membership change in the room of this agent's contact with another deployment's agent.
+    """Apply the other agent's membership change in the room of this agent's contact with another deployment's agent.
 
     For a request this agent sent, the other agent joining accepts it and leaving or being banned declines it. Once
-    active, the other agent leaving or being banned ends the contact here too. This agent removed by anyone else, as a
-    homeserver administrator or a room creator with unlimited power can do, ends the contact as well; a withdrawn invite
-    of a room this agent never joined reaches no member event. Every other change, and the same change seen again,
-    changes nothing.
+    active, the other agent leaving or being banned ends the contact here too. Every other change, and the same change
+    seen again, changes nothing.
     """
     found = _agent(config, runtime_paths, agent_name, agent_bot)
     if found is None:
         return
     actor, _party = found
-    contacts = await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name)
-    match = next(
-        (
-            (record, side)
-            for record, side in contacts
-            if record.room_id == room_id and record.status in {"pending", "active"}
-        ),
-        None,
-    )
-    if match is None or (other := match[0].counterparty(match[1])).kind != "remote_agent":
+    match = await run_blocking_until_complete(_remote_contact_in, config, runtime_paths, agent_name, room_id)
+    if match is None or user_id != match[0].counterparty(match[1]).id:
         return
     record, side = match
-    gone = membership in {"leave", "ban"}
-    own_id = current_entity_id(agent_name, runtime_paths).full_id
-    if user_id == own_id and gone and sender != own_id:
-        await _end(actor, record, agent_name, record.status, leave=False)
-    elif user_id != other.id:
+    await _catch_up(
+        actor,
+        record,
+        agent_name,
+        membership,
+        pending_request=record.status == "pending" and side == "requester",
+    )
+
+
+async def contact_room_left(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    agent_bot: Callable[[str], AgentBot | None],
+    *,
+    room_id: str,
+) -> None:
+    """End this agent's contact with another deployment's agent in a room it no longer is in, as after being removed.
+
+    An agent's own departure reaches only its membership bookkeeping, not the room's member events. One it made itself
+    finds the contact already ended, and a request it was asked, whose room it left again after a failed acceptance,
+    stays pending.
+    """
+    found = _agent(config, runtime_paths, agent_name, agent_bot)
+    if found is None:
         return
-    elif record.status == "pending" and side == "requester" and membership == "join":
-        await _accepted(actor, record, agent_name)
-    elif record.status == "pending" and side == "requester" and gone:
-        await _declined(actor, record, agent_name)
-    elif record.status == "active" and gone:
-        await _end(actor, record, agent_name, "active", leave=True)
+    actor, _party = found
+    match = await run_blocking_until_complete(_remote_contact_in, config, runtime_paths, agent_name, room_id)
+    if match is None or (match[0].status == "pending" and match[1] != "requester"):
+        return
+    record, _side = match
+    await _end(actor, record, agent_name, record.status, leave=False)
 
 
 async def _accepted(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
@@ -284,7 +306,7 @@ async def _accepted(actor: ContactActor, record: ContactRecord, agent_name: str)
         return
     bot = actor.agent_bot(agent_name)
     client = None if bot is None else bot.client
-    # Equal power lets each agent invite and withdraw its own owner, and neither remove the other.
+    # The other agent then invites and withdraws its own owner; where creators have no unlimited power, neither agent can remove the other.
     if client is None or not await ensure_managed_room_power_levels(client, accepted.room_id, [accepted.target.id]):
         logger.warning("contact_room_power_grant_failed", contact_id=record.id, user_id=accepted.target.id)
     if client is None or not await invite_to_room(client, accepted.room_id, actor.owner):
@@ -354,7 +376,7 @@ async def reconcile_remote_contacts(
             membership = await get_room_membership(bot.client, record.room_id, other.id)
             await _catch_up(actor, record, agent_name, membership, pending_request=pending_request)
         except Exception:
-            # Each contact moves only from the status it is in, so the next start retries one that failed here.
+            # Each contact moves only from the status it is in, so the next start retries one whose status did not move.
             logger.exception("remote_contact_reconcile_failed", contact_id=record.id, agent_name=agent_name)
 
 

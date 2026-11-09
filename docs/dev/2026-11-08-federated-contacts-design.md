@@ -84,9 +84,9 @@ The target marks the contact active and then joins, because the other side reads
 ### Membership events drive the requesting side
 
 The requesting side activates its contact when the target agent joins, records a decline when the invite is rejected, and ends an active contact when the other agent leaves or is removed, from the journaled member events of the contact room.
-A join, rejection, or leave that reached no live event, as across a sync gap, is read from the other agent's membership in the room's state when the agent starts, so it cannot strand a contact; the room's joined members could not tell a pending invite from a rejected one.
+A join, rejection, or leave that reached no live event, as across a sync gap, is read from the other agent's membership in the room's state when the agent starts, so a missed event cannot strand a contact; the room's joined members could not tell a pending invite from a rejected one.
 The generic invite handling never joins the room of any contact the agent has or had, at a reload or start included and whatever the config then says of the inviter, because its join is the acceptance the other side reads.
-A local agent that someone else removes from the room ends its contact the same way, because it can no longer speak there.
+A local agent that someone else removes from the room ends its contact too, because it can no longer speak there; that change reaches it with its own membership bookkeeping, not as a member event of the room.
 
 ### The other agent behaves like an agent in the room
 
@@ -111,6 +111,7 @@ A new invite to a room whose request was declined or removed is rejected, so a s
 
 ## Accepted Limitations
 
+- A decline made while the asking side's homeserver cannot be reached never arrives there, because the asked side's homeserver then rejects the invite only locally and reports success; the request waits until its owner withdraws it, and asking again then reaches the decline that stands.
 - A request sent before the other deployment lists the asking agent is not picked up once it does, because a restored invite carries no reason; the asking owner removes it and asks again.
 - An agent whose deployment does not list the asking agent in `remote_agents` treats the request as an ordinary invite, and one that accepts every invitation joins, which the asking side reads as an acceptance its owner never gave; nobody answers in that room.
   Telling that join from a real acceptance needs a signal on the join, such as a `reason`, which the agent's membership commands cannot send.
