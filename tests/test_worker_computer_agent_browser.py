@@ -263,7 +263,7 @@ async def test_the_bridge_follows_the_agent_to_another_tab_and_to_none(agent: _A
     """When the agent shows another page the service hears of it, and its new screencast shows that page."""
     first = cast("Page", agent.shown)
     second = await first.context.new_page()
-    await second.set_content("<title>Second</title><p>second page")
+    await second.set_content(_FORM.replace("Form", "Second"))
     async with _connected(agent.runtime) as service:
         assert await service.event("MindRoom.page") == {"page": True}
         await service.call("Page.startScreencast", {"format": "jpeg"})
@@ -278,6 +278,22 @@ async def test_the_bridge_follows_the_agent_to_another_tab_and_to_none(agent: _A
         agent.shown = None
         assert await service.event("MindRoom.page") == {"page": False}
         assert "no page" in await service.refused("Target.getTargetInfo")
+
+
+@pytest.mark.asyncio
+async def test_a_key_held_on_the_page_the_agent_left_is_not_released_on_the_next(agent: _Agent) -> None:
+    """The next page never saw that key go down, so it never sees it go up either."""
+    first = cast("Page", agent.shown)
+    second = await first.context.new_page()
+    await second.set_content(_FORM)
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft"})
+        agent.shown = second
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.releaseControl")
+    assert await second.evaluate("released") == []
 
 
 @pytest.mark.asyncio
@@ -347,9 +363,15 @@ async def test_leaving_releases_the_keys_and_buttons_the_service_held_and_the_le
     async with _connected(agent.runtime) as service:
         assert await service.event("MindRoom.page") == {"page": True}
         await service.call("MindRoom.takeControl")
+        # A key and a button the service already released are not released again.
+        key = {"key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65}
+        await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", **key})
+        await service.call("Input.dispatchKeyEvent", {"type": "keyUp", **key})
+        await service.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 1, "y": 1, "button": "left"})
+        await service.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": 1, "y": 1, "button": "left"})
         await service.call("Input.dispatchKeyEvent", {"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft"})
         await service.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 1, "y": 1, "button": "right"})
-    assert sorted(await page.evaluate("released")) == ["Shift", "button 2"]
+    assert sorted(await page.evaluate("released")) == ["Shift", "a", "button 0", "button 2"]
     assert agent.runtime.status()["controller_session_id"] is None
     await agent.browse()
 
@@ -369,7 +391,9 @@ async def test_releasing_control_releases_what_the_service_held(agent: _Agent) -
 @pytest.mark.asyncio
 async def test_a_pending_navigation_holds_neither_other_commands_nor_a_leaving_service(agent: _Agent) -> None:
     """A server that never answers keeps only its own navigation waiting; release and leaving still complete."""
-    stalled = await asyncio.start_server(lambda _reader, _writer: None, "127.0.0.1", 0)
+    # The server keeps each connection open without answering, so the navigation stays pending.
+    connections: list[asyncio.StreamWriter] = []
+    stalled = await asyncio.start_server(lambda _reader, writer: connections.append(writer), "127.0.0.1", 0)
     port = stalled.sockets[0].getsockname()[1]
     try:
         async with _connected(agent.runtime) as service:
@@ -385,6 +409,8 @@ async def test_a_pending_navigation_holds_neither_other_commands_nor_a_leaving_s
             assert navigation not in {message.get("id") for message in service.messages}
         await agent.browse()
     finally:
+        for writer in connections:
+            writer.close()
         stalled.close()
 
 
@@ -423,14 +449,20 @@ class _FakeSession:
     def __init__(self, late_frame: str | None = None) -> None:
         self.handlers: dict[str, Any] = {}
         self.late_frame = late_frame
+        self.detached = False
+        # A page its own script froze answers no input.
+        self.frozen = False
 
     def on(self, event: str, handler: object) -> None:
         self.handlers[event] = handler
 
-    async def send(self, _method: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def send(self, method: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.frozen and method.startswith("Input."):
+            await asyncio.Event().wait()
         return {}
 
     async def detach(self) -> None:
+        self.detached = True
         if self.late_frame is not None:
             self.frame(self.late_frame)
 
@@ -459,6 +491,24 @@ async def test_an_event_the_left_page_delivers_never_reaches_the_service() -> No
         assert await service.event("MindRoom.page") == {"page": True}
         new.session.frame("new")
         assert await service.event("Page.screencastFrame") == {"data": "new"}
+        assert old.session.detached
+    assert new.session.detached
+    await agent.runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_input_to_a_frozen_page_answers_an_error_in_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page whose script hangs never answers input, so the bridge answers for it and keeps serving."""
+    monkeypatch.setattr("mindroom.worker_computer.agent_browser._INPUT_SECONDS", 0.05)
+    frozen = _FakePage(_FakeSession())
+    frozen.session.frozen = True
+    agent = _Agent(cast("Page", frozen))
+    await agent.browse()
+    async with _connected(agent.runtime) as service:
+        assert await service.event("MindRoom.page") == {"page": True}
+        await service.call("MindRoom.takeControl")
+        assert await service.refused("Input.insertText", {"text": "x"}) == "The page did not answer in time."
+        assert await service.call("Target.getTargetInfo") == {}
     await agent.runtime.close()
 
 
