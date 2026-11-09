@@ -195,6 +195,7 @@ def _api_state(config: Config | None, runtime_paths: RuntimePaths) -> config_lif
 def _app(config: Config | None, runtime_paths: RuntimePaths) -> FastAPI:
     """Return an API app serving ``config`` with the plugin routes mounted, answering errors as the main app does."""
     app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
+    app.add_middleware(main._FramedWebsocketDenials)
     ensure_app_state(app).api_state = _api_state(config, runtime_paths)
     mount_plugin_routes(app)
     return app
