@@ -385,9 +385,13 @@ def test_a_scan_stops_once_its_paths_reach_the_cap_s_length(tmp_path: Path, monk
     root.mkdir()
     for index in range(10):
         (root / f"{index}{'x' * 49}").write_text("x")
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 120)
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 100)
+    examined = []
+    real_is_hidden = watch.is_hidden
+    monkeypatch.setattr(watch, "is_hidden", lambda path: examined.append(path) or real_is_hidden(path))
 
     assert len(watch._scan(root)) == 2
+    assert len(examined) == 3
 
 
 @pytest.mark.asyncio
@@ -395,10 +399,12 @@ async def test_a_follower_whose_waiting_paths_pass_the_cap_s_length_is_told_to_c
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A client that stops reading can't make the path text waiting for it grow without bound, however few the paths."""
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 10)
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 12)
     follower = watch._Follower()
     follower.add({"aaaaaa"})
     follower.add({"bbbbbb"})
+    assert follower.ended is None
+    follower.add({"c"})
 
     with pytest.raises(HTTPException) as overflow:
         await follower.next()
@@ -408,7 +414,7 @@ async def test_a_follower_whose_waiting_paths_pass_the_cap_s_length_is_told_to_c
 @pytest.mark.asyncio
 async def test_sent_paths_no_longer_count_toward_the_cap_s_length(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the paths still waiting count, and a path changed again while it waits counts once."""
-    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 10)
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 6)
     follower = watch._Follower()
     follower.add({"aaaaaa"})
     follower.add({"aaaaaa"})

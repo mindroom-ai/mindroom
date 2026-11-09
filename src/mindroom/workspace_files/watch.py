@@ -81,7 +81,6 @@ class _Follower:
     def end(self, reason: str) -> None:
         self.ended = reason
         self.pending.clear()
-        self.pending_characters = 0
         self.ready.set()
 
     async def next(self) -> list[str]:
