@@ -48,7 +48,7 @@ Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the a
 | `GET /workspaces` | `{"workspaces": [{"agent_user_id", "display_name", "private", "files", "terminal"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write`, and `terminal` is what the caller may do in the agent's [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none`, `watch`, or `type` |
 | `GET /agents/{agent_user_id}/workspace/folder?path=<folder>` | `{"path", "entries", "truncated"}`: the folder's entries, folders and links to folders first, then by name |
 | `GET /agents/{agent_user_id}/workspace/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
-| `PUT /agents/{agent_user_id}/workspace/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |
+| `PUT /agents/{agent_user_id}/workspace/file` with `{"path", "content", "encoding", "etag", "create"}` | `{"etag", "size", "mtime"}` of the saved file |
 | `POST /agents/{agent_user_id}/workspace/folder` with `{"path"}` | 204; the folder is made with any folders above it |
 | `POST /agents/{agent_user_id}/workspace/move` with `{"path", "to"}` | 204; the folders above `to` are made, and a link moves as a link |
 | `DELETE /agents/{agent_user_id}/workspace/entry?path=<path>` | 204; a folder goes with everything in it unless it holds Git's files or a hidden credential, and a link without what it leads to |
@@ -61,6 +61,7 @@ Files over 5 MiB answer 413, to read and to save.
 
 A save sends `content` as text, or as base64 with `encoding: "base64"`.
 Without `etag` it overwrites the file; with the `etag` the client read, it saves only while the file still has that content, and otherwise answers 409 with `{"detail", "etag"}`, where `etag` is the file's current one, or null once it is gone.
+With `"create": true`, for a new file, it saves only where nothing is yet, not even a link leading nowhere, and otherwise answers 409 and changes nothing; it can't be combined with `etag`, which answers 422.
 A save is atomic, keeps an existing file's permissions, and makes the folders above a new file; the first save or new folder in a workspace not made yet makes it as the agent's first turn would.
 Making a folder where something already is, or moving onto a taken name, answers 409, and moving a folder into itself answers 400.
 

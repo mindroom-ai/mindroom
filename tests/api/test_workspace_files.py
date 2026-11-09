@@ -185,6 +185,21 @@ def test_a_save_with_a_stale_etag_answers_409_with_the_current_one(client: _Clie
     assert (gone.status_code, gone.json()["etag"]) == (409, None)
 
 
+def test_a_create_only_save_writes_only_where_nothing_is(client: _Client) -> None:
+    """``create`` makes a new file, answers 409 over a taken name without changing it, and refuses an etag with 422."""
+    new = client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "", "create": True})
+    assert (new.status_code, new.json()["etag"]) == (200, _etag(b""))
+    client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "# Notes\n"})
+
+    taken = client.put(ALICE, "coder", "file", {"path": "notes.md", "content": "", "create": True})
+
+    assert (taken.status_code, taken.json()) == (409, {"detail": "Something is already there."})
+    assert client.get(ALICE, "coder", "file", path="notes.md").json()["content"] == "# Notes\n"
+    both = {"path": "other.md", "content": "", "create": True, "etag": _etag(b"")}
+    assert client.put(ALICE, "coder", "file", both).status_code == 422
+    assert client.get(ALICE, "coder", "file", path="other.md").status_code == 404
+
+
 def test_files_travel_as_text_or_base64_both_ways(client: _Client) -> None:
     """Binary content saves and reads as base64, and content that is not base64 answers 400."""
     binary = bytes(range(256))

@@ -412,6 +412,57 @@ def test_a_save_without_an_etag_overwrites(root: Path) -> None:
     assert (root / "notes.md").read_text() == "# Mine\n"
 
 
+def test_a_create_only_save_makes_a_new_file_and_the_folders_above(root: Path) -> None:
+    """With ``create`` a free name gets a new file with the folders above it, as a plain save makes one."""
+    saved = save_file(root, "docs/guide/new.md", b"", None, create=True)
+
+    created = root / "docs" / "guide" / "new.md"
+    assert created.read_bytes() == b""
+    assert (saved.etag, saved.size, saved.mtime) == (_etag(b""), 0, created.stat().st_mtime_ns // 1_000_000)
+
+
+def _tree(root: Path) -> dict[str, bytes | str | None]:
+    """Every entry below ``root``: a link's target, a file's content, None for a folder."""
+    return {
+        str(entry.relative_to(root)): (
+            str(entry.readlink()) if entry.is_symlink() else entry.read_bytes() if entry.is_file() else None
+        )
+        for entry in root.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("path", ["notes.md", "src", "notes-link", "dangling-link"])
+def test_a_create_only_save_over_anything_already_there_answers_409_and_changes_nothing(root: Path, path: str) -> None:
+    """A file, a folder, a link to a file and a link leading nowhere all take the name, and nothing is written."""
+    (root / "notes-link").symlink_to("notes.md")
+    (root / "dangling-link").symlink_to("missing.md")
+    before = _tree(root)
+
+    with pytest.raises(HTTPException) as taken:
+        save_file(root, path, b"mine", None, create=True)
+
+    assert (taken.value.status_code, taken.value.detail) == (409, "Something is already there.")
+    assert _tree(root) == before
+
+
+def test_a_create_only_save_never_overwrites_what_appears_after_the_path_is_followed(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code the agent runs can make the file between the save's checks and its write: the save then answers 409."""
+    leaf = operations._leaf
+
+    def planting(*args: object) -> object:
+        found = leaf(*args)
+        (root / "race.md").write_text("theirs")
+        return found
+
+    monkeypatch.setattr(operations, "_leaf", planting)
+
+    assert _status(lambda: save_file(root, "race.md", b"mine", None, create=True)) == 409
+    assert (root / "race.md").read_text() == "theirs"
+
+
 def test_make_folder_makes_the_folders_above_and_refuses_a_taken_name(root: Path) -> None:
     """Missing folders above are made too, and a folder or file already there answers 409."""
     make_folder(root, "a/b/c")

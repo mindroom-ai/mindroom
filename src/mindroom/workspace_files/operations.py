@@ -344,18 +344,27 @@ def read_file(root: Path, raw_path: str) -> FileContent:
     return FileContent(str(path), encoding, content, len(payload), _mtime(status), _etag(payload))
 
 
-def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Saved:
+def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None, *, create: bool = False) -> Saved:
     """Save a file atomically, keeping an existing one's mode and making the folders above a new one.
 
-    Given ``etag``, it saves only while the file still has that version, else raises ``StaleEtagError``.
+    Given ``etag``, it saves only while the file still has that version, else raises ``StaleEtagError``. With
+    ``create``, it saves only where nothing is, not even a link leading nowhere, else answers 409.
     """
     if len(payload) > _MAX_FILE_BYTES:
         raise _too_large()
     path = _relative(raw_path)
     _refuse_git(path)
-    found = _find(root, path)
+    if create:
+        parent, name = _leaf(root, path)
+        found = _Found(parent.base, parent.relative / name)
+    else:
+        found = _find(root, path)
     _refuse_git(found.relative)
     with _changes(found.base):
+        if create:
+            # Claims the name, without following a link there, so nothing that appeared since the checks is replaced.
+            with _refusals(), open_directory_within_root(found.base, found.relative.parent, create=True) as directory:
+                os.close(os.open(found.relative.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=directory))
         try:
             current = _etag(_read(found)[0])
         except HTTPException as error:

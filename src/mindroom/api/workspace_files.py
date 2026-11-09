@@ -12,11 +12,11 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from mindroom.api import agent_streams
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
@@ -60,6 +60,14 @@ class _Save(BaseModel):
     content: str
     encoding: Literal["utf-8", "base64"] = "utf-8"
     etag: str | None = None
+    create: bool = False
+
+    @model_validator(mode="after")
+    def _create_or_etag(self) -> Self:
+        if self.create and self.etag is not None:
+            msg = "A save that creates the file can't also name its etag."
+            raise ValueError(msg)
+        return self
 
 
 class _Path(BaseModel):
@@ -142,14 +150,17 @@ async def save_file(
     agent_user_id: str,
     body: _Save,
 ) -> operations.Saved | JSONResponse:
-    """Save a file; given ``etag``, only while the file has it, else 409 with the file's current etag."""
+    """Save a file; given ``etag``, only while the file has it, else 409 with the file's current etag.
+
+    With ``create``, only where nothing is, else 409.
+    """
     try:
         payload = body.content.encode() if body.encoding == "utf-8" else base64.b64decode(body.content, validate=True)
     except ValueError:  # Half of a surrogate pair, or text that is not base64.
         raise HTTPException(400, f"content is not valid {body.encoding}.") from None
     root = await _made_root(request, room, room_id, agent_user_id)
     try:
-        return await asyncio.to_thread(operations.save_file, root, body.path, payload, body.etag)
+        return await asyncio.to_thread(operations.save_file, root, body.path, payload, body.etag, create=body.create)
     except operations.StaleEtagError as stale:
         return JSONResponse({"detail": str(stale), "etag": stale.etag}, status_code=409)
 
