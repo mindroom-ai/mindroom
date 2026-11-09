@@ -240,6 +240,12 @@ async def test_output_reads_as_the_screen_shows_it() -> None:
     assert terminal_tools._plain_text(b"abc\x08\x1b[K\r\nxy\x08\x08z\r\n\x08w") == "ab\nz\nw"
 
 
+@pytest.mark.timeout(10)
+async def test_output_full_of_backspaces_reads_in_one_pass() -> None:
+    """Worker code writes the output, so erasing it costs one pass however many backspaces it holds."""
+    assert terminal_tools._plain_text(b"x" * 100_000 + b"\x08" * 100_000 + b"done") == "done"
+
+
 class _Chatty:
     """A viewer of a terminal printing far more than a call keeps, then exiting."""
 
