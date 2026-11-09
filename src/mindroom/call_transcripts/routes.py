@@ -86,7 +86,7 @@ class _PauseRequest(BaseModel):
     paused: bool
 
 
-@router.post("/rooms/{room_id}/calls.join")
+@router.post("/rooms/{room_id}/call")
 async def join_call(room_id: str, caller: _SignedIn) -> dict[str, object]:
     """Join the room's live call, starting it if there is none; from someone already in it, this is the heartbeat."""
     return {"call": _call_json(await caller.service.join(room_id, caller.user_id))}
@@ -127,7 +127,7 @@ async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> di
     return {"line": None if line is None else _line_json(line)}
 
 
-@router.get("/rooms/{room_id}/calls.live")
+@router.get("/rooms/{room_id}/call")
 async def live_call(room_id: str, caller: _SignedIn, after: str | None = None) -> dict[str, object]:
     """Return the room's live call, its lines (those added after the line ``after`` if given) and everyone's names."""
     return _live_json(await caller.service.live(room_id, caller.user_id, after=after))

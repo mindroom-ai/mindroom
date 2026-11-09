@@ -47,7 +47,7 @@ class Api:
 
     async def join(self, user_id: str, room_id: str = ROOM) -> httpx.Response:
         """Join or check in to the room's call."""
-        return await self.client.post(f"{PREFIX}/rooms/{quote(room_id)}/calls.join", headers=self.headers(user_id))
+        return await self.client.post(f"{PREFIX}/rooms/{quote(room_id)}/call", headers=self.headers(user_id))
 
     async def pause(self, call_id: str, user_id: str, *, paused: bool) -> httpx.Response:
         """Pause or resume transcription in the call."""
@@ -61,7 +61,7 @@ class Api:
         """Read the room's live call, as MindRoom Chat polls it."""
         params = {} if after is None else {"after": after}
         return await self.client.get(
-            f"{PREFIX}/rooms/{quote(ROOM)}/calls.live",
+            f"{PREFIX}/rooms/{quote(ROOM)}/call",
             headers=self.headers(user_id),
             params=params,
         )
@@ -116,11 +116,11 @@ def _refusal(response: httpx.Response, status: int, code: str) -> None:
 
 
 ROUTES = [
-    ("POST", f"/rooms/{quote(ROOM)}/calls.join"),
+    ("POST", f"/rooms/{quote(ROOM)}/call"),
     ("POST", "/calls/call1/leave"),
     ("POST", "/calls/call1/pause"),
     ("POST", "/calls/call1/speech"),
-    ("GET", f"/rooms/{quote(ROOM)}/calls.live"),
+    ("GET", f"/rooms/{quote(ROOM)}/call"),
 ]
 
 

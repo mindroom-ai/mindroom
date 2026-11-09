@@ -390,11 +390,11 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 
 | Route | Answer |
 |-------|--------|
-| `POST /rooms/{room_id}/calls.join` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
+| `POST /rooms/{room_id}/call` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
 | `POST /calls/{call_id}/leave` | `{}` |
 | `POST /calls/{call_id}/pause` with `{"paused": true}` or `{"paused": false}` | `{"call": Call}` |
 | `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line or null}`: a line, a gap, or null when speech-to-text heard no words |
-| `GET /rooms/{room_id}/calls.live`, optionally with `?after=<line ID>` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}`; `lines` are those added after `after`, or all without it |
+| `GET /rooms/{room_id}/call`, optionally with `?after=<line ID>` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}`; `lines` are those added after `after`, or all without it |
 
 A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
 A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
@@ -402,7 +402,7 @@ Every route answers 404 while `calls.transcripts.enabled` is off.
 A call's routes take the room from the call and answer 404 to anyone not in that room.
 Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
-Clients poll `calls.live` for new lines and the paused state: `lines` come in the order they were added, so the last one's ID is the next `after`, and an `after` that is not one of the live call's lines answers all of them.
+Clients poll `GET /rooms/{room_id}/call` for new lines and the paused state: `lines` come in the order they were added, so the last one's ID is the next `after`, and an `after` that is not one of the live call's lines answers all of them.
 The row's content is `io.mindroom.call: {"call_id"}`; its edits add `ended_at`, `duration_seconds`, and, once the message is posted, `transcript_event_id`.
 The message carries `io.mindroom.call_transcript` (see [Calling an agent about a thread](#calling-an-agent-about-a-thread)) and `io.mindroom.call_notes: {"call_id"}`.
 
