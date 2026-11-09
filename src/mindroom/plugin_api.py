@@ -137,7 +137,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, dump_worker_target, load_worker_target
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 __all__ = [
@@ -254,6 +254,7 @@ __all__ = [
     "current_call",
     "current_execution_identity",
     "current_plugin_context",
+    "dump_worker_target",
     "emit_custom_event",
     "ensure_worker_service",
     "entity_directory",
@@ -267,6 +268,7 @@ __all__ = [
     "hook",
     "is_human_user",
     "is_platform_administrator",
+    "load_worker_target",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",

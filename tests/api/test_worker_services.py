@@ -30,6 +30,7 @@ from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.plugin_api import dump_worker_target, load_worker_target
 from mindroom.plugin_context import build_plugin_context
 from mindroom.plugin_http import WorkerRelay, worker_relay
 from mindroom.plugin_lifecycle import PluginLifespans
@@ -1061,3 +1062,24 @@ async def test_worker_relay_takes_the_plugin_from_the_route_that_serves_it(
         assert await _get(await worker_relay(route, _TARGET), "/", service="hello") == (200, "hello", False)
         with pytest.raises(RuntimeError, match=r"worker_relay\(\) serves only a plugin's own routes"):
             await worker_relay(Request({"type": "http", "app": app}), _TARGET)
+
+
+@pytest.mark.asyncio
+async def test_a_stored_target_reaches_the_same_worker_after_the_primary_restarts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target the plugin stored in its state directory, loaded by the restarted primary, relays to the same service."""
+    async with _runner(tmp_path) as runner:
+        context, _, _ = await _relay(tmp_path, runner, monkeypatch)
+        (context.state_root / "target.json").write_text(json.dumps(dump_worker_target(_TARGET)))
+
+        # The restarted primary's backend finds the worker that kept running.
+        workers = _Workers(runner.port)
+        workers.running = True
+        restarted = _primary(tmp_path, runner, monkeypatch, workers)
+        target = load_worker_target(json.loads((restarted.state_root / "target.json").read_text()))
+        relay = await open_worker_relay(restarted.runtime_paths, target, restarted.plugin_name)
+
+        assert await _get(relay, "/", service="hello") == (200, "hello", False)
+        assert workers.touches == 1

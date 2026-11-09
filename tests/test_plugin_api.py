@@ -138,6 +138,7 @@ _EXPORTS = [
     "current_call",
     "current_execution_identity",
     "current_plugin_context",
+    "dump_worker_target",
     "emit_custom_event",
     "ensure_worker_service",
     "entity_directory",
@@ -151,6 +152,7 @@ _EXPORTS = [
     "hook",
     "is_human_user",
     "is_platform_administrator",
+    "load_worker_target",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
@@ -311,6 +313,7 @@ _SIGNATURES = {
     "current_call": "()",
     "current_execution_identity": "()",
     "current_plugin_context": "(plugin_name)",
+    "dump_worker_target": "(target)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "ensure_worker_service": "(context, service, target)",
     "entity_directory": "(config, runtime_paths)",
@@ -329,6 +332,7 @@ _SIGNATURES = {
     "hook": "(event, *, name, priority, timeout_ms, agents, rooms, required)",
     "is_human_user": "(user_id, config, runtime_paths)",
     "is_platform_administrator": "(user_id, config, runtime_paths)",
+    "load_worker_target": "(data)",
     "oauth_connect_url": "(provider, runtime_paths, *, worker_target)",
     "oauth_runtime_bootstrapper": "(config)",
     "open_directory_within_root": "(root, relative_path, *, create, mode)",
@@ -627,7 +631,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 23), "7fec787b0a7fa9c0b93631172e92c68db804bbe5fad7f3e9be42ad8211f36b81")
+_PINNED_VERSION = ((1, 24), "7a6f0543576591cd7f30ceeb5fe8c800710ffb56abec618fca799592563d59e8")
 
 
 def _is_enum(obj: object) -> bool:

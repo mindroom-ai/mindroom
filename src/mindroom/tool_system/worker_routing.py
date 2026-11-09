@@ -6,7 +6,7 @@ import hashlib
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
@@ -128,6 +128,79 @@ class ResolvedWorkerTarget:
     account_id: str | None
     worker_key: str | None
     private_agent_names: frozenset[str] | None = None
+
+
+_STORED_TARGET_VERSION = 1
+_STORED_TARGET_KEYS = frozenset({"version", *(field.name for field in fields(ResolvedWorkerTarget))})
+_STORED_IDENTITY_KEYS = frozenset(field.name for field in fields(ToolExecutionIdentity))
+_STORED_TARGET_STRINGS = ("routing_agent_name", "tenant_id", "account_id", "worker_key")
+
+
+def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
+    """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
+    identity = target.execution_identity
+    names = target.private_agent_names
+    return {
+        "version": _STORED_TARGET_VERSION,
+        "worker_scope": target.worker_scope,
+        "routing_agent_name": target.routing_agent_name,
+        "execution_identity": serialize_tool_execution_identity(identity) if identity is not None else None,
+        "tenant_id": target.tenant_id,
+        "account_id": target.account_id,
+        "worker_key": target.worker_key,
+        "private_agent_names": sorted(names) if names is not None else None,
+    }
+
+
+def load_worker_target(data: object) -> ResolvedWorkerTarget:
+    """Return the target ``dump_worker_target`` stored, else raise ``ValueError``.
+
+    It refuses a target whose worker key or private-agent visibility is not what its own scope, agent, and identity
+    resolve, so stored data never pairs one person's or agent's identity with another's worker.
+    """
+    if not isinstance(data, dict) or set(data) != _STORED_TARGET_KEYS:
+        msg = f"A stored worker target has exactly the keys {sorted(_STORED_TARGET_KEYS)}."
+        raise ValueError(msg)
+    stored = cast("dict[str, object]", data)
+    if stored["version"] != _STORED_TARGET_VERSION:
+        msg = f"Unknown stored worker target version: {stored['version']!r}."
+        raise ValueError(msg)
+    scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]
+    strings = {name: stored[name] for name in _STORED_TARGET_STRINGS}
+    if (
+        scope not in (None, "shared", "user", "user_agent")
+        or any(value is not None and not isinstance(value, str) for value in strings.values())
+        or (names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)))
+        or (identity is not None and not (isinstance(identity, dict) and set(identity) == _STORED_IDENTITY_KEYS))
+    ):
+        msg = "A stored worker target holds a value dump_worker_target never writes."
+        raise ValueError(msg)
+    try:
+        identity = parse_tool_execution_identity_payload(identity) if identity is not None else None
+    except TypeError as error:
+        msg = f"A stored worker target holds a value dump_worker_target never writes: {error}."
+        raise ValueError(msg) from None
+    target = ResolvedWorkerTarget(
+        worker_scope=cast("WorkerScope | None", scope),
+        execution_identity=identity,
+        private_agent_names=frozenset(cast("list[str]", names)) if names is not None else None,
+        **cast("dict[str, str | None]", strings),
+    )
+    agent = target.routing_agent_name
+    # The visibility each target an agent's turn resolves carries: that agent alone when it is private, else none.
+    visibilities = (frozenset(), frozenset({agent})) if scope == "user_agent" and agent is not None else (None,)
+    resolved = resolve_worker_target(
+        target.worker_scope,
+        agent,
+        identity,
+        tenant_id=target.tenant_id,
+        account_id=target.account_id,
+        private_agent_names=target.private_agent_names,
+    )
+    if resolved != target or target.private_agent_names not in visibilities:
+        msg = "A stored worker target names another worker than its own scope, agent, and identity resolve."
+        raise ValueError(msg)
+    return target
 
 
 # The identity a runner without a Matrix conversation binds for the calls it runs; a conversation's context names

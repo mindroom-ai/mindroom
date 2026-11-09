@@ -7134,6 +7134,8 @@ expose = [
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
     "detached_execution_identity",
+    "dump_worker_target",
+    "load_worker_target",
     "private_instance_scope_root_path",
     "private_instances_root_path",
     "parse_tool_execution_identity_payload",
