@@ -1,9 +1,16 @@
-"""Sandbox runner routes that relay the primary's requests to apps listening on this worker's loopback.
+"""Sandbox runner routes that relay the primary's requests to the apps a dedicated worker runs on its loopback.
 
-``GET /api/sandbox-runner/ports`` lists the ports apps listen on at loopback, and ``/api/sandbox-runner/ports/{port}/{path}``
-passes a GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS request, its body streamed both ways, or a WebSocket, to
-``{path}`` on the app at ``127.0.0.1:{port}``, or at ``[::1]:{port}`` when it listens only there.
+``GET /api/sandbox-runner/ports`` lists the ports those apps listen on at loopback, and
+``/api/sandbox-runner/ports/{port}/{path}`` passes a GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS request, its body
+streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{port}``, or at ``[::1]:{port}`` when it
+listens only there.
 Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
+A dedicated worker's loopback is not only the worker's either: every container of a Kubernetes worker pod shares it,
+as does any container started in the worker's network namespace.
+So the relay reaches a port only when the worker's own processes, those of its runner's process tree or its cgroup,
+hold every socket listening on it, and never the runner's own port.
+The runner marks each refusal with the ``x-mindroom-relay-refused`` header: 403 for a port the relay never reaches,
+and 502 for one no app answers on.
 The runner's own token never reaches an app.
 """
 
@@ -11,9 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import sys
 from contextlib import suppress
-from pathlib import Path
+from functools import partial
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -23,6 +29,7 @@ from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
+from mindroom.previews.listeners import held_by_this_worker, listening_sockets
 from mindroom.previews.relay import relay_websocket
 
 if TYPE_CHECKING:
@@ -62,7 +69,10 @@ _LOOPBACK_ADDRESSES = frozenset(
     ipaddress.ip_address(address)
     for address in ("127.0.0.1", "0.0.0.0", "::1", "::")  # noqa: S104 - every address, loopback included
 )
-_TCP_LISTEN = "0A"
+_CANNOT_TELL = "This runner can't tell which processes hold its ports, so it relays to none."
+# The listening sockets each port was last found to be the worker's by, so their holders are read again only once
+# another socket listens there.
+_workers_sockets: dict[int, frozenset[int]] = {}
 # The relay reaches an app within this long, then waits on it as long as the stream lasts.
 _CONNECT_SECONDS = 10
 _TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=_CONNECT_SECONDS)
@@ -72,28 +82,8 @@ def _refused(status_code: int, detail: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail, headers={_REFUSED_HEADER: "1"})
 
 
-def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Decode a /proc/net address: 32-bit words in hex, each in host byte order; an IPv4-mapped one as IPv4."""
-    words = (int(hex_words[start : start + 8], 16) for start in range(0, len(hex_words), 8))
-    address = ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words))
-    # A dual-stack socket bound to an IPv4 address, as Java binds localhost, shows in tcp6 as ::ffff:<address>.
-    return (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
-
-
-def _loopback_ports() -> set[int]:
-    """Return each port a TCP socket listens on at loopback or every address."""
-    ports: set[int] = set()
-    for table in ("tcp", "tcp6"):
-        try:
-            lines = Path("/proc/net", table).read_text(encoding="ascii").splitlines()[1:]
-        except OSError:  # No IPv6 in this network namespace.
-            continue
-        for line in lines:
-            _, local, _, state, *_ = line.split()
-            hex_address, _, hex_port = local.partition(":")
-            if state == _TCP_LISTEN and _address(hex_address) in _LOOPBACK_ADDRESSES:
-                ports.add(int(hex_port, 16))
-    return ports
+def _no_app(port: int) -> HTTPException:
+    return _refused(502, f"No app listens on port {port} at this worker's loopback.")
 
 
 def _require_dedicated_worker(connection: HTTPConnection) -> None:
@@ -102,10 +92,7 @@ def _require_dedicated_worker(connection: HTTPConnection) -> None:
 
 
 async def _loopback_host(port: int) -> str | None:
-    """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers.
-
-    Connecting costs far less than reading /proc/net, whose size grows with every connection the relay closes.
-    """
+    """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers."""
     for host in ("127.0.0.1", "::1"):
         try:
             async with asyncio.timeout(_CONNECT_SECONDS):
@@ -119,20 +106,61 @@ async def _loopback_host(port: int) -> str | None:
     return None
 
 
-async def _loopback_only(request: aiohttp.ClientRequest, handler: aiohttp.ClientHandlerType) -> aiohttp.ClientResponse:
-    """Send ``request`` only to loopback: aiohttp follows a WebSocket handshake's redirects, wherever they point."""
+def _held_by_worker(port: int, sockets: frozenset[int]) -> bool:
+    """Return whether only the worker's processes hold ``sockets``, those listening on ``port``.
+
+    Blocking: reads which processes hold them, unless they are those last found to be the worker's.
+    Raises OSError when ``/proc`` can't say.
+    """
+    if _workers_sockets.get(port) != sockets:
+        if not held_by_this_worker(sockets):
+            return False
+        _workers_sockets[port] = sockets
+    return True
+
+
+def _check_reachable(port: int, runner_port: int) -> None:
+    """Raise the relay's refusal unless a server of the worker's own listens on ``port``. Blocking."""
+    if port == runner_port:
+        raise _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
+    try:
+        sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
+        held = bool(sockets) and _held_by_worker(port, sockets)
+    except OSError:
+        raise _refused(403, _CANNOT_TELL) from None
+    if not sockets:
+        raise _no_app(port)
+    if not held:
+        raise _refused(403, f"The server on port {port} is not one this worker runs.")
+
+
+async def _require_reachable(connection: HTTPConnection, port: int) -> None:
+    """Refuse ``port`` unless a server of the worker's own listens on it."""
+    await asyncio.to_thread(_check_reachable, port, connection.scope["server"][1])
+
+
+async def _reachable_only(
+    connection: HTTPConnection,
+    request: aiohttp.ClientRequest,
+    handler: aiohttp.ClientHandlerType,
+) -> aiohttp.ClientResponse:
+    """Send ``request`` only to a server the relay reaches: aiohttp follows a WebSocket handshake's redirects."""
     if request.url.host not in {"127.0.0.1", "::1"}:
         raise aiohttp.InvalidURL(request.url, "The relay reaches only loopback.")
+    try:
+        await _require_reachable(connection, request.url.port or 0)
+    except HTTPException as refusal:
+        raise aiohttp.InvalidURL(request.url, refusal.detail) from None
     return await handler(request)
 
 
 async def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for."""
     _require_dedicated_worker(connection)
-    own = port == connection.scope["server"][1]
-    host = None if own or not 0 < port < 65536 else await _loopback_host(port)
+    await _require_reachable(connection, port)
+    host = await _loopback_host(port)
     if host is None:
-        raise _refused(502, f"No app listens on port {port} at this worker's loopback.")
+        raise _no_app(port)
     # The path below the port as the primary sent it, still percent-encoded.
     target = connection.scope["raw_path"].decode("latin-1").removeprefix(f"{router.prefix}/").partition("/")[2]
     query = connection.scope["query_string"].decode("latin-1")
@@ -145,6 +173,19 @@ def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str]) -> lis
     named = {token.strip().lower() for name, value in pairs if name == "connection" for token in value.split(",")}
     excluded = _HOP_HEADERS | named | drop
     return [(name, value) for name, value in pairs if name not in excluded]
+
+
+def _reachable_ports(runner_port: int) -> list[int]:
+    """Return each port listening at loopback or every address that the relay reaches. Blocking."""
+    try:
+        listeners = listening_sockets()
+        sockets: dict[int, set[int]] = {}
+        for listener in listeners:
+            sockets.setdefault(listener.port, set()).add(listener.inode)
+        ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES} - {runner_port}
+        return sorted(port for port in ports if _held_by_worker(port, frozenset(sockets[port])))
+    except OSError:
+        raise _refused(403, _CANNOT_TELL) from None
 
 
 class _AppResponse(StreamingResponse):
@@ -174,9 +215,9 @@ class _AppResponse(StreamingResponse):
 
 @router.get("", dependencies=[Depends(validate_runner_token)])
 async def listening_ports(request: Request) -> list[int]:
-    """List the ports apps listen on at this worker's loopback, which the relay reaches; the runner's own is not one."""
+    """List the ports the worker's own apps listen on at its loopback: those the relay reaches."""
     _require_dedicated_worker(request)
-    return sorted(_loopback_ports() - {request.scope["server"][1]})
+    return await asyncio.to_thread(_reachable_ports, request.scope["server"][1])
 
 
 @router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
@@ -215,7 +256,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
         async with (
             aiohttp.ClientSession(
                 timeout=_TIMEOUT,
-                middlewares=(_loopback_only,),
+                middlewares=(partial(_reachable_only, websocket),),
                 skip_auto_headers=_AIOHTTP_DEFAULT_HEADERS,
             ) as session,
             session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,

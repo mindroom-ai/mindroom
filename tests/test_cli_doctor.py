@@ -562,6 +562,92 @@ def test_doctor_reports_ollama_settings_it_cannot_read_and_goes_on(
     assert probed == []
 
 
+_LONG_MODEL_NAME = "m:fire:-a-model-name-long-enough-to-push-each-doctor-line-past-eighty-columns"
+_LONG_HOST = f"http://ollama.example:11434/{'a-long-path-segment-' * 4}"
+
+
+def test_doctor_prints_ollama_model_names_hosts_and_errors_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each Ollama result keeps a model name with an emoji code, a long host, and its error as written, on one line."""
+    runtime_paths = _runtime_with_env(narrow_markup_dir, {})
+    results = iter([(True, ""), (False, "HTTP 401"), (None, f"Cannot reach {_LONG_HOST}")])
+    monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: next(results))
+    hosted = Config(
+        models={_LONG_MODEL_NAME: ModelConfig(provider="ollama", id="gemma4", host=_LONG_HOST)},
+        router=RouterConfig(model=_LONG_MODEL_NAME),
+    )
+    without_host = Config(
+        models={_LONG_MODEL_NAME: ModelConfig(provider="ollama", id="gemma4")},
+        router=RouterConfig(model=_LONG_MODEL_NAME),
+    )
+
+    for _ in range(3):
+        _check_providers(hosted, runtime_paths)
+
+    def unreadable(**_kwargs: object) -> str:
+        msg = f"Cannot read {_LONG_HOST}"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr("mindroom.providers.ollama.adapter.get_ollama_host", unreadable)
+    _check_providers(without_host, runtime_paths)
+
+    lines = capsys.readouterr().out.splitlines()
+    subject = f"models.{_LONG_MODEL_NAME}"
+    assert f"✓ {subject}: ollama reachable ({_LONG_HOST})" in lines
+    assert f"✗ {subject}: ollama unreachable: {_LONG_HOST} (HTTP 401)" in lines
+    assert f"! {subject}: ollama: could not reach {_LONG_HOST} (Cannot reach {_LONG_HOST})" in lines
+    assert f"! {subject}: could not read its Ollama settings (Cannot read {_LONG_HOST})" in lines
+
+
+def test_doctor_prints_unchecked_and_missing_keys_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unchecked key, a missing key, and the memory LLM keep a model name with an emoji code whole on one line."""
+    with_key = _runtime_with_env(narrow_markup_dir, {"OPENAI_API_KEY": "shared"})
+    endpoint = Config(
+        models={_LONG_MODEL_NAME: ModelConfig(provider="openai", id="m", host=_LONG_HOST)},
+        router=RouterConfig(model=_LONG_MODEL_NAME),
+    )
+    _check_providers(endpoint, with_key)
+    without_key = _runtime_with_env(narrow_markup_dir, {})
+    keyless = Config(
+        models={_LONG_MODEL_NAME: ModelConfig(provider="openai", id="m")},
+        memory={"backend": "mem0", "llm": {"provider": "openai", "config": {"model": _LONG_MODEL_NAME}}},
+        router=RouterConfig(model=_LONG_MODEL_NAME),
+    )
+    _check_providers(keyless, without_key)
+    _check_memory_llm(keyless, without_key)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"! openai: OPENAI_API_KEY not checked: models.{_LONG_MODEL_NAME}.host "
+        "may send it elsewhere or send another key in its place"
+    ) in lines
+    assert f"! openai: Set OPENAI_API_KEY (models: {_LONG_MODEL_NAME})" in lines
+    assert f"! Memory LLM (openai/{_LONG_MODEL_NAME}): OPENAI_API_KEY not set" in lines
+
+
+def test_doctor_prints_the_default_memory_ollama_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The memory LLM's fallback Ollama server and its error print whole on one line."""
+    runtime_paths = _runtime_with_env(narrow_markup_dir, {"OLLAMA_HOST": _LONG_HOST})
+    monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: (None, f"Cannot reach {_LONG_HOST}"))
+    config = Config(memory={"backend": "mem0"}, router=RouterConfig(model="default"))
+
+    assert _check_memory_llm(config, runtime_paths) == (0, 1, 0)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert f"! Memory LLM not configured (defaults to ollama at {_LONG_HOST}; see memory/config.py fallback)" in lines
+    assert f"✗ Default Ollama for memory LLM unreachable ({_LONG_HOST}: Cannot reach {_LONG_HOST})" in lines
+
+
 def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
     """Answer every doctor HTTP request with 200 and return the requests it sent."""
     sent: list[tuple[str, dict[str, str]]] = []

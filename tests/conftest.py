@@ -2422,6 +2422,16 @@ def thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryB
     return fresh_thread_summary_baselines(monkeypatch)
 
 
+_CLI_CONSOLES = (
+    cli_config_module.console,
+    cli_config_module._err_console,
+    cli_desktop_module._console,
+    cli_desktop_module._error_console,
+    cli_service_module._console,
+    cli_service_module._err_console,
+)
+
+
 @pytest.fixture
 def wide_cli_consoles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Render the CLI's consoles at a width no output line with a temporary path reaches.
@@ -2431,16 +2441,22 @@ def wide_cli_consoles(monkeypatch: pytest.MonkeyPatch) -> None:
     exported when pytest starts, and with `FORCE_COLOR` set the root conftest's dumb terminal makes Rich use 80 columns.
     Rich takes a pinned width and height before either.
     """
-    for console in (
-        cli_config_module.console,
-        cli_config_module._err_console,
-        cli_desktop_module._console,
-        cli_desktop_module._error_console,
-        cli_service_module._console,
-        cli_service_module._err_console,
-    ):
+    for console in _CLI_CONSOLES:
         monkeypatch.setattr(console, "_width", 1000)
         monkeypatch.setattr(console, "_height", 25)
+
+
+@pytest.fixture
+def narrow_markup_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a folder whose path Rich would read as markup and that passes 80 columns, with the CLI at 80 columns.
+
+    On a console that reads the path as markup, `[work]` disappears and `[/x]` raises `MarkupError`.
+    """
+    directory = tmp_path / "[work]" / "[" / "x]" / ("a-folder-name-that-pushes-the-path-past-eighty-columns-" * 2)
+    directory.mkdir(parents=True)
+    for console in _CLI_CONSOLES:
+        monkeypatch.setattr(console, "_width", 80)
+    return directory
 
 
 class _ExtractedCollaboratorProxy[CollaboratorT]:
