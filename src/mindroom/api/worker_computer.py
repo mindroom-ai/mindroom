@@ -262,27 +262,6 @@ async def screencast(websocket: WebSocket, session_id: str, generation: str) -> 
         await _end_stream(websocket, computer, session_id, lease, tasks, close_viewer)
 
 
-# The header in which a worker service presents its instance secret.
-_SERVICE_SECRET_HEADER = "x-mindroom-service-secret"  # noqa: S105 - a header name
-
-
-async def _admit_service(websocket: WebSocket) -> WorkerComputerRuntime | None:
-    """Admit only a worker service of this worker, by its instance secret, once the Computer runs, or refuse."""
-    supplied = websocket.headers.get(_SERVICE_SECRET_HEADER, "").encode()
-    try:
-        services = websocket.app.state.worker_services
-    except AttributeError:
-        services = {}
-    if supplied and any(secrets.compare_digest(supplied, service.secret.encode()) for service in services.values()):
-        with suppress(HTTPException, OSError, RuntimeError, TimeoutError):
-            computer = _app_computer(websocket.app)
-            # Opening a bridge starts a stopped Computer, as creating a Computer session does.
-            await computer.ensure_started()
-            return computer
-    await websocket.close(code=1008)
-    return None
-
-
 async def _service_to_bridge(websocket: WebSocket, bridge: "AgentBrowserBridge") -> None:
     while True:
         message = await websocket.receive()
@@ -294,11 +273,17 @@ async def _service_to_bridge(websocket: WebSocket, bridge: "AgentBrowserBridge")
         bridge.receive(text)
 
 
-@router.websocket("/agent-browser")
-async def agent_browser(websocket: WebSocket) -> None:
-    """Give one worker service its own CDP session on the agent's page; it acts only under the control lease."""
-    computer = await _admit_service(websocket)
-    if computer is None:
+async def serve_agent_browser(websocket: WebSocket) -> None:
+    """Give an admitted worker service its own CDP session on the agent's page; it acts only under the control lease.
+
+    Opening it starts a stopped Computer, as creating a Computer session does; in a worker without a Computer, or one
+    whose display cannot start, the handshake is refused.
+    """
+    try:
+        computer = _app_computer(websocket.app)
+        await computer.ensure_started()
+    except (HTTPException, OSError, RuntimeError, TimeoutError):
+        await websocket.close(code=1008)
         return
     # Playwright loads only once a service reaches the agent's browser, which already runs it.
     from mindroom.worker_computer.agent_browser import AgentBrowserBridge  # noqa: PLC0415

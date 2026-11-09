@@ -21,11 +21,12 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request, WebSocket
 from pydantic import Field
 
 from mindroom.api.sandbox_exec import resolve_subprocess_worker_context, runner_uses_dedicated_worker
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
+from mindroom.api.worker_computer import serve_agent_browser
 from mindroom.api.worker_preview import loopback_host
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN, WorkerServiceState
 from mindroom.tool_system.plugins import refresh_plugins
@@ -197,7 +198,7 @@ def _require_dedicated_worker(app: FastAPI) -> None:
         raise HTTPException(403, "Only a dedicated worker's runner runs plugin services.")
 
 
-def _program(app: FastAPI, payload: _Ensure, plugin: str, runner_url: str) -> _Program:
+def _program(app: FastAPI, payload: _Ensure, plugin: str, name: str, runner_url: str) -> _Program:
     """Return the service's program in the plugin's folder, where the request's config places it here. Blocking."""
     route = prepare_route(app, payload)
     if isinstance(route, WorkerFailure):
@@ -214,7 +215,11 @@ def _program(app: FastAPI, payload: _Ensure, plugin: str, runner_url: str) -> _P
     if not path.is_relative_to(root) or not path.is_file():
         raise HTTPException(400, f"The service program {payload.module!r} is no file in plugin {plugin!r}.")
     python, env, cwd = resolve_subprocess_worker_context(route.worker.paths if route.worker is not None else None)
-    env = {**(env or {}), "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url}
+    env = {
+        **(env or {}),
+        "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url,
+        "MINDROOM_AGENT_BROWSER_URL": f"ws{runner_url.removeprefix('http')}{router.prefix}/{plugin}/{name}/agent-browser",
+    }
     return _Program(path, hashlib.sha256(path.read_bytes()).hexdigest(), python or sys.executable, env, cwd)
 
 
@@ -223,7 +228,7 @@ async def ensure_service(request: Request, plugin: _Name, name: _Name, payload: 
     """Start the plugin's service unless it runs, and report it."""
     _require_dedicated_worker(request.app)
     runner_url = f"http://127.0.0.1:{request.scope['server'][1]}"
-    program = await asyncio.to_thread(_program, request.app, payload, plugin, runner_url)
+    program = await asyncio.to_thread(_program, request.app, payload, plugin, name, runner_url)
     return await _services(request.app).ensure(plugin, name, program, payload.idle_timeout_seconds)
 
 
@@ -232,3 +237,18 @@ async def stop_service(request: Request, plugin: _Name, name: _Name) -> None:
     """End the plugin's service, if it runs."""
     _require_dedicated_worker(request.app)
     await _services(request.app).stop(plugin, name)
+
+
+@router.websocket("/{plugin}/{name}/agent-browser")
+async def agent_browser(websocket: WebSocket, plugin: _Name, name: _Name) -> None:
+    """Bridge the agent's browser page to the running instance of this service, which presents its own secret."""
+    instance = _services(websocket.app).instance(plugin, name)
+    supplied = websocket.headers.get("x-mindroom-service-secret", "").encode()
+    if (
+        instance is None
+        or instance.process.returncode is not None
+        or not secrets.compare_digest(supplied, instance.secret.encode())
+    ):
+        await websocket.close(code=1008)
+        return
+    await serve_agent_browser(websocket)

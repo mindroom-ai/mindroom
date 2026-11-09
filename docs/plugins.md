@@ -1474,6 +1474,74 @@ A service stops when `idle_timeout_seconds` pass without an ensure, when it is s
 Without a dedicated worker backend, set by `MINDROOM_WORKER_BACKEND` as `docker` or `kubernetes`, both calls raise `WorkerServiceError`, as they do when the worker is unavailable or refuses, with the reason.
 A plugin with worker services states `"mindroom_plugin_api": "1.18"` in its manifest.
 
+### The agent's browser
+
+A worker service can watch the page of its agent's browser and, while it holds the Computer's control, act on it, for example to show and steer that page in a plugin's own panel.
+This needs a worker that runs the [Computer](tools/worker-computer.md) and an agent that browses with the built-in `browser` tool; `browser_mcp` runs its browser in another process, which offers no page.
+The service finds the bridge's WebSocket address in `MINDROOM_AGENT_BROWSER_URL` and opens it with its secret in the `X-MindRoom-Service-Secret` header.
+The worker refuses a connection without the running instance's own secret, and every connection in a worker without a Computer.
+Opening the bridge starts the Computer's display when it is stopped.
+Each connection is a CDP session of its own on the agent's current page, so open one per viewer.
+
+The bridge speaks the JSON of the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/): send `{"id": 1, "method": "Page.startScreencast", "params": {}}` and read `{"id": 1, "result": {}}` or `{"id": 1, "error": {"code": -32000, "message": "..."}}`.
+Commands run side by side and each answers when it completes, so a navigation waiting on a slow server holds up no other command.
+
+| Methods | Allowed |
+|---------|---------|
+| `Page.startScreencast`, `Page.stopScreencast`, `Page.screencastFrameAck`, `Page.enable`, `Page.getNavigationHistory`, `Page.getLayoutMetrics`, `Target.getTargetInfo` | Always |
+| `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`, `Page.navigate`, `Page.navigateToHistoryEntry`, `Page.reload`, `Page.stopLoading`, `Emulation.setDeviceMetricsOverride`, `Emulation.clearDeviceMetricsOverride` | While this connection holds control |
+| `MindRoom.takeControl`, `MindRoom.releaseControl` | Always: take or release the Computer's control |
+
+Every other method, such as `Runtime.evaluate`, answers an error and does nothing, and so do `Page.reload` with `scriptToEvaluateOnLoad`, `Target.getTargetInfo` with a `targetId`, a number JSON cannot carry, such as `NaN`, and any command while the agent's browser shows no page.
+`Page.navigate` opens only `http` and `https` addresses and `about:blank`, and the browser then checks every request as it does the agent's.
+The bridge passes on its session's `Page.screencastFrame`, `Page.screencastVisibilityChanged`, `Page.frameNavigated`, `Page.navigatedWithinDocument`, `Page.frameStartedLoading`, and `Page.frameStoppedLoading` events; all but the first two need `Page.enable`.
+Two events are the bridge's own:
+
+| Event | Sent |
+|-------|------|
+| `{"method": "MindRoom.page", "params": {"page": true}}` | On connect and whenever the agent's browser shows another page or none (`false`); each page has a new session, so start the screencast and `Page.enable` again |
+| `{"method": "MindRoom.control", "params": {"held": true}}` | When this connection takes control, and with `false` when it loses it: by releasing it, by leaving, or when the Computer stops or restarts |
+
+Control is the Computer's own, shared with the viewers of its desktop: one holder at a time, and while it is held the agent's browser calls fail with `Computer is under user control; resume the agent first.`
+`MindRoom.takeControl` answers an error while someone else holds control or the Computer is stopped, and works while the agent's browser shows no page, so a service that shows a browser of its own can gate it by the same control.
+Releasing control or leaving releases every key and mouse button the connection still holds, and a viewport override lasts until the service clears it or leaves.
+
+The worker trusts every service it runs, so check the person in your plugin's route: admit a viewer with `RoomReader.agent()`, the Computer's own check, before you relay them to the service, and never offer the bridge's control to a viewer your route did not admit.
+A service that keeps the newest frame of the agent's page in `frame.jpg`:
+
+```python
+# page_service.py
+import asyncio
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+
+from websockets.asyncio.client import connect
+
+SECRET = sys.stdin.readline().strip()
+
+
+async def main() -> None:
+    headers = {"X-MindRoom-Service-Secret": SECRET}
+    async with connect(os.environ["MINDROOM_AGENT_BROWSER_URL"], additional_headers=headers, max_size=None) as bridge:
+        async for raw in bridge:
+            message = json.loads(raw)
+            if message.get("method") == "MindRoom.page" and message["params"]["page"]:
+                await bridge.send(json.dumps({"id": 1, "method": "Page.startScreencast", "params": {"format": "jpeg"}}))
+            elif message.get("method") == "Page.screencastFrame":
+                frame = message["params"]
+                Path("frame.jpg").write_bytes(base64.b64decode(frame["data"]))
+                ack = {"id": 2, "method": "Page.screencastFrameAck", "params": {"sessionId": frame["sessionId"]}}
+                await bridge.send(json.dumps(ack))
+
+
+asyncio.run(main())
+```
+
+A plugin that uses the bridge states `"mindroom_plugin_api": "1.19"` in its manifest.
+
 ## People, agents, and administrators
 
 These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.

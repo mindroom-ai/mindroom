@@ -11,34 +11,27 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import aiohttp
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
-from starlette.websockets import WebSocketDisconnect
 
-from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
-from mindroom.api.worker_computer import router
-from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.api import sandbox_runner_app
 from mindroom.worker_computer.agent_browser import AgentBrowserBridge
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
+from tests.api.test_worker_services import _AUTH, _body, _call, _runner
 from tests.test_worker_computer_runtime import FakeDisplay, unused
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-    from pathlib import Path
 
     from playwright.async_api import Page
 
-RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
-SERVICE_SECRET = "test-service-secret"  # noqa: S105 - isolated test credential
 _TIMEOUT = 10
 _FORM = """<title>Form</title><input id=field><button id=go onclick="document.title = 'clicked'">Go</button>
 <script>
@@ -399,50 +392,77 @@ async def test_a_page_the_bridge_cannot_attach_to_reads_as_no_page_once() -> Non
     await agent.runtime.close()
 
 
-def _runner(tmp_path: Path, runtime: WorkerComputerRuntime | None) -> FastAPI:
-    """A worker runner with one stand-in worker service record."""
-
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
-        if runtime is not None:
-            await runtime.close()
-
-    app = FastAPI(lifespan=lifespan)
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
-    app.state.worker_computer = runtime
-    app.state.worker_services = {("demo", "viewer"): SimpleNamespace(secret=SERVICE_SECRET)}
-    app.include_router(router)
-    return app
+_SECRET_HEADER = "X-MindRoom-Service-Secret"  # noqa: S105 - a header name
+# A service that records its secret, then exits at once.
+_BRIEF = """
+import json, sys
+with open("service.json", "w") as record:
+    json.dump({"secret": sys.stdin.readline().strip()}, record)
+"""
 
 
-def test_only_a_worker_service_with_its_secret_opens_the_bridge(tmp_path: Path) -> None:
-    """Neither the runner token nor a wrong secret opens it; opening it starts a stopped Computer to control."""
+def _bridge_url(pid: object) -> str:
+    """The bridge's address, as the runner hands it to the service process ``pid`` in its environment."""
+    environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    (url,) = [entry.split(b"=", 1)[1].decode() for entry in environ if entry.startswith(b"MINDROOM_AGENT_BROWSER_URL=")]
+    return url
+
+
+async def _refused(url: str, headers: dict[str, str]) -> bool:
+    async with aiohttp.ClientSession() as client:
+        try:
+            async with client.ws_connect(url, headers=headers):
+                return False
+        except aiohttp.WSServerHandshakeError:
+            return True
+
+
+@pytest.mark.asyncio
+async def test_only_the_service_s_own_secret_opens_its_bridge_and_opening_it_starts_the_computer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the runner token, another service's secret, nor a stopped or exited instance's secret opens it."""
     runtime = WorkerComputerRuntime(FakeDisplay())
-    with TestClient(_runner(tmp_path, runtime)) as client:
-        url = "/computer/agent-browser"
-        for headers in ({}, {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}, {"X-Mindroom-Service-Secret": "wrong"}):
-            with pytest.raises(WebSocketDisconnect), client.websocket_connect(url, headers=headers):
-                pass
+    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", runtime, raising=False)
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "brief.py").write_text(_BRIEF)
+        await _call("POST", runner.url("other"), _body(), _AUTH)
+        other_secret = str(runner.record()["secret"])
+        await _call("POST", runner.url(), _body(), _AUTH)
+        record = runner.record()
+        url = _bridge_url(record["pid"])
+        assert url == f"ws://127.0.0.1:{runner.port}/api/sandbox-runner/plugin-services/demo/hello/agent-browser"
+        for headers in ({}, _AUTH, {_SECRET_HEADER: other_secret}, {_SECRET_HEADER: f"{record['secret']}x"}):
+            assert await _refused(url, headers)
         assert runtime.status()["state"] == "stopped"
-        with client.websocket_connect(url, headers={"X-Mindroom-Service-Secret": SERVICE_SECRET}) as websocket:
-            assert json.loads(websocket.receive_text()) == {"method": "MindRoom.page", "params": {"page": False}}
+
+        headers = {_SECRET_HEADER: str(record["secret"])}
+        async with aiohttp.ClientSession() as client, client.ws_connect(url, headers=headers) as bridge:
+            assert await bridge.receive_json() == {"method": "MindRoom.page", "params": {"page": False}}
             assert runtime.status()["state"] == "ready"
             # The agent's browser has no page yet, and a service that shows a browser of its own still takes control.
-            websocket.send_text(json.dumps({"id": 1, "method": "MindRoom.takeControl"}))
-            messages = [json.loads(websocket.receive_text()) for _ in range(2)]
-            assert messages == [{"method": "MindRoom.control", "params": {"held": True}}, {"id": 1, "result": {}}]
+            await bridge.send_json({"id": 1, "method": "MindRoom.takeControl"})
+            assert await bridge.receive_json() == {"method": "MindRoom.control", "params": {"held": True}}
+            assert await bridge.receive_json() == {"id": 1, "result": {}}
             assert runtime.status()["controller_session_id"] is not None
-            websocket.send_bytes(b"binary")
-            with pytest.raises(WebSocketDisconnect):
-                websocket.receive_text()
+            await bridge.send_bytes(b"binary")
+            assert (await bridge.receive()).type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED}
         assert runtime.status()["controller_session_id"] is None
 
+        await _call("DELETE", runner.url(), None, _AUTH)
+        assert await _refused(url, headers)
+        _, brief = await _call("POST", runner.url("brief"), _body("brief.py"), _AUTH)
+        assert brief["state"] == "exited"
+        brief_secret = {_SECRET_HEADER: str(runner.record()["secret"])}
+        assert await _refused(url.replace("/hello/", "/brief/"), brief_secret)
 
-def test_a_worker_without_a_computer_refuses_the_bridge(tmp_path: Path) -> None:
+
+@pytest.mark.asyncio
+async def test_a_worker_without_a_computer_refuses_the_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A service of a worker that runs no Computer has no agent's browser to reach."""
-    with TestClient(_runner(tmp_path, None)) as client:
-        headers = {"X-Mindroom-Service-Secret": SERVICE_SECRET}
-        with pytest.raises(WebSocketDisconnect), client.websocket_connect("/computer/agent-browser", headers=headers):
-            pass
+    monkeypatch.setattr(sandbox_runner_app.app.state, "worker_computer", None, raising=False)
+    async with _runner(tmp_path) as runner:
+        await _call("POST", runner.url(), _body(), _AUTH)
+        record = runner.record()
+        assert await _refused(_bridge_url(record["pid"]), {_SECRET_HEADER: str(record["secret"])})

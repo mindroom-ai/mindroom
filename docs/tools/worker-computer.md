@@ -156,6 +156,8 @@ Expose only this gateway; the worker's display has no public listener.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
 
+A plugin can show and steer the agent's page in its own interface through [the agent's browser bridge](../plugins.md#the-agents-browser), under the same control.
+
 The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
 Before that, and on phones, open it from the room's More menu with **Show Computer**.
 
