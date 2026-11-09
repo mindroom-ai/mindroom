@@ -297,6 +297,7 @@ def test_ask_is_answered_only_off_plugin_hosts(tmp_path: Path) -> None:
     app = _api_app(tmp_path, "demo")
 
     assert _client(app, "x.demo.localhost").get("/ask", params={"domain": "yes.demo.localhost"}).status_code == 404
+    assert _client(app, "x.missing.localhost").get("/ask", params={"domain": "yes.demo.localhost"}).status_code == 404
     assert _client(app, "localhost").post("/ask", params={"domain": "yes.demo.localhost"}).status_code == 404
     assert _client(app, "localhost").get("/ask", params={"domain": "yes.demo.localhost"}).status_code == 200
 
