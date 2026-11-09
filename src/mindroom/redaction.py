@@ -77,7 +77,7 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # A line break after a backslash continues a value, as in a shell command.
-_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\\)[\r\n]|[,&)\]}\"']")
+_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\\)(?<!\\\r)[\r\n]|[,&)\]}\"']")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
@@ -85,7 +85,7 @@ _QUOTED_VALUE_PATTERNS = {
 }
 # One command and its arguments run to a line break or a shell operator outside quotes; a backslash continues them.
 _COMMAND_PATTERN = re.compile(
-    r"(?:'[^'\r\n]*+'?|\"(?:[^\"\\\r\n]|\\[\s\S])*+\"?|[^\\\r\n;&|(`'\"]|\\(?:\r\n|[\s\S]))++",
+    r"(?:'[^'\r\n]*+'?|\"(?:[^\"\\\r\n]|\\(?:\r\n|[\s\S]))*+\"?|[^\\\r\n;&|(`'\"]|\\(?:\r\n|[\s\S]))++",
 )
 # Programs that take a password as an option: curl takes `user:password` after `-u` or `--user`, and mysql and its
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other

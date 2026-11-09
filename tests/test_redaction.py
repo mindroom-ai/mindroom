@@ -929,6 +929,7 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("mysql -uroot -ppw app", f"mysql -uroot -p{REDACTED} app"),
         ('mysqldump -p"my pw" app > dump.sql', f"mysqldump -p{REDACTED} app > dump.sql"),
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
+        ('mysql -e "select \\\r\n 1" -ppw app', f'mysql -e "select \\\r\n 1" -p{REDACTED} app'),
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
         ("mysql -u root -p'ab&c;d|e' app", f"mysql -u root -p{REDACTED} app"),
         ('mysql -e "select 1; select 2" -ppw app', f'mysql -e "select 1; select 2" -p{REDACTED} app'),
@@ -974,7 +975,7 @@ def test_options_that_carry_no_password_stay(command: str) -> None:
         "echo sk-abcdef\\\nghijkl",
         "curl -H 'Authorization: Bearer abcdef\\\nghijkl' https://example.test",
         "export TOKEN=abcdef\\\nghijkl",
-        'TOKEN="abcdef\\\nghijkl" make',
+        "export TOKEN=abcdef\\\r\nghijkl",
     ],
 )
 def test_a_token_split_by_a_backslash_line_break_stays_hidden(text: str) -> None:

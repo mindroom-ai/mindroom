@@ -995,7 +995,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
 
     with patch("mindroom.memory._backend.create_memory_instance", return_value=FakeScopedMemory()):
         await store_conversation_memory(
-            # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
+            # A line too long to redact is dropped without the rest; an unclosed quote hides the rest of its line.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
             "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
             "general",
