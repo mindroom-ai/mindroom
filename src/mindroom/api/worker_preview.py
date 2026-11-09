@@ -239,7 +239,7 @@ def _require_service(app: FastAPI, plugin: str, name: str) -> RunningService:
 
 @asynccontextmanager
 async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_seconds: float) -> AsyncIterator[None]:
-    """Count the service as used every half idle timeout while a stream to it lasts, and once more as it ends."""
+    """Count the service as used every half idle timeout while a stream to it lasts."""
 
     async def use() -> None:
         # A periodic use, not a wait for a condition.
@@ -251,7 +251,6 @@ async def _service_in_use(app: FastAPI, plugin: str, name: str, idle_timeout_sec
         yield
     finally:
         task.cancel()
-        _service(app, plugin, name)
 
 
 async def _relay(request: Request, url: URL, port: int, secret: str | None, held: AsyncExitStack) -> StreamingResponse:

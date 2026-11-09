@@ -776,7 +776,7 @@ async def test_an_ensure_during_a_stop_keeps_its_service_recorded(
 # A service that echoes each WebSocket text message with its pid and path, refusing a handshake without its secret.
 # The worker's Python here has only the standard library, so it speaks the protocol's few frames itself.
 _ECHO = """
-import base64, hashlib, os, socketserver, struct, sys
+import base64, hashlib, os, socketserver, struct, sys, time
 
 secret = sys.stdin.readline().strip()
 
@@ -790,6 +790,13 @@ class Echo(socketserver.StreamRequestHandler):
             headers[name.lower()] = value.strip()
         if headers.get("x-mindroom-service-secret") != secret:
             self.wfile.write(b"HTTP/1.1 403 Forbidden\\r\\nContent-Length: 0\\r\\n\\r\\n")
+            return
+        if "upgrade" not in headers:
+            # A slow answer, as a stream of events is, whose second part comes after the idle timeout.
+            self.wfile.write(b"HTTP/1.1 200 OK\\r\\nConnection: close\\r\\n\\r\\nfirst;")
+            self.wfile.flush()
+            time.sleep(1.5)
+            self.wfile.write(f"second from {os.getpid()}".encode())
             return
         accept = base64.b64encode(hashlib.sha1((headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
         self.wfile.write(b"HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + b"\\r\\n\\r\\n")
@@ -868,6 +875,9 @@ async def test_a_route_never_reaches_another_plugins_service_or_one_that_is_not_
         }
         await stop_worker_service(context, _SERVICE, _TARGET)
         assert (await _get(relay, "/", service="hello"))[::2] == (503, True)
+        crash = WorkerService("crash", "crash.py")
+        assert (await ensure_worker_service(context, crash, _TARGET)).state == "exited"
+        assert (await _get(relay, "/", service="crash"))[::2] == (503, True)
         with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
             async with relay.websocket("/", service="hello"):
                 pass
@@ -902,7 +912,9 @@ async def test_a_relayed_stream_keeps_its_service_and_its_worker_in_use_while_it
             assert workers.touches == touches + 1
         touch_workers_in_flight(workers)  # type: ignore[arg-type]
         assert workers.touches == touches + 1
-        # Its idle timeout counts from the stream's end.
+        # So does a slow answer.
+        async with relay.http("GET", "/slow", service="echo") as answer:
+            assert await answer.text() == f"first;second from {instance.process.pid}"
         await _until(lambda: services.instance("demo", "echo") is None)
 
 
@@ -946,6 +958,16 @@ async def test_a_route_reaches_a_server_the_agent_started_by_port_and_nothing_el
             monkeypatch.setattr("mindroom.api.worker_preview._workers_sockets", {})
             assert (await _get(relay, "/", port=unused_tcp_port))[::2] == (403, True)
             assert unused_tcp_port not in await relay.ports()
+
+            def cannot_tell() -> list[object]:
+                raise OSError
+
+            monkeypatch.setattr("mindroom.api.worker_preview.listening_sockets", cannot_tell)
+            with pytest.raises(HTTPException) as refused:
+                await relay.ports()
+            assert refused.value.status_code == 403
+            assert refused.value.headers == {_REFUSED: "1"}
+            assert "can't tell which processes hold its ports" in str(refused.value.detail)
     finally:
         server.terminate()
         await server.wait()
@@ -968,6 +990,11 @@ async def test_the_relay_starts_no_worker_and_needs_a_dedicated_one(
             await open_worker_relay(context.runtime_paths, _TARGET, "demo")
         assert (stopped.value.status_code, stopped.value.detail) == (503, "The agent's worker is not running.")
         assert not workers.running
+        workers.running = True
+        workers.handle = replace(workers.handle, status="starting")
+        with pytest.raises(HTTPException) as starting:
+            await open_worker_relay(context.runtime_paths, _TARGET, "demo")
+        assert (starting.value.status_code, starting.value.detail) == (503, "The agent's worker is not running.")
     paths = resolve_runtime_paths(config_path=tmp_path / "c.yaml", storage_path=tmp_path / "s", process_env={})
     with pytest.raises(HTTPException) as shared:
         await open_worker_relay(paths, _TARGET, "demo")
