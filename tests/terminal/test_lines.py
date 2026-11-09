@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from mindroom.terminal.lines import PromptMarks, TerminalLine
+from typing import TYPE_CHECKING
+
+from mindroom.terminal import lines
+from mindroom.terminal.lines import PromptMarks, TerminalLine, forget_line, terminal_line
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _mark(number: int, status: int = 0) -> bytes:
@@ -132,3 +138,21 @@ def test_prompt_marks_count_once_even_split_across_frames() -> None:
     assert marks.feed(whole[:9]) == []
     assert marks.feed(whole[9:]) == [7]
     assert marks.feed(b"\x1b[?2004h" + _mark(8)) == [8]
+
+
+def test_each_terminal_keeps_its_line_until_closed_or_least_recently_used_past_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every viewer and call of a terminal shares its line; one the primary did not see open starts holding typing."""
+    monkeypatch.setattr(lines, "_MAX_TERMINALS", 2)
+    first = terminal_line("lru", "a", opened=True)
+    assert terminal_line("lru", "a") is first
+    assert first.empty
+    second = terminal_line("lru", "b")
+    assert not second.empty
+    assert terminal_line("lru", "a") is first
+    terminal_line("lru", "c")
+    assert terminal_line("lru", "a") is first
+    assert terminal_line("lru", "b") is not second
+    forget_line("lru", "a")
+    assert terminal_line("lru", "a") is not first

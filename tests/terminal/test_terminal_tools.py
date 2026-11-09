@@ -237,7 +237,7 @@ async def test_named_keys_are_keys_and_other_text_is_typed_as_written() -> None:
 
 async def test_output_reads_as_the_screen_shows_it() -> None:
     """Escapes go, and backspaces take effect, as readline's own erasing of a typed character shows."""
-    assert terminal_tools._plain_text(b"abc\x08\x1b[K\r\nx\x08\x08y") == "ab\ny"
+    assert terminal_tools._plain_text(b"abc\x08\x1b[K\r\nxy\x08\x08z\r\n\x08w") == "ab\nz\nw"
 
 
 class _Chatty:
@@ -360,10 +360,14 @@ async def test_an_agent_is_told_when_a_terminal_s_shell_has_exited(tmp_path: Pat
     paths = primary_paths(tmp_path, runner)
     functions = _functions(_config(paths, ["shell", "terminal"]), paths)
     session_id = await _open(functions)
+    ran_exit = await _open(functions)
+    exited = "[The terminal's shell has exited.]"
 
-    assert (await _call(functions["terminal_send"], session_id=session_id, keys="exit<enter>")).endswith(
-        "[The terminal's shell has exited.]",
-    )
+    assert (await _call(functions["terminal_send"], session_id=session_id, keys="exit<enter>")).endswith(exited)
+    # Bash says `exit` as it leaves, after the echo of the command.
+    assert await _call(functions["terminal_run"], session_id=ran_exit, command="exit") == f"exit\n{exited}"
+    for terminal in (session_id, ran_exit):
+        assert (await _call(functions["terminal_read"], session_id=terminal)).endswith(f"\n{exited}")
     for function, arguments in (("terminal_send", {"keys": "<ctrl-c>"}), ("terminal_run", {"command": "ls"})):
         answer = await _call(functions[function], session_id=session_id, **arguments)
         assert answer == "Error: the terminal's shell has exited; open another with terminal_open."
