@@ -40,7 +40,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, ToolMetadataValidationError, record_plugin_root
 from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -1338,6 +1338,50 @@ def test_a_package_plugins_module_loads_under_the_name_python_gives_it(
             assert hooks.__name__.startswith(PLUGIN_MODULE_PREFIX)
         else:
             assert importlib.import_module(hooks_name) is hooks
+
+
+def test_a_package_plugins_module_imported_before_its_first_load_executes_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tools module some other code imported by package name before the plugin loads still registers its tools."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    record_plugin_root(plugin_root.resolve())
+
+    with _forgetting_modules("demo_pkg"):
+        imported = importlib.import_module("demo_pkg.tools")
+        assert "helper_tool" in _load(config, runtime_paths_for(config)).tools
+        assert sys.modules["demo_pkg.tools"] is cached_plugin_module(plugin_root / "tools.py") is not imported
+
+
+def test_validating_an_edited_package_plugin_executes_it_apart_from_its_loaded_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation runs the edited tools module under its own namespace and leaves the loaded one under its name."""
+    site_packages = tmp_path / "site-packages"
+    plugin_root = site_packages / "edited_pkg"
+    _write_working_tool_plugin(plugin_root, plugin_name="edited-pkg", tool_name="edited_pkg_tool")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+    data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "tools": ["edited_pkg_tool"]}},
+        "plugins": ["edited_pkg"],
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = _runtime_paths(config_path)
+
+    with _forgetting_modules("edited_pkg"):
+        _load(Config.validate_with_runtime(data, runtime_paths), runtime_paths)
+        loaded = sys.modules["edited_pkg.tools"]
+        _bump_mtime(plugin_root / "tools.py")
+        validated = Config.validate_with_runtime(data, runtime_paths)
+
+        assert validated.get_agent("assistant").tool_names == ["edited_pkg_tool"]
+        assert sys.modules["edited_pkg.tools"] is loaded is cached_plugin_module(plugin_root / "tools.py")
 
 
 def test_removing_a_package_plugin_drops_its_modules_package_names(
