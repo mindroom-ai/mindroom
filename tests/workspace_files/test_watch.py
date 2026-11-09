@@ -379,6 +379,53 @@ async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(mon
     assert overflow.value.status_code == 503
 
 
+def test_a_scan_stops_once_its_paths_reach_the_cap_s_length(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Long names deep down can't make one scan hold more path text than the cap, however few entries it took in."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(10):
+        (root / f"{index}{'x' * 49}").write_text("x")
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 120)
+
+    assert len(watch._scan(root)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_follower_whose_waiting_paths_pass_the_cap_s_length_is_told_to_connect_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that stops reading can't make the path text waiting for it grow without bound, however few the paths."""
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 10)
+    follower = watch._Follower()
+    follower.add({"aaaaaa"})
+    follower.add({"bbbbbb"})
+
+    with pytest.raises(HTTPException) as overflow:
+        await follower.next()
+    assert (overflow.value.status_code, overflow.value.detail) == (503, "Too many changes to follow; connect again.")
+
+
+@pytest.mark.asyncio
+async def test_sent_paths_no_longer_count_toward_the_cap_s_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the paths still waiting count, and a path changed again while it waits counts once."""
+    monkeypatch.setattr(watch, "_MAX_PATH_CHARACTERS", 10)
+    follower = watch._Follower()
+    follower.add({"aaaaaa"})
+    follower.add({"aaaaaa"})
+    assert await follower.next() == ["aaaaaa"]
+
+    follower.add({"bbbbbb"})
+    assert await follower.next() == ["bbbbbb"]
+
+
+def test_a_follower_of_an_ordinary_workspace_reaches_the_entry_cap_before_the_length_cap() -> None:
+    """A workspace at the entry cap whose paths run to 100 characters still has every change followed."""
+    follower = watch._Follower()
+    follower.add({f"{index:0100d}" for index in range(watch._MAX_ENTRIES)})
+
+    assert follower.ended is None
+
+
 @pytest.mark.asyncio
 async def test_a_scanner_that_fails_ends_its_streams_and_any_that_join_it(
     tmp_path: Path,

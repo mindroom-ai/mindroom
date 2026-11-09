@@ -6658,6 +6658,7 @@ It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other cache
 It signs in as [plugin websocket routes](https://docs.mindroom.chat/plugins/#websocket-routes) do, counting toward their 16 open streams per user, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell or once the client stopped reading; the client then connects again and lists afresh.
 In a workspace with more than 10,000 folders or 100,000 files and folders, changes in the deepest of them are not reported, nor are changes more than 32 folders deep.
+Changes are also not reported past the first 16 million characters of the workspace's paths, which only very long names deep in its folders reach.
 
 # Bug Reports
 
