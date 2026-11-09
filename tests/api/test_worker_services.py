@@ -55,8 +55,8 @@ import json, os, subprocess, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 secret = sys.stdin.readline().strip()
-# A process the service starts, which a stop asks to end with it, as a TERM signal it records.
-CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(open('child-term', 'w').close())); time.sleep(600)"
+# A process the service starts, which a stop asks to end with it, as a TERM signal it takes a while to record.
+CHILD = "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: (time.sleep(0.3), sys.exit(open('child-term', 'w').close()))); time.sleep(600)"
 child = subprocess.Popen([sys.executable, "-c", CHILD])
 with open("service.json", "w") as record:
     runner_url = os.environ["MINDROOM_WORKER_SERVICE_RUNNER_URL"]
@@ -220,7 +220,9 @@ async def test_stop_ends_the_service_and_the_next_ensure_starts_it_again(tmp_pat
     async with _runner(tmp_path) as runner:
         await _call("POST", runner.url(), _body(), _AUTH)
         record = runner.record()
-        assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
+        # The stop waits for the processes that end on the TERM signal, not for its whole grace period.
+        async with asyncio.timeout(3):
+            assert (await _call("DELETE", runner.url(), headers=_AUTH))[0] == 204
         await _until(lambda: not _pid_alive(int(record["child"])))
         assert not _pid_alive(int(record["pid"]))
         assert (runner.workspace / "child-term").exists()
@@ -243,6 +245,24 @@ async def test_a_service_that_ignores_the_stop_signal_is_killed(
         assert (await _call("DELETE", runner.url("stubborn"), headers=_AUTH))[0] == 204
         assert not _pid_alive(int(record["pid"]))
         await _until(lambda: not _pid_alive(int(record["child"])))
+
+
+@pytest.mark.asyncio
+async def test_each_ensure_resets_the_idle_timer(tmp_path: Path) -> None:
+    """A service ensured more often than its idle timeout keeps running, even when an ensure waited on another one."""
+    async with _runner(tmp_path) as runner:
+        services = _services(sandbox_runner_app.app)
+        for _ in range(4):
+            await _call("POST", runner.url(), _body(idle_timeout_seconds=0.6), _AUTH)
+            await asyncio.sleep(0.3)
+        instance = services.instance("demo", "hello")
+        # The timeout passes while another call holds the services, and an ensure resets it before that call ends.
+        async with services._lock:
+            await asyncio.sleep(0.8)
+            services.touch("demo", "hello")
+        await asyncio.sleep(0.05)
+        assert services.instance("demo", "hello") is instance
+        assert _pid_alive(int(runner.record()["pid"]))
 
 
 @pytest.mark.asyncio
@@ -322,6 +342,17 @@ async def test_a_plugin_whose_folder_this_worker_lacks_is_refused(tmp_path: Path
         assert answer["detail"] == (
             "Plugin 'demo' is not loaded in this worker: its folder is missing here, or it failed to load."
         )
+
+
+@pytest.mark.asyncio
+async def test_any_valid_plugin_name_runs_services(tmp_path: Path) -> None:
+    """Plugin names may start with an underscore and run longer than service names."""
+    name = "_" + "x" * 80
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "mindroom.plugin.json").write_text(json.dumps({"name": name}))
+        status, state = await _call("POST", runner.url(plugin=name), _body(), _AUTH)
+        assert (status, state["state"]) == (200, "running")
+        assert (await _call("DELETE", runner.url(plugin=name), headers=_AUTH))[0] == 204
 
 
 @pytest.mark.asyncio
@@ -421,6 +452,8 @@ async def test_the_primary_reports_what_keeps_a_service_from_running(
 
         with pytest.raises(WorkerServiceError, match=r"refused: The service program 'missing\.py' is no file"):
             await ensure_worker_service(context, WorkerService("hello", "missing.py"), _TARGET)
+        with pytest.raises(WorkerServiceError, match=r"refused: body\.module: String should have at most 4096 char"):
+            await ensure_worker_service(context, WorkerService("hello", "x" * 5000), _TARGET)
         crashed = await ensure_worker_service(context, WorkerService("crash", "crash.py"), _TARGET)
         assert (crashed.state, crashed.exit_code) == ("exited", 3)
 
@@ -466,6 +499,52 @@ async def test_a_plugin_load_or_shutdown_stops_the_services_the_primary_started(
         assert services.instance("demo", "hello") is None
 
         await ensure_worker_service(context, _SERVICE, _TARGET)
+        await lifespans.stop()
+        assert services.instance("demo", "hello") is None
+
+
+# The lifespan of a plugin that starts its service as it starts, for Alice's turns of the agent ``coder``.
+_LIFECYCLE = """
+from contextlib import asynccontextmanager
+
+from mindroom.plugin_api import WorkerService, ensure_worker_service
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+
+TARGET = resolve_worker_target(
+    "shared", "coder", ToolExecutionIdentity("matrix", "coder", "@alice:localhost", None, None, None, None)
+)
+
+
+@asynccontextmanager
+async def lifespan(lifecycle):
+    await ensure_worker_service(lifecycle.context(), WorkerService("hello", "hello.py"), TARGET)
+    yield
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_service_the_new_code_starts_as_it_loads_keeps_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load stops the services the replaced code started before the new code starts its own, at startup too."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "mindroom.plugin.json").write_text('{"name": "demo", "lifecycle_module": "lifecycle.py"}')
+        (runner.plugin_root / "lifecycle.py").write_text(_LIFECYCLE)
+        context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
+        config = context.config
+        lifespans = PluginLifespans(context.runtime_paths, lambda: config)
+        services = _services(sandbox_runner_app.app)
+
+        await lifespans.apply_published()
+        first = services.instance("demo", "hello")
+        assert first is not None
+        publish_test_plugins(config, context.runtime_paths)
+        await lifespans.apply_published()
+        second = services.instance("demo", "hello")
+        assert second is not None
+        assert second is not first
+        assert second.process.returncode is None
         await lifespans.stop()
         assert services.instance("demo", "hello") is None
 

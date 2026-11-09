@@ -1411,7 +1411,7 @@ A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its ma
 ## Worker services
 
 A worker service is a long-lived program of a plugin, such as a web server, that runs inside an agent's dedicated worker and never in the process that runs the agents.
-Declare it once with `WorkerService` from `mindroom.plugin_api`, and start it from primary code that has the plugin's [context](#plugin-context), such as a route or a tool with `requires_primary_runtime=True`:
+Declare it once with `WorkerService` from `mindroom.plugin_api`, and start it from a tool with `requires_primary_runtime=True`, which has the plugin's [context](#plugin-context) and the agent's worker target:
 
 ```python
 # tools.py
