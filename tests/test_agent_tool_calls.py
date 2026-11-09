@@ -33,6 +33,7 @@ from mindroom.tool_system.runtime_context import current_execution_identity, get
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
@@ -908,6 +909,29 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
             expected_worker_target=runtime.resolve_worker_target(),
         )
     assert effects == []
+
+
+@pytest.mark.asyncio
+async def test_a_prepared_cli_call_survives_the_placement_its_subagent_turn_adds_to_its_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target that keeps a subagent turn's own worker still matches the one prepared before the turn placed it."""
+
+    def action() -> str:
+        return "executed"
+
+    catalog = await _catalog(tmp_path, [_function(action)])
+    config = Config(agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])})
+    runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: config)
+    catalog.runtime_context = runtime
+    binding = await catalog.bind(ToolKey("actions", "action"))
+    monkeypatch.setattr(approval_tools, "is_sender_allowed_for_entity_replies_in_room", lambda *_a, **_k: True)
+    expected = runtime.resolve_worker_target()
+
+    with dedicated_worker_placement(runtime.session_id, DedicatedWorkerPlacement("c" * 32)):
+        assert runtime.resolve_worker_target().placement == DedicatedWorkerPlacement("c" * 32)
+        await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=expected)
 
 
 def _remove_helper(config: Config) -> None:

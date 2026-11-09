@@ -25,6 +25,7 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     detached_execution_identity,
 )
+from mindroom.workers.placements import placement_for_session
 
 if TYPE_CHECKING:
     import asyncio
@@ -282,12 +283,14 @@ class ToolRuntimeContext:
         # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
         from mindroom.runtime_resolution import resolve_agent_execution  # noqa: PLC0415
 
-        return resolve_agent_execution(
+        target = resolve_agent_execution(
             self.agent_name,
             self.config,
             self.runtime_paths,
             execution_identity=self.execution_identity,
         ).worker_target
+        # A subagent turn's own worker stays with the target, so a plugin that keeps it reaches that worker later.
+        return replace(target, placement=placement_for_session(self.session_id))
 
     def agent_workspace_root(self, *, create: bool = False) -> Path:
         """Return the workspace of the agent this dispatch runs as, at the primary's path for it.
