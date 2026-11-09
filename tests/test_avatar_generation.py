@@ -1417,7 +1417,7 @@ async def test_generation_prints_roles_room_names_and_errors_whole(
     assert f"   Role: {beta_role}" in lines
     assert f"   Role: {closing_role}" in lines
     assert f"   Role: Collaboration space for {retried_room} activities" in lines
-    assert any(f" rooms/{retried_room} " in line for line in lines), lines
+    assert any(line.startswith("╭") and f" rooms/{retried_room} " in line for line in lines), lines
     max_attempts = generate_avatars._MAX_IMAGE_ATTEMPTS
     assert f"⟳ No image returned for rooms/{retried_room} (attempt 1/{max_attempts}); regenerating prompt" in lines
     assert f"✓ Generated avatar for rooms/{retried_room}" in lines
