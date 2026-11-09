@@ -249,7 +249,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.26",
+  "mindroom_plugin_api": "1.27",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1136,6 +1136,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
+| `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
 | `modes()` | A `RoomModes` with the room's [thread mode](configuration/threads.md#thread_mode) override `thread` and [reply mode](configuration/threads.md#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
@@ -1260,6 +1261,56 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ```json
 {"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
+
+### An agent's terminals
+
+`await terminals(workspace, *, create=False)` returns a `WorkerTerminals` for the agent's [terminals](tools/execution-and-coding.md#terminal), those the chat's Terminal tab shows the caller for that agent in this room, or `None` while `workspace.terminal` is `none`.
+It checks nothing beyond what `agent()` checked, so the route enforces what the caller may do, as MindRoom's own terminal routes do: opening, closing, and typing in a terminal require `workspace.terminal == "type"`, and listing and watching require `watch` or `type`.
+Pass `create=True` before opening a terminal, so the agent's workspace exists, as its first turn would make it.
+
+| Call | Effect |
+|------|--------|
+| `await terminals.open(*, cols=80, rows=24, cwd=None)` | Starts a terminal in `cwd`, a folder of the workspace given relative to it, by default the workspace itself, starting the agent's worker as a shell call would, and returns its `id`, `cols`, `rows`, `alive`, `exit_code`, and `created_at` |
+| `await terminals.sessions()` | The workspace's terminals, oldest first, each described as `open()` describes it |
+| `await terminals.close(session_id)` | Ends a terminal |
+| `async with terminals.attach(session_id) as terminal` | Attaches to a terminal; `await terminal.send_input(data)` types `data`, at most 16384 characters at once |
+
+A refused call raises `TerminalError`, from `mindroom.plugin_http`, whose `status_code` and `detail` a route answers with, such as 404 for a terminal the workspace does not have, 413 for longer input, or 503 while the agent's worker is unavailable.
+This route types a command its caller confirmed into a new terminal, where the chat's Terminal tab shows it run, and refuses a command too long to type at once before it opens one:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+from mindroom.plugin_http import RoomReader, TerminalError, require_room_reader
+
+router = APIRouter()
+
+
+@router.post("/rooms/{room_id}/agents/{agent_user_id}/run")
+async def run(
+    agent_user_id: str,
+    command: Annotated[str, Body(embed=True, max_length=16383)],
+    room: RoomReader = Depends(require_room_reader),
+) -> dict[str, str]:
+    workspace = await room.agent(agent_user_id)
+    if workspace.terminal != "type":
+        raise HTTPException(403, "You may not type in this agent's terminals.")
+    terminals = await room.terminals(workspace, create=True)
+    if terminals is None:
+        raise HTTPException(403, "This agent has no terminals.")
+    try:
+        info = await terminals.open()
+        async with terminals.attach(info.id) as terminal:
+            await terminal.send_input(f"{command}\r")
+    except TerminalError as error:
+        raise HTTPException(error.status_code, error.detail) from None
+    return {"terminal_id": info.id}
+```
+
+A plugin that uses `terminals()` states `"mindroom_plugin_api": "1.27"` in its manifest.
 
 ### Websocket routes
 
