@@ -1172,6 +1172,25 @@ class TestAgentBot(AgentBotTestBase):
         socket.create_server(("127.0.0.1", port)).close()
 
     @pytest.mark.asyncio
+    async def test_run_api_server_refuses_a_plugin_origin_port_that_is_the_apis(self, tmp_path: Path) -> None:
+        """An origin port equal to the API's fails the start, naming the setting, before the API serves."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "data",
+            process_env={"MINDROOM_PLUGIN_ORIGIN_PORT": "8765"},
+        )
+
+        with (
+            patch("mindroom.orchestrator._SignalAwareUvicornServer") as server,
+            pytest.raises(ValueError, match="MINDROOM_PLUGIN_ORIGIN_PORT must differ from the API's port"),
+        ):
+            await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), asyncio.Event())
+
+        server.return_value.serve.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
         """The API gateway and its dedicated listener must receive the lifecycle-owned broker without replacing it."""
 

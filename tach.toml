@@ -7483,7 +7483,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
+expose = ["SCRIPT_GATEWAY_PORT_ENV", "bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]
@@ -8380,7 +8380,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
 ]
-visibility = ["mindroom.api.main", "mindroom.api.plugin_origins", "mindroom.plugin_testing"]
+visibility = ["mindroom.api.main", "mindroom.api.plugin_origins", "mindroom.plugin_http", "mindroom.plugin_testing"]
 
 [[modules]]
 path = "mindroom.api.plugin_origins"
@@ -8406,6 +8406,7 @@ depends_on = [
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.api.plugin_origins",
+    "mindroom.api.plugin_routes",
     "mindroom.constants",
     "mindroom.entity_directory",
     "mindroom.hooks.types",
