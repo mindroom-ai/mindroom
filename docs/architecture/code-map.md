@@ -500,7 +500,7 @@ Matrix sync callback
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
 | `api/worker_preview.py` | Dedicated-worker runner routes that list the ports the worker's own apps listen on at its loopback and relay the primary's HTTP requests and WebSockets to them, refusing other containers' servers and the runner's own port |
-| `previews/listeners.py` | Finds the TCP sockets listening on a port, through the kernel's socket diagnostics or `/proc/net`, and whether only the runner's process tree or cgroup holds them |
+| `previews/listeners.py` | Lists the TCP sockets listening on this machine's ports, through the kernel's socket diagnostics or `/proc/net`, and whether only the runner's process tree or cgroup holds them |
 | `previews/relay.py` | Passes one WebSocket's messages both ways between an accepted socket and a client socket until either closes |
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
