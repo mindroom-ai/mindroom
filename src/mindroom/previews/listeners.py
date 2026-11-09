@@ -62,11 +62,12 @@ def _replies(diag: socket.socket) -> Iterator[bytes]:
         while offset < len(data):
             length, kind, _, _, _ = _NETLINK_HEADER.unpack_from(data, offset)
             payload = data[offset + _NETLINK_HEADER.size : offset + length]
-            if kind == _NLMSG_DONE:
-                return
-            if kind == _NLMSG_ERROR:
+            if kind in {_NLMSG_DONE, _NLMSG_ERROR}:
+                # Both lead with an error number, negated: an error answer, or a dump the kernel ended in one.
                 error = -int.from_bytes(payload[:4], sys.byteorder, signed=True)
-                raise OSError(error, os.strerror(error))
+                if error:
+                    raise OSError(error, os.strerror(error))
+                return
             yield payload
             offset += (length + 3) & ~3
 

@@ -146,9 +146,14 @@ def test_proc_net_lists_only_listening_sockets(proc: Path) -> None:
     assert _found(5173) == [("127.0.0.1", 5173, 11)]
 
 
-def test_an_error_the_kernel_answers_a_dump_with_is_raised() -> None:
-    """A netlink error answer, as for a family without socket diagnostics, raises its error, so ``/proc/net`` answers."""
-    answer = struct.pack("=IHHII", 36, 2, 0, 0, 0) + (-errno.ENOENT).to_bytes(4, sys.byteorder, signed=True) + bytes(16)
+@pytest.mark.parametrize(("kind", "length"), [(2, 36), (3, 20)], ids=["error", "done"])
+def test_an_error_the_kernel_answers_a_dump_with_is_raised(kind: int, length: int) -> None:
+    """A netlink error answer, or a dump that ends in an error, raises it, so ``/proc/net`` answers instead.
+
+    The kernel ends a dump with an error, for instance, when it has diagnostics for no TCP sockets of one family.
+    """
+    error = (-errno.ENOENT).to_bytes(4, sys.byteorder, signed=True)
+    answer = struct.pack("=IHHII", length, kind, 0, 0, 0) + error + bytes(length - 20)
     kernel, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
     with kernel, runner:
         kernel.send(answer)

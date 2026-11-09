@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The port list reads listening sockets from /proc/net."),
+    pytest.mark.skipif(sys.platform != "linux", reason="The relay reads sockets and their holders from Linux."),
     # The runner serves WebSockets with uvicorn's default implementation, the deprecated websockets.legacy one.
     pytest.mark.filterwarnings(r"ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy"),
     pytest.mark.filterwarnings(
