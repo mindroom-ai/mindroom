@@ -964,6 +964,7 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
         ('mysql -e "select \\\r\n 1" -ppw app', f'mysql -e "select \\\r\n 1" -p{REDACTED} app'),
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ("curl -u \\\n  'admin:pw' https://example.test/x", f"curl -u \\\n  'admin:{REDACTED}' https://example.test/x"),
         ("curl -u 7f3a9c1e2b4d6f8a0c2e: https://example.test/api", f"curl -u {REDACTED}: https://example.test/api"),
         ("sudo \\\n  mysql -ppw app", f"sudo \\\n  mysql -p{REDACTED} app"),
         ("mysql -p'first'\"second\" app", f"mysql -p{REDACTED} app"),

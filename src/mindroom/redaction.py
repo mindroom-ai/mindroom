@@ -93,7 +93,7 @@ _ARGUMENT_GAP = r"(?:[^\S\r\n]|\\\r?\n)"
 _ARGUMENT_GAP_PATTERN = re.compile(rf"{_ARGUMENT_GAP}*+")
 _ARGUMENTS_PATTERN = re.compile(rf"{_SHELL_WORD}(?:{_ARGUMENT_GAP}++{_SHELL_WORD})*+")
 # curl's `user:password` is one shell word, whose part after the first colon is the password.
-_CURL_USER_OPTION_PATTERN = re.compile(rf"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|[^\S\r\n]*+)(?P<word>{_SHELL_WORD})")
+_CURL_USER_OPTION_PATTERN = re.compile(rf"(?<!\S)(?:-u|--user(?=[=\s]))(?:=|{_ARGUMENT_GAP}*+)(?P<word>{_SHELL_WORD})")
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(rf"(?<!\S)-p(?P<token>{_SHELL_WORD})")
 # Words that run the word after them as a program, as in `sudo mysql`.
 _COMMAND_PREFIX_WORDS = frozenset(
