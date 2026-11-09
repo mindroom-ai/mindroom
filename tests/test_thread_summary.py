@@ -131,6 +131,7 @@ async def _summary_pass(
     room_id: str = _ROOM,
     thread_id: str = _THREAD,
     delivered_response: DeliveredResponse = _DELIVERED_AND_ECHOED,
+    retitle: bool = False,
 ) -> None:
     """Run one automatic summary pass as the router."""
     await maybe_generate_thread_summary(
@@ -143,6 +144,7 @@ async def _summary_pass(
         delivered_response=delivered_response,
         entity_name="router",
         membership_index=AgentReplyMembershipIndex(),
+        retitle=retitle,
     )
 
 
@@ -755,9 +757,9 @@ class TestMaybeGenerateThreadSummary:
         self.models[model_name] = model
         return model
 
-    async def _maybe_generate(self, config: Config, *, client: AsyncMock | None = None) -> None:
+    async def _maybe_generate(self, config: Config, *, client: AsyncMock | None = None, retitle: bool = False) -> None:
         """Run the production helper through the explicit access seam."""
-        await _summary_pass(client or self.client, config, self.rp, self.conversation_reader)
+        await _summary_pass(client or self.client, config, self.rp, self.conversation_reader, retitle=retitle)
 
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
@@ -1063,6 +1065,29 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == int(should_generate)
         assert self.client.room_send.await_count == int(should_generate)
         assert self._count() == (message_count if should_generate else 5)
+
+    async def test_a_retitle_summarizes_before_the_next_summary_is_due(self) -> None:
+        """Asked to title the thread again, the pass summarizes now, though the thread's count is short of the next summary."""
+        model = self._summarizer(_title("Launch plan call"))
+        self._history(
+            [*_make_thread_history(7), _make_summary_notice_message(_THREAD, message_count=5, model="default")],
+        )
+
+        await self._maybe_generate(_mock_config(), retitle=True)
+
+        assert len(model.requests) == 1
+        assert _sent_summaries(self.client)[0]["summary"] == "Launch plan call"
+        assert self._count() == 7
+
+    async def test_a_retitle_leaves_a_pinned_title(self) -> None:
+        """A title someone pinned stays: asked to title the thread again, the pass does not call the model."""
+        model = self._summarizer()
+        self._history([*_make_thread_history(7), _make_summary_notice_message(_THREAD, message_count=5, pinned=True)])
+
+        await self._maybe_generate(_mock_config(), retitle=True)
+
+        assert not model.requests
+        assert self.client.room_send.await_count == 0
 
     async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
         """Concurrent calls for one thread should share a single generation/send path."""

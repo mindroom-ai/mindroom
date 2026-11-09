@@ -1195,6 +1195,8 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
 
     assert {"name": "storage", "mountPath": "/mindroom_data"} in mindroom_container["volumeMounts"]
     assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == "/mindroom_data/config/config.yaml"
+    # The primary knows the sidecar mounts the agents' storage, so people may type in the agents' terminals.
+    assert _env_by_name(mindroom_container)["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"
     assert runner_container["volumeMounts"] == [
         {"name": "storage", "mountPath": "/mindroom_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/mindroom_data/agents", "subPath": "agents"},
@@ -3017,6 +3019,8 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     }
     assert [ref["key"] for ref in _secret_key_refs(runner_container)] == ["MINDROOM_SANDBOX_PROXY_TOKEN"]
     assert {"name": "storage", "mountPath": "/app/agent_data"} in mindroom_container["volumeMounts"]
+    # The primary knows the sidecar mounts the agents' storage, so people may type in the agents' terminals.
+    assert _env_by_name(mindroom_container)["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"
     assert runner_container["volumeMounts"] == [
         {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},

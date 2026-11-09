@@ -900,6 +900,11 @@ class AgentBot:
         return self._conversation_reader
 
     @property
+    def post_response_effects(self) -> PostResponseEffectsSupport:
+        """Return what this bot does after it posts, such as titling the thread it posted in."""
+        return self._post_response_effects_support
+
+    @property
     def tool_runtime_support(self) -> ToolRuntimeSupport:
         """Return the builder of tool runtime contexts for this bot's dispatches."""
         return self._tool_runtime_support

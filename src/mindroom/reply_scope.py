@@ -135,11 +135,14 @@ class SpanHandle:
         *,
         team_state: Mapping[str, object] | None = None,
     ) -> Segment:
-        """Return this span's answer as one segment, its markers counted from one."""
+        """Return this span's answer as one segment, its markers counted from one.
+
+        A stream that continues a stopped attempt starts with what that attempt showed; a whole answer is the span's own.
+        """
         resumed = self.resumed
         own_text = text
         own_trace = tool_trace
-        if resumed is not None:
+        if resumed is not None and text.startswith(resumed.resumed_text):
             own_text = text.removeprefix(resumed.resumed_text)
             resumed_count = len(resumed.tool_trace)
             own_trace = tool_trace[resumed_count:]

@@ -8,7 +8,7 @@ import json
 import math
 import os
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -71,20 +71,46 @@ def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
     return raw
 
 
-def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
+def _self_reference_error() -> ValueError:
+    return ValueError("it refers to itself")
+
+
+def _refuse_self_reference(value: Any, ancestors: frozenset[int]) -> None:  # noqa: ANN401 - Any metadata value.
+    """Refuse a value inside itself along the dataclasses, dicts, lists, and tuples that ``asdict`` copies."""
+    if id(value) in ancestors:
+        raise _self_reference_error()
+    if is_dataclass(value) and not isinstance(value, type):
+        items = [getattr(value, item.name) for item in dataclass_fields(value)]
+    elif isinstance(value, dict):
+        items = list(value.values())
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return
+    inner = ancestors | {id(value)}
+    for item in items:
+        _refuse_self_reference(item, inner)
+
+
+def _encode(value: Any, allowance: _FileAllowance, ancestors: frozenset[int]) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
+    if id(value) in ancestors:
+        # A container inside itself would never finish encoding.
+        raise _self_reference_error()
     if isinstance(value, ToolValue):
         media = (value.images, value.audios, value.videos, value.files)
         fields: dict[str, Any] = {"content": value.content}
         fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
-        return {"type": "ToolValue", "value": _encode(fields, allowance)}
+        return {"type": "ToolValue", "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, (Image, Audio, Video, File)):
+        # asdict() copies the metadata deeply and would never finish copying one inside itself.
+        _refuse_self_reference(value.metadata, frozenset())
         fields = asdict(value)
         if value.filepath is not None:
             fields["filepath"] = None
             # Bytes the tool returned stand; its path is read only when they are missing.
             if value.content is None:
                 fields["content"] = _file_bytes(Path(value.filepath), allowance)
-        return {"type": type(value).__name__, "value": _encode(fields, allowance)}
+        return {"type": type(value).__name__, "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, bytes):
         return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
@@ -93,10 +119,12 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
         if not all(isinstance(key, str) for key in value):
             # Keys such as 1 and "1" would collide as text, so the whole mapping keeps the text the model reads inline.
             return str(value)
-        return {"type": "dict", "value": {key: _encode(item, allowance) for key, item in value.items()}}
+        inner = ancestors | {id(value)}
+        return {"type": "dict", "value": {key: _encode(item, allowance, inner) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        return {"type": kind, "value": [_encode(item, allowance) for item in value]}
+        inner = ancestors | {id(value)}
+        return {"type": kind, "value": [_encode(item, allowance, inner) for item in value]}
     if value is None or isinstance(value, (str, int, bool)) or (isinstance(value, float) and math.isfinite(value)):
         return value
     # Any other value, such as a datetime or a driver's own type, keeps the text the model reads for it inline.
@@ -136,7 +164,8 @@ def _media(kind: type[Image | Audio | Video | File], saved: dict[str, Any]) -> I
 def encode_tool_result(value: Any) -> dict[str, Any]:  # noqa: ANN401 - Public SDK value boundary.
     """Encode one supported value in a versioned envelope within the 64 MiB encoded-JSON limit."""
     # Base64 turns every 3 raw artifact bytes into 4 encoded bytes.
-    envelope = {"version": 1, "value": _encode(value, _FileAllowance(3 * (_MAX_ENCODED_RESULT_BYTES // 4)))}
+    allowance = _FileAllowance(3 * (_MAX_ENCODED_RESULT_BYTES // 4))
+    envelope = {"version": 1, "value": _encode(value, allowance, frozenset())}
     # Default JSON escapes every non-ASCII character, so its length is the saved byte count.
     if len(json.dumps(envelope, allow_nan=False)) > _MAX_ENCODED_RESULT_BYTES:
         raise _size_error()

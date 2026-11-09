@@ -84,3 +84,16 @@ def test_local_model_requires_loopback_endpoint(tmp_path: Path, url: str) -> Non
     result = _configure(path, "--base-url", url)
     assert result.exit_code == 1
     assert path.read_text() == "models: {}\n"
+
+
+def test_local_model_failure_prints_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """A failure that names a config path Rich would read as markup prints it whole on one line."""
+    path = narrow_markup_dir / "config.yaml"
+
+    result = _configure(path)
+
+    assert result.exit_code == 1
+    assert any(
+        line.startswith("Local model configuration failed: ") and line.endswith(f"'{path}'")
+        for line in result.output.splitlines()
+    ), result.output

@@ -16,7 +16,6 @@ import os
 import secrets
 import signal
 import socket
-import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated
@@ -24,7 +23,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request, WebSocket
 from pydantic import Field
 
-from mindroom.api.sandbox_exec import resolve_subprocess_worker_context, runner_uses_dedicated_worker
+from mindroom.api.sandbox_exec import runner_uses_dedicated_worker, worker_subprocess_env
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
 from mindroom.api.worker_computer import serve_agent_browser
 from mindroom.api.worker_preview import loopback_host
@@ -54,7 +53,7 @@ class _Program:
     entry_hash: str
     python: str
     env: dict[str, str] = field(repr=False)
-    cwd: str | None
+    cwd: str
 
 
 @dataclass(eq=False)
@@ -82,7 +81,7 @@ class _WorkerServices:
         return self._instances.get((plugin, name))
 
     def touch(self, plugin: str, name: str) -> None:
-        """Reset the instance's idle timer, as traffic to it does."""
+        """Reset the instance's idle timer."""
         if (instance := self.instance(plugin, name)) is not None:
             instance.idle_until = asyncio.get_running_loop().time() + instance.idle_timeout_seconds
 
@@ -126,13 +125,17 @@ class _WorkerServices:
 
     async def _expire(self, key: tuple[str, str], instance: _ServiceInstance) -> None:
         loop = asyncio.get_running_loop()
-        # Each touch moves the deadline, so the loop reads it again after every sleep.
-        while (remaining := instance.idle_until - loop.time()) > 0:  # noqa: ASYNC110
-            await asyncio.sleep(remaining)
-        async with self._lock:
-            if self._instances.get(key) is instance:
-                instance.expiry = None
-                await self._end(key, instance)
+        while True:
+            # Each touch moves the deadline, so it is read again after every sleep, and under the lock an ensure holds.
+            while (remaining := instance.idle_until - loop.time()) > 0:  # noqa: ASYNC110
+                await asyncio.sleep(remaining)
+            async with self._lock:
+                if self._instances.get(key) is not instance:
+                    return
+                if instance.idle_until <= loop.time():
+                    instance.expiry = None
+                    await self._end(key, instance)
+                    return
 
 
 def _services(app: FastAPI) -> _WorkerServices:
@@ -170,12 +173,24 @@ async def _start(program: _Program, idle_timeout_seconds: float) -> _ServiceInst
     return _ServiceInstance(process, port, secret, program.entry_hash, idle_timeout_seconds)
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
 async def _terminate(process: asyncio.subprocess.Process) -> None:
-    """End the instance's process group, killing what is left of it after ``_STOP_SECONDS``."""
+    """Ask the instance's process group to end, then kill what is left of it after ``_STOP_SECONDS``."""
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
-    with suppress(TimeoutError):
-        await asyncio.wait_for(process.wait(), _STOP_SECONDS)
+    deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
+    # The group outlives its leader while a process the leader started runs.
+    while _group_alive(process.pid) and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.05)
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
     await process.wait()
@@ -213,17 +228,20 @@ def _program(app: FastAPI, payload: _Ensure, plugin: str, name: str, runner_url:
     path = (root / payload.module).resolve()
     if not path.is_relative_to(root) or not path.is_file():
         raise HTTPException(400, f"The service program {payload.module!r} is no file in plugin {plugin!r}.")
-    python, env, cwd = resolve_subprocess_worker_context(route.worker.paths if route.worker is not None else None)
+    # A dedicated worker's runner prepares every route's worker, which tool subprocesses run in too.
+    assert route.worker is not None
+    paths = route.worker.paths
     env = {
-        **(env or {}),
+        **worker_subprocess_env(paths),
         "MINDROOM_WORKER_SERVICE_RUNNER_URL": runner_url,
         "MINDROOM_AGENT_BROWSER_URL": f"ws{runner_url.removeprefix('http')}{router.prefix}/{plugin}/{name}/agent-browser",
     }
-    return _Program(path, hashlib.sha256(path.read_bytes()).hexdigest(), python or sys.executable, env, cwd)
+    entry_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    return _Program(path, entry_hash, str(paths.venv_dir / "bin" / "python"), env, str(paths.workspace))
 
 
 @router.post("/{plugin}/{name}", dependencies=_GUARDED)
-async def ensure_service(request: Request, plugin: _Name, name: _Name, payload: _Ensure) -> WorkerServiceState:
+async def ensure_service(request: Request, plugin: str, name: _Name, payload: _Ensure) -> WorkerServiceState:
     """Start the plugin's service unless it runs, and report it."""
     _require_dedicated_worker(request.app)
     runner_url = f"http://127.0.0.1:{request.scope['server'][1]}"
@@ -232,7 +250,7 @@ async def ensure_service(request: Request, plugin: _Name, name: _Name, payload: 
 
 
 @router.delete("/{plugin}/{name}", status_code=204, dependencies=_GUARDED)
-async def stop_service(request: Request, plugin: _Name, name: _Name) -> None:
+async def stop_service(request: Request, plugin: str, name: _Name) -> None:
     """End the plugin's service, if it runs."""
     _require_dedicated_worker(request.app)
     await _services(request.app).stop(plugin, name)

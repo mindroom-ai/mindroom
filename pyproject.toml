@@ -425,6 +425,7 @@ tavily = [
 telegram = [
   "pytelegrambotapi>=4.32",
 ]
+terminal = []
 thread_model = []
 thread_move = []
 thread_resolution = []

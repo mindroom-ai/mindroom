@@ -147,6 +147,8 @@ class PluginLifespans:
                 return
             previous, self._published = self._published, generation
             replaced, self._running = self._running, {}
+            # The new code may start services as it starts, so those the replaced code started stop first.
+            await stop_started_worker_services()
             for plugin in generation.plugins.values():
                 if plugin.lifespan is None:
                     continue
@@ -165,7 +167,6 @@ class PluginLifespans:
             )
             for name, running in replaced.items():
                 await _stop(running, "reload" if name in self._running else "disabled")
-            await stop_started_worker_services()
 
     async def stop(self) -> None:
         """Stop every running lifespan as MindRoom shuts down, and start none after."""

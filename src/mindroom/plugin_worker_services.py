@@ -7,14 +7,14 @@ every plugin's code, so the primary stops the services it started whenever it lo
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+from mindroom.http_error_detail import error_detail_from_response
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, worker_proxy_client_config, worker_route
 from mindroom.tool_system.worker_proxy_client import worker_request_headers
@@ -64,6 +64,14 @@ class WorkerServiceError(RuntimeError):
     """A worker service could not be reached: no dedicated worker backend, no worker, or the runner refused."""
 
 
+class _Endpoint(NamedTuple):
+    """The route of a target's worker, its runner's service routes, and the headers that authenticate to it."""
+
+    route: dict[str, object]
+    root: str
+    headers: dict[str, str]
+
+
 _STATE = TypeAdapter(WorkerServiceState)
 # The services this primary started, by worker key, plugin, and name, with what reaches their worker again.
 _started: dict[tuple[str, str, str], tuple[RuntimePaths, Config, ResolvedWorkerTarget]] = {}
@@ -75,8 +83,8 @@ def _endpoint(
     target: ResolvedWorkerTarget,
     *,
     start: bool,
-) -> tuple[dict[str, object], str, dict[str, str]] | None:
-    """Return the target's worker's route, service URL root, and headers, None while it does not run. Blocking."""
+) -> _Endpoint | None:
+    """Return the target's worker's endpoint, None while it does not run. Blocking."""
     if not worker_backend_kind(runtime_paths).dedicated:
         msg = "Worker services need a dedicated worker backend: set MINDROOM_WORKER_BACKEND to docker or kubernetes."
         raise WorkerServiceError(msg)
@@ -103,21 +111,18 @@ def _endpoint(
     if handle is None or handle.status != "ready":
         return None
     headers = worker_request_headers(handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
-    return route.model_dump(mode="json"), f"{worker_api_root(handle)}/plugin-services", headers
+    return _Endpoint(route.model_dump(mode="json"), f"{worker_api_root(handle)}/plugin-services", headers)
 
 
-async def _send(method: str, url: str, headers: dict[str, str], body: object) -> bytes:
+async def _send(method: str, endpoint: _Endpoint, path: str, body: object) -> bytes:
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.request(method, url, headers=headers, json=body)
+            response = await client.request(method, f"{endpoint.root}/{path}", headers=endpoint.headers, json=body)
     except httpx.HTTPError as error:
         msg = f"The agent's worker is unavailable: {type(error).__name__}"
         raise WorkerServiceError(msg) from None
     if response.status_code >= 400:
-        try:
-            detail = json.loads(response.content)["detail"]
-        except (ValueError, TypeError, KeyError):
-            detail = f"HTTP {response.status_code}"
+        detail = error_detail_from_response(response, fallback=f"HTTP {response.status_code}")
         msg = f"The agent's worker refused: {detail}"
         raise WorkerServiceError(msg)
     return response.content
@@ -134,10 +139,9 @@ async def ensure_worker_service(
     if endpoint is None:
         msg = "The agent's worker is not ready."
         raise WorkerServiceError(msg)
-    route, root, headers = endpoint
-    _started[(str(route["worker_key"]), plugin, service.name)] = (paths, config, target)
-    body = {**route, "module": service.module, "idle_timeout_seconds": service.idle_timeout_seconds}
-    answer = await _send("POST", f"{root}/{plugin}/{service.name}", headers, body)
+    _started[(str(endpoint.route["worker_key"]), plugin, service.name)] = (paths, config, target)
+    body = {**endpoint.route, "module": service.module, "idle_timeout_seconds": service.idle_timeout_seconds}
+    answer = await _send("POST", endpoint, f"{plugin}/{service.name}", body)
     try:
         return _STATE.validate_json(answer)
     except ValidationError:
@@ -149,7 +153,7 @@ async def _stop(paths: RuntimePaths, config: Config, target: ResolvedWorkerTarge
     endpoint = await asyncio.to_thread(_endpoint, paths, config, target, start=False)
     # A worker that does not run runs no service.
     if endpoint is not None:
-        await _send("DELETE", f"{endpoint[1]}/{plugin}/{name}", endpoint[2], None)
+        await _send("DELETE", endpoint, f"{plugin}/{name}", None)
 
 
 async def stop_worker_service(context: PluginContext, service: WorkerService, target: ResolvedWorkerTarget) -> None:
