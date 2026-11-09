@@ -344,7 +344,7 @@ async def test_the_runner_stopping_ends_its_services(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
-    """A plugin this worker lacks, a program outside the plugin, another protocol, no token: refusals, no process."""
+    """A missing plugin, a program outside it, another protocol, a non-finite timeout, no token: refusals, no process."""
     async with _runner(tmp_path) as runner:
         status, answer = await _call("POST", runner.url(plugin="other"), _body(), _AUTH)
         assert status == 404
@@ -356,6 +356,8 @@ async def test_the_runner_refuses_what_it_cannot_run(tmp_path: Path) -> None:
         status, answer = await _call("POST", runner.url(), {**_body(), "protocol": 0}, _AUTH)
         assert status == 400
         assert "worker protocol" in answer["detail"]
+        for idle in (float("inf"), float("nan")):
+            assert (await _call("POST", runner.url(), _body(idle_timeout_seconds=idle), _AUTH))[0] == 422
         assert (await _call("POST", runner.url(), _body()))[0] == 401
         assert not (runner.workspace / "service.json").exists()
 
@@ -627,7 +629,7 @@ async def test_without_a_dedicated_worker_backend_a_service_never_starts(tmp_pat
     ],
 )
 def test_a_service_declaration_refuses_a_bad_name_or_timeout(name: str, idle: float) -> None:
-    """A name the runner's routes cannot carry, or a timeout that is not positive, fails where the plugin declares it."""
+    """A name the runner's routes cannot carry, or a timeout not positive and finite, fails where it is declared."""
     with pytest.raises(ValueError, match=r"(?i)worker service"):
         WorkerService(name, "hello.py", idle_timeout_seconds=idle)
 
