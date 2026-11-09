@@ -37,6 +37,8 @@ _REST_FACTOR = 9
 # The folders a scan takes in and the entries it examines, breadth first, so a large tree leaves out its deepest ones.
 _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
+# Each folder is opened from the root, so a deeper one costs more opens.
+_MAX_DEPTH = 32
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
     ignore_dirs=(*watchfiles.DefaultFilter.ignore_dirs, ".cache"),
@@ -142,7 +144,7 @@ def _scan(root: Path) -> dict[str, _Seen]:
                     kind = stat.S_IFMT(status.st_mode)
                     if kind == stat.S_IFDIR:
                         seen[str(relative)] = (kind, 0, 0, status.st_ino)
-                        if len(folders) < _MAX_FOLDERS:
+                        if len(folders) < _MAX_FOLDERS and len(relative.parts) < _MAX_DEPTH:
                             folders.append(relative)
                     elif kind in ENTRY_KINDS:
                         seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)

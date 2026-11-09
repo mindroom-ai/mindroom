@@ -371,3 +371,12 @@ async def test_a_follower_that_falls_too_far_behind_is_told_to_connect_again(mon
     with pytest.raises(HTTPException) as overflow:
         await follower.next()
     assert overflow.value.status_code == 503
+
+
+def test_a_scan_leaves_out_folders_past_the_depth_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deep chain of folders, which each scan would open from the root, costs at most the cap's depth."""
+    root = tmp_path / "workspace"
+    (root / "a" / "b" / "c" / "d").mkdir(parents=True)
+    monkeypatch.setattr(watch, "_MAX_DEPTH", 2)
+
+    assert set(watch._scan(root)) == {"a", "a/b"}
