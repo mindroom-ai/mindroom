@@ -346,17 +346,6 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
     assert ports == sorted(ports)
 
 
-@pytest.mark.asyncio
-async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A closed port, a server only on another address, and no port at all are marked refusals."""
-    async with _app("127.0.0.2") as elsewhere, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for port in (unused_tcp_port, elsewhere, 0, 70000):
-            async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
-                assert response.status == 502
-                assert response.headers[_REFUSED] == "1"
-                assert await response.json() == {"detail": f"No app listens on port {port} at this worker's loopback."}
-
-
 async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: int, status: int, detail: str) -> None:
     """Requests and WebSockets to ``port`` are marked refusals."""
     async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
@@ -368,10 +357,25 @@ async def _assert_refused(client: aiohttp.ClientSession, runner: _Runner, port: 
     assert refused.value.status == 403
 
 
-async def _assert_unlisted(client: aiohttp.ClientSession, runner: _Runner, port: int) -> None:
-    async with client.get(runner.root, headers=_AUTH) as response:
-        assert response.status == 200
-        assert port not in await response.json()
+def _hide_every_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Show the runner a ``/proc`` with no processes, as a pod sidecar's processes in their own PID namespace are hidden."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(listeners, "_PROC", proc)
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path, unused_tcp_port: int) -> None:
+    """A closed port, a server only on another address, and no port at all are marked refusals."""
+    async with _app("127.0.0.2") as elsewhere, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        for port in (unused_tcp_port, elsewhere, 0, 70000):
+            await _assert_refused(
+                client,
+                runner,
+                port,
+                502,
+                f"No app listens on port {port} at this worker's loopback.",
+            )
 
 
 async def _wait_listening(port: int) -> None:
@@ -441,7 +445,7 @@ async def test_relay_reaches_the_workers_app_on_a_port_the_primarys_servers_use(
 
 @pytest.mark.asyncio
 async def test_relay_refuses_the_runners_own_port(tmp_path: Path) -> None:
-    """The runner's own port is a marked refusal and is not listed."""
+    """The runner's own port is a marked refusal."""
     async with _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
         await _assert_refused(
             client,
@@ -450,7 +454,6 @@ async def test_relay_refuses_the_runners_own_port(tmp_path: Path) -> None:
             403,
             f"Port {runner.port} is this runner's own, which the relay never reaches.",
         )
-        await _assert_unlisted(client, runner, runner.port)
 
 
 @pytest.mark.asyncio
@@ -459,13 +462,12 @@ async def test_relay_refuses_a_server_no_process_of_the_worker_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An app the runner sees no process of its own holding, as a pod sidecar in its own PID namespace, is refused."""
-    proc = tmp_path / "proc"
-    (proc / "self").mkdir(parents=True)
-    (proc / "self" / "cgroup").write_text("0::/\n")
-    monkeypatch.setattr(listeners, "_PROC", proc)
+    _hide_every_holder(tmp_path, monkeypatch)
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
         await _assert_refused(client, runner, port, 403, f"The server on port {port} is not one this worker runs.")
-        await _assert_unlisted(client, runner, port)
+        async with client.get(runner.root, headers=_AUTH) as response:
+            assert response.status == 200
+            assert port not in await response.json()
 
 
 @pytest.mark.asyncio
@@ -513,10 +515,7 @@ async def test_relay_follows_no_websocket_redirect_to_a_server_the_worker_does_n
         # Found to be the worker's while /proc shows its holder, so the app on ``port`` stays reachable below.
         async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
             assert response.status == 200
-        proc = tmp_path / "proc"
-        (proc / "self").mkdir(parents=True)
-        (proc / "self" / "cgroup").write_text("0::/\n")
-        monkeypatch.setattr(listeners, "_PROC", proc)
+        _hide_every_holder(tmp_path, monkeypatch)
         there = f"http://127.0.0.1:{other}/socket"
         with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
             await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)

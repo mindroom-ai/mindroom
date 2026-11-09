@@ -72,8 +72,8 @@ def _replies(diag: socket.socket) -> Iterator[bytes]:
             offset += (length + 3) & ~3
 
 
-def _diagnosed_listeners(port: int | None) -> list[_Listener]:
-    """Ask the kernel's socket diagnostics for the TCP sockets listening on ``port``, or on any port for None."""
+def _diagnosed_listeners() -> list[_Listener]:
+    """Ask the kernel's socket diagnostics for the TCP sockets listening on any port."""
     found: list[_Listener] = []
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_SOCK_DIAG) as diag:
         for family, address_bytes in ((socket.AF_INET, 4), (socket.AF_INET6, 16)):
@@ -95,7 +95,7 @@ def _diagnosed_listeners(port: int | None) -> list[_Listener]:
                         int.from_bytes(answer[_DIAG_INODE : _DIAG_INODE + 4], sys.byteorder),
                     ),
                 )
-    return [listener for listener in found if port is None or listener.port == port]
+    return found
 
 
 def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -104,36 +104,36 @@ def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     return _unmapped(ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words)))
 
 
-def _proc_net_listeners(port: int | None) -> list[_Listener]:
-    """Read the TCP sockets listening on ``port``, or on any port for None, from ``/proc/net``."""
+def _proc_net_listeners() -> list[_Listener]:
+    """Read the TCP sockets listening on any port from ``/proc/net``."""
     found: list[_Listener] = []
-    tables = 0
+    read = False
     for table in ("tcp", "tcp6"):
         try:
             lines = (_PROC / "net" / table).read_text(encoding="ascii").splitlines()[1:]
         except OSError:  # No IPv6 in this network namespace.
             continue
-        tables += 1
+        read = True
         for line in lines:
             _, local, _, state, _, _, _, _, _, inode, *_ = line.split()
             hex_address, _, hex_port = local.partition(":")
-            if state == f"{_TCP_LISTEN:02X}" and port in {None, int(hex_port, 16)}:
+            if state == f"{_TCP_LISTEN:02X}":
                 found.append(_Listener(_address(hex_address), int(hex_port, 16), int(inode)))
-    if not tables:
+    if not read:
         msg = "No source names this machine's listening sockets."
         raise OSError(msg)
     return found
 
 
-def listening_sockets(port: int | None = None) -> list[_Listener]:
-    """Return the TCP sockets listening on ``port`` at any address, or on any port for None.
+def listening_sockets() -> list[_Listener]:
+    """Return the TCP sockets listening on this machine's ports, at any address.
 
     Blocking. Raises OSError when neither the kernel nor ``/proc/net`` can say.
     """
     try:
-        return _diagnosed_listeners(port)
+        return _diagnosed_listeners()
     except OSError:
-        return _proc_net_listeners(port)
+        return _proc_net_listeners()
 
 
 def _read(path: Path) -> str | None:
@@ -150,10 +150,9 @@ def _parent(pid: int) -> int | None:
     return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
 
 
-def _holders(sockets: frozenset[int]) -> dict[int, set[int]]:
-    """Return the processes holding each of ``sockets``, among those whose descriptors this process may read."""
-    wanted = {f"socket:[{inode}]": inode for inode in sockets}
-    holders: dict[int, set[int]] = {inode: set() for inode in sockets}
+def _holders(sockets: frozenset[int]) -> dict[str, set[int]]:
+    """Return the processes holding each of ``sockets``, by its descriptor link, among those this process may read."""
+    holders: dict[str, set[int]] = {f"socket:[{inode}]": set() for inode in sockets}
     for entry in _PROC.iterdir():
         if not entry.name.isdigit():
             continue
@@ -166,8 +165,8 @@ def _holders(sockets: frozenset[int]) -> dict[int, set[int]]:
                 target = str(descriptor.readlink())
             except OSError:
                 continue
-            if target in wanted:
-                holders[wanted[target]].add(int(entry.name))
+            if target in holders:
+                holders[target].add(int(entry.name))
     return holders
 
 
@@ -176,7 +175,7 @@ def _of_this_worker(pid: int, runner: int, cgroup: str | None) -> bool:
         return True
     seen: set[int] = set()
     current: int | None = pid
-    while current is not None and current > 0 and current not in seen:
+    while current and current not in seen:
         if current == runner:
             return True
         seen.add(current)

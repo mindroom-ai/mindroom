@@ -92,10 +92,7 @@ def _require_dedicated_worker(connection: HTTPConnection) -> None:
 
 
 async def _loopback_host(port: int) -> str | None:
-    """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers.
-
-    Connecting costs far less than reading /proc/net, whose size grows with every connection the relay closes.
-    """
+    """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers."""
     for host in ("127.0.0.1", "::1"):
         try:
             async with asyncio.timeout(_CONNECT_SECONDS):
@@ -109,37 +106,37 @@ async def _loopback_host(port: int) -> str | None:
     return None
 
 
-def _holders_refusal(port: int, sockets: frozenset[int]) -> HTTPException | None:
-    """Return why the relay reaches no server on ``port``, where ``sockets`` listen, or None when only the worker holds them.
+def _held_by_worker(port: int, sockets: frozenset[int]) -> bool:
+    """Return whether only the worker's processes hold ``sockets``, those listening on ``port``.
 
     Blocking: reads which processes hold them, unless they are those last found to be the worker's.
     Raises OSError when ``/proc`` can't say.
     """
-    if not sockets:
-        return _no_app(port)
-    if _workers_sockets.get(port) == sockets:
-        return None
-    if not held_by_this_worker(sockets):
-        return _refused(403, f"The server on port {port} is not one this worker runs.")
-    _workers_sockets[port] = sockets
-    return None
+    if _workers_sockets.get(port) != sockets:
+        if not held_by_this_worker(sockets):
+            return False
+        _workers_sockets[port] = sockets
+    return True
 
 
-def _refusal(port: int, runner_port: int) -> HTTPException | None:
-    """Return why the relay reaches no server on ``port``, or None when it does. Blocking, like ``_holders_refusal``."""
+def _check_reachable(port: int, runner_port: int) -> None:
+    """Raise the relay's refusal unless a server of the worker's own listens on ``port``. Blocking."""
     if port == runner_port:
-        return _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
+        raise _refused(403, f"Port {port} is this runner's own, which the relay never reaches.")
     try:
-        return _holders_refusal(port, frozenset(listener.inode for listener in listening_sockets(port)))
+        sockets = frozenset(listener.inode for listener in listening_sockets() if listener.port == port)
+        held = bool(sockets) and _held_by_worker(port, sockets)
     except OSError:
-        return _refused(403, _CANNOT_TELL)
+        raise _refused(403, _CANNOT_TELL) from None
+    if not sockets:
+        raise _no_app(port)
+    if not held:
+        raise _refused(403, f"The server on port {port} is not one this worker runs.")
 
 
 async def _require_reachable(connection: HTTPConnection, port: int) -> None:
     """Refuse ``port`` unless a server of the worker's own listens on it."""
-    refusal = await asyncio.to_thread(_refusal, port, connection.scope["server"][1])
-    if refusal is not None:
-        raise refusal
+    await asyncio.to_thread(_check_reachable, port, connection.scope["server"][1])
 
 
 async def _reachable_only(
@@ -179,14 +176,14 @@ def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str]) -> lis
 
 
 def _reachable_ports(runner_port: int) -> list[int]:
-    """Return each port listening at loopback or every address that the relay reaches. Blocking, like ``_refusal``."""
+    """Return each port listening at loopback or every address that the relay reaches. Blocking."""
     try:
         listeners = listening_sockets()
         sockets: dict[int, set[int]] = {}
         for listener in listeners:
             sockets.setdefault(listener.port, set()).add(listener.inode)
         ports = {listener.port for listener in listeners if listener.address in _LOOPBACK_ADDRESSES} - {runner_port}
-        return sorted(port for port in ports if _holders_refusal(port, frozenset(sockets[port])) is None)
+        return sorted(port for port in ports if _held_by_worker(port, frozenset(sockets[port])))
     except OSError:
         raise _refused(403, _CANNOT_TELL) from None
 

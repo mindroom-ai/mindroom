@@ -74,7 +74,7 @@ def proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def no_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the kernel's socket diagnostics unavailable, as under gVisor."""
 
-    def unsupported(_port: int | None) -> NoReturn:
+    def unsupported() -> NoReturn:
         raise OSError(93, "Protocol not supported")
 
     monkeypatch.setattr(listeners, "_diagnosed_listeners", unsupported)
@@ -95,15 +95,16 @@ def _inode(server: socket.socket) -> int:
 
 def _found(port: int | None = None) -> list[tuple[str, int, int]]:
     """Return the address, port, and inode of each socket listening on ``port``, or on any port for None."""
-    return [(str(found.address), found.port, found.inode) for found in listening_sockets(port)]
+    return [
+        (str(found.address), found.port, found.inode) for found in listening_sockets() if port in {None, found.port}
+    ]
 
 
 def test_the_kernel_names_a_real_listener_and_its_holder(listener: socket.socket) -> None:
-    """A socket this process listens on is found on its port, and only there, and is held by the worker."""
-    port = listener.getsockname()[1]
-    assert _found(port) == [("127.0.0.1", port, _inode(listener))]
-    assert ("127.0.0.1", port, _inode(listener)) in _found()
-    assert held_by_this_worker(frozenset({_inode(listener)}))
+    """A socket this process listens on is found once, with its address and port, and is held by the worker."""
+    port, inode = listener.getsockname()[1], _inode(listener)
+    assert [found for found in _found() if found[2] == inode] == [("127.0.0.1", port, inode)]
+    assert held_by_this_worker(frozenset({inode}))
 
 
 @pytest.mark.usefixtures("no_diagnostics")
@@ -166,7 +167,7 @@ def test_no_diagnostics_and_no_proc_net_cannot_say(proc: Path) -> None:
     """Without socket diagnostics or ``/proc/net``, finding the listeners fails instead of finding none."""
     assert not (proc / "net").exists()
     with pytest.raises(OSError, match="No source"):
-        listening_sockets(5173)
+        listening_sockets()
 
 
 def test_a_socket_the_runners_process_tree_holds_is_the_workers(proc: Path) -> None:
