@@ -8223,8 +8223,13 @@ path = "mindroom.api.worker_preview"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
+    "mindroom.previews.listeners",
     "mindroom.previews.relay",
 ]
+
+[[modules]]
+path = "mindroom.previews.listeners"
+depends_on = []
 
 [[modules]]
 path = "mindroom.previews.relay"
