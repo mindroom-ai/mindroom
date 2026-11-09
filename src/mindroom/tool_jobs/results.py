@@ -8,7 +8,7 @@ import json
 import math
 import os
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -82,7 +82,8 @@ def _encode(value: Any, allowance: _FileAllowance, ancestors: frozenset[int]) ->
         fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
         return {"type": "ToolValue", "value": _encode(fields, allowance, ancestors)}
     if isinstance(value, (Image, Audio, Video, File)):
-        fields = asdict(value)
+        # Shallow, so the check above sees a metadata dict that holds itself; a deep copy would recurse into it forever.
+        fields = {item.name: getattr(value, item.name) for item in dataclass_fields(value)}
         if value.filepath is not None:
             fields["filepath"] = None
             # Bytes the tool returned stand; its path is read only when they are missing.

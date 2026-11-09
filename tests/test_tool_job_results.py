@@ -41,7 +41,11 @@ def test_payload_round_trips_every_field_with_exact_types() -> None:
     """Rich values, structured values, state changes, and the error survive persistence unchanged."""
     payload = ToolResultPayload(
         value=[
-            ToolValue(content="picture", images=(Image(content=b"\x00\xff"),), files=(File(url="https://f.test/a"),)),
+            ToolValue(
+                content="picture",
+                images=(Image(content=b"\x00\xff", metadata={"source": {"pages": [2, 3]}}),),
+                files=(File(url="https://f.test/a"),),
+            ),
             {"structured_content": {"a": 1}, "pairs": [(1, "two"), ([], (3,))]},
         ],
         state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
@@ -101,16 +105,19 @@ def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
     assert _saved(payload).value == {"created": str(created), "amount": "1.50", "ratio": "nan", "ids": str(by_id)}
 
 
-@pytest.mark.parametrize("kind", ["dict", "list"])
+@pytest.mark.parametrize("kind", ["dict", "list", "metadata", "medium"])
 def test_payload_refuses_a_value_inside_itself_and_says_so(kind: str) -> None:
-    """A value that holds itself can never be saved whole, and the reason says that instead of a recursion limit."""
-    cycle: dict[str, object] | list[object]
-    if kind == "dict":
-        cycle = {}
-        cycle["self"] = cycle
+    """A value that holds itself, also through a medium's metadata, is refused with that reason, not a recursion limit."""
+    cycle: object
+    if kind == "list":
+        items: list[object] = []
+        items.append(items)
+        cycle = items
     else:
-        cycle = []
-        cycle.append(cycle)
+        metadata: dict[str, object] = {}
+        image = Image(content=b"chart", metadata=metadata)
+        metadata["self"] = image if kind == "medium" else metadata
+        cycle = metadata if kind == "dict" else ToolValue(content="chart", images=(image,))
 
     with pytest.raises(ValueError, match=r"^it refers to itself$"):
         encode_result_payload(ToolResultPayload(value=[{"events": (cycle,)}]))
