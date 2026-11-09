@@ -1013,11 +1013,10 @@ from pathlib import Path
 site_packages = Path(sys.argv[1])
 sys.path.insert(0, str(site_packages))
 
-from mindroom.tool_system.dependencies import _environment_lock_path, optional_dependency_environment
+from mindroom.tool_system.dependencies import _environment_lock_path
 
-with optional_dependency_environment():
-    pass
-# An install that reinstalls MindRoom itself removes its metadata before writing the new one.
+# An install that reinstalls MindRoom itself removes its metadata before writing the new one,
+# here before this process takes its first lock.
 shutil.rmtree(site_packages / 'mindroom-0.dist-info')
 print(_environment_lock_path())
 """
@@ -1090,7 +1089,7 @@ def test_optional_dependency_lock_is_private_to_the_current_user(
     """Other local accounts that can read the installation cannot open its lock to hold it."""
     site_packages = tmp_path / "site-packages"
     site_packages.mkdir()
-    monkeypatch.setattr(dependencies, "_installation_site_packages", lambda: site_packages)
+    monkeypatch.setattr(dependencies, "_INSTALLATION_SITE_PACKAGES", site_packages)
     with optional_dependency_environment():
         pass
     assert (site_packages / ".mindroom-optional-dependencies.lock").stat().st_mode & 0o777 == 0o600
@@ -1107,7 +1106,7 @@ def test_optional_dependency_lock_directory_must_be_private(
     """When this user cannot open the installation's lock, other local users cannot share or plant its own lock."""
     site_packages = tmp_path / "site-packages"
     site_packages.mkdir()
-    monkeypatch.setattr(dependencies, "_installation_site_packages", lambda: site_packages)
+    monkeypatch.setattr(dependencies, "_INSTALLATION_SITE_PACKAGES", site_packages)
     if installation == "read-only":
         site_packages.chmod(0o555)
     else:

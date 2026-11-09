@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Found at import, as `mindroom/__init__.py` reads its version, so an install that replaces
+# MindRoom's own metadata later cannot move the dependency lock or hide it.
+_INSTALLATION_SITE_PACKAGES = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
 
 
 class _EnvironmentLockState(threading.local):
@@ -40,15 +43,6 @@ class _EnvironmentLockState(threading.local):
 
 
 _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
-
-
-@cache
-def _installation_site_packages() -> Path:
-    """Return the site-packages directory MindRoom is installed in.
-
-    Found once, so an install that replaces MindRoom's own metadata cannot move the lock or hide it.
-    """
-    return Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
 
 
 def _environment_lock_path() -> Path:
@@ -62,7 +56,7 @@ def _environment_lock_path() -> Path:
     created it, a private per-user directory in the OS temporary directory keeps other local users
     from creating or holding the lock.
     """
-    lock_path = _installation_site_packages() / ".mindroom-optional-dependencies.lock"
+    lock_path = _INSTALLATION_SITE_PACKAGES / ".mindroom-optional-dependencies.lock"
     with suppress(OSError):
         os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
         return lock_path

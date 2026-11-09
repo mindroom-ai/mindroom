@@ -1272,7 +1272,7 @@ class TestMemoryConfig:
     ) -> None:
         """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
         # Its own installation, so its exclusive hold stays off the real environment's lock.
-        monkeypatch.setattr("mindroom.tool_system.dependencies._installation_site_packages", lambda: tmp_path)
+        monkeypatch.setattr("mindroom.tool_system.dependencies._INSTALLATION_SITE_PACKAGES", tmp_path)
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="sentence_transformers",
