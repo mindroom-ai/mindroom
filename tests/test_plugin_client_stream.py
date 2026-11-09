@@ -695,10 +695,8 @@ def test_a_refused_or_failed_handshake_takes_no_place(
     _admit_with(lambda _user: False)
     store = client_session_store(app)
     token = store.create(ALICE).token
-    accept = WebSocket.accept
 
     async def failing_accept(_websocket: WebSocket, *_args: object, **_kwargs: object) -> None:
-        monkeypatch.setattr(WebSocket, "accept", accept)
         msg = "client went away"
         raise RuntimeError(msg)
 
@@ -711,9 +709,10 @@ def test_a_refused_or_failed_handshake_takes_no_place(
             (_admits_path(), _offers(token), CLIENT_ORIGIN, 503),
         ):
             assert _denial(client, path, protocols, {"origin": origin}).status_code == status
-        monkeypatch.setattr(WebSocket, "accept", failing_accept)
-        with pytest.raises(RuntimeError, match="client went away"), _connect(client, token):
-            pass
+        with monkeypatch.context() as patched:
+            patched.setattr(WebSocket, "accept", failing_accept)
+            with pytest.raises(RuntimeError, match="client went away"), _connect(client, token):
+                pass
         with _connect(client, token) as websocket:
             websocket.send_text("hi")
             assert websocket.receive_text() == f"{ALICE}: hi"

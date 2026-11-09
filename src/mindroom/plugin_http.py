@@ -1,4 +1,4 @@
-"""Public helpers for plugin HTTP routes."""
+"""Public helpers that plugin HTTP routes and plugin tools import."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # Each stream holds a membership recheck and whatever its route attaches, such as a terminal or a workspace watcher;
 # a client opens a few streams for each room it shows, so a user rarely needs more than this many at once.
 _STREAMS_PER_USER = 16
-# Each user's accepted streams in this process, across every route on client_stream.
+# Each user's open streams in this process, across every route on client_stream.
 _open_streams: Counter[str] = Counter()
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
