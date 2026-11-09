@@ -22,7 +22,7 @@ from mindroom import plugin_worker_services
 from mindroom.api import sandbox_runner_app
 from mindroom.api import worker_services as worker_services_module
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
-from mindroom.api.worker_services import _services, close_worker_services
+from mindroom.api.worker_services import close_worker_services, worker_services
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -262,7 +262,7 @@ async def test_a_service_that_ignores_the_stop_signal_is_killed(
 async def test_each_ensure_resets_the_idle_timer(tmp_path: Path) -> None:
     """A service ensured more often than its idle timeout keeps running, even when an ensure waited on another one."""
     async with _runner(tmp_path) as runner:
-        services = _services(sandbox_runner_app.app)
+        services = worker_services(sandbox_runner_app.app)
         for _ in range(4):
             await _call("POST", runner.url(), _body(idle_timeout_seconds=0.6), _AUTH)
             await asyncio.sleep(0.3)
@@ -284,7 +284,7 @@ async def test_an_idle_service_stops_after_its_timeout(tmp_path: Path) -> None:
         await _call("POST", runner.url(), _body(idle_timeout_seconds=2.0), _AUTH)
         pid = int(runner.record()["pid"])
         await _until(lambda: not _pid_alive(pid), seconds=20)
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
 
 
 @pytest.mark.asyncio
@@ -294,10 +294,10 @@ async def test_a_crashed_service_is_reported_and_not_restarted(tmp_path: Path) -
         _, state = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert state["state"] == "exited"
         assert state["exit_code"] == 3
-        process = _services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
+        process = worker_services(sandbox_runner_app.app).instance("demo", "crash").process  # type: ignore[union-attr]
         _, again = await _call("POST", runner.url("crash"), _body("crash.py"), _AUTH)
         assert again == state
-        assert _services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
+        assert worker_services(sandbox_runner_app.app).instance("demo", "crash").process is process  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -372,7 +372,7 @@ async def test_a_stop_refuses_a_start_that_arrived_before_it(tmp_path: Path, mon
         release.set()
         status, answer = await start
         assert (status, answer["detail"]) == (409, "The service was stopped while it started.")
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
         assert (await _call("POST", runner.url(), _body(), _AUTH))[1]["state"] == "running"
 
 
@@ -461,13 +461,13 @@ async def test_a_plugin_runs_its_service_in_the_agent_s_worker(tmp_path: Path, m
         state = await ensure_worker_service(context, _SERVICE, _TARGET)
         assert state.state == "running"
         assert await ensure_worker_service(context, _SERVICE, _TARGET) == state
-        instance = _services(sandbox_runner_app.app).instance("demo", "hello")
+        instance = worker_services(sandbox_runner_app.app).instance("demo", "hello")
         assert instance is not None
         assert instance.port == state.port
         assert instance.idle_timeout_seconds == 300
 
         await stop_worker_service(context, _SERVICE, _TARGET)
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
         # A stopped service is not stopped again at the next plugin load.
         assert plugin_worker_services._started == {}
 
@@ -554,7 +554,7 @@ async def test_a_service_the_new_code_starts_as_it_loads_keeps_running(
         context = _primary(tmp_path, runner, monkeypatch, _Workers(runner.port))
         config = context.config
         lifespans = PluginLifespans(context.runtime_paths, lambda: config)
-        services = _services(sandbox_runner_app.app)
+        services = worker_services(sandbox_runner_app.app)
 
         await lifespans.apply_published()
         first = services.instance("demo", "hello")
@@ -655,7 +655,7 @@ async def test_a_plugin_load_stops_a_service_whose_ensure_was_under_way(
         release.set()
         assert (await ensure).state == "running"
         await load
-        assert _services(sandbox_runner_app.app).instance("demo", "hello") is None
+        assert worker_services(sandbox_runner_app.app).instance("demo", "hello") is None
 
 
 class _AnyWorkers:
