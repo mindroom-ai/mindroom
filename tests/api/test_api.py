@@ -3656,37 +3656,24 @@ def test_cookie_mutations_use_configured_public_origin(
     assert response.status_code == expected, response.text
 
 
-def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
-    """A valid standalone auth session cookie should work without bearer headers."""
-    response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert response.status_code == 200
-    assert response.cookies.get("mindroom_api_key") == "test-key"
-
-    response = api_key_client.post("/api/config/load", headers={"Origin": "http://localhost"})
-    assert response.status_code == 200
-
-
-def test_api_key_cookie_keeps_plain_name_over_http(api_key_client: TestClient) -> None:
-    """Browsers refuse `__Host-` cookies without `Secure`, so plain HTTP keeps the unprefixed name."""
-    login_with_api_key(api_key_client)
-
-    [set_cookie] = api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).headers.get_list("set-cookie")
-    assert set_cookie.startswith("mindroom_api_key=test-key;")
-    assert "secure" not in set_cookie.lower()
-
-
 @pytest.mark.usefixtures("api_key_client")
-def test_api_key_cookie_uses_host_prefix_over_https() -> None:
-    """Over HTTPS the session cookie is a host-only `__Host-` cookie that authenticates later requests."""
-    client = TestClient(main.app, base_url="https://localhost")
-    login_with_api_key(client)
+@pytest.mark.parametrize(
+    ("base_url", "name", "secure"),
+    [("http://localhost", "mindroom_api_key", False), ("https://localhost", "__Host-mindroom_api_key", True)],
+)
+def test_api_key_cookie_auth_allows_protected_requests(base_url: str, name: str, *, secure: bool) -> None:
+    """The session cookie is host-only and `__Host-` over HTTPS, which browsers refuse without `Secure` over HTTP."""
+    client = TestClient(main.app, base_url=base_url, headers={"Origin": base_url})
+    response = client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert response.status_code == 200
 
-    [set_cookie] = client.post("/api/auth/session", json={"api_key": "test-key"}).headers.get_list("set-cookie")
+    [set_cookie] = response.headers.get_list("set-cookie")
     attributes = [part.strip().lower() for part in set_cookie.split(";")]
-    assert attributes[0] == "__host-mindroom_api_key=test-key"
-    assert {"secure", "httponly", "path=/", "samesite=lax"} <= set(attributes)
+    assert attributes[0] == f"{name.lower()}=test-key"
+    assert {"httponly", "path=/", "samesite=lax"} <= set(attributes)
+    assert ("secure" in attributes) is secure
     assert not any(attribute.startswith("domain") for attribute in attributes)
-    assert client.cookies.get("__Host-mindroom_api_key") == "test-key"
+    assert client.cookies.get(name) == "test-key"
     assert client.post("/api/config/load").status_code == 200
 
 

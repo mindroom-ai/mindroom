@@ -1145,11 +1145,10 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
 
 
 def _standalone_auth_cookie(request: Request) -> str:
-    """Name the dashboard sign-in cookie for the origin the browser opened, which is plain HTTP only locally."""
+    """Name the dashboard sign-in cookie for the origin the browser opened."""
     origin = browser_origin(request)
-    if origin is not None and origin.startswith("http://"):
-        return _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME
-    return _HTTPS_STANDALONE_AUTH_COOKIE_NAME
+    plain_http = origin is not None and origin.startswith("http://")
+    return _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME if plain_http else _HTTPS_STANDALONE_AUTH_COOKIE_NAME
 
 
 @router.post("/api/auth/session", include_in_schema=False)

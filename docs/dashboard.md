@@ -13,7 +13,7 @@ This page covers opening the dashboard, what each tab does, saving and conflict 
 **Standalone:** run `mindroom run` and open `http://localhost:8765`.
 When running from a source checkout, MindRoom builds the dashboard assets on first start if Bun is available.
 When `MINDROOM_API_KEY` is set, the dashboard first asks for that key, and the login page shows which `.env` file holds it.
-When `MINDROOM_PUBLIC_URL` is an HTTPS address, sign in through that address, or through `MINDROOM_DASHBOARD_URL` when it is set, because a sign-in through a plain-HTTP address of the same server does not stick.
+When `MINDROOM_PUBLIC_URL` is an HTTPS address, sign in to the dashboard through that address, because the dashboard does not work through a plain-HTTP address of the same server.
 See [Authorization](authorization.md#dashboard-configuration) for who can open the dashboard and [Environment Variables](configuration/index.md#dashboard-and-api) for the related settings.
 
 **SaaS platform:** open `https://<instance-id>.mindroom.chat`.
