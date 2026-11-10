@@ -267,12 +267,14 @@ async def test_a_service_whose_first_candidate_port_another_server_holds_runs_on
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe passes over a port another process listens on."""
-    with _service_port_listener() as other, _service_port_listener() as freed:
-        taken, free = other.getsockname()[1], freed.getsockname()[1]
-        freed.close()
-        monkeypatch.setattr(worker_services_module, "_SERVICE_PORTS", [taken, free])
-        async with _runner(tmp_path) as runner:
+    """The probe passes over the first candidate port, which another process listens on."""
+    async with _runner(tmp_path) as runner:
+        with _service_port_listener() as other, _service_port_listener() as freed:
+            taken, free = other.getsockname()[1], freed.getsockname()[1]
+            freed.close()
+            monkeypatch.setattr(worker_services_module, "_SERVICE_PORTS", [taken, free])
+            # The probe takes the candidates in the order given, so the held one comes first.
+            monkeypatch.setattr(worker_services_module.random, "sample", lambda population, _k: list(population))
             _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert (state["state"], state["port"]) == ("running", free)
 
