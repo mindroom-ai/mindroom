@@ -378,6 +378,17 @@ Inspect what each worker mounts with `docker inspect <name> --format '{{range .M
 Tool-call arguments are not logged at `INFO`; read them from the agent's session database below `mindroom_data/agents/<agent>/sessions/`.
 Explicit `access` blocks with `members_of_rooms: []` and only `current_room_members: true` deny every identity-only authorization check, such as inviting that agent to a shared directory, so omit `access` unless the scenario needs it.
 
+## Two Federated Homeservers
+
+Use this when a scenario crosses homeservers, such as contacts between deployments.
+Run two `ghcr.io/mindroom-ai/mindroom-tuwunel` containers on one Docker network, each with a `tuwunel.toml` naming `server_name = "hsa.test"` (or `hsb.test`), `port = 8008`, `allow_registration = true`, a `registration_token`, `allow_invalid_tls_certificates = true`, `ip_range_denylist = []`, and `trusted_servers = []`, and publish each container's 8008 on its own localhost port.
+The image has no direct TLS (`tuwunel was not built with direct TLS support ("direct_tls")`), and federation needs HTTPS on 8448, so give each homeserver an `nginx:alpine` sidecar on the network with `--network-alias` set to its server name (`hsa.test`, `hsb.test`) that terminates TLS on 8448 with a self-signed certificate for that name and proxies to its own Tuwunel container's 8008.
+Without `ip_range_denylist = []` the servers refuse each other's private Docker addresses.
+Check federation before starting MindRoom: register a user on each server, create a room on one, invite the other server's user, and join it.
+Give each deployment its own `.env` with `MATRIX_HOMESERVER` set to its localhost port, `MATRIX_SERVER_NAME` set to its server name, `MATRIX_REGISTRATION_TOKEN`, a unique `MINDROOM_NAMESPACE`, its own config and storage, and its own `--api-port`.
+`personal_rooms.auto_join_requester: true` needs homeserver admin rights these servers do not grant, so leave it off and join the personal-room invitation as the user.
+An agent's own access token is in its deployment's `mindroom_data/matrix_state.yaml`, which lets the harness read a room from that agent's side.
+
 ## Upgrade Test: Old Version Then This Branch On One `mindroom_data`
 
 Use this to prove a storage or persistence change against real history written by the previous release.

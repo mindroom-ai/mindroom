@@ -389,16 +389,21 @@ async def consecutive_agent_messages(
     room_id: str,
     thread_id: str | None,
     limit: int,
+    agent_ids: frozenset[str] = frozenset(),
 ) -> int:
     """Count the newest messages in one conversation that agents or teams wrote, looking back at most ``limit``.
 
-    Any other sender, the router included, ends the run: it writes only for a person.
+    ``agent_ids`` are agents this deployment does not run that count too. Any other sender, the router included, ends
+    the run: it writes only for a person.
     """
     page = await reader.read(room_id=room_id, thread_id=thread_id, limit=limit)
     registry = entity_identity_registry(config, runtime_paths)
     count = 0
     for message in reversed(page.messages):
-        if registry.current_entity_name_for_user_id(message.sender, include_router=False) is None:
+        if (
+            message.sender not in agent_ids
+            and registry.current_entity_name_for_user_id(message.sender, include_router=False) is None
+        ):
             break
         count += 1
     return count

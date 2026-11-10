@@ -15,6 +15,7 @@ from mindroom.config.resolution import authored_tool_entries
 from mindroom.contacts.parties import agent_party, party_matrix_ids, party_reference, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
 from mindroom.contacts.store import agent_contacts, contact_room_ids
+from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactRecord, SideName
+    from mindroom.contacts.store import ContactParty, ContactRecord, SideName
     from mindroom.tool_system.registry import ToolRegistry
 
 
@@ -134,11 +135,11 @@ def contact_turn_instructions(
 ) -> EnrichmentItem:
     """Return what a contact turn's agent must know: who it acts for, who the other side is, and how it may answer."""
     party = record.party(side)
-    owner = party.owner
+    owner = party.local_owner
     other = record.counterparty(side)
     personal = personal_room_of(config, runtime_paths, owner)
     answer = "Answer the other side only by calling matrix_message to send into this room"
-    if other.kind == "agent":
+    if other.kind != "person":
         answer += f", with recipient {other.id} when that agent should respond"
     lines = [
         f"This room is contact {record.id} between you, acting for {owner}, and {party_reference(other)}.",
@@ -171,20 +172,21 @@ def contact_counterparty_agent(
     *,
     room_id: str,
     agent_name: str,
-) -> str | None:
+) -> ContactParty | None:
     """Return the other agent of the active contact whose room ``room_id`` is, or None for any other room.
 
     That agent's access never admits this agent's owner, yet it runs a message this agent sends it for its owner as its
-    own owner's contact turn, so it is always a recipient there.
+    own owner's contact turn, so it is always a recipient there. It is an agent of this deployment by name, or another
+    deployment's agent by Matrix ID.
     """
     found = contact_room(config, runtime_paths, room_id, agent_name)
     if found is None:
         return None
     record, side = found
     other = record.counterparty(side)
-    if record.status != "active" or other.kind != "agent" or other.id not in config.agents:
+    if record.status != "active" or other.kind == "person" or (other.kind == "agent" and other.id not in config.agents):
         return None
-    return other.id
+    return other
 
 
 def unmentioned_message_answerer(
@@ -195,11 +197,12 @@ def unmentioned_message_answerer(
     agent_name: str,
     sender_id: str,
 ) -> str | None:
-    """Return the agent that answers a person's unmentioned message in this agent's active contact room, or None.
+    """Return the Matrix ID of whoever answers an unmentioned message in this agent's active contact room, or None.
 
     Each agent of a contact runs a message there as its own owner, so access cannot choose between them.
     The writer's own agent answers: the other agent's owner's message is that agent's, while this agent's owner's, or
-    a person party's, who has no agent there, is this agent's alone.
+    a person party's, who has no agent there, is this agent's alone. Another deployment's agent wakes this agent only
+    by mentioning it, as agents of one deployment do, so its unmentioned message is left to itself.
     None leaves the choice to access, as for an agent's message or in any other room.
     """
     found = contact_room(config, runtime_paths, room_id, agent_name)
@@ -207,7 +210,10 @@ def unmentioned_message_answerer(
         return None
     record, side = found
     other = record.counterparty(side)
+    own_id = current_entity_id(agent_name, runtime_paths).full_id
+    if other.kind == "remote_agent" and sender_id == other.id:
+        return other.id
     sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     if sender == other.owner:
-        return other.id if other.kind == "agent" else agent_name
-    return agent_name if sender == record.party(side).owner else None
+        return current_entity_id(other.id, runtime_paths).full_id if other.kind == "agent" else own_id
+    return own_id if sender == record.party(side).owner else None

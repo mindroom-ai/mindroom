@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 from mindroom.contacts.store import ContactParty
@@ -28,6 +29,36 @@ def agent_party(config: Config, agent_name: str) -> ContactParty | None:
 def owner_contact_agents(config: Config, owner: str) -> list[str]:
     """Return the owner's personal agents that have contacts, in config order."""
     return [name for name in config.agents if (party := agent_party(config, name)) is not None and party.owner == owner]
+
+
+def remote_party(user_id: str) -> ContactParty:
+    """Return another deployment's agent as a party, known by its Matrix ID alone."""
+    return ContactParty(kind="remote_agent", id=user_id, owner=None)
+
+
+def remote_target(config: Config, runtime_paths: RuntimePaths, agent_name: str, user_id: str) -> ContactParty | None:
+    """Return the agent of another deployment that ``user_id`` names for this agent, or None.
+
+    It must match the agent's ``contacts.remote_agents`` and be no account of this deployment and no person with a
+    personal agent here, whom a broad pattern could match too.
+    """
+    contacts = config.agents[agent_name].contacts
+    if (
+        contacts is None
+        or not is_concrete_matrix_user_id(user_id)
+        or not any(fnmatchcase(user_id, pattern) for pattern in contacts.remote_agents)
+        or is_mindroom_account_id(user_id, runtime_paths)
+        or _owns_a_personal_agent(config, resolve_human_requester_alias(user_id, config, runtime_paths))
+    ):
+        return None
+    return remote_party(user_id)
+
+
+def _owns_a_personal_agent(config: Config, user_id: str) -> bool:
+    return any(
+        (instance := config.personal_agent_instance(name)) is not None and instance.user_id == user_id
+        for name in config.agents
+    )
 
 
 def person_party(config: Config, runtime_paths: RuntimePaths, user_id: str) -> ContactParty:
@@ -59,15 +90,15 @@ def resolve_target(config: Config, runtime_paths: RuntimePaths, target: str) -> 
 
 
 def party_name(config: Config, party: ContactParty) -> str:
-    """Return how people see a party named: an agent's display name, or the ID of a person or of a removed agent."""
+    """Return how people see a party named: an agent's display name, or the ID of a person or of any other agent."""
     agent = config.agents.get(party.id) if party.kind == "agent" else None
     return party.id if agent is None else agent.display_name
 
 
 def party_label(config: Config, party: ContactParty) -> str:
     """Return a party as an agent reads it: a person's Matrix ID, or an agent's name, ID, and owner."""
-    if party.kind == "person":
-        return party.id
+    if party.kind != "agent":
+        return party_reference(party)
     return f"{party_name(config, party)} ({party.id}), the agent of {party.owner}"
 
 
@@ -76,12 +107,17 @@ def party_reference(party: ContactParty) -> str:
 
     That side chooses its agent's display name, so a prompt that names it would let that side write into the prompt.
     """
+    if party.kind == "remote_agent":
+        return f"{party.id}, an agent of another MindRoom deployment"
     return party.id if party.kind == "person" else f"{party.id}, the agent of {party.owner}"
 
 
 def party_matrix_ids(party: ContactParty, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the Matrix accounts that speak for a party: an agent's own account and its owner, or the person."""
-    if party.kind == "person":
+    """Return the Matrix accounts that speak for a party: an agent's own account and its owner, or the person.
+
+    Another deployment's agent speaks only for itself, since nobody here can vouch for its owner.
+    """
+    if party.owner is None or party.kind == "person":
         return frozenset({party.id})
     return frozenset({current_entity_id(party.id, runtime_paths).full_id, party.owner})
 

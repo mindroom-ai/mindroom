@@ -13,9 +13,17 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.contacts.federation import (
+    answer_contact_invite,
+    contact_member_event,
+    contact_room_left,
+    is_contact_invite,
+    reconcile_remote_contacts,
+    store_contact_invite,
+)
 from mindroom.contacts.flow import withdraw_removed_contact_invites
 from mindroom.contacts.parties import agent_party
-from mindroom.contacts.store import contact_room_ids, remove_active_contacts
+from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
@@ -43,6 +51,7 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -106,6 +115,8 @@ class BotRoomLifecycleDeps:
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
+    # Every running agent's bot by name, which a contact request from another deployment needs to post its notice.
+    get_agent_bot: Callable[[str], AgentBot | None]
 
 
 class BotRoomLifecycle:
@@ -159,8 +170,12 @@ class BotRoomLifecycle:
         return should_accept_invites(self._config(), self.deps.agent_name)
 
     def _inviter_allowed(self, sender: str) -> bool:
-        """Return whether this entity's invitation rule accepts an invitation from `sender`."""
-        return is_inviter_allowed(self._config(), self.deps.runtime_paths, self.deps.agent_name, sender)
+        """Return whether this entity's invitation rule accepts an invitation from `sender`.
+
+        Another deployment's contact request joins only once its owner accepts, so its inviter is never allowed here.
+        """
+        config, paths, name = self._config(), self.deps.runtime_paths, self.deps.agent_name
+        return not is_contact_invite(config, paths, name, sender) and is_inviter_allowed(config, paths, name, sender)
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
@@ -286,9 +301,49 @@ class BotRoomLifecycle:
             or event.membership != "invite"
         ):
             return
+        config, paths, name = self._config(), self.deps.runtime_paths, self.deps.agent_name
+        if is_contact_invite(config, paths, name, event.sender):
+            # A contact request joins only once the owner accepts, so no invite policy may join it. It is stored before
+            # its handling returns, since nothing hands an invite to this handler again.
+            answer = await store_contact_invite(
+                config,
+                paths,
+                name,
+                room_id=room.room_id,
+                inviter=event.sender,
+                reason=event.content.get("reason"),
+            )
+            if answer is not None:
+                create_background_task(
+                    answer_contact_invite(config, paths, name, self.deps.get_agent_bot, answer),
+                    owner=self.deps.runtime,
+                )
+            return
         await self._record_pending_room_invite(room.room_id, event.sender)
         # The bot's runtime owns the handling, so its shutdown drains it.
         create_background_task(self._handle_recorded_invite(room, event.sender), owner=self.deps.runtime)
+
+    async def on_contact_member(self, room_id: str, event: nio.RoomMemberEvent) -> None:
+        """Accept, decline, or end a contact with another deployment's agent from its room's membership."""
+        await contact_member_event(
+            self._config(),
+            self.deps.runtime_paths,
+            self.deps.agent_name,
+            self.deps.get_agent_bot,
+            room_id=room_id,
+            user_id=event.state_key,
+            membership=event.membership,
+        )
+
+    async def on_contact_room_left(self, room_id: str) -> None:
+        """End a contact with another deployment's agent whose room this agent is no longer in."""
+        await contact_room_left(
+            self._config(),
+            self.deps.runtime_paths,
+            self.deps.agent_name,
+            self.deps.get_agent_bot,
+            room_id=room_id,
+        )
 
     async def _record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
         """Persist an outstanding invite before its network work runs."""
@@ -403,6 +458,13 @@ class BotRoomLifecycle:
                 await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
+        # Membership of a contact room with another deployment's agent can change while no live event reaches it.
+        await reconcile_remote_contacts(
+            self._config(),
+            self.deps.runtime_paths,
+            self.deps.agent_name,
+            self.deps.get_agent_bot,
+        )
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this bot is no longer configured for.
@@ -474,11 +536,11 @@ class BotRoomLifecycle:
             self._logger().exception("contacts_end_failed_as_agent_leaves")
 
     async def _end_contacts(self, config: Config) -> None:
-        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides."""
+        """Mark the contacts whose rooms a personal agent keeps removed before it leaves them, ending them for both sides."""
         name = self.deps.agent_name
         if config.personal_agent_instance(name) is None:
             return
-        removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+        removed = await asyncio.to_thread(remove_kept_contacts, self.deps.runtime_paths, name)
         if removed:
             self._logger().info("contacts_removed_as_agent_leaves", contact_ids=removed)
 
@@ -672,6 +734,12 @@ class BotRoomLifecycle:
                 self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
                 return
             joined = self._client_has_joined_room(room.room_id)
+            if not joined and await self._is_contact_room(room.room_id):
+                # Joining a contact's room is the acceptance the other side reads, so only accepting it may join,
+                # whatever the current config says of its inviter.
+                self._logger().info("ignoring_invite_to_contact_room", room_id=room.room_id, sender=sender)
+                await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+                return
             allowed_sender = (
                 self._pending_room_invites.get(room.room_id) if joined else self._allowed_current_inviter(room.room_id)
             )
@@ -703,6 +771,11 @@ class BotRoomLifecycle:
                 await self._send_managed_room_notice(room, sender)
             await self._room_joined(room.room_id)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+
+    async def _is_contact_room(self, room_id: str) -> bool:
+        """Return whether a contact this agent has or had uses the room."""
+        config, paths, name = self._config(), self.deps.runtime_paths, self.deps.agent_name
+        return room_id in await asyncio.to_thread(contact_room_ids, config, paths, name, any_status=True)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
         """Authorize a new join at the point Nio takes command ownership."""

@@ -33,7 +33,7 @@ from mindroom.event_journal import DepartureSource, RoomMembershipPosition
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix import client_room_admin, invited_rooms_store
-from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, invite_to_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     is_inviter_allowed,
@@ -195,6 +195,7 @@ def _router_room_lifecycle(
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
             get_conversation_reader=MagicMock(),
+            get_agent_bot=lambda _name: None,
         ),
     )
 
@@ -3234,3 +3235,20 @@ def test_reading_invited_rooms_after_the_store_wrote_them_parses_nothing(
 
     assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!kept:localhost"}
     assert loads == []
+
+
+@pytest.mark.asyncio
+async def test_an_invite_can_carry_a_reason_the_invitee_reads() -> None:
+    """A reason travels in the invite itself, which nio's own invite call cannot send."""
+    client = make_matrix_client_mock()
+    client.access_token = "token"  # noqa: S105 - a fake access token
+    client._send = AsyncMock(return_value=nio.RoomInviteResponse())
+    assert await invite_to_room(client, "!room:localhost", "@dana:other.org", reason="Find a slot")
+    _method, path, _data = nio.Api.room_invite("token", "!room:localhost", "@dana:other.org")
+    client._send.assert_awaited_once_with(
+        nio.RoomInviteResponse,
+        "POST",
+        path,
+        json.dumps({"user_id": "@dana:other.org", "reason": "Find a slot"}, separators=(",", ":")),
+    )
+    client.room_invite.assert_not_awaited()

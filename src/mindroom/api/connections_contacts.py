@@ -85,11 +85,14 @@ class ContactAgent(BaseModel):
 
 
 class ContactPartyView(BaseModel):
-    """One end of a contact, named for people: an agent's display name, or a person's Matrix ID."""
+    """One end of a contact, named for people: an agent's display name, or the Matrix ID of anyone else.
+
+    Another deployment's agent has no owner here.
+    """
 
     kind: PartyKind
     id: str
-    owner: str
+    owner: str | None
     display_name: str
 
 

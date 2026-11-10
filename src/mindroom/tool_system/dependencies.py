@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import tomllib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Found at import, as `mindroom/__init__.py` reads its version, so an install that replaces
+# MindRoom's own metadata later cannot move the dependency lock or hide it.
+_INSTALLATION_SITE_PACKAGES = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
 
 
 class _EnvironmentLockState(threading.local):
@@ -43,11 +46,20 @@ _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 
 
 def _environment_lock_path() -> Path:
-    """Return the current user's lock for this Python environment.
+    """Return the lock that every process running this MindRoom installation takes.
 
-    The OS temporary directory also works when HOME or the environment is read-only.
-    A private per-user directory keeps other local users from creating or holding the lock.
+    The lock lives in the site-packages directory MindRoom is installed in: installs into MindRoom's
+    own environment write there, and every process running it imports from there, including local
+    worker tool subprocesses with their own TMPDIR and venv. The file is private to the account that
+    creates it, so other local users can hold it only if they can already change those packages.
+    When this user cannot open it, as in a read-only installation or one where another account
+    created it, a private per-user directory in the OS temporary directory keeps other local users
+    from creating or holding the lock.
     """
+    lock_path = _INSTALLATION_SITE_PACKAGES / ".mindroom-optional-dependencies.lock"
+    with suppress(OSError):
+        os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+        return lock_path
     key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
     if sys.platform == "win32":
         # Windows temporary directories are already per user.
@@ -64,7 +76,7 @@ def _environment_lock_path() -> Path:
 
 @contextmanager
 def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
-    """Coordinate same-user optional imports and installs for one Python environment.
+    """Coordinate optional imports and installs for one MindRoom installation.
 
     Imports share the lock; installers own it exclusively. Install before entering
     an import scope, so no reader attempts a non-atomic upgrade to a write lock.
