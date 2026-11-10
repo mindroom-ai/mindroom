@@ -1,8 +1,8 @@
 """Contact turns: every turn of an agent party in its own active contact room.
 
-A contact turn answers the other side only through ``matrix_message``, so it shows only typing while it runs and its
-final reply never shows. It is the same agent acting for its owner, offering only the tools its owner chose for the
-contact, and its prompt also says who it acts for and which rules apply.
+A contact turn answers the other side only through ``matrix_message``, so while it runs it shows only 👀 on the message
+it answers, and its final reply never shows. It is the same agent acting for its owner, offering only the tools its
+owner chose for the contact, and its prompt also says who it acts for and which rules apply.
 """
 
 from __future__ import annotations

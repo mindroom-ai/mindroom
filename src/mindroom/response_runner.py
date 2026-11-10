@@ -40,7 +40,7 @@ from mindroom.final_delivery import (
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
-from mindroom.matrix.guarded_rooms import guarded_room
+from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -1425,6 +1425,20 @@ class ResponseRunner:
         current = contact_room(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
         return None if current is not None and current[0].status == "active" else Suppression.CONTACT_TURN
 
+    async def _send_contact_receipt(self, request: ResponseRequest) -> None:
+        """Put 👀 on the message a contact turn answers, the only progress it shows.
+
+        The fixed emoji carries nothing the model wrote, so it skips the contact's message policy.
+        """
+        with allowed_send():
+            await self.deps.delivery_gateway.send_judgment_reaction(
+                turn_id=request.response_envelope.source_event_id,
+                room_id=request.room_id,
+                event_id=request.sources.logical_source_event_ids[-1],
+                key="👀",
+                kind="contact_turn",
+            )
+
     async def _prepare_locked_turn(
         self,
         request: ResponseRequest,
@@ -1992,6 +2006,8 @@ class ResponseRunner:
                 request,
                 response_run_id=turn.run_id,
                 participation=runtime.participation,
+                # A contact turn never streams, so only this collected delivery shows its receipt.
+                contact_receipt=lambda: self._send_contact_receipt(request),
             ):
                 with tool_runtime_context(runtime.tool_context):
                     response_text = await collect()
@@ -2061,7 +2077,7 @@ class ResponseRunner:
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
             show_tool_calls=show_tool_calls,
-            # A quiet turn shows no stream, and a contact turn's or a silent schedule's answer may never be shown, so
+            # A quiet turn shows no progress, and a contact turn's or a silent schedule's answer may never be shown, so
             # its tool hooks read its calls as hidden.
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
             participation=participation

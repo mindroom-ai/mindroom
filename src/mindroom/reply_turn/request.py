@@ -139,7 +139,7 @@ class ResponseRequest:
 
     @property
     def quiet(self) -> bool:
-        """Return whether the turn shows no placeholder or stream: a silent schedule's or a contact turn's."""
+        """Return whether the turn shows no progress in its room: a silent schedule's or a contact turn's."""
         return self.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND or self.contact is not None
 
 
@@ -173,17 +173,22 @@ async def response_typing_indicator(
     *,
     response_run_id: str | None,
     participation: ParticipationGate | None = None,
+    contact_receipt: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing for every response but a silent schedule's, which nobody waits on.
+    """Expose typing only for a response whose progress may be visible, which a quiet one's never is.
 
-    A contact turn shows no other progress, but its typing carries no content, so whoever wrote to it sees it working.
+    A contact turn, quiet as it is, sends ``contact_receipt`` instead, once its participation lets it become visible.
     """
-    if request.quiet and request.contact is None:
+    if request.quiet and (request.contact is None or contact_receipt is None):
         yield
         return
 
     @asynccontextmanager
-    async def show_typing() -> AsyncIterator[None]:
+    async def show_progress() -> AsyncIterator[None]:
+        if request.contact is not None and contact_receipt is not None:
+            await contact_receipt()
+            yield
+            return
         async with typing_indicator(
             client,
             request.room_id,
@@ -192,17 +197,17 @@ async def response_typing_indicator(
             yield
 
     if participation is None:
-        async with show_typing():
+        async with show_progress():
             yield
         return
     finished = asyncio.Event()
 
-    async def approved_typing() -> None:
+    async def approved_progress() -> None:
         if await participation.wait_for_approval():
-            async with show_typing():
+            async with show_progress():
                 await finished.wait()
 
-    task = asyncio.create_task(approved_typing())
+    task = asyncio.create_task(approved_progress())
     try:
         yield
     finally:

@@ -118,6 +118,8 @@ Blocking each path separately was rejected, because three review rounds each fou
 Plugin hooks on an inbound event run before any contact turn starts, always inside the agent's admitted decision to act on that event, so that decision guards the room when it is or was the agent's contact room.
 Guarding at the journal callback was rejected, because those hooks run in coalescing tasks that keep the context of whatever created them.
 Contact turns keep their quiet delivery, so their replies never try a placeholder, stream, or error notice that the room would refuse.
+A contact turn puts a fixed 👀 reaction on the message it answers, outside the message policy, because a turn that showed nothing for tens of seconds left an owner who asked in the contact room taking the agent for idle and mentioning it again; the emoji carries nothing the model wrote, and a turn whose participation is judged shows it only once approved, as other turns show typing.
+Typing was rejected for this, because MindRoom Chat names an agent as typing in a thread only while its reply there streams, and a contact turn never streams.
 Their tools also run inline, never as background jobs, because every running job is published as a state event in its room, which the room does not refuse and the other owner's client shows with its tool name.
 
 ### Contact turns get a restricted surface
@@ -219,7 +221,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A personal agent removed while MindRoom is stopped, or while its bot is not running because it failed to start, keeps its contacts active, because no bot of it runs to end them, so the other side writes into a room where its agent no longer answers until the agent comes back or the other owner removes the contact.
 - A personal agent whose removal waits on an unresolved approval recovery stays in its rooms so that recovery can still deliver there, and keeps its contacts active the same way.
 - A personal agent removed while the contacts store cannot be read or written still leaves its rooms but keeps its contacts active and its owners' invitations pending, because staying would keep a removed agent in every room it joined.
-- The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends only typing notices, which carry no content, into its room, and only a plugin hook could send the others.
+- The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
 - Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.
 
