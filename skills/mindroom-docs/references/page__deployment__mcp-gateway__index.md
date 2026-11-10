@@ -90,7 +90,7 @@ Forward these paths to the MindRoom API:
 | Paths | Authentication at the access proxy |
 |-------|------------------------------------|
 | `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [sign-in from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) |
-| `/api/oauth/<provider_id>/client-metadata.json` | Public; the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it |
+| `/api/oauth/<provider_id>/client-metadata.json` | Public in both `MINDROOM_MCP_AUTH_MODE` modes; the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it |
 | `/mcp` | Pass through to gateway bearer authentication |
 | `/mcp/oauth/authorize`, `/mcp/oauth/register`, `/mcp/oauth/token`, `/mcp/oauth/revoke` | Public OAuth endpoints; pass through |
 | `/.well-known/oauth-authorization-server/mcp/oauth`, `/.well-known/oauth-protected-resource/mcp` | Public client discovery |

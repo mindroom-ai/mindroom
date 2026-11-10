@@ -8820,7 +8820,7 @@ These variables do not relax the address rules for the MCP connection itself.
 ### OAuth Client Registration
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
-When the authorization server offers no registration endpoint but advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
+With `discovery: auto`, when the authorization server offers no registration endpoint but advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
 The authorization server fetches that client ID metadata document when a user connects, so it must be able to reach that URL without signing in.
 See [Built-In Providers](https://docs.mindroom.chat/oauth-framework/#built-in-providers) for when a dynamically registered client works from a hosted address.
 If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
@@ -18689,7 +18689,7 @@ provider = OAuthProvider(
 )
 ```
 
-With a public client and an HTTPS `MINDROOM_PUBLIC_URL`, a provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client, as described in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration); a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
+A provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client under the conditions in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), which include a public client, dynamic registration left enabled, and an HTTPS `MINDROOM_PUBLIC_URL` on a public DNS hostname; a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
 
 OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
 When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.
@@ -21272,7 +21272,7 @@ Forward these paths to the MindRoom API:
 | Paths | Authentication at the access proxy |
 |-------|------------------------------------|
 | `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [sign-in from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) |
-| `/api/oauth/<provider_id>/client-metadata.json` | Public; the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it |
+| `/api/oauth/<provider_id>/client-metadata.json` | Public in both `MINDROOM_MCP_AUTH_MODE` modes; the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it |
 | `/mcp` | Pass through to gateway bearer authentication |
 | `/mcp/oauth/authorize`, `/mcp/oauth/register`, `/mcp/oauth/token`, `/mcp/oauth/revoke` | Public OAuth endpoints; pass through |
 | `/.well-known/oauth-authorization-server/mcp/oauth`, `/.well-known/oauth-protected-resource/mcp` | Public client discovery |

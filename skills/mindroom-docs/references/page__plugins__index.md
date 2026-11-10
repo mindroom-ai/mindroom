@@ -869,7 +869,7 @@ provider = OAuthProvider(
 )
 ```
 
-With a public client and an HTTPS `MINDROOM_PUBLIC_URL`, a provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client, as described in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration); a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
+A provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client under the conditions in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), which include a public client, dynamic registration left enabled, and an HTTPS `MINDROOM_PUBLIC_URL` on a public DNS hostname; a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
 
 OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
 When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.
