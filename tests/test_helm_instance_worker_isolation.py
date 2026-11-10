@@ -470,16 +470,20 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
 @pytest.mark.parametrize(
     ("auth_args", "expected"),
     [
-        (("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"), "@owner:42.example.test"),
-        (("allowUnauthenticatedPrimary=true",), None),
+        (
+            ("accountId=account-42", "supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"),
+            "@owner:42.example.test",
+        ),
+        (("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"), None),
+        (("accountId=account-42", "allowUnauthenticatedPrimary=true"), None),
     ],
-    ids=["platform-login", "open-access"],
+    ids=["platform-login", "no-account-binding", "open-access"],
 )
 def test_instance_chart_maps_platform_logins_to_the_owner_only_behind_supabase(
     auth_args: tuple[str, ...],
     expected: str | None,
 ) -> None:
-    """Platform logins act as the owner; an open-access chart must not give credentialless requests that identity."""
+    """Only account-bound platform logins act as the owner; never other project users or credentialless requests."""
     docs = _render_chart(
         Path("cluster/k8s/instance"),
         "customer=42",
