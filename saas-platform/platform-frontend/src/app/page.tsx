@@ -10,6 +10,9 @@ import { PlausibleAnalytics } from '@/components/PlausibleAnalytics'
 import { AgentAvatar, type AvatarName } from '@/components/landing/AgentAvatar'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
+import { buildCinnyLoginUrl } from '@/lib/cinny'
+import { loadInstance } from '@/lib/instance-resource'
+import { createClient } from '@/lib/supabase/client'
 import {
   ArrowRight,
   BookOpen,
@@ -458,7 +461,28 @@ function ReasonList({ items }: { items: Reason[] }) {
   )
 }
 
-function MobileMenu() {
+// A signed-in hosted customer opens chat on their instance's server; on the public one they would get a second account.
+function useChatUrl(): string {
+  const [url, setUrl] = useState(chatUrl)
+
+  useEffect(() => {
+    let active = true
+    Promise.resolve()
+      .then(() => createClient().auth.getSession())
+      .then(({ data: { session } }) => (session ? loadInstance(session.user.id) : null))
+      .then((instance) => {
+        if (active && instance?.matrix_server_url) setUrl(buildCinnyLoginUrl(instance.matrix_server_url))
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [])
+
+  return url
+}
+
+function MobileMenu({ chatHref }: { chatHref: string }) {
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -505,7 +529,7 @@ function MobileMenu() {
             link.external ? (
               <a
                 key={link.label}
-                href={link.href}
+                href={link.href === chatUrl ? chatHref : link.href}
                 onClick={() => setOpen(false)}
                 className={linkClass}
                 {...(link.newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
@@ -525,6 +549,8 @@ function MobileMenu() {
 }
 
 export default function LandingPage() {
+  const chatHref = useChatUrl()
+
   return (
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
       <PlausibleAnalytics />
@@ -563,7 +589,7 @@ export default function LandingPage() {
             <Link href="/auth/login" className="hidden whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
-            <a href={chatUrl} className="hidden items-center gap-2 whitespace-nowrap rounded-lg border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
+            <a href={chatHref} className="hidden items-center gap-2 whitespace-nowrap rounded-lg border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
               <MessageSquare className="h-4 w-4" />
               Open Chat
             </a>
@@ -571,7 +597,7 @@ export default function LandingPage() {
               Get started
               <ArrowRight className="hidden h-4 w-4 sm:block" />
             </a>
-            <MobileMenu />
+            <MobileMenu chatHref={chatHref} />
           </div>
         </div>
       </nav>
@@ -605,7 +631,7 @@ export default function LandingPage() {
             <div className="mt-6 flex flex-col items-center gap-1 text-sm text-gray-600 dark:text-gray-400 sm:flex-row sm:justify-center sm:gap-5">
               <p>
                 Already have agents?{' '}
-                <a href={chatUrl} className="font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200">
+                <a href={chatHref} className="font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200">
                   Open MindRoom Chat
                 </a>
               </p>
