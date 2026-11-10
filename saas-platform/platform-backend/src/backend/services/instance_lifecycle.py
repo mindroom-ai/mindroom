@@ -9,8 +9,8 @@ Stripe webhooks and the nightly cleanup job both call it, so they behave identic
   the tier), re-enable the key, and clear the schedule.
 - Entitled on a different tier: redeploy a running instance with the tier's key and resources, and lower
   the key limit of an instance that is not running.
-- First paid period after a trial: replace a key created during the trial, since OpenRouter resets usage only
-  each calendar month and the trial's usage would otherwise count against the paid budget.
+- First paid period after a trial: redeploy with a new key in place of one created during the trial, since
+  OpenRouter resets usage only each calendar month and the trial's usage would otherwise count against it.
 - Teardown due and still not entitled: uninstall everything and mark the instance deprovisioned.
 
 Account deletion also runs through this module: a deletion request cancels Stripe billing and holds the
@@ -52,6 +52,7 @@ from backend.services.provisioner_service import (
     InstanceClaimLostError,
     account_pending_deletion,
     account_row_pending_deletion,
+    openrouter_key_created_before,
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
@@ -510,15 +511,13 @@ async def _resume(
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
-    if _key_carries_trial_usage(instance, subscription):
-        await revoke_instance_openrouter_key(sb, instance_id)
-        instance = {**instance, **CLEARED_OPENROUTER_KEY_METADATA}
     torn_down = instance.get("status") == "deprovisioned"
     # Apply the tier's resources and key limit before re-enabling a held instance.
     plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
-    if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
+    trial_key = openrouter_key_created_before(instance, _first_paid_period_start(subscription))
+    if torn_down or plan_mismatch or failed_before or trial_key or not await check_deployment_exists(str(instance_id)):
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
@@ -561,36 +560,34 @@ def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
     return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
 
 
-def _key_carries_trial_usage(instance: dict[str, Any], subscription: dict[str, Any]) -> bool:
-    """Return whether the instance's platform-paid key was created before the first paid period after a trial.
+def _first_paid_period_start(subscription: dict[str, Any]) -> datetime | None:
+    """Return the start of the subscription's current period when it is the first paid one after a trial.
 
     OpenRouter resets a key's usage on the first of each calendar month, not when a billing period starts, so a
     trial key kept after the trial converts to paid would start the paid period with the trial's usage, possibly
-    with nothing left to spend until the next calendar month.
+    with nothing left to spend until the next calendar month. A key created before this moment is replaced.
     """
-    if subscription.get("status") != "active" or not instance.get("openrouter_key_hash"):
-        return False
-    key_created_at = parse_timestamp(instance.get("openrouter_key_created_at"))
+    if subscription.get("status") != "active":
+        return None
     period_start = parse_timestamp(subscription.get("current_period_start"))
     trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
-    if key_created_at is None or period_start is None or trial_ends_at is None:
-        return False
+    if period_start is None or trial_ends_at is None:
+        return None
     # Stripe starts the first paid period when the trial ends; later periods start after the trial end.
-    return key_created_at < period_start <= trial_ends_at
+    return period_start if period_start <= trial_ends_at else None
 
 
-def _plan_alignment(
-    instance: dict[str, Any], subscription: dict[str, Any]
-) -> Literal["rotate", "redeploy", "limit"] | None:
+def _plan_alignment(instance: dict[str, Any], subscription: dict[str, Any]) -> Literal["redeploy", "limit"] | None:
     """Return how an instance the lifecycle does not hold must change to run only what its tier pays for."""
     tier = subscription["tier"]
     status = instance.get("status")
     if status == "error" and instance.get("lifecycle_error"):
         # A redeploy by this function failed, and provisioning marked the instance errored; retry it.
         return "redeploy"
-    if status == "running" and _key_carries_trial_usage(instance, subscription):
-        # A new key starts the paid period with the full included budget. Any other instance gets one when it runs.
-        return "rotate"
+    if status == "running" and openrouter_key_created_before(instance, _first_paid_period_start(subscription)):
+        # The redeploy gives the paid period a new key with the full included budget; any other instance gets one
+        # when it runs again.
+        return "redeploy"
     if _deployed_plan_matches(instance, tier):
         return None
     if status == "running":
@@ -613,11 +610,7 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     """Keep an entitled instance the lifecycle does not hold on what its subscription tier pays for."""
     instance_id = instance["instance_id"]
     alignment = _plan_alignment(instance, subscription)
-    if alignment == "rotate":
-        logger.info("Replacing the trial OpenRouter key of instance %s for its first paid period", instance_id)
-        await revoke_instance_openrouter_key(sb, instance_id)
-        await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
-    elif alignment == "redeploy":
+    if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
@@ -651,6 +644,7 @@ async def _reprovision(
         background_tasks=None,
         resume_lifecycle_hold=resume_lifecycle_hold,
         expected_status=instance["status"],
+        replace_openrouter_key_created_before=_first_paid_period_start(subscription),
     )
 
 

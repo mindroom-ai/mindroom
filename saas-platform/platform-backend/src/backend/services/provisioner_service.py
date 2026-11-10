@@ -56,6 +56,7 @@ from backend.config import (
     logger,
 )
 from backend.deps import ensure_supabase
+from backend.entitlements import parse_timestamp
 from backend.k8s import (
     INSTANCES_NAMESPACE,
     check_deployment_exists,
@@ -596,8 +597,46 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
             raise RuntimeError(msg)
 
 
-def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> bool:
-    """Persist non-secret metadata of a created key unless the instance records a key already; return whether it did."""
+def openrouter_key_created_before(instance_row: Mapping[str, Any] | None, moment: datetime | None) -> bool:
+    """Return whether the instance records a platform-paid key created before `moment`."""
+    if moment is None or _stored_openrouter_key_hash(instance_row) is None:
+        return False
+    created_at = parse_timestamp((instance_row or {}).get("openrouter_key_created_at"))
+    return created_at is not None and created_at < moment
+
+
+@dataclass(frozen=True)
+class _OpenRouterKeyRotation:
+    """The stored key a provision replaces, kept until the replacement is deployed."""
+
+    key_hash: str
+    key: str
+    metadata: dict[str, Any]
+
+
+async def _openrouter_key_rotation(
+    row: Mapping[str, Any], *, created_before: datetime | None, tier: str, instance_id: str, namespace: str
+) -> _OpenRouterKeyRotation | None:
+    """Return the stored key to replace with a new one, when it was created before `created_before` and is published."""
+    if _included_ai_budget_usd(tier) <= 0 or not openrouter_key_created_before(row, created_before):
+        return None
+    published = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
+    if not published:
+        return None
+    return _OpenRouterKeyRotation(
+        key_hash=row["openrouter_key_hash"],
+        key=published,
+        metadata={column: row.get(column) for column in CLEARED_OPENROUTER_KEY_METADATA},
+    )
+
+
+def _persist_openrouter_key_metadata(
+    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, replaces: str | None = None
+) -> bool:
+    """Persist non-secret metadata of a created key; return whether it did.
+
+    The instance must record no key, or with `replaces` still the key being replaced.
+    """
     recorded = update_instance(
         sb,
         instance_id,
@@ -608,7 +647,8 @@ def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: Cre
             "openrouter_key_limit_reset": created_key.limit_reset,
             "openrouter_key_created_at": datetime.now(UTC).isoformat(),
         },
-        without_openrouter_key=True,
+        without_openrouter_key=replaces is None,
+        expected_openrouter_key_hash=replaces,
     )
     return bool(recorded)
 
@@ -632,8 +672,7 @@ async def _provision_openrouter_key(
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
-    Stored keys keep their usage across plan changes; only their spending limit changes. The lifecycle revokes a
-    trial key before the first paid period, so that period starts with a new key.
+    Stored keys keep their usage across plan changes; only their spending limit changes.
     A created key is recorded before its Secret is published, so a run that loses the record to another run never
     publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
@@ -669,7 +708,9 @@ async def _provision_openrouter_key(
     return created_key.key, created_key
 
 
-async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+async def _commit_openrouter_key(
+    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, replaces: str | None = None
+) -> None:
     """Record a newly created key before it is published, or delete it when it cannot be recorded.
 
     Disabling, limiting, and revoking act only on the recorded key, so a created key is never left unrecorded.
@@ -678,39 +719,60 @@ async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: Created
     """
     try:
         recorded = await anyio.to_thread.run_sync(
-            partial(_persist_openrouter_key_metadata, sb, instance_id, created_key)
+            partial(_persist_openrouter_key_metadata, sb, instance_id, created_key, replaces)
         )
     except Exception:
-        await _discard_openrouter_key(created_key, instance_id)
+        await _discard_openrouter_key(created_key.hash, instance_id)
         raise
     if not recorded:
-        await _discard_openrouter_key(created_key, instance_id)
+        await _discard_openrouter_key(created_key.hash, instance_id)
         raise InstanceClaimLostError
 
 
-async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> bool:
-    """Best-effort delete of a created key that was not published or not recorded; return whether the key is gone."""
-    delete_key = partial(
-        delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
-    )
+async def _discard_openrouter_key(key_hash: str, instance_id: str) -> bool:
+    """Best-effort delete of a key that was not published, not recorded, or replaced; return whether it is gone."""
+    delete_key = partial(delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=key_hash)
     try:
         await anyio.to_thread.run_sync(delete_key)
     except OpenRouterKeyNotFoundError:
         return True
     except OpenRouterError:
-        logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
+        logger.warning("Failed to delete OpenRouter key %s for instance %s", key_hash, instance_id, exc_info=True)
         return False
     return True
 
 
-async def _discard_recorded_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+async def _discard_recorded_openrouter_key(
+    sb: Any, instance_id: str, created_key: CreatedOpenRouterKey, rotation: _OpenRouterKeyRotation | None = None
+) -> None:
     """Delete a recorded key whose Secret was not published, and forget it once it is gone.
 
+    A replaced key (`rotation`) is recorded again, so the next run replaces it again.
     A key whose deletion fails stays recorded, so a later revocation can still reach it; a key another run recorded
     in the meantime also stays recorded.
     """
-    if await _discard_openrouter_key(created_key, instance_id):
-        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=created_key.hash)
+    if await _discard_openrouter_key(created_key.hash, instance_id):
+        restored = rotation.metadata if rotation is not None else CLEARED_OPENROUTER_KEY_METADATA
+        update_instance(sb, instance_id, restored, expected_openrouter_key_hash=created_key.hash)
+
+
+async def _roll_back_openrouter_key_rotation(
+    sb: Any,
+    instance_id: str,
+    namespace: str,
+    secret_data: dict[str, str],
+    created_key: CreatedOpenRouterKey,
+    rotation: _OpenRouterKeyRotation,
+) -> None:
+    """Publish and record the replaced key again after a failed deploy, so the next run replaces it again."""
+    try:
+        await _apply_instance_secret(instance_id, namespace, {**secret_data, "openrouter_key": rotation.key})
+    except Exception:
+        logger.warning(
+            "Keeping the new OpenRouter key of instance %s after a failed deploy", instance_id, exc_info=True
+        )
+        return
+    await _discard_recorded_openrouter_key(sb, instance_id, created_key, rotation)
 
 
 class InstanceClaimLostError(HTTPException):
@@ -727,6 +789,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     background_tasks: BackgroundTasks | None,
     resume_lifecycle_hold: bool = False,
     expected_status: str | None = None,
+    replace_openrouter_key_created_before: datetime | None = None,
 ) -> dict[str, Any]:
     """Provision (or re-provision) a tenant instance and return the portal response payload.
 
@@ -742,6 +805,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     still revoke a key that another run recorded but has not published yet. The lifecycle claims with the status it
     read to avoid that, but a claim expecting `provisioning` still succeeds while another run holds the instance, so a
     lifecycle resume that read the instance as `provisioning` can overlap that run the same way.
+    A stored key created before `replace_openrouter_key_created_before` is replaced by a new key with fresh usage:
+    the new key is recorded only while the instance still records the old one, and the old key is deleted only once
+    the new one is deployed; a failed deploy publishes and records the old key again.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -855,12 +921,19 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             namespace=namespace,
         )
         storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
+        rotation = await _openrouter_key_rotation(
+            existing_instance_row,
+            created_before=replace_openrouter_key_created_before,
+            tier=tier,
+            instance_id=customer_id,
+            namespace=namespace,
+        )
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
             sb=sb,
             account_id=account_id,
             instance_id=customer_id,
             tier=tier,
-            existing_instance_row=existing_instance_row,
+            existing_instance_row=None if rotation else existing_instance_row,
             namespace=namespace,
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
@@ -973,22 +1046,33 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         _append_matrix_oidc_helm_args(helm_args)
         # Record a created key before publishing it, so a run that loses the record never publishes its key.
         if created_openrouter_key is not None:
-            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
+            await _commit_openrouter_key(
+                sb, customer_id, created_openrouter_key, rotation.key_hash if rotation else None
+            )
         # Apply before Helm so pods restarted by the new secret hash read the new values.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
             if created_openrouter_key is not None:
-                await _discard_recorded_openrouter_key(sb, customer_id, created_openrouter_key)
+                await _discard_recorded_openrouter_key(sb, customer_id, created_openrouter_key, rotation)
             raise
-        code, stdout, stderr = await run_helm(helm_args)
-        if code != 0:
-            msg = f"Helm install failed: {stderr}"
-            raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
+        try:
+            code, stdout, stderr = await run_helm(helm_args)
+            if code != 0:
+                msg = f"Helm install failed: {stderr}"
+                raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
+        except Exception:
+            if rotation is not None and created_openrouter_key is not None:
+                await _roll_back_openrouter_key_rotation(
+                    sb, customer_id, namespace, instance_secret_data, created_openrouter_key, rotation
+                )
+            raise
         logger.info("Helm install output: %s", stdout)
         # Older releases managed this Secret in Helm. Apply it again after Helm
         # because Helm's resource pruning deletes the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        if rotation is not None:
+            await _discard_openrouter_key(rotation.key_hash, customer_id)
     except InstanceClaimLostError:
         # The provision that recorded its key owns the instance and its status.
         raise

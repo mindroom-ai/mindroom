@@ -130,6 +130,7 @@ def platform() -> Iterator[Platform]:
         background_tasks: Any,  # noqa: ANN401, ARG001
         resume_lifecycle_hold: bool,  # noqa: ARG001
         expected_status: str | None,  # noqa: ARG001
+        replace_openrouter_key_created_before: datetime | None = None,  # noqa: ARG001
     ) -> dict[str, Any]:
         # Like provision_instance, a successful deploy records the tier it deployed.
         db.row("instances", instance_id=data["instance_id"]).update(
@@ -2496,24 +2497,146 @@ async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(pla
     platform.provision.assert_not_awaited()
 
 
-def test_first_paid_period_after_a_trial_replaces_the_trial_key(platform: Platform) -> None:
+TRIAL_END = 1_793_750_400
+TRIAL_END_ISO = datetime.fromtimestamp(TRIAL_END, UTC).isoformat()
+TRIAL_KEY_CREATED_AT = datetime.fromtimestamp(TRIAL_END - 3 * 86400, UTC).isoformat()
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["running", "held"])
+def test_first_paid_period_after_a_trial_redeploys_with_a_new_key(platform: Platform, *, held: bool) -> None:
     # A customer who used the trial budget converts to paid; OpenRouter resets usage only each calendar month.
-    trial_end = 1_793_750_400
     platform.db.tables["subscriptions"].append(_subscription("trialing"))
+    instance_status = "stopped" if held else "running"
+    hold = _held(datetime.now(UTC)) if held else {}
     platform.db.tables["instances"].append(
-        _instance("running", openrouter_key_created_at=datetime.fromtimestamp(trial_end - 3 * 86400, UTC).isoformat())
+        _instance(instance_status, openrouter_key_created_at=TRIAL_KEY_CREATED_AT, **hold)
     )
     paid = _stripe_subscription("active")
-    paid["trial_end"] = trial_end
-    paid["items"]["data"][0].update({"current_period_start": trial_end, "current_period_end": trial_end + 30 * 86400})
+    paid["trial_end"] = TRIAL_END
+    paid["items"]["data"][0].update({"current_period_start": TRIAL_END, "current_period_end": TRIAL_END + 30 * 86400})
 
-    with patch(f"{LIFECYCLE}.revoke_instance_openrouter_key", AsyncMock()) as revoke:
-        _send_webhook("customer.subscription.updated", paid)
-        revoke.assert_awaited_once_with(platform.db, 7)
-        platform.provision.assert_awaited_once()
+    _send_webhook("customer.subscription.updated", paid)
 
-        # The new key was created in the paid period, so later runs keep it.
-        platform.db.row("instances", instance_id=7)["openrouter_key_created_at"] = datetime.now(UTC).isoformat()
-        _send_webhook("customer.subscription.updated", paid)
-        revoke.assert_awaited_once()
-        platform.provision.assert_awaited_once()
+    platform.provision.assert_awaited_once()
+    replace_before = platform.provision.await_args.kwargs["replace_openrouter_key_created_before"]
+    assert replace_before == datetime.fromtimestamp(TRIAL_END, UTC)
+    platform.start.assert_not_awaited()
+
+    # The new key was created in the paid period, so later runs keep it.
+    platform.db.row("instances", instance_id=7)["openrouter_key_created_at"] = datetime.now(UTC).isoformat()
+    _send_webhook("customer.subscription.updated", paid)
+    platform.provision.assert_awaited_once()
+
+
+def _trial_key_instance() -> dict[str, Any]:
+    return _instance("running", openrouter_key_hash="hash_trial", openrouter_key_created_at=TRIAL_KEY_CREATED_AT)
+
+
+def _rotation_world() -> tuple[set[str], dict[str, str], Any]:
+    """OpenRouter keys alive, the published Secret, and a key factory for a trial key `hash_trial`."""
+    alive = {"hash_trial"}
+    published = {"openrouter_key": "key_trial"}
+    minted = iter(["new", "retry"])
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        suffix = next(minted)
+        alive.add(f"hash_{suffix}")
+        return CreatedOpenRouterKey(f"key_{suffix}", f"hash_{suffix}", plan.name, plan.monthly_limit_usd, "monthly")
+
+    return alive, published, create_key
+
+
+def _rotation_patches(alive: set[str], published: dict[str, str], create_key: Any, helm: AsyncMock) -> Any:  # noqa: ANN401
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        published.update(secret_data)
+        return "hash"
+
+    async def kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:  # noqa: ARG001
+        if "-o=jsonpath={.data.openrouter_key}" in args:
+            return 0, base64.b64encode(published["openrouter_key"].encode()).decode(), ""
+        return 0, "", ""
+
+    stack = contextlib.ExitStack()
+    for target, value in (
+        ("OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        ("PROVISIONER_API_KEY", "test-root-secret"),
+        ("create_openrouter_key", create_key),
+        ("delete_openrouter_key", delete_key),
+        ("_apply_instance_secret", apply_secret),
+        ("run_kubectl", kubectl),
+        ("run_helm", helm),
+        ("wait_for_deployment_ready", AsyncMock(return_value=True)),
+    ):
+        stack.enter_context(patch(f"{SERVICE}.{target}", value))
+    return stack
+
+
+@pytest.mark.asyncio
+async def test_a_failed_key_rotation_keeps_the_trial_key_and_the_next_run_replaces_it() -> None:
+    db = FakeSupabase({"instances": [_trial_key_instance()]})
+    alive, published, create_key = _rotation_world()
+    helm = AsyncMock(side_effect=[(1, "", "helm exploded"), (0, "deployed", "")])
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    paid_period_start = datetime.fromtimestamp(TRIAL_END, UTC)
+
+    with _rotation_patches(alive, published, create_key, helm):
+        with pytest.raises(HTTPException):
+            await provision_instance(
+                db,
+                data=data,
+                background_tasks=None,
+                expected_status="running",
+                replace_openrouter_key_created_before=paid_period_start,
+            )
+        # The tenant is back on its trial key with its trial metadata, so the next run replaces it again.
+        row = db.row("instances", instance_id=7)
+        assert (row["openrouter_key_hash"], row["openrouter_key_created_at"]) == ("hash_trial", TRIAL_KEY_CREATED_AT)
+        assert published["openrouter_key"] == "key_trial"
+        assert alive == {"hash_trial"}
+
+        await provision_instance(
+            db,
+            data=data,
+            background_tasks=None,
+            expected_status="error",
+            replace_openrouter_key_created_before=paid_period_start,
+        )
+
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_retry"
+    assert published["openrouter_key"] == "key_retry"
+    assert alive == {"hash_retry"}
+
+
+@pytest.mark.asyncio
+async def test_a_stale_rotation_never_deletes_the_key_another_run_put_in_its_place() -> None:
+    db = FakeSupabase({"instances": [_trial_key_instance()]})
+    alive, published, create_key = _rotation_world()
+
+    def create_after_another_run(**kwargs: Any) -> CreatedOpenRouterKey:  # noqa: ANN401
+        # Another run, which claimed the instance at the same time, replaced the trial key first.
+        alive.add("hash_other")
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_other"
+        published["openrouter_key"] = "key_other"
+        return create_key(**kwargs)
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        _rotation_patches(alive, published, create_after_another_run, helm),
+        pytest.raises(InstanceClaimLostError),
+    ):
+        await provision_instance(
+            db,
+            data=data,
+            background_tasks=None,
+            replace_openrouter_key_created_before=datetime.fromtimestamp(TRIAL_END, UTC),
+        )
+
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_other"
+    assert published["openrouter_key"] == "key_other"
+    assert "hash_other" in alive
+    assert "hash_new" not in alive
+    helm.assert_not_awaited()
