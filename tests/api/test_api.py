@@ -3651,7 +3651,7 @@ def test_cookie_mutations_use_configured_public_origin(
     app_state = config_lifecycle.app_state(api_key_client.app)
     auth_state = auth._app_auth_state(api_key_client.app, main._app_runtime_paths(api_key_client.app))
     app_state.api_auth_state = replace(auth_state, settings=replace(auth_state.settings, public_url=public_url))
-    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    api_key_client.cookies.set("__Host-mindroom_api_key", "test-key")
     response = api_key_client.post("/api/config/load", headers={"Origin": origin})
     assert response.status_code == expected, response.text
 
@@ -3688,6 +3688,24 @@ def test_api_key_cookie_uses_host_prefix_over_https() -> None:
     assert not any(attribute.startswith("domain") for attribute in attributes)
     assert client.cookies.get("__Host-mindroom_api_key") == "test-key"
     assert client.post("/api/config/load").status_code == 200
+
+
+def test_api_key_cookie_follows_https_public_url_behind_proxy(api_key_client: TestClient) -> None:
+    """Behind a TLS-terminating proxy the HTTPS `MINDROOM_PUBLIC_URL`, not the proxied scheme, picks the prefixed name."""
+    app_state = config_lifecycle.app_state(api_key_client.app)
+    auth_state = auth._app_auth_state(api_key_client.app, main._app_runtime_paths(api_key_client.app))
+    public_url = "https://public.example.org"
+    app_state.api_auth_state = replace(auth_state, settings=replace(auth_state.settings, public_url=public_url))
+    headers = {"Origin": public_url}
+
+    response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"}, headers=headers)
+    [set_cookie] = response.headers.get_list("set-cookie")
+    assert set_cookie.startswith("__Host-mindroom_api_key=test-key;")
+    assert "secure" in set_cookie.lower()
+    cookie = "__Host-mindroom_api_key=test-key"
+    assert api_key_client.post("/api/config/load", headers={**headers, "Cookie": cookie}).status_code == 200
+    cookie = "mindroom_api_key=test-key"
+    assert api_key_client.post("/api/config/load", headers={**headers, "Cookie": cookie}).status_code == 401
 
 
 @pytest.mark.parametrize(

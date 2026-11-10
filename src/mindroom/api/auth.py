@@ -71,7 +71,7 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 # Host-only by prefix over HTTPS, so other hosts under the domain can neither set nor override it.
-_STANDALONE_AUTH_COOKIE_NAME = "__Host-mindroom_api_key"
+_HTTPS_STANDALONE_AUTH_COOKIE_NAME = "__Host-mindroom_api_key"
 # Browsers keep a `__Host-` cookie only when it is Secure, which they refuse to store over plain HTTP.
 _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
@@ -1145,8 +1145,11 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
 
 
 def _standalone_auth_cookie(request: Request) -> str:
-    """Name the dashboard sign-in cookie for this request's scheme."""
-    return _STANDALONE_AUTH_COOKIE_NAME if request.url.scheme == "https" else _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME
+    """Name the dashboard sign-in cookie for the origin the browser opened, which is plain HTTP only locally."""
+    origin = browser_origin(request)
+    if origin is not None and origin.startswith("http://"):
+        return _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME
+    return _HTTPS_STANDALONE_AUTH_COOKIE_NAME
 
 
 @router.post("/api/auth/session", include_in_schema=False)
@@ -1159,11 +1162,12 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
     if not payload.api_key or not secrets.compare_digest(payload.api_key, mindroom_api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+    cookie = _standalone_auth_cookie(request)
     response.set_cookie(
-        key=_standalone_auth_cookie(request),
+        key=cookie,
         value=payload.api_key,
         path="/",
-        secure=request.url.scheme == "https",
+        secure=cookie == _HTTPS_STANDALONE_AUTH_COOKIE_NAME,
         httponly=True,
         samesite="lax",
     )
@@ -1173,7 +1177,7 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
 @router.delete("/api/auth/session", include_in_schema=False)
 async def clear_auth_session(response: Response) -> dict[str, bool]:
     """Clear the standalone dashboard auth cookie under both of its names."""
-    response.delete_cookie(key=_STANDALONE_AUTH_COOKIE_NAME, path="/", secure=True)
+    response.delete_cookie(key=_HTTPS_STANDALONE_AUTH_COOKIE_NAME, path="/", secure=True)
     response.delete_cookie(key=_PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME, path="/")
     return {"success": True}
 
