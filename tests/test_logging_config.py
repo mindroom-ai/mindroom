@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import warnings
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import aiohttp
 import httpx
@@ -1053,7 +1053,7 @@ async def test_api_request_logs_record_paths_without_their_query(
 async def test_debug_logs_leave_out_websocket_headers_and_frames(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    ws: Literal["websockets-sansio", "websockets"],
+    ws: str,
 ) -> None:
     """At DEBUG, a WebSocket's handshake headers and frame contents stay out of the logs; its other records stay."""
     setup_logging(level="DEBUG", runtime_paths=_runtime_paths(tmp_path))

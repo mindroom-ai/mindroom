@@ -97,7 +97,8 @@ class _Mem0KeywordSearchFilter(logging.Filter):
 def _scrub_request_record(record: logging.LogRecord) -> bool:
     """Keep the query, headers, and frame contents of uvicorn's requests out of its records, since they can carry secrets.
 
-    Returns False for a record that only carries such data, and True for every other one, its query cut.
+    Returns False for each raw WebSocket traffic record, whether or not it carries such data, and True for every other
+    record, its query cut.
     """
     message = record.msg if isinstance(record.msg, str) else ""
     # The websockets library logs each raw handshake line, header, and frame on uvicorn's error logger at DEBUG.
