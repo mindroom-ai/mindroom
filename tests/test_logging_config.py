@@ -21,7 +21,7 @@ import nio
 import pytest
 import uvicorn
 from agno.utils import log as agno_log
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from mem0 import AsyncMemory
 
 from mindroom import logging_config
@@ -995,11 +995,11 @@ def test_log_file_writer_survives_a_failed_reopen(
 
 
 @pytest.mark.asyncio
-async def test_api_access_log_records_paths_without_their_query(
+async def test_api_request_logs_record_paths_without_their_query(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The API's access log names each request's path, but leaves out a query such as an OAuth callback's code."""
+    """The API's request lines name each path, but leave out a query such as an OAuth callback's code."""
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     app = FastAPI()
 
@@ -1011,10 +1011,15 @@ async def test_api_access_log_records_paths_without_their_query(
     async def health() -> str:
         return "ok"
 
+    @app.websocket("/api/stream")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     # Built after `setup_logging`, as for `mindroom run`, so uvicorn's own logging config is the last one applied.
-    server = uvicorn.Server(uvicorn.Config(app, log_level="info", ws="none"))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="info", ws="websockets-sansio"))
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         # The socket already listens, so requests wait in its backlog until the server starts accepting.
@@ -1024,13 +1029,20 @@ async def test_api_access_log_records_paths_without_their_query(
                 params={"code": "authorization-code-value", "state": "state-value"},
             )
             health_response = await client.get("/api/health")
+        async with (
+            aiohttp.ClientSession() as session,
+            session.ws_connect(f"ws://127.0.0.1:{port}/api/stream?token=websocket-token-value") as websocket,
+        ):
+            await websocket.receive()
     finally:
         server.should_exit = True
         await serving
 
     assert (callback_response.status_code, health_response.status_code) == (200, 200)
-    access_log = capsys.readouterr().out
-    assert '"GET /api/oauth/google_drive/callback HTTP/1.1" 200' in access_log
-    assert '"GET /api/health HTTP/1.1" 200' in access_log
-    assert "authorization-code-value" not in access_log
-    assert "state-value" not in access_log
+    captured = capsys.readouterr()
+    request_log = captured.out + captured.err
+    assert '"GET /api/oauth/google_drive/callback HTTP/1.1" 200' in request_log
+    assert '"GET /api/health HTTP/1.1" 200' in request_log
+    assert '"WebSocket /api/stream" [accepted]' in request_log
+    for secret in ("authorization-code-value", "state-value", "websocket-token-value"):
+        assert secret not in request_log

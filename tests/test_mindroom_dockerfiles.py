@@ -152,7 +152,7 @@ def test_sandbox_runner_script_serves_through_the_runner_entrypoint() -> None:
 
 
 def test_sandbox_runner_logs_uvicorn_info_to_stdout_and_warnings_to_stderr() -> None:
-    """Log collectors read stderr as errors, so only uvicorn's warnings and errors go there."""
+    """Log collectors read stderr as errors, so only uvicorn's warnings and errors go there; request lines omit queries."""
     probe = """
 import logging.config
 
@@ -162,13 +162,15 @@ logging.config.dictConfig(_uvicorn_log_config())
 logging.getLogger("uvicorn.error").info("Uvicorn running on http://0.0.0.0:8766")
 logging.getLogger("uvicorn.error").warning("Invalid HTTP request received.")
 logging.getLogger("uvicorn.error").error("Exception in ASGI application")
-logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", "/healthz", "1.1", 200)
+logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", "/healthz?token=http-token", "1.1", 200)
+logging.getLogger("uvicorn.error").info('%s - "WebSocket %s" [accepted]', "10.0.0.1:5001", "/stream?token=ws-token")
 """
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120)
 
     assert result.stdout.splitlines() == [
         "INFO:     Uvicorn running on http://0.0.0.0:8766",
         'INFO:     10.0.0.1:5000 - "GET /healthz HTTP/1.1" 200 OK',
+        'INFO:     10.0.0.1:5001 - "WebSocket /stream" [accepted]',
     ]
     assert result.stderr.splitlines() == [
         "WARNING:  Invalid HTTP request received.",
