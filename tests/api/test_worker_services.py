@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import random
 import re
 import shutil
 import socket
@@ -13,6 +14,7 @@ import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -235,6 +237,109 @@ async def test_a_service_starts_on_demand_and_answers_only_with_its_secret(tmp_p
             "hello",
         )
         assert await _call("GET", f"http://127.0.0.1:{port}/") == (403, "refused")
+
+
+def _kernel_port_range() -> range:
+    low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+    return range(low, high + 1)
+
+
+def _local_port_range(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, low: int, high: int) -> None:
+    """Have the runner read ``low``-``high`` as the worker's local port range."""
+    (tmp_path / "ip_local_port_range").write_text(f"{low}\t{high}\n")
+    monkeypatch.setattr(worker_services_module, "_LOCAL_PORT_RANGE", tmp_path / "ip_local_port_range")
+
+
+@pytest.mark.asyncio
+async def test_a_service_s_port_lies_outside_the_range_the_kernel_numbers_other_sockets_from(tmp_path: Path) -> None:
+    """Sockets that bind port 0 or connect get their ports from that range, so none of them can take the service's.
+
+    It needs this machine's local port range to leave the services' ports out, as Linux's default does.
+    """
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+        assert state["state"] == "running"
+        assert state["port"] in worker_services_module._SERVICE_PORTS
+        assert state["port"] not in _kernel_port_range()
+
+
+def _service_port_listener() -> socket.socket:
+    """Listen on a port of the services' range, taken at random as the runner takes them, so parallel tests rarely meet."""
+    ports = worker_services_module._SERVICE_PORTS
+    for port in random.sample(ports, len(ports)):
+        with suppress(OSError):
+            return socket.create_server(("127.0.0.1", port))
+    raise AssertionError
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_first_candidate_port_another_server_holds_runs_on_another(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe passes over the first candidate port, which another process listens on."""
+    _local_port_range(monkeypatch, tmp_path, 32768, 60999)
+    async with _runner(tmp_path) as runner:
+        with _service_port_listener() as other, _service_port_listener() as freed:
+            taken, free = other.getsockname()[1], freed.getsockname()[1]
+            freed.close()
+            monkeypatch.setattr(worker_services_module, "_SERVICE_PORTS", [taken, free])
+            # The probe takes the candidates in the order given, so the held one comes first.
+            ordered = SimpleNamespace(sample=lambda population, _k: list(population))
+            monkeypatch.setattr(worker_services_module, "random", ordered)
+            _, state = await _call("POST", runner.url(), _body(), _AUTH)
+    assert (state["state"], state["port"]) == ("running", free)
+
+
+@pytest.mark.asyncio
+async def test_a_service_s_port_lies_outside_gvisor_s_local_port_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gVisor runtime numbers its sockets from 16000-65535, which the services' ports stay below."""
+    _local_port_range(monkeypatch, tmp_path, 16000, 65535)
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+    assert state["state"] == "running"
+    assert state["port"] in worker_services_module._SERVICE_PORTS
+
+
+@pytest.mark.asyncio
+async def test_a_service_s_port_avoids_a_local_port_range_that_reaches_into_the_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator's wider local port range leaves the services only the ports below it."""
+    _local_port_range(monkeypatch, tmp_path, 13000, 60999)
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+    assert state["state"] == "running"
+    assert 12000 <= state["port"] < 13000
+
+
+@pytest.mark.asyncio
+async def test_services_starting_together_each_get_a_port_of_their_own(tmp_path: Path) -> None:
+    """A start probes while another service has not bound its port yet, so the two rarely pick the same one."""
+    async with _runner(tmp_path) as runner:
+        (runner.plugin_root / "other.py").write_text(_HELLO.replace("service.json", "other.json"))
+        states = await asyncio.gather(
+            _call("POST", runner.url(), _body(), _AUTH),
+            _call("POST", runner.url("other"), _body("other.py"), _AUTH),
+        )
+    assert [state["state"] for _, state in states] == ["running", "running"]
+
+
+@pytest.mark.asyncio
+async def test_without_a_free_port_outside_the_kernel_s_range_a_service_gets_one_the_kernel_picks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local port range that covers every service port leaves the kernel to pick one."""
+    _local_port_range(monkeypatch, tmp_path, 1024, 65535)
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+    assert state["state"] == "running"
+    assert state["port"] in _kernel_port_range()
 
 
 @pytest.mark.asyncio
