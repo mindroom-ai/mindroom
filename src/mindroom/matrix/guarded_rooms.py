@@ -1,7 +1,8 @@
 """A room that the current task context sends into only from inside an allowed scope.
 
 A contact turn guards its contact room, so everything it runs, its tools and their middleware included, reaches that
-room only through a send the contact's message policy approved. Tasks a guarded context starts inherit the guard.
+room only through a send the contact's message policy approved, or through the fixed 👀 that says the turn runs.
+Tasks a guarded context starts inherit the guard.
 """
 
 from __future__ import annotations
@@ -29,7 +30,10 @@ def guarded_room(room_id: str) -> Iterator[None]:
 
 @contextmanager
 def allowed_send() -> Iterator[None]:
-    """Let the sends made inside this scope reach the guarded room; use it only around a send its policy approved."""
+    """Let the sends made inside this scope reach the guarded room.
+
+    Use it only around a send its policy approved, or one that carries nothing the model wrote.
+    """
     token = _SEND_ALLOWED.set(True)
     try:
         yield

@@ -557,7 +557,7 @@ class ResponseRunner:
                             request,
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
-                            # A contact turn shows nothing, not even a reaction on the other side's message.
+                            # A contact turn shows only its 👀, never a deferral's reaction on the other side's message.
                             on_defer=None if request.contact is not None else acknowledge_deferred,
                         ),
                         locked_operation=lambda target: self._run_locked_ending_span(
@@ -1428,16 +1428,23 @@ class ResponseRunner:
     async def _send_contact_receipt(self, request: ResponseRequest) -> None:
         """Put 👀 on the message a contact turn answers, the only progress it shows.
 
-        The fixed emoji carries nothing the model wrote, so it skips the contact's message policy.
+        The fixed emoji carries nothing the model wrote, so it skips the contact's message policy, but like every send
+        it reads the contact again: a contact removed while the turn prepared or waited on its participation gets none.
+        Like typing, it is best-effort, so failing to send it never fails the turn.
         """
-        with allowed_send():
-            await self.deps.delivery_gateway.send_judgment_reaction(
-                turn_id=request.response_envelope.source_event_id,
-                room_id=request.room_id,
-                event_id=request.sources.logical_source_event_ids[-1],
-                key="👀",
-                kind="contact_turn",
-            )
+        if self._runs_nothing(request) is not None:
+            return
+        try:
+            with allowed_send():
+                await self.deps.delivery_gateway.send_judgment_reaction(
+                    turn_id=request.response_envelope.source_event_id,
+                    room_id=request.room_id,
+                    event_id=request.sources.logical_source_event_ids[-1],
+                    key="👀",
+                    kind="contact_turn",
+                )
+        except Exception:
+            self.deps.logger.warning("contact_turn_receipt_failed", room_id=request.room_id, exc_info=True)
 
     async def _prepare_locked_turn(
         self,

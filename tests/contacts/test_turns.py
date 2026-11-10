@@ -54,7 +54,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.context import ResponseDraft
 from mindroom.logging_config import get_logger
-from mindroom.matrix.guarded_rooms import send_refused
+from mindroom.matrix.guarded_rooms import guarded_room, send_refused
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -758,6 +758,47 @@ async def test_a_gated_contact_turn_shows_eyes_only_once_its_participation_lets_
 
     assert receipts == ([CONTACT_ROOM] if action == "respond" else [])
     client.room_typing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_a_contact_turns_eyes_reread_its_contact(tmp_path: Path, status: str) -> None:
+    """A contact removed while its turn prepared or waited on its participation gets no 👀, like any other send."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+
+    def set_status(book: Any) -> None:  # noqa: ANN401
+        book.contacts[0].status = status
+
+    update_contacts(paths, set_status)
+    with guarded_room(CONTACT_ROOM):
+        await bot._response_runner._send_contact_receipt(request)
+
+    if status == "active":
+        assert _sent_after_eyes(bot) == []
+    else:
+        bot.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_contact_turns_eyes_that_fail_never_fail_the_turn(tmp_path: Path) -> None:
+    """The 👀 is best-effort like typing, so an error sending it, such as its membership read failing, never reaches the turn."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+    failing = AsyncMock(side_effect=RuntimeError("journal unavailable"))
+
+    with (
+        patch("mindroom.delivery_gateway.DeliveryGateway.send_judgment_reaction", failing),
+        guarded_room(CONTACT_ROOM),
+        capture_logs() as logs,
+    ):
+        await bot._response_runner._send_contact_receipt(request)
+
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["contact_turn_receipt_failed"]
 
 
 @pytest.mark.asyncio
