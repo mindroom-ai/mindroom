@@ -94,19 +94,13 @@ class _Mem0KeywordSearchFilter(logging.Filter):
         )
 
 
-class _AccessLogQueryFilter(logging.Filter):
-    """Leave the query out of each uvicorn access line, since a query, such as an OAuth callback's, can carry a secret."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Keep the record, its path argument cut at the query."""
-        # Uvicorn logs each HTTP request with the arguments client, method, path with query, HTTP version, and status.
-        if isinstance(record.args, tuple) and len(record.args) == 5:
-            client, method, path, http_version, status = record.args
-            record.args = (client, method, str(path).partition("?")[0], http_version, status)
-        return True
-
-
-_ACCESS_LOG_QUERY_FILTER = _AccessLogQueryFilter()
+def _drop_access_log_query(record: logging.LogRecord) -> bool:
+    """Cut the query from a uvicorn access record's path, since a query, such as an OAuth callback's, can carry a secret."""
+    # Uvicorn logs each HTTP request with the arguments client, method, path with query, HTTP version, and status.
+    if isinstance(record.args, tuple) and len(record.args) == 5:
+        client, method, path, http_version, status = record.args
+        record.args = (client, method, str(path).partition("?")[0], http_version, status)
+    return True
 
 
 class _AgnoLevelFilter(logging.Filter):
@@ -492,7 +486,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
         cache_logger_on_first_use=True,
     )
     # A logger's filters outlast the `dictConfig` each `uvicorn.Config` runs later, so every listener keeps this one.
-    logging.getLogger("uvicorn.access").addFilter(_ACCESS_LOG_QUERY_FILTER)
+    logging.getLogger("uvicorn.access").addFilter(_drop_access_log_query)
     _route_agno_loggers_to_root(loggers)
     return renderer_name
 
