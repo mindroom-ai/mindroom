@@ -984,19 +984,30 @@ async def test_mcp_oauth_registers_when_it_can_instead_of_using_a_client_id_meta
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("env", "dynamic_client_registration"),
-    [({}, True), ({"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"}, False)],
-    ids=["no-public-url", "registration-disabled"],
+    ("env", "dynamic_client_registration", "supports_document"),
+    [
+        ({}, True, True),
+        ({"MINDROOM_PUBLIC_URL": "http://192.168.1.10:8765"}, True, True),
+        ({"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"}, False, True),
+        ({"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"}, True, False),
+    ],
+    ids=["no-public-url", "http-public-url", "registration-disabled", "no-document-support"],
 )
-async def test_mcp_oauth_document_only_server_without_a_usable_document_leaves_no_client(
+async def test_mcp_oauth_without_registration_or_a_usable_document_leaves_no_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env: dict[str, str],
     dynamic_client_registration: bool,
+    supports_document: bool,
 ) -> None:
-    """Without an HTTPS public URL, or with automatic clients disabled, a document-only server gets no client."""
+    """A server without registration gets no client unless MindRoom can serve it a document from an HTTPS public URL."""
     runtime_paths = _runtime_paths(tmp_path, **env)
     _serve_client_id_metadata_documents(monkeypatch)
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "supports_client_id_metadata_document",
+        supports_document,
+    )
     provider = mcp_oauth_provider(
         "demo",
         _auto_oauth_mcp_server_config(dynamic_client_registration=dynamic_client_registration),
