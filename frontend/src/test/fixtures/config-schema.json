@@ -3255,7 +3255,7 @@
         },
         "dynamic_client_registration": {
           "default": true,
-          "description": "Whether dynamic registration may be used",
+          "description": "Whether a client may be obtained automatically, by dynamic registration or client ID metadata document",
           "title": "Dynamic Client Registration",
           "type": "boolean"
         },
