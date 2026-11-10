@@ -44,9 +44,10 @@ _Name = Annotated[str, Path(pattern=f"^{SERVICE_NAME_PATTERN}$")]
 # How long an ensure waits for a new instance to listen, and a stopped one's process group gets before it is killed.
 _START_SECONDS = 10.0
 _STOP_SECONDS = 5.0
-# Service ports lie above Linux's default local port range, 32768-60999, which the kernel numbers the sockets that bind
-# port 0 or connect from, so none of those can take a service's port between its probe and the service's bind.
-_SERVICE_PORTS = range(61000, 65536)
+# Service ports lie below the default local port ranges of Linux, 32768-60999, and gVisor, 16000-65535, which the kernel
+# numbers the sockets that bind port 0 or connect from, so none of those can take a service's port between its probe
+# and the service's bind. They also pass over well-known servers such as memcached (11211) and Ollama (11434).
+_SERVICE_PORTS = range(12000, 15000)
 _LOCAL_PORT_RANGE = FilePath("/proc/sys/net/ipv4/ip_local_port_range")
 
 

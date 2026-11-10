@@ -292,16 +292,29 @@ async def test_a_service_whose_first_candidate_port_another_server_holds_runs_on
 
 
 @pytest.mark.asyncio
+async def test_a_service_s_port_lies_outside_gvisor_s_local_port_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gVisor runtime numbers its sockets from 16000-65535, which the services' ports stay below."""
+    _local_port_range(monkeypatch, tmp_path, 16000, 65535)
+    async with _runner(tmp_path) as runner:
+        _, state = await _call("POST", runner.url(), _body(), _AUTH)
+    assert state["state"] == "running"
+    assert state["port"] in worker_services_module._SERVICE_PORTS
+
+
+@pytest.mark.asyncio
 async def test_a_service_s_port_avoids_a_local_port_range_that_reaches_into_the_services(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An operator's wider local port range leaves the services only the ports above it."""
-    _local_port_range(monkeypatch, tmp_path, 32768, 65000)
+    """An operator's wider local port range leaves the services only the ports below it."""
+    _local_port_range(monkeypatch, tmp_path, 13000, 60999)
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert state["state"] == "running"
-    assert 65000 < state["port"] <= 65535
+    assert 12000 <= state["port"] < 13000
 
 
 @pytest.mark.asyncio
@@ -321,8 +334,8 @@ async def test_without_a_free_port_outside_the_kernel_s_range_a_service_gets_one
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local port range that covers every service port, as gVisor's does, leaves the kernel to pick one."""
-    _local_port_range(monkeypatch, tmp_path, 16000, 65535)
+    """A local port range that covers every service port leaves the kernel to pick one."""
+    _local_port_range(monkeypatch, tmp_path, 1024, 65535)
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert state["state"] == "running"
