@@ -94,13 +94,21 @@ class _Mem0KeywordSearchFilter(logging.Filter):
         )
 
 
-def _drop_request_target_query(record: logging.LogRecord) -> bool:
-    """Cut the query from the request target in a uvicorn request line, since a query can carry a secret."""
+def _scrub_request_record(record: logging.LogRecord) -> bool:
+    """Keep the query, headers, and frame contents of uvicorn's requests out of its records, since they can carry secrets.
+
+    Returns False for each raw WebSocket traffic record, whether or not it carries such data, and True for every other
+    record, its query cut.
+    """
+    message = record.msg if isinstance(record.msg, str) else ""
+    # The websockets library logs each raw handshake line, header, and frame on uvicorn's error logger at DEBUG.
+    if message.startswith(("< ", "> ")):
+        return False
     # Uvicorn logs each HTTP request's target, its path with query, as the third argument of an access line,
     # and each WebSocket handshake's as the second argument of a `WebSocket` line on its error logger.
     if record.name == "uvicorn.access":
         target = 2
-    elif isinstance(record.msg, str) and record.msg.startswith('%s - "WebSocket %s"'):
+    elif message.startswith('%s - "WebSocket %s"'):
         target = 1
     else:
         return True
@@ -558,5 +566,5 @@ if not structlog.is_configured():
     configure_default_logging()
 # A logger's filters outlast every later `dictConfig`, such as the one each uvicorn server runs as it starts,
 # so every server in a process that imports this module keeps these.
-logging.getLogger("uvicorn.access").addFilter(_drop_request_target_query)
-logging.getLogger("uvicorn.error").addFilter(_drop_request_target_query)
+logging.getLogger("uvicorn.access").addFilter(_scrub_request_record)
+logging.getLogger("uvicorn.error").addFilter(_scrub_request_record)
