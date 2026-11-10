@@ -384,10 +384,14 @@ def _usable_client_id_metadata_document_url(
     metadata: _DiscoveredOAuthMetadata,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Return the document URL to use as client ID when the server fetches client ID metadata documents."""
+    """Return the document URL to use as client ID when the server fetches documents and offers no registration.
+
+    Registration is kept wherever the server offers it, since only a document needs the server to reach MindRoom.
+    """
     if (
         not config.dynamic_client_registration
         or not metadata.client_id_metadata_document_supported
+        or metadata.registration_url is not None
         or provider.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
     ):
         return None
@@ -503,8 +507,8 @@ async def _register_client(
 ) -> None:
     """Register a client when none is stored or the stored one belongs to another token endpoint.
 
-    A server that fetches client ID metadata documents gets the document's URL as client ID instead of a registration,
-    following the MCP authorization spec's order. `for_moved_callback` also replaces a dynamic registration for another
+    A server that fetches client ID metadata documents and offers no registration endpoint gets the document's URL as
+    client ID instead. `for_moved_callback` also replaces a dynamic registration for another
     callback. The server refusing that one keeps the stored client, whose tokens still refresh, and raises
     `OAuthCallbackRefusedError` naming the callback.
     """
