@@ -94,12 +94,20 @@ class _Mem0KeywordSearchFilter(logging.Filter):
         )
 
 
-def _drop_access_log_query(record: logging.LogRecord) -> bool:
-    """Cut the query from a uvicorn access record's path, since a query, such as an OAuth callback's, can carry a secret."""
-    # Uvicorn logs each HTTP request with the arguments client, method, path with query, HTTP version, and status.
-    if isinstance(record.args, tuple) and len(record.args) == 5:
-        client, method, path, http_version, status = record.args
-        record.args = (client, method, str(path).partition("?")[0], http_version, status)
+def _drop_request_target_query(record: logging.LogRecord) -> bool:
+    """Cut the query from the request target in a uvicorn request line, since a query can carry a secret."""
+    # Uvicorn logs each HTTP request's target, its path with query, as the third argument of an access line,
+    # and each WebSocket handshake's as the second argument of a `WebSocket` line on its error logger.
+    if record.name == "uvicorn.access":
+        target = 2
+    elif isinstance(record.msg, str) and record.msg.startswith('%s - "WebSocket %s"'):
+        target = 1
+    else:
+        return True
+    if isinstance(record.args, tuple) and len(record.args) > target:
+        args = list(record.args)
+        args[target] = str(args[target]).partition("?")[0]
+        record.args = tuple(args)
     return True
 
 
@@ -485,8 +493,6 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
-    # A logger's filters outlast the `dictConfig` each `uvicorn.Config` runs later, so every listener keeps this one.
-    logging.getLogger("uvicorn.access").addFilter(_drop_access_log_query)
     _route_agno_loggers_to_root(loggers)
     return renderer_name
 
@@ -550,3 +556,7 @@ def bound_log_context(**context: object) -> AbstractContextManager[None]:
 
 if not structlog.is_configured():
     configure_default_logging()
+# A logger's filters outlast every later `dictConfig`, such as the one each uvicorn server runs as it starts,
+# so every server in a process that imports this module keeps these.
+logging.getLogger("uvicorn.access").addFilter(_drop_request_target_query)
+logging.getLogger("uvicorn.error").addFilter(_drop_request_target_query)

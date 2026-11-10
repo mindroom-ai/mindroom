@@ -176,6 +176,28 @@ logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:50
     ]
 
 
+def test_sandbox_runner_request_lines_leave_out_queries() -> None:
+    """The runner's request lines name each path, but leave out its query."""
+    probe = """
+import logging
+import logging.config
+
+from mindroom.api import sandbox_runner_app
+
+sandbox_runner_app.uvicorn.run = lambda app, **kwargs: logging.config.dictConfig(kwargs["log_config"])
+sandbox_runner_app._main()
+access = logging.getLogger("uvicorn.access")
+access.info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", "/api/files?token=http-token-value", "1.1", 200)
+logging.getLogger("uvicorn.error").info('%s - "WebSocket %s" [accepted]', "10.0.0.1:5001", "/stream?token=ws-token-value")
+"""
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120)
+
+    assert result.stdout.splitlines() == [
+        'INFO:     10.0.0.1:5000 - "GET /api/files HTTP/1.1" 200 OK',
+        'INFO:     10.0.0.1:5001 - "WebSocket /stream" [accepted]',
+    ]
+
+
 @pytest.mark.parametrize(("port_env", "port"), [(None, 8766), ("", 8766), ("9123", 9123)])
 def test_sandbox_runner_serves_every_interface_on_the_configured_port(
     monkeypatch: pytest.MonkeyPatch,
