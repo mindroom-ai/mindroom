@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import warnings
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import aiohttp
 import httpx
@@ -1046,3 +1046,46 @@ async def test_api_request_logs_record_paths_without_their_query(
     assert '"WebSocket /api/stream" [accepted]' in request_log
     for secret in ("authorization-code-value", "state-value", "websocket-token-value"):
         assert secret not in request_log
+
+
+@pytest.mark.parametrize("ws", ["websockets-sansio", "websockets"])
+@pytest.mark.asyncio
+async def test_debug_logs_leave_out_websocket_headers_and_frames(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ws: Literal["websockets-sansio", "websockets"],
+) -> None:
+    """At DEBUG, a WebSocket's handshake headers and frame contents stay out of the logs; its other records stay."""
+    setup_logging(level="DEBUG", runtime_paths=_runtime_paths(tmp_path))
+    app = FastAPI()
+
+    @app.websocket("/api/stream")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.receive_text()
+        await websocket.close()
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level="debug", ws=ws))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.ws_connect(
+                f"ws://127.0.0.1:{port}/api/stream?token=query-value",
+                headers={"Authorization": "Bearer authorization-value", "Cookie": "session=cookie-value"},
+            ) as websocket,
+        ):
+            await websocket.send_str("frame-value")
+            await websocket.receive()
+    finally:
+        server.should_exit = True
+        await serving
+
+    captured = capsys.readouterr()
+    debug_log = captured.out + captured.err
+    assert '"WebSocket /api/stream" [accepted]' in debug_log
+    assert "= connection is OPEN" in debug_log
+    for secret in ("query-value", "authorization-value", "cookie-value", "frame-value"):
+        assert secret not in debug_log
