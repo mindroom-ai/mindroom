@@ -9,8 +9,6 @@ Stripe webhooks and the nightly cleanup job both call it, so they behave identic
   the tier), re-enable the key, and clear the schedule.
 - Entitled on a different tier: redeploy a running instance with the tier's key and resources, and lower
   the key limit of an instance that is not running.
-- First paid period after a trial: redeploy with a new key in place of one created during the trial, since
-  OpenRouter resets usage only each calendar month and the trial's usage would otherwise count against it.
 - Teardown due and still not entitled: uninstall everything and mark the instance deprovisioned.
 
 Account deletion also runs through this module: a deletion request cancels Stripe billing and holds the
@@ -52,7 +50,7 @@ from backend.services.provisioner_service import (
     InstanceClaimLostError,
     account_pending_deletion,
     account_row_pending_deletion,
-    openrouter_key_created_before,
+    allowed_openrouter_limit_usd,
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
@@ -74,7 +72,7 @@ if TYPE_CHECKING:
 
 LIFECYCLE_INSTANCE_COLUMNS = (
     "instance_id,subscription_id,account_id,status,tier,openrouter_key_hash,openrouter_key_limit_usd,"
-    "openrouter_key_limit_reset,openrouter_key_created_at,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
+    "openrouter_key_limit_reset,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
 _STRIPE_REFRESH_ATTEMPTS = 3
@@ -513,11 +511,10 @@ async def _resume(
     instance_id = instance["instance_id"]
     torn_down = instance.get("status") == "deprovisioned"
     # Apply the tier's resources and key limit before re-enabling a held instance.
-    plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
+    plan_mismatch = not _deployed_plan_matches(instance, subscription)
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
-    trial_key = openrouter_key_created_before(instance, _first_paid_period_start(subscription))
-    if torn_down or plan_mismatch or failed_before or trial_key or not await check_deployment_exists(str(instance_id)):
+    if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
@@ -555,26 +552,11 @@ async def _hold_for_pending_deletion(
     return True
 
 
-def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
+def _deployed_plan_matches(instance: dict[str, Any], subscription: dict[str, Any]) -> bool:
     """Return whether an instance was last deployed for the tier, with exactly the platform-paid key it includes."""
-    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
-
-
-def _first_paid_period_start(subscription: dict[str, Any]) -> datetime | None:
-    """Return the start of the subscription's current period when it is the first paid one after a trial.
-
-    OpenRouter resets a key's usage on the first of each calendar month, not when a billing period starts, so a
-    trial key kept after the trial converts to paid would start the paid period with the trial's usage, possibly
-    with nothing left to spend until the next calendar month. A key created before this moment is replaced.
-    """
-    if subscription.get("status") != "active":
-        return None
-    period_start = parse_timestamp(subscription.get("current_period_start"))
-    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
-    if period_start is None or trial_ends_at is None:
-        return None
-    # Stripe starts the first paid period when the trial ends; later periods start after the trial end.
-    return period_start if period_start <= trial_ends_at else None
+    tier = subscription["tier"]
+    limit = allowed_openrouter_limit_usd(tier, subscription)
+    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, limit)
 
 
 def _plan_alignment(instance: dict[str, Any], subscription: dict[str, Any]) -> Literal["redeploy", "limit"] | None:
@@ -584,18 +566,17 @@ def _plan_alignment(instance: dict[str, Any], subscription: dict[str, Any]) -> L
     if status == "error" and instance.get("lifecycle_error"):
         # A redeploy by this function failed, and provisioning marked the instance errored; retry it.
         return "redeploy"
-    if status == "running" and openrouter_key_created_before(instance, _first_paid_period_start(subscription)):
-        # The redeploy gives the paid period a new key with the full included budget; any other instance gets one
-        # when it runs again.
-        return "redeploy"
-    if _deployed_plan_matches(instance, tier):
+    if _deployed_plan_matches(instance, subscription):
         return None
+    if instance.get("tier") == tier and instance.get("openrouter_key_hash"):
+        # Deployed for the tier, so only the key limit differs, as it does around a trial conversion.
+        return "limit"
     if status == "running":
         # Provisioning applies the tier's resources and updates the key limit.
         return "redeploy"
     # Any other instance is not redeployed, which would start a customer-stopped one or race a provision; it only
     # gets a lower key limit when required, and the rest follows once it runs again.
-    return "limit" if openrouter_key_exceeds_plan(instance, tier) else None
+    return "limit" if openrouter_key_exceeds_plan(instance, allowed_openrouter_limit_usd(tier, subscription)) else None
 
 
 def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
@@ -615,7 +596,8 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
         try:
-            await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
+            limit = allowed_openrouter_limit_usd(subscription["tier"], subscription)
+            await set_instance_openrouter_key_limit(sb, instance, limit)
         except OpenRouterKeyNotFoundError:
             await revoke_instance_openrouter_key(sb, instance_id)
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
@@ -644,7 +626,6 @@ async def _reprovision(
         background_tasks=None,
         resume_lifecycle_hold=resume_lifecycle_hold,
         expected_status=instance["status"],
-        replace_openrouter_key_created_before=_first_paid_period_start(subscription),
     )
 
 
