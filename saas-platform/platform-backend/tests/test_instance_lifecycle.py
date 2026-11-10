@@ -2497,6 +2497,26 @@ async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(pla
     platform.provision.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_missing_key_never_clears_the_replacement_another_run_recorded(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+
+    async def replaced_meanwhile(*_args: object, **_kwargs: object) -> None:
+        platform.instance()["openrouter_key_hash"] = "key_hash_replacement"
+        msg = "key gone"
+        raise OpenRouterKeyNotFoundError(msg)
+
+    platform.limit_key.side_effect = replaced_meanwhile
+    delete = Mock()
+    with patch(f"{SERVICE}.delete_openrouter_key", delete):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert summary.errors == []
+    assert platform.instance()["openrouter_key_hash"] == "key_hash_replacement"
+    delete.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("status", "trial_ends_at", "now", "expected_multiple"),
     [

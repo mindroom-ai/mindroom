@@ -54,7 +54,6 @@ from backend.services.provisioner_service import (
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
-    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
     set_instance_openrouter_key_limit,
     start_instance,
@@ -599,7 +598,16 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
             limit = allowed_openrouter_limit_usd(subscription["tier"], subscription)
             await set_instance_openrouter_key_limit(sb, instance, limit)
         except OpenRouterKeyNotFoundError:
-            await revoke_instance_openrouter_key(sb, instance_id)
+            # The key is gone on OpenRouter; forget it unless another run recorded a replacement meanwhile, and give a
+            # running instance a new key now. A stopped one gets its key when it starts again.
+            update_instance(
+                sb,
+                instance_id,
+                CLEARED_OPENROUTER_KEY_METADATA,
+                expected_openrouter_key_hash=instance["openrouter_key_hash"],
+            )
+            if instance.get("status") == "running":
+                await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
