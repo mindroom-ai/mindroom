@@ -1432,9 +1432,9 @@ class ResponseRunner:
         it reads the contact again: a contact removed while the turn prepared or waited on its participation gets none.
         Like typing, it is best-effort, so failing to send it never fails the turn.
         """
-        if self._runs_nothing(request) is not None:
-            return
         try:
+            if self._runs_nothing(request) is not None:
+                return
             with allowed_send():
                 await self.deps.delivery_gateway.send_judgment_reaction(
                     turn_id=request.response_envelope.source_event_id,
@@ -2084,8 +2084,8 @@ class ResponseRunner:
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
             show_tool_calls=show_tool_calls,
-            # A quiet turn shows no progress, and a contact turn's or a silent schedule's answer may never be shown, so
-            # its tool hooks read its calls as hidden.
+            # A quiet turn shows none of its calls, and a contact turn's or a silent schedule's answer may never be shown,
+            # so its tool hooks read its calls as hidden.
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
             participation=participation
             if participation is not None

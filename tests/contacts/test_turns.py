@@ -783,16 +783,19 @@ async def test_a_contact_turns_eyes_reread_its_contact(tmp_path: Path, status: s
 
 
 @pytest.mark.asyncio
-async def test_a_contact_turns_eyes_that_fail_never_fail_the_turn(tmp_path: Path) -> None:
-    """The 👀 is best-effort like typing, so an error sending it, such as its membership read failing, never reaches the turn."""
+@pytest.mark.parametrize(
+    "failing",
+    ["mindroom.response_runner.contact_room", "mindroom.delivery_gateway.DeliveryGateway.send_judgment_reaction"],
+)
+async def test_a_contact_turns_eyes_that_fail_never_fail_the_turn(tmp_path: Path, failing: str) -> None:
+    """The 👀 is best-effort like typing, so an error rereading its contact or sending it never reaches the turn."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     bot = _bot(config, paths)
     request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
-    failing = AsyncMock(side_effect=RuntimeError("journal unavailable"))
 
     with (
-        patch("mindroom.delivery_gateway.DeliveryGateway.send_judgment_reaction", failing),
+        patch(failing, side_effect=OSError("storage unavailable")),
         guarded_room(CONTACT_ROOM),
         capture_logs() as logs,
     ):

@@ -139,7 +139,7 @@ class ResponseRequest:
 
     @property
     def quiet(self) -> bool:
-        """Return whether the turn shows no progress in its room: a silent schedule's or a contact turn's."""
+        """Return whether the turn shows no placeholder, stream, or typing: a silent schedule's or a contact turn's."""
         return self.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND or self.contact is not None
 
 
