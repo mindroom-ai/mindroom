@@ -4056,6 +4056,12 @@ def test_api_key_with_non_ascii_characters_rejects(api_key_client: TestClient) -
     assert api_key_client.post("/api/config/load", headers=bearer).status_code == 401
     cookie = {"Cookie": f"mindroom_api_key={wrong}".encode()}
     assert api_key_client.post("/api/config/load", headers=cookie).status_code == 401
+    lone_surrogate = api_key_client.post(
+        "/api/auth/session",
+        content='{"api_key": "\\ud800"}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert lone_surrogate.status_code == 401
     login_with_api_key(api_key_client)
     assert api_key_client.post("/api/config/load").status_code == 200
 

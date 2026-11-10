@@ -52,8 +52,8 @@ router = APIRouter(tags=["auth"])
 
 
 def _api_key_matches(supplied: str, api_key: str) -> bool:
-    """Compare UTF-8 bytes, since `compare_digest` raises on non-ASCII strings."""
-    return secrets.compare_digest(supplied.encode(), api_key.encode())
+    """Compare UTF-8 bytes, since `compare_digest` raises on non-ASCII strings and `encode` on lone surrogates."""
+    return secrets.compare_digest(supplied.encode(errors="surrogatepass"), api_key.encode(errors="surrogatepass"))
 
 
 def require_operator_key(request: Request, authorization: str | None) -> None:
