@@ -217,7 +217,7 @@ async def current_session(request: Request, response: Response) -> _SignedIn | J
     except HTTPException as error:
         # The sign-in probe answer depends on the browser's cookies, so no cache may keep it.
         headers = {**(error.headers or {}), **CONNECTIONS_HEADERS}
-        # Only a browser without a session goes to Chat; a page showing another account just reloads.
+        # Only a browser without a session goes to Chat; a page showing another account reloads.
         if sign_in_url is None or error.detail != CONNECTIONS_SIGN_IN_REQUIRED:
             raise HTTPException(error.status_code, error.detail, headers=headers) from error
         return JSONResponse({"detail": error.detail, "sign_in_url": sign_in_url}, status_code=401, headers=headers)
