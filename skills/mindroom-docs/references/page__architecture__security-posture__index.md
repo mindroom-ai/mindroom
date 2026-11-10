@@ -149,7 +149,7 @@ Reads of worker-controlled files are capped per surface.
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
 | Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 examined entries per folder listing, hidden ones included | A read or save answers 413; a listing is cut and says so |
-| What the workspace change stream scans | 10,000 folders, 100,000 examined entries, and 16 million characters of kept paths, breadth first, 32 folders deep; 100,000 paths or 16 million characters waiting unsent per stream | Changes in the deepest folders and entries past the cap are not reported; a stream with more waiting closes for the client to connect again |
+| What the workspace change stream scans | 10,000 folders, 100,000 examined entries, and 16 MiB of kept paths as UTF-8, breadth first, 32 folders deep; 100,000 paths or 16 MiB of paths waiting unsent per stream | Changes in the deepest folders and entries past the cap are not reported; a stream with more waiting closes for the client to connect again |
 
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).
 The exporter's drift check reads at most 8 MiB of a room's `index.json` and rebuilds a larger one from the thread files.
