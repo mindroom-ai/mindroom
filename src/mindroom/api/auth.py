@@ -1116,7 +1116,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
             )
             if token is None:
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-            if not secrets.compare_digest(token, mindroom_api_key):
+            if not secrets.compare_digest(token.encode(), mindroom_api_key.encode()):
                 raise HTTPException(status_code=401, detail="Invalid API key")
             _require_browser_mutation_origin(request, authorization)
         else:
@@ -1158,7 +1158,7 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
     if not mindroom_api_key:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    if not payload.api_key or not secrets.compare_digest(payload.api_key, mindroom_api_key):
+    if not payload.api_key or not secrets.compare_digest(payload.api_key.encode(), mindroom_api_key.encode()):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     cookie = _standalone_auth_cookie(request)
