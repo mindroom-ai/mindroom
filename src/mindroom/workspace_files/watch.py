@@ -42,10 +42,10 @@ _MAX_FOLDERS = 10_000
 _MAX_ENTRIES = 100_000
 # Each folder is opened from the root, so a deeper one costs more opens.
 _MAX_DEPTH = 32
-# The length of the paths a scan keeps and a follower holds unsent, so each holds at most 64 MB of path text, at 4 bytes
-# a character at most; names of 255 bytes 32 folders deep would let the entry cap alone keep about 800 MB per scan. It
-# leaves the entry cap room for paths of 160 characters each.
-_MAX_PATH_CHARACTERS = 16_000_000
+# The path text a scan keeps and a follower holds unsent, in UTF-8 bytes as a batch sends it. A scan counts every name
+# its filter keeps, also one it then skips by type. Names of 255 bytes 32 folders deep would let the entry cap alone
+# keep about 800 MB per scan. It leaves the entry cap room for paths of 160 bytes each.
+_MAX_PATH_BYTES = 16 * 1024 * 1024
 # The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
     ignore_dirs=(*watchfiles.DefaultFilter.ignore_dirs, ".cache"),
@@ -62,7 +62,7 @@ class _Follower:
     """One stream's changes not sent yet; scans, at least ``_INTERVAL_SECONDS`` apart, add them."""
 
     pending: set[str] = field(default_factory=set)
-    pending_characters: int = 0
+    pending_bytes: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     # Why the stream ends, set once more changes or longer paths wait than one scan takes in, as for a client that
     # stopped reading, or once the scanner fails. The client lists again once it connects again, so what waited is
@@ -73,8 +73,8 @@ class _Follower:
         if self.ended is None:
             added = paths - self.pending
             self.pending |= added
-            self.pending_characters += sum(map(len, added))
-            if len(self.pending) > _MAX_ENTRIES or self.pending_characters > _MAX_PATH_CHARACTERS:
+            self.pending_bytes += sum(len(path.encode()) for path in added)
+            if len(self.pending) > _MAX_ENTRIES or self.pending_bytes > _MAX_PATH_BYTES:
                 self.end("Too many changes to follow; connect again.")
         self.ready.set()
 
@@ -89,7 +89,7 @@ class _Follower:
         self.ready.clear()
         if self.ended is not None:
             raise HTTPException(503, self.ended)
-        paths, self.pending, self.pending_characters = sorted(self.pending), set(), 0
+        paths, self.pending, self.pending_bytes = sorted(self.pending), set(), 0
         return paths
 
 
@@ -136,7 +136,7 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
 def _scan(root: Path) -> dict[str, _Seen]:
     """Return what the workspace holds now by relative path, empty while the root is missing or a link."""
     seen: dict[str, _Seen] = {}
-    examined = characters = 0
+    examined = path_bytes = 0
     with suppress(OSError), open_directory_within_root(root) as root_fd:
         folders = [PurePosixPath()]
         # The list grows while it is read.
@@ -155,6 +155,11 @@ def _scan(root: Path) -> dict[str, _Seen]:
                     # The folders above passed both checks, so the filter needs only the name.
                     if not _FILTER(watchfiles.Change.added, item.name) or is_hidden(relative):
                         continue
+                    path = str(relative)
+                    # A name is UTF-8 once ``is_hidden`` let it through.
+                    path_bytes += len(path.encode())
+                    if path_bytes > _MAX_PATH_BYTES:
+                        return seen
                     try:
                         status = item.stat(follow_symlinks=False)
                     except OSError:
@@ -163,10 +168,6 @@ def _scan(root: Path) -> dict[str, _Seen]:
                     kind = stat.S_IFMT(status.st_mode)
                     if kind not in ENTRY_KINDS:
                         continue
-                    path = str(relative)
-                    characters += len(path)
-                    if characters > _MAX_PATH_CHARACTERS:
-                        return seen
                     if kind == stat.S_IFDIR:
                         seen[path] = (kind, 0, 0, status.st_ino)
                         if len(folders) < _MAX_FOLDERS and len(relative.parts) < _MAX_DEPTH:
