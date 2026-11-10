@@ -14,6 +14,7 @@ import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -243,9 +244,18 @@ def _kernel_port_range() -> range:
     return range(low, high + 1)
 
 
+def _local_port_range(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, low: int, high: int) -> None:
+    """Have the runner read ``low``-``high`` as the worker's local port range."""
+    (tmp_path / "ip_local_port_range").write_text(f"{low}\t{high}\n")
+    monkeypatch.setattr(worker_services_module, "_LOCAL_PORT_RANGE", tmp_path / "ip_local_port_range")
+
+
 @pytest.mark.asyncio
 async def test_a_service_s_port_lies_outside_the_range_the_kernel_numbers_other_sockets_from(tmp_path: Path) -> None:
-    """Sockets that bind port 0 or connect get their ports from that range, so none of them can take the service's."""
+    """Sockets that bind port 0 or connect get their ports from that range, so none of them can take the service's.
+
+    It needs this machine's local port range to leave the services' ports out, as Linux's default does.
+    """
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
         assert state["state"] == "running"
@@ -268,13 +278,15 @@ async def test_a_service_whose_first_candidate_port_another_server_holds_runs_on
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The probe passes over the first candidate port, which another process listens on."""
+    _local_port_range(monkeypatch, tmp_path, 32768, 60999)
     async with _runner(tmp_path) as runner:
         with _service_port_listener() as other, _service_port_listener() as freed:
             taken, free = other.getsockname()[1], freed.getsockname()[1]
             freed.close()
             monkeypatch.setattr(worker_services_module, "_SERVICE_PORTS", [taken, free])
             # The probe takes the candidates in the order given, so the held one comes first.
-            monkeypatch.setattr(worker_services_module.random, "sample", lambda population, _k: list(population))
+            ordered = SimpleNamespace(sample=lambda population, _k: list(population))
+            monkeypatch.setattr(worker_services_module, "random", ordered)
             _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert (state["state"], state["port"]) == ("running", free)
 
@@ -285,8 +297,7 @@ async def test_a_service_s_port_avoids_a_local_port_range_that_reaches_into_the_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An operator's wider local port range leaves the services only the ports above it."""
-    (tmp_path / "ip_local_port_range").write_text("32768\t65000\n")
-    monkeypatch.setattr(worker_services_module, "_LOCAL_PORT_RANGE", tmp_path / "ip_local_port_range")
+    _local_port_range(monkeypatch, tmp_path, 32768, 65000)
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert state["state"] == "running"
@@ -310,9 +321,8 @@ async def test_without_a_free_port_outside_the_kernel_s_range_a_service_gets_one
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local port range that covers every service port leaves the kernel to pick one."""
-    (tmp_path / "ip_local_port_range").write_text("1024\t65535\n")
-    monkeypatch.setattr(worker_services_module, "_LOCAL_PORT_RANGE", tmp_path / "ip_local_port_range")
+    """A local port range that covers every service port, as gVisor's does, leaves the kernel to pick one."""
+    _local_port_range(monkeypatch, tmp_path, 16000, 65535)
     async with _runner(tmp_path) as runner:
         _, state = await _call("POST", runner.url(), _body(), _AUTH)
     assert state["state"] == "running"

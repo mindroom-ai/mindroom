@@ -195,10 +195,7 @@ async def close_worker_services(app: FastAPI) -> None:
 
 
 def _free_loopback_port() -> int:
-    """Return a loopback port no socket holds now, outside the kernel's local port range while one is free there.
-
-    Only a socket bound to that port by number can take it before the service binds it.
-    """
+    """Return a loopback port no socket holds now, outside the kernel's local port range while one is free there."""
     low, high = map(int, _LOCAL_PORT_RANGE.read_text().split())
     candidates = [port for port in _SERVICE_PORTS if not low <= port <= high]
     # In random order, so that services starting together rarely probe the same port.
