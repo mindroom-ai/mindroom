@@ -16727,6 +16727,7 @@ The API routes are:
 | `GET` | `/api/oauth/{provider}/status` | Connection status |
 | `POST` | `/api/oauth/{provider}/disconnect` | Remove the stored token; the tool's editable settings stay |
 | `GET`, `POST` | `/api/oauth/{provider}/reset` | Browser-confirmed reset (see [`oauth_connections`](#oauth_connections)) |
+| `GET` | `/api/oauth/{provider}/client-metadata.json` | Client ID metadata document that a remote MCP server's authorization server fetches when a user connects; it must stay reachable without signing in (see [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration)) |
 
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
