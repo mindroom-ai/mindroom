@@ -351,7 +351,7 @@ async def test_resource_origin_metadata_registers_public_client(
         (
             "https://auth.example.test/register",
             {
-                "client_name": "Example",
+                "client_name": "MindRoom",
                 "redirect_uris": ["https://mindroom.example.test/api/oauth/example/callback"],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],

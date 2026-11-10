@@ -123,6 +123,7 @@ The request-by-request exchange is described in [Connections portal sign-in](arc
 Behind an identity gateway, users can also reach the portal through [trusted upstream auth](deployment/trusted-upstream-auth.md) with a [Matrix identity](deployment/trusted-upstream-auth.md#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
+Leave `/api/oauth/<provider_id>/client-metadata.json` reachable without signing in, because the authorization server of a remote MCP server that [uses a client ID metadata document](mcp.md#oauth-client-registration) fetches it.
 Exclude `/connections` from the other application's service-worker navigation fallback.
 Portal assets are served under `/connections/assets/`, so root `/assets/` can keep serving the other application.
 

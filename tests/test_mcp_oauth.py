@@ -389,7 +389,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
         (
             "https://auth.example.test/register",
             {
-                "client_name": "Example MCP",
+                "client_name": "MindRoom",
                 "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
@@ -920,7 +920,7 @@ async def test_mcp_oauth_identifies_with_a_client_id_metadata_document(
     assert _MovableAuthorizationServerDiscoveryClient.posts == []
     assert client_id_metadata_document(provider, runtime_paths) == {
         "client_id": _ACME_DOCUMENT_URL,
-        "client_name": "Example MCP",
+        "client_name": "MindRoom",
         "redirect_uris": ["https://acme.mindroom.chat/api/oauth/mcp_demo/callback"],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],

@@ -1384,7 +1384,8 @@ async def client_metadata(provider_id: str, request: Request) -> JSONResponse:
     document = await asyncio.to_thread(client_id_metadata_document, provider, runtime_paths)
     if document is None:
         raise HTTPException(status_code=404, detail="No client ID metadata document for this OAuth provider")
-    return JSONResponse(document)
+    # Authorization servers cache the document by its HTTP cache headers; a short lifetime lets scope changes show soon.
+    return JSONResponse(document, headers={"Cache-Control": "public, max-age=300"})
 
 
 @router.get("/{provider_id}/status")

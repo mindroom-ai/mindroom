@@ -718,6 +718,7 @@ Users open it from MindRoom Chat (see [Connections portal](../../../docs/connect
 - **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
   Configure it with the `trustedUpstreamAuth` values, and set an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
+  Leave `/api/oauth/<provider_id>/client-metadata.json` reachable without signing in, because the authorization server of a remote MCP server that [uses a client ID metadata document](../../../docs/mcp.md#oauth-client-registration) fetches it.
   The chart creates no ingress.
 - **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
   Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.

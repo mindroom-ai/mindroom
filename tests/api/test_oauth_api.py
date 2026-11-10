@@ -2867,9 +2867,10 @@ def test_client_id_metadata_document_is_public_only_for_a_client_it_identifies(
     assert response.status_code == status_code
     if status_code == 200:
         assert response.headers["content-type"] == "application/json"
+        assert response.headers["cache-control"] == "public, max-age=300"
         assert response.json() == {
             "client_id": stored_client_id,
-            "client_name": "Test Drive",
+            "client_name": "MindRoom",
             "redirect_uris": ["https://acme.mindroom.chat/api/oauth/test_drive/callback"],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],

@@ -342,7 +342,8 @@ async def _discover_metadata(
 
 def _registration_payload(provider: OAuthProvider, runtime_paths: RuntimePaths) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "client_name": provider.display_name,
+        # Authorization servers show this name on consent screens as the client asking for access.
+        "client_name": "MindRoom",
         "redirect_uris": [provider.default_redirect_uri(runtime_paths)],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
