@@ -164,6 +164,11 @@ spec:
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
+        {{- with .Values.administrators }}
+        # Dashboard logins carry the platform account id; act as the owner's Matrix user so admin checks match.
+        - name: MINDROOM_OWNER_USER_ID
+          value: {{ first . | quote }}
+        {{- end }}
         - name: MINDROOM_STORAGE_PATH
           value: {{ .Values.storagePath }}
         - name: MINDROOM_CONFIG_PATH

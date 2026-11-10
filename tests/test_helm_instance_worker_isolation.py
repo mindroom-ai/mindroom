@@ -432,6 +432,7 @@ def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
+    assert "MINDROOM_OWNER_USER_ID" not in env_values
 
 
 def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
@@ -465,6 +466,9 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     }
     Config.model_validate(mindroom_config)
     assert _tuwunel_config(docs, "42")["auto_join_rooms"] == ["#lobby:42.example.test", "#dev:42.example.test"]
+    container = _resource(docs, "Deployment", "mindroom-42")["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    assert env_values["MINDROOM_OWNER_USER_ID"] == "@owner:42.example.test"
 
 
 @pytest.mark.parametrize(
