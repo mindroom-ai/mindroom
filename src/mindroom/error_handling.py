@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
+    QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -26,6 +27,11 @@ logger = get_logger(__name__)
 
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
+# The provider's own text names its billing pages, which the person in the room may not be able to open.
+_QUOTA_EXHAUSTED_MESSAGE = (
+    "💳 The AI budget for this MindRoom is used up, so I can't answer right now. "
+    "Add credit or raise the spending limit (from the dashboard or with the AI provider), then try again."
+)
 
 
 class AvatarGenerationError(RuntimeError):
@@ -101,7 +107,9 @@ def needs_provider_key(error: Exception) -> bool:
     return isinstance(error, AuthenticationFailed) and error.code == MISSING_API_KEY
 
 
-def _provider_error_message(error: ProviderError, safe_error: str) -> str:
+def _provider_error_message(error: ProviderError, safe_error: str) -> str:  # noqa: PLR0911 - one return per kind
+    if error.code == QUOTA_EXHAUSTED:
+        return _QUOTA_EXHAUSTED_MESSAGE
     if isinstance(error, AuthenticationFailed):
         provider_hint = f" ({error.provider})" if error.provider else ""
         return f"❌ Authentication failed{provider_hint}: {safe_error}"

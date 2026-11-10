@@ -97,12 +97,14 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
 # your specified workspace API usage limits" for a spend limit the organization or a workspace set. Gemini's 429
 # ``RESOURCE_EXHAUSTED``, which it also sends for a rate limit: "Your prepayment credits are depleted. Please go to AI
 # Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
-# spending cap.", or "Your billing account has ..." for the billing account's cap.
+# spending cap.", or "Your billing account has ..." for the billing account's cap. OpenRouter's 403 for a key that
+# reached the credit limit set on it: "Key limit exceeded (monthly limit). Manage it using ...".
 _QUOTA_EXHAUSTED_WORDING = (
     "credit balance is too low",
     "you have reached your specified",
     "prepayment credits are depleted",
     "exceeded its monthly spending cap",
+    "key limit exceeded",
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
