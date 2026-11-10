@@ -254,6 +254,8 @@ def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
         ),
         pytest.param(402, None, "Insufficient Balance", id="deepseek"),
         pytest.param(429, "1113", "Insufficient balance or no resource package. Please recharge.", id="zai"),
+        pytest.param(429, "1309", "Your GLM Coding Plan package has expired.", id="zai-plan-expired"),
+        pytest.param(429, "1314", "Your enterprise package has expired.", id="zai-package-expired"),
     ],
 )
 def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
@@ -264,5 +266,7 @@ def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
     """A provider refusing for lack of credit gets one plain reply, not its own text and billing links."""
     error = classify_provider_error(message, provider="openrouter", status_code=status_code, code=code)
     reply = get_user_friendly_error_message(error, "assistant")
-    assert reply.startswith("[assistant] 💳 The AI budget for this MindRoom is used up")
+    assert reply.startswith("[assistant] 💳 The AI budget for this MindRoom is used up or its plan has expired")
+    assert "renew the plan" in reply
+    assert "(openrouter)" in reply
     assert "openrouter.ai" not in reply
