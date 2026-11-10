@@ -81,7 +81,7 @@ def _contact(
         reason="Plan the dinner",
         requester_side=ContactSide(),
         target_side=ContactSide(),
-        origin_room_id="!origin:localhost",
+        origin_room_id=None if requester.kind == "remote_agent" else "!origin:localhost",
         origin_thread_id=None,
         room_id=room_id,
     )

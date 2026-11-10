@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.contacts.parties import remote_party
 from mindroom.contacts.policy import (
     _CONTACT_RULES_QUESTION_ID,
     ContactVerdict,
@@ -555,3 +556,26 @@ async def test_blank_text_denies_when_a_judge_is_set(tmp_path: Path, monkeypatch
 
     assert verdict == ContactVerdict("deny", "   ", "The message cannot be checked (missing_essential_input).")
     assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_another_deployments_agent_counts_toward_the_limit(tmp_path: Path) -> None:
+    """Its messages are agent messages, so two agents of different deployments cannot talk past the limit."""
+    config, paths = _config(tmp_path)
+    remote = "@mindroom_mind_dana:other.org"
+    record = _record(target=remote_party(remote))
+    context = _tool_context(config, paths)
+    alice_agent = current_entity_id("mind_alice", paths).full_id
+    trail = [make_visible_message(sender=sender) for sender in (remote, alice_agent, remote)]
+    serve_conversation_reader(context.conversation_reader, trail, room_id=ROOM, thread_id="$thread")
+    verdict = await check_contact_message(
+        context,
+        record,
+        "requester",
+        room_id=ROOM,
+        thread_id="$thread",
+        text="Friday?",
+        adds_message=True,
+    )
+    assert verdict.action == "deny"
+    assert verdict.feedback == "The conversation already has 3 agent messages in a row; wait for a person to write."

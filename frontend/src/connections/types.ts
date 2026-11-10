@@ -373,9 +373,11 @@ export interface ContactAgent {
 }
 
 export interface ContactPartyView {
-  kind: "agent" | "person";
+  /** `remote_agent` is an agent of another MindRoom deployment, known by its Matrix ID alone. */
+  kind: "agent" | "person" | "remote_agent";
   id: string;
-  owner: string;
+  /** Null for an agent of another deployment, whose owner this deployment cannot verify. */
+  owner: string | null;
   display_name: string;
 }
 

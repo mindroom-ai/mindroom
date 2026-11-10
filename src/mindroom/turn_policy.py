@@ -16,7 +16,7 @@ from mindroom.authorization import (
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.contacts.turns import contact_room, unmentioned_message_answerer
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
-from mindroom.entity_resolution import current_entity_id, entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
@@ -781,16 +781,15 @@ class TurnPolicy:
         context = dispatch.context
         if context.am_i_mentioned or context.mentioned_agents or context.has_non_agent_mentions:
             return candidates
-        answerer = unmentioned_message_answerer(
+        answerer_id = unmentioned_message_answerer(
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room_id=dispatch.target.room_id,
             agent_name=self.deps.agent_name,
             sender_id=dispatch.envelope.origin.transport_sender_id,
         )
-        if answerer is None:
+        if answerer_id is None:
             return candidates
-        answerer_id = current_entity_id(answerer, self.deps.runtime_paths).full_id
         return replace(
             candidates,
             allowed=[responder for responder in candidates.allowed if responder.full_id == answerer_id],

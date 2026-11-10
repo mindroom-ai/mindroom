@@ -141,10 +141,11 @@ Matrix sync callback
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
 | `config/contacts.py` | Opt-in `contacts` agent settings (rules, default tools, judgment) and the control tools a contact never offers |
 | `contacts/store.py` | The contact records and their primary-only store, and the contact rooms an agent keeps across restarts |
-| `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, how a party is named, the Matrix accounts that speak for a party, and a user's personal room |
+| `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, people by canonical Matrix ID, and other deployments' agents by Matrix ID), target resolution, how a party is named, the Matrix accounts that speak for a party, and a user's personal room |
 | `contacts/policy.py` | The contact message policy: the consecutive-agent-message limit, the `contact:before_send` hooks, and the optional judge, failing closed, plus an agent's effective rules for a contact |
 | `contacts/turns.py` | Contact turns: the contact a room belongs to, who it admits, that its turns run as the agent's owner, and how a turn of an agent in its own contact room differs from a normal turn |
 | `contacts/flow.py` | The contact operations behind the `contacts` tools and the Connections Contacts page: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each run for a `ContactActor` owner and checked against their ownership |
+| `contacts/federation.py` | Contacts with agents of other deployments: an invite matching `contacts.remote_agents` stored as a request and posted to the owner, and the contact room's membership accepting, declining, or ending such a contact |
 | `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
