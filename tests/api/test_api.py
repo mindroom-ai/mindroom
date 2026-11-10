@@ -3666,6 +3666,67 @@ def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClien
     assert response.status_code == 200
 
 
+def test_api_key_cookie_keeps_plain_name_over_http(api_key_client: TestClient) -> None:
+    """Browsers refuse `__Host-` cookies without `Secure`, so plain HTTP keeps the unprefixed name."""
+    login_with_api_key(api_key_client)
+
+    [set_cookie] = api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).headers.get_list("set-cookie")
+    assert set_cookie.startswith("mindroom_api_key=test-key;")
+    assert "secure" not in set_cookie.lower()
+
+
+@pytest.mark.usefixtures("api_key_client")
+def test_api_key_cookie_uses_host_prefix_over_https() -> None:
+    """Over HTTPS the session cookie is a host-only `__Host-` cookie that authenticates later requests."""
+    client = TestClient(main.app, base_url="https://localhost")
+    login_with_api_key(client)
+
+    [set_cookie] = client.post("/api/auth/session", json={"api_key": "test-key"}).headers.get_list("set-cookie")
+    attributes = [part.strip().lower() for part in set_cookie.split(";")]
+    assert attributes[0] == "__host-mindroom_api_key=test-key"
+    assert {"secure", "httponly", "path=/", "samesite=lax"} <= set(attributes)
+    assert not any(attribute.startswith("domain") for attribute in attributes)
+    assert client.cookies.get("__Host-mindroom_api_key") == "test-key"
+    assert client.post("/api/config/load").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("cookie", "expected"),
+    [
+        ("mindroom_api_key=wrong; __Host-mindroom_api_key=test-key", 200),
+        ("__Host-mindroom_api_key=test-key; mindroom_api_key=wrong", 200),
+        ("mindroom_api_key=test-key; __Host-mindroom_api_key=wrong", 401),
+        ("mindroom_api_key=test-key", 401),
+    ],
+)
+def test_api_key_cookie_over_https_reads_only_prefixed_name(
+    api_key_client: TestClient,
+    cookie: str,
+    expected: int,
+) -> None:
+    """Over HTTPS an unprefixed cookie of the same name never authenticates or overrides the prefixed one."""
+    response = api_key_client.post(
+        "https://localhost/api/config/load",
+        headers={"Origin": "https://localhost", "Cookie": cookie},
+    )
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.usefixtures("api_key_client")
+@pytest.mark.parametrize("base_url", ["http://localhost", "https://localhost"])
+def test_api_key_sign_out_clears_both_cookie_names(base_url: str) -> None:
+    """Sign-out expires the prefixed and the unprefixed session cookie."""
+    client = TestClient(main.app, base_url=base_url)
+    login_with_api_key(client)
+
+    set_cookies = client.delete("/api/auth/session").headers.get_list("set-cookie")
+    cleared = {header.split("=", 1)[0]: header.lower() for header in set_cookies}
+    assert set(cleared) == {"mindroom_api_key", "__Host-mindroom_api_key"}
+    assert all("max-age=0" in header and "path=/" in header for header in cleared.values())
+    assert "secure" in cleared["__Host-mindroom_api_key"]
+    assert not client.cookies
+
+
 @pytest.mark.usefixtures("frontend_dist")
 def test_frontend_serves_after_api_key_login(api_key_client: TestClient) -> None:
     """Authenticated standalone users should receive the bundled dashboard."""
