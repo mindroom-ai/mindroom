@@ -76,8 +76,9 @@ jobs:
           expected="$(mktemp)"
           actual="$(mktemp)"
           jq -r '.[]' .github/plugin-fleet.json | sort > "$expected"
+          # `-client-plugin` repositories are MindRoom Chat client plugins, which this backend fleet does not test.
           gh api --paginate 'orgs/mindroom-ai/repos?per_page=100&type=public' \
-            --jq '.[] | select(.archived == false and (.name | endswith("-plugin"))) | .full_name' \
+            --jq '.[] | select(.archived == false and (.name | endswith("-plugin")) and (.name | endswith("-client-plugin") | not)) | .full_name' \
             | sort > "$actual"
           diff -u "$expected" "$actual"
 
