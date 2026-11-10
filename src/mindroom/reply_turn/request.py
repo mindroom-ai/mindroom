@@ -139,7 +139,7 @@ class ResponseRequest:
 
     @property
     def quiet(self) -> bool:
-        """Return whether the turn shows no progress in its room: a silent schedule's or a contact turn's."""
+        """Return whether the turn shows no placeholder or stream: a silent schedule's or a contact turn's."""
         return self.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND or self.contact is not None
 
 
@@ -174,8 +174,11 @@ async def response_typing_indicator(
     response_run_id: str | None,
     participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing only for a response whose progress may be visible, which a quiet one's never is."""
-    if request.quiet:
+    """Expose typing for every response but a silent schedule's, which nobody waits on.
+
+    A contact turn shows no other progress, but its typing carries no content, so whoever wrote to it sees it working.
+    """
+    if request.quiet and request.contact is None:
         yield
         return
 

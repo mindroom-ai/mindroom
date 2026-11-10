@@ -219,7 +219,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A personal agent removed while MindRoom is stopped, or while its bot is not running because it failed to start, keeps its contacts active, because no bot of it runs to end them, so the other side writes into a room where its agent no longer answers until the agent comes back or the other owner removes the contact.
 - A personal agent whose removal waits on an unresolved approval recovery stays in its rooms so that recovery can still deliver there, and keeps its contacts active the same way.
 - A personal agent removed while the contacts store cannot be read or written still leaves its rooms but keeps its contacts active and its owners' invitations pending, because staying would keep a removed agent in every room it joined.
-- The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
+- The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends only typing notices, which carry no content, into its room, and only a plugin hook could send the others.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
 - Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.
 

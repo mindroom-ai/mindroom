@@ -675,15 +675,15 @@ async def _run(bot: AgentBot, room_id: str) -> _Turn:
 
 
 @pytest.mark.asyncio
-async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
+async def test_a_contact_turn_shows_only_typing_and_offers_only_its_contacts_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No placeholder, typing, stream, Stop button, reaction, or answer reaches the room, and only the contact's tools do.
+    """The room sees only typing, never the answer, and the model gets only the contact's tools.
 
-    The approval-gated ``sleep`` is dropped though the contact lists it, and so are shell, the room tools, and the
-    tools ``matrix_message`` brings along. The agent stays itself: its identity, its configured instructions, and the
-    contact's rules all reach the model.
+    No placeholder, stream, Stop button, or reaction reaches the room either. The approval-gated ``sleep`` is dropped
+    though the contact lists it, and so are shell, the room tools, and the tools ``matrix_message`` brings along. The
+    agent stays itself: its identity, its configured instructions, and the contact's rules all reach the model.
     """
     config, paths = _setup(tmp_path)
     _contact(paths, _record(target_side=ContactSide(rules=OWNER_RULE)))
@@ -696,7 +696,11 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
     [delivery], [context] = turn.ended, turn.contexts
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     bot.client.room_send.assert_not_awaited()
-    bot.client.room_typing.assert_not_awaited()
+    # Typing carries no content, so whoever is waiting on the turn sees it working.
+    assert [call.args[:2] for call in bot.client.room_typing.await_args_list] == [
+        (CONTACT_ROOM, True),
+        (CONTACT_ROOM, False),
+    ]
     assert turn.on_defer == [None]
     assert (context.persona, context.tool_names) == (None, ("calculator", "sleep", "matrix_message"))
     assert context.supports_native_tool_approval is False
@@ -1068,7 +1072,7 @@ async def test_a_contact_turn_whose_preparation_fails_shows_nothing(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fails", [False, True])
-async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_nothing(
+async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_no_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fails: bool,
@@ -1110,7 +1114,8 @@ async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_noth
         assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     assert context.tool_names == ("calculator", "sleep", "matrix_message")
     bot.client.room_send.assert_not_awaited()
-    bot.client.room_typing.assert_not_awaited()
+    # The typing it started before the removal still ends with the turn.
+    assert [call.args[1] for call in bot.client.room_typing.await_args_list] == [True, False]
 
 
 @pytest.mark.asyncio

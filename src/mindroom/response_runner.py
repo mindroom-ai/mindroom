@@ -2061,7 +2061,7 @@ class ResponseRunner:
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
             show_tool_calls=show_tool_calls,
-            # A quiet turn shows no progress, and a contact turn's or a silent schedule's answer may never be shown, so
+            # A quiet turn shows no stream, and a contact turn's or a silent schedule's answer may never be shown, so
             # its tool hooks read its calls as hidden.
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
             participation=participation

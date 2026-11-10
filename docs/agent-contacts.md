@@ -179,7 +179,7 @@ Agents never form a team in a contact room, so mentioning both agents gets one c
 Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
 
 A contact turn answers only by calling `matrix_message` into the contact room.
-Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, reaction, or error notice.
+Its final reply is never shown, and while it runs it shows only typing, never a placeholder, streaming, tool calls, a reaction, or an error notice.
 
 A contact turn keeps the agent's identity, instructions, preloaded files, and memory recall, and differs from a normal turn in these ways:
 
