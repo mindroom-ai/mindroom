@@ -7,6 +7,7 @@ import json
 import logging
 import logging.config
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -15,9 +16,12 @@ import warnings
 from typing import TYPE_CHECKING, NoReturn
 
 import aiohttp
+import httpx
 import nio
 import pytest
+import uvicorn
 from agno.utils import log as agno_log
+from fastapi import FastAPI
 from mem0 import AsyncMemory
 
 from mindroom import logging_config
@@ -988,3 +992,45 @@ def test_log_file_writer_survives_a_failed_reopen(
     assert "Stale file handle" in capsys.readouterr().err
     events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
     assert events == ["Logging initialized", "logged_after_failed_reopen"]
+
+
+@pytest.mark.asyncio
+async def test_api_access_log_records_paths_without_their_query(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The API's access log names each request's path, but leaves out a query such as an OAuth callback's code."""
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    app = FastAPI()
+
+    @app.get("/api/oauth/{provider_id}/callback")
+    async def callback(provider_id: str) -> str:
+        return provider_id
+
+    @app.get("/api/health")
+    async def health() -> str:
+        return "ok"
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    # Built after `setup_logging`, as for `mindroom run`, so uvicorn's own logging config is the last one applied.
+    server = uvicorn.Server(uvicorn.Config(app, log_level="info", ws="none"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        # The socket already listens, so requests wait in its backlog until the server starts accepting.
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+            callback_response = await client.get(
+                "/api/oauth/google_drive/callback",
+                params={"code": "authorization-code-value", "state": "state-value"},
+            )
+            health_response = await client.get("/api/health")
+    finally:
+        server.should_exit = True
+        await serving
+
+    assert (callback_response.status_code, health_response.status_code) == (200, 200)
+    access_log = capsys.readouterr().out
+    assert '"GET /api/oauth/google_drive/callback HTTP/1.1" 200' in access_log
+    assert '"GET /api/health HTTP/1.1" 200' in access_log
+    assert "authorization-code-value" not in access_log
+    assert "state-value" not in access_log
