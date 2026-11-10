@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import tempfile
 import threading
 import time
 from functools import partial
@@ -1272,7 +1271,8 @@ class TestMemoryConfig:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        # Its own installation, so its exclusive hold stays off the real environment's lock.
+        monkeypatch.setattr("mindroom.tool_system.dependencies._INSTALLATION_SITE_PACKAGES", tmp_path)
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="sentence_transformers",
