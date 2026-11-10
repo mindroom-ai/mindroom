@@ -37,6 +37,7 @@ from mindroom.contacts.turns import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.custom_tools import chat_ui, computer_announcement
 from mindroom.delivery_gateway import ResponseIdentity
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
 from mindroom.final_delivery import Failed, FailureCause, Suppressed, Suppression
 from mindroom.hooks import (
@@ -756,6 +757,22 @@ async def test_a_gated_contact_turn_shows_eyes_only_once_its_participation_lets_
             await asyncio.sleep(0)
 
     assert receipts == ([CONTACT_ROOM] if action == "respond" else [])
+    client.room_typing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_silent_schedule_run_as_a_contact_turn_shows_no_eyes() -> None:
+    """A silent schedule's trigger is hidden and nobody waits on it, so even a contact turn puts no 👀 on it."""
+    contact_request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+    origin = message_origin(sender_id=OWNER, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    request = replace(contact_request, response_envelope=replace(contact_request.response_envelope, origin=origin))
+    client = AsyncMock(spec=nio.AsyncClient)
+    receipt = AsyncMock()
+
+    async with response_typing_indicator(client, request, response_run_id=None, contact_receipt=receipt):
+        await asyncio.sleep(0)
+
+    receipt.assert_not_awaited()
     client.room_typing.assert_not_awaited()
 
 

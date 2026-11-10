@@ -177,9 +177,11 @@ async def response_typing_indicator(
 ) -> AsyncIterator[None]:
     """Expose typing only for a response whose progress may be visible, which a quiet one's never is.
 
-    A contact turn, quiet as it is, sends ``contact_receipt`` instead, once its participation lets it become visible.
+    A contact turn, quiet as it is, sends ``contact_receipt`` instead, once its participation lets it become visible,
+    unless it runs a silent schedule, whose hidden trigger nobody waits on.
     """
-    if request.quiet and (request.contact is None or contact_receipt is None):
+    silent_schedule = request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    if silent_schedule or (request.quiet and contact_receipt is None):
         yield
         return
 
