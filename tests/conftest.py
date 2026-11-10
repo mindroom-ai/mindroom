@@ -4,6 +4,7 @@ import asyncio
 import gc
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -3764,7 +3765,13 @@ def _isolate_structlog_configuration(
         (agno_logger, agno_logger.handlers[:], agno_logger.filters[:], agno_logger.level, agno_logger.propagate)
         for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger)
     ]
+    # `setup_logging` also sets the root level and handlers; a DEBUG root makes every later test on this worker
+    # render and capture each debug record, which took team turns past the timeout.
+    root_logger = logging.getLogger()
+    root_handlers, root_level = root_logger.handlers[:], root_logger.level
     yield
+    root_logger.handlers[:] = root_handlers
+    root_logger.setLevel(root_level)
     _configure_quiet_structlog()
     for agno_logger, handlers, filters, level, propagate in agno_loggers:
         agno_logger.handlers[:] = handlers
