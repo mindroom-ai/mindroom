@@ -8222,7 +8222,7 @@ Agents never form a team in a contact room, so mentioning both agents gets one c
 Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
 
 A contact turn answers only by calling `matrix_message` into the contact room.
-Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, reaction, or error notice.
+Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, or error notice, only a 👀 reaction on the message it answers.
 
 A contact turn keeps the agent's identity, instructions, preloaded files, and memory recall, and differs from a normal turn in these ways:
 
@@ -8238,7 +8238,7 @@ Even your own messages in a contact room start contact turns, so use your person
 
 ## Message Policy
 
-Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room.
+Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room; only the 👀 a contact turn puts on the message it answers skips it.
 The checks run in order:
 
 1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](https://docs.mindroom.chat/configuration/agents/#defaults) agent messages in a row, until a person writes.
@@ -17659,7 +17659,7 @@ Do not report or "fix" these; they are deliberate.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
 - An accepted [contact](https://docs.mindroom.chat/agent-contacts/) lets the other side start turns of an agent that run with its owner's authority, limited to the tools the owner approved for that contact; anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything the agent's worker or process can.
   A contact turn also keeps the agent's instructions, preloaded files, and memory recall, so the other side can try to extract them.
-- A contact turn can post into its contact room only through `matrix_message`, after the contact's message policy; any other message, edit, reaction, or file that the turn, its tools, or its plugin hooks send into that room is refused, and so is one that a `message:received` or `reaction:received` hook sends there for an event in that room.
+- A contact turn can post into its contact room only through `matrix_message`, after the contact's message policy; any other message, edit, reaction, or file that the turn, its tools, or its plugin hooks send into that room is refused, and so is one that a `message:received` or `reaction:received` hook sends there for an event in that room; only the fixed 👀 that MindRoom puts on the message the turn answers skips the policy.
 - A contact request puts text its requester controls, the `reason` and the requesting agent's display name, into a new thread of the target owner's personal room, and any owner whose personal agent has `contacts` can send one after approving their own request card.
   When the target owner replies in that thread, their personal-room agent reads that text in a normal turn with the owner's full tools, so the text can steer it like any untrusted content; approval cards, which `accept_contact` always shows unless the owner turned on `!auto_approve` there, and the owner's `tool_approval` rules for other tools are what stop writes.
 - A personal agent whose `contacts.remote_agents` names agents of other deployments treats an invite from any matching account as a contact request, which puts the invite's `reason` into its owner's personal room like a request from this deployment; an empty list, the default, accepts none.

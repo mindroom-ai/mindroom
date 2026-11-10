@@ -118,6 +118,8 @@ Blocking each path separately was rejected, because three review rounds each fou
 Plugin hooks on an inbound event run before any contact turn starts, always inside the agent's admitted decision to act on that event, so that decision guards the room when it is or was the agent's contact room.
 Guarding at the journal callback was rejected, because those hooks run in coalescing tasks that keep the context of whatever created them.
 Contact turns keep their quiet delivery, so their replies never try a placeholder, stream, or error notice that the room would refuse.
+A contact turn puts a fixed 👀 reaction on the message it answers, outside the message policy, because a turn that showed nothing for tens of seconds left an owner who asked in the contact room taking the agent for idle and mentioning it again; the emoji carries nothing the model wrote, and a turn whose participation is judged shows it only once approved, as other turns show typing.
+Typing was rejected for this, because MindRoom Chat names an agent as typing in a thread only while its reply there streams, and a contact turn never streams.
 Their tools also run inline, never as background jobs, because every running job is published as a state event in its room, which the room does not refuse and the other owner's client shows with its tool name.
 
 ### Contact turns get a restricted surface

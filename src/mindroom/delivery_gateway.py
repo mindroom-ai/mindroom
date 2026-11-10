@@ -590,7 +590,7 @@ class DeliveryGateway:
         room_id: str,
         event_id: str,
         key: str,
-        kind: Literal["participation_decline", "mid_turn_defer", "approval_wait"],
+        kind: Literal["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"],
     ) -> None:
         """Best-effort acknowledgement of a deliberate judgment on the turn ``turn_id``, stable across replays."""
         # A reaction is direct transport, outside the outbox's durable refusal, so it checks the turn's membership itself.
