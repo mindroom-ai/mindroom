@@ -1063,6 +1063,7 @@ async def test_debug_logs_leave_out_websocket_headers_and_frames(
     async def stream(websocket: WebSocket) -> None:
         await websocket.accept()
         await websocket.receive_text()
+        await websocket.send_text("reply-value")
         await websocket.close()
 
     listener = socket.create_server(("127.0.0.1", 0))
@@ -1078,7 +1079,7 @@ async def test_debug_logs_leave_out_websocket_headers_and_frames(
             ) as websocket,
         ):
             await websocket.send_str("frame-value")
-            await websocket.receive()
+            assert (await websocket.receive()).data == "reply-value"
     finally:
         server.should_exit = True
         await serving
@@ -1087,5 +1088,5 @@ async def test_debug_logs_leave_out_websocket_headers_and_frames(
     debug_log = captured.out + captured.err
     assert '"WebSocket /api/stream" [accepted]' in debug_log
     assert "= connection is OPEN" in debug_log
-    for secret in ("query-value", "authorization-value", "cookie-value", "frame-value"):
+    for secret in ("query-value", "authorization-value", "cookie-value", "frame-value", "reply-value"):
         assert secret not in debug_log
