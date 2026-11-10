@@ -385,7 +385,7 @@ def test_a_scan_stops_once_its_paths_reach_the_cap_s_bytes(tmp_path: Path, monke
     root = tmp_path / "workspace"
     root.mkdir()
     for index in range(10):
-        # 25 characters, 50 bytes.
+        # 26 characters, 50 bytes.
         (root / f"{index}{'é' * 24}x").write_text("x")
     monkeypatch.setattr(watch, "_MAX_PATH_BYTES", 100)
     examined = Mock(wraps=watch.is_hidden)
