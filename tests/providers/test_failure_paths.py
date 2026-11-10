@@ -83,6 +83,7 @@ ERROR = "⚠️ Error: "
 AUTHENTICATION = "❌ Authentication failed"
 CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."
 OVER_TOKENS_PER_MINUTE = "⚠️ This request is larger than the account's tokens-per-minute limit."
+QUOTA_EXHAUSTED_REPLY = "💳 The AI budget for this MindRoom is used up"
 
 
 @pytest.fixture(autouse=True)
@@ -546,7 +547,7 @@ _CLAUDE_CASES = [
         "http_400_credit_balance_too_low",
         _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -554,7 +555,7 @@ _CLAUDE_CASES = [
         "http_400_own_spend_limit",
         _claude_status(400, "invalid_request_error", "You have reached your specified API usage limits."),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -562,7 +563,7 @@ _CLAUDE_CASES = [
         "http_400_own_workspace_spend_limit",
         _claude_status(400, "invalid_request_error", "You have reached your specified workspace API usage limits."),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -571,7 +572,7 @@ _CLAUDE_CASES = [
         "http_429_spend_cap",
         _json(429, _CLAUDE_SPEND_CAP_BODY),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -579,7 +580,7 @@ _CLAUDE_CASES = [
         "http_402_billing_error",
         _claude_status(402, "billing_error", "There's an issue with your billing or payment information."),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -633,7 +634,7 @@ _CLAUDE_CASES = [
         "event_credit_balance_too_low",
         _claude_stream(_claude_error("invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)),
         ProviderError,
-        ERROR,
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -865,7 +866,7 @@ _OPENAI_HTTP_CASES = [
         1,
     ),
     # An account without credit, or past its spend or usage limit, fails every time until its billing changes, so the
-    # reply shows the provider's text. ``insufficient_quota`` is the older code and still the type of the others.
+    # reply says the AI budget is used up. ``insufficient_quota`` is the older code and still the type of the others.
     _Case(
         "http_429_insufficient_quota",
         _openai_status(
@@ -876,7 +877,7 @@ _OPENAI_HTTP_CASES = [
             "insufficient_quota",
         ),
         ProviderError,
-        f"{ERROR}You exceeded your current quota, please check your plan and billing details.",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -889,7 +890,7 @@ _OPENAI_HTTP_CASES = [
             "credit_balance_exhausted",
         ),
         ProviderError,
-        f"{ERROR}Your organization has no prepaid credits remaining.",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -898,7 +899,7 @@ _OPENAI_HTTP_CASES = [
         "http_429_unlisted_billing_code",
         _openai_status(429, "A billing failure under a new code.", "insufficient_quota", "unlisted_billing_code"),
         ProviderError,
-        f"{ERROR}A billing failure under a new code.",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -935,7 +936,7 @@ _CHAT_CASES = [
             "exceeded_current_quota_error",
         ),
         ProviderError,
-        f"{ERROR}Account balance is insufficient or the account has been disabled",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -1058,12 +1059,23 @@ _OPENROUTER_NO_CREDIT = _json(
     {"error": {"code": 402, "message": "Insufficient credits. Add more using https://openrouter.ai/credits"}},
 )
 _DEEPSEEK_NO_BALANCE = _openai_status(402, "Insufficient Balance", "unknown_error", "invalid_request_error")
+_OPENROUTER_KEY_LIMIT = _json(
+    403,
+    {
+        "error": {
+            "code": 403,
+            "message": "Key limit exceeded (monthly limit). Manage it using https://openrouter.ai/settings/keys",
+        },
+    },
+)
 _OPENROUTER_CASES = [
+    # A key past the credit limit set on it fails with a 403 that only its wording tells apart.
+    _Case("http_403_key_limit", _OPENROUTER_KEY_LIMIT, ProviderError, QUOTA_EXHAUSTED_REPLY, 1, code=QUOTA_EXHAUSTED),
     _Case(
         "http_402_insufficient_credits",
         _OPENROUTER_NO_CREDIT,
         ProviderError,
-        f"{ERROR}Insufficient credits",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -1073,7 +1085,7 @@ _DEEPSEEK_CASES = [
         "http_402_insufficient_balance",
         _DEEPSEEK_NO_BALANCE,
         ProviderError,
-        f"{ERROR}Insufficient Balance",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -1089,7 +1101,7 @@ _ZAI_CASES = [
         "http_429_insufficient_balance",
         _ZAI_NO_BALANCE,
         ProviderError,
-        f"{ERROR}Insufficient balance or no resource package",
+        QUOTA_EXHAUSTED_REPLY,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -1187,13 +1199,13 @@ _GEMINI_CASES = [
     ),
     # Gemini sends used-up prepaid credit and a reached monthly spending cap as a 429 like a rate limit, with no code
     # of its own, and Google's troubleshooting guide names a 402 for used-up credit; no retry passes until the credits
-    # or the cap change, so the reply shows Google's text.
+    # or the cap change.
     *(
         _Case(
             f"http_{status}_{failure}",
             _gemini_status(status, message, reason),
             ProviderError,
-            f"{ERROR}{message}",
+            QUOTA_EXHAUSTED_REPLY,
             1,
             code=QUOTA_EXHAUSTED,
         )

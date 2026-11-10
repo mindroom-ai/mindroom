@@ -21,7 +21,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.errors import missing_api_key_error
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error
 
 
 @pytest.mark.parametrize(
@@ -235,3 +235,38 @@ def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
     assert minimal_mode_failure_message(reason, "helper", subagent=False) == (
         "Minimal Bash requires an active managed response owner. Return to standard mode with `!mode helper standard`."
     )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        pytest.param(
+            402,
+            None,
+            "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+            id="openrouter-402",
+        ),
+        pytest.param(
+            403,
+            None,
+            "Key limit exceeded (monthly limit). Manage it using https://openrouter.ai/settings/keys",
+            id="openrouter-key-limit",
+        ),
+        pytest.param(402, None, "Insufficient Balance", id="deepseek"),
+        pytest.param(429, "1113", "Insufficient balance or no resource package. Please recharge.", id="zai"),
+        pytest.param(429, "1309", "Your GLM Coding Plan package has expired.", id="zai-plan-expired"),
+        pytest.param(429, "1314", "Your enterprise package has expired.", id="zai-package-expired"),
+    ],
+)
+def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
+    status_code: int,
+    code: str | None,
+    message: str,
+) -> None:
+    """A provider refusing for lack of credit gets one plain reply, not its own text and billing links."""
+    error = classify_provider_error(message, provider="openrouter", status_code=status_code, code=code)
+    reply = get_user_friendly_error_message(error, "assistant")
+    assert reply.startswith("[assistant] 💳 The AI budget for this MindRoom is used up or its plan has expired")
+    assert "renew the plan" in reply
+    assert "(openrouter)" in reply
+    assert "openrouter.ai" not in reply
