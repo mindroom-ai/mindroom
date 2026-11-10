@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 router = APIRouter(tags=["auth"])
 
 
+def _api_key_matches(supplied: str, api_key: str) -> bool:
+    """Compare UTF-8 bytes, since `compare_digest` raises on non-ASCII strings."""
+    return secrets.compare_digest(supplied.encode(), api_key.encode())
+
+
 def require_operator_key(request: Request, authorization: str | None) -> None:
     """Require the runtime's configured operator bearer key, regardless of user auth mode."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
@@ -58,7 +63,7 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     if not configured_key:
         raise HTTPException(status_code=503, detail="This operational check requires MINDROOM_API_KEY")
     token = _extract_bearer_token(authorization)
-    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
+    if token is None or not _api_key_matches(token, configured_key):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
 
@@ -1116,7 +1121,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
             )
             if token is None:
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-            if not secrets.compare_digest(token.encode(), mindroom_api_key.encode()):
+            if not _api_key_matches(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
             _require_browser_mutation_origin(request, authorization)
         else:
@@ -1158,7 +1163,7 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
     if not mindroom_api_key:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    if not payload.api_key or not secrets.compare_digest(payload.api_key.encode(), mindroom_api_key.encode()):
+    if not _api_key_matches(payload.api_key, mindroom_api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     cookie = _standalone_auth_cookie(request)

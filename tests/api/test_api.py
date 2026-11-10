@@ -4050,14 +4050,13 @@ def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
 
 def test_api_key_with_non_ascii_characters_rejects(api_key_client: TestClient) -> None:
     """A wrong key with non-ASCII characters gets 401 at sign-in, as bearer token, and as cookie."""
-    api_key_client.headers["Origin"] = str(api_key_client.base_url).rstrip("/")
     wrong = "tést-kéy"
     assert api_key_client.post("/api/auth/session", json={"api_key": wrong}).status_code == 401
     bearer = {"Authorization": f"Bearer {wrong}".encode()}
     assert api_key_client.post("/api/config/load", headers=bearer).status_code == 401
     cookie = {"Cookie": f"mindroom_api_key={wrong}".encode()}
     assert api_key_client.post("/api/config/load", headers=cookie).status_code == 401
-    assert api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).status_code == 200
+    login_with_api_key(api_key_client)
     assert api_key_client.post("/api/config/load").status_code == 200
 
 
