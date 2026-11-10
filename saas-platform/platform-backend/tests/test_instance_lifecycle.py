@@ -2494,3 +2494,26 @@ async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(pla
     platform.limit_key.assert_awaited_once()
     platform.start.assert_not_awaited()
     platform.provision.assert_not_awaited()
+
+
+def test_first_paid_period_after_a_trial_replaces_the_trial_key(platform: Platform) -> None:
+    # A customer who used the trial budget converts to paid; OpenRouter resets usage only each calendar month.
+    trial_end = 1_793_750_400
+    platform.db.tables["subscriptions"].append(_subscription("trialing"))
+    platform.db.tables["instances"].append(
+        _instance("running", openrouter_key_created_at=datetime.fromtimestamp(trial_end - 3 * 86400, UTC).isoformat())
+    )
+    paid = _stripe_subscription("active")
+    paid["trial_end"] = trial_end
+    paid["items"]["data"][0].update({"current_period_start": trial_end, "current_period_end": trial_end + 30 * 86400})
+
+    with patch(f"{LIFECYCLE}.revoke_instance_openrouter_key", AsyncMock()) as revoke:
+        _send_webhook("customer.subscription.updated", paid)
+        revoke.assert_awaited_once_with(platform.db, 7)
+        platform.provision.assert_awaited_once()
+
+        # The new key was created in the paid period, so later runs keep it.
+        platform.db.row("instances", instance_id=7)["openrouter_key_created_at"] = datetime.now(UTC).isoformat()
+        _send_webhook("customer.subscription.updated", paid)
+        revoke.assert_awaited_once()
+        platform.provision.assert_awaited_once()

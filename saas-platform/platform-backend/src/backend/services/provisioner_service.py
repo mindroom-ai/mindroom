@@ -632,7 +632,8 @@ async def _provision_openrouter_key(
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
-    Stored keys keep their usage across plan changes; only their spending limit changes.
+    Stored keys keep their usage across plan changes; only their spending limit changes. The lifecycle revokes a
+    trial key before the first paid period, so that period starts with a new key.
     A created key is recorded before its Secret is published, so a run that loses the record to another run never
     publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
