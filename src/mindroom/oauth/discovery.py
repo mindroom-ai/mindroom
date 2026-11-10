@@ -1,4 +1,4 @@
-"""Reusable OAuth metadata discovery and dynamic client registration."""
+"""Reusable OAuth metadata discovery, client ID metadata documents, and dynamic client registration."""
 
 from __future__ import annotations
 
@@ -28,8 +28,10 @@ from mindroom.oauth.providers import (
     OAuthProvider,
     OAuthProviderError,
     OAuthRuntimeEndpoints,
+    is_valid_hosted_oauth_callback_for_request,
     token_endpoint_origin,
 )
+from mindroom.origins import configured_public_url
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
     ServerFetchUrlError,
@@ -75,6 +77,7 @@ class _DiscoveredOAuthMetadata:
     token_url: str
     registration_url: str | None
     token_endpoint_auth_method: _TokenEndpointAuthMethod
+    client_id_metadata_document_supported: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +309,7 @@ async def _discover_metadata(
             token_url=token_url,
             registration_url=_configured_endpoint(config.registration_url) or None,
             token_endpoint_auth_method=config.token_endpoint_auth_method,
+            client_id_metadata_document_supported=False,
         )
     else:
         async with _http_client(config, runtime_paths) as client:
@@ -325,6 +329,7 @@ async def _discover_metadata(
             registration_url=_configured_endpoint(config.registration_url)
             or _metadata_string(discovered, "registration_endpoint"),
             token_endpoint_auth_method=config.token_endpoint_auth_method,
+            client_id_metadata_document_supported=discovered.get("client_id_metadata_document_supported") is True,
         )
 
     await _validate_metadata(metadata, config, runtime_paths)
@@ -346,6 +351,47 @@ def _registration_payload(provider: OAuthProvider, runtime_paths: RuntimePaths) 
     if provider.scopes:
         payload["scope"] = " ".join(provider.scopes)
     return payload
+
+
+def _client_id_metadata_document_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str | None:
+    """Return the URL of the provider's client ID metadata document, or None when no authorization server could fetch it.
+
+    The URL is the client ID, so it must be an HTTPS URL on a public DNS name; it moves with `MINDROOM_PUBLIC_URL`.
+    """
+    public_url = configured_public_url(runtime_paths)
+    if public_url is None:
+        return None
+    url = f"{public_url}/api/oauth/{provider.id}/client-metadata.json"
+    return url if is_valid_hosted_oauth_callback_for_request(url, urlparse(url).hostname) else None
+
+
+def _client_id_metadata_document(provider: OAuthProvider, runtime_paths: RuntimePaths, url: str) -> dict[str, Any]:
+    return {"client_id": url, **_registration_payload(provider, runtime_paths)}
+
+
+def client_id_metadata_document(provider: OAuthProvider, runtime_paths: RuntimePaths) -> dict[str, Any] | None:
+    """Return the provider's client ID metadata document while its stored client is identified by that document."""
+    url = _client_id_metadata_document_url(provider, runtime_paths)
+    resolution = provider.client_config_resolution(runtime_paths)
+    if url is None or resolution is None or resolution.config.client_id != url:
+        return None
+    return _client_id_metadata_document(provider, runtime_paths, url)
+
+
+def _usable_client_id_metadata_document_url(
+    provider: OAuthProvider,
+    config: OAuthDiscoveryConfig,
+    metadata: _DiscoveredOAuthMetadata,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the document URL to use as client ID when the server fetches client ID metadata documents."""
+    if (
+        not config.dynamic_client_registration
+        or not metadata.client_id_metadata_document_supported
+        or provider.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
+    ):
+        return None
+    return _client_id_metadata_document_url(provider, runtime_paths)
 
 
 def _stored_registration(
@@ -397,10 +443,13 @@ def _registration_needed(
     resolution: OAuthClientConfigResolution | None,
     config: OAuthDiscoveryConfig,
     metadata: _DiscoveredOAuthMetadata,
+    document_url: str | None,
 ) -> bool:
     """Return whether a client can be registered or the dynamic registration belongs to another token endpoint."""
     if resolution is None:
-        return config.dynamic_client_registration and metadata.registration_url is not None
+        return document_url is not None or (
+            config.dynamic_client_registration and metadata.registration_url is not None
+        )
     return resolution.dynamically_registered and resolution.registered_token_url != metadata.token_url
 
 
@@ -454,8 +503,10 @@ async def _register_client(
 ) -> None:
     """Register a client when none is stored or the stored one belongs to another token endpoint.
 
-    `for_moved_callback` also replaces a dynamic registration for another callback. The server refusing that one
-    keeps the stored client, whose tokens still refresh, and raises `OAuthCallbackRefusedError` naming the callback.
+    A server that fetches client ID metadata documents gets the document's URL as client ID instead of a registration,
+    following the MCP authorization spec's order. `for_moved_callback` also replaces a dynamic registration for another
+    callback. The server refusing that one keeps the stored client, whose tokens still refresh, and raises
+    `OAuthCallbackRefusedError` naming the callback.
     """
     with _DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD:
         lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
@@ -466,7 +517,8 @@ async def _register_client(
             and resolution is not None
             and provider.dynamic_client_callback_moved(resolution, runtime_paths)
         )
-        if not callback_moved and not _registration_needed(resolution, config, metadata):
+        document_url = _usable_client_id_metadata_document_url(provider, config, metadata, runtime_paths)
+        if not callback_moved and not _registration_needed(resolution, config, metadata, document_url):
             return
         if not provider.client_config_services:
             msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
@@ -491,16 +543,19 @@ async def _register_client(
                 {**(stored or {}), OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: metadata.token_url},
             )
             return
-        if not config.dynamic_client_registration or metadata.registration_url is None:
+        if document_url is not None:
+            registration = _client_id_metadata_document(provider, runtime_paths, document_url)
+        elif not config.dynamic_client_registration or metadata.registration_url is None:
             msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint or callback"
             raise OAuthProviderError(msg)
-        registration = await _post_registration(
-            provider,
-            config,
-            metadata.registration_url,
-            runtime_paths,
-            callback_moved=callback_moved,
-        )
+        else:
+            registration = await _post_registration(
+                provider,
+                config,
+                metadata.registration_url,
+                runtime_paths,
+                callback_moved=callback_moved,
+            )
         await run_blocking_until_complete(
             credentials_manager.save_credentials,
             provider.client_config_services[0],

@@ -42,6 +42,7 @@ from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
     _discover_metadata,
+    client_id_metadata_document,
 )
 from mindroom.oauth.providers import (
     OAuthCallbackRefusedError,
@@ -238,6 +239,7 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
 
     authorization_server: ClassVar[str] = "https://auth.example.test"
     supports_registration: ClassVar[bool] = False
+    supports_client_id_metadata_document: ClassVar[bool] = False
     refusal_status: ClassVar[int | None] = None
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
@@ -254,6 +256,8 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
             }
             if self.supports_registration:
                 metadata["registration_endpoint"] = f"{self.authorization_server}/register"
+            if self.supports_client_id_metadata_document:
+                metadata["client_id_metadata_document_supported"] = True
             return _FakeDiscoveryResponse(metadata)
         return _FakeDiscoveryResponse({}, status_code=404)
 
@@ -885,6 +889,163 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
     assert _stored_mcp_client(moved_paths) == registered
     assert refreshed is not None
     assert grants == ["client-of-auth.example.test"]
+
+
+_ACME_DOCUMENT_URL = "https://acme.mindroom.chat/api/oauth/mcp_demo/client-metadata.json"
+
+
+def _serve_client_id_metadata_documents(monkeypatch: pytest.MonkeyPatch, *, supports_registration: bool) -> None:
+    """Serve discovery from an authorization server that fetches client ID metadata documents."""
+    _serve_movable_discovery(monkeypatch)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", supports_registration)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_client_id_metadata_document", True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_registration", [False, True], ids=["document-only", "document-and-registration"])
+async def test_mcp_oauth_identifies_with_a_client_id_metadata_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supports_registration: bool,
+) -> None:
+    """A server fetching client ID metadata documents gets the document's URL as client ID, never a registration."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
+    _serve_client_id_metadata_documents(monkeypatch, supports_registration=supports_registration)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    assert await _authorized_client_id(provider, runtime_paths) == _ACME_DOCUMENT_URL
+    assert await _authorized_client_id(provider, runtime_paths) == _ACME_DOCUMENT_URL
+
+    assert _MovableAuthorizationServerDiscoveryClient.posts == []
+    assert client_id_metadata_document(provider, runtime_paths) == {
+        "client_id": _ACME_DOCUMENT_URL,
+        "client_name": "Example MCP",
+        "redirect_uris": ["https://acme.mindroom.chat/api/oauth/mcp_demo/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": "mcp.read",
+    }
+    resolution = await provider.client_config_resolution_async(runtime_paths)
+    assert resolution is not None
+    assert resolution.dynamically_registered is True
+    assert resolution.registered_token_url == "https://auth.example.test/token"  # noqa: S105
+    grants = _serve_refresh(monkeypatch)
+    refreshed = await provider.refresh_token_data(_expired_token(_ACME_DOCUMENT_URL), runtime_paths)
+    assert refreshed is not None
+    assert grants == [_ACME_DOCUMENT_URL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "supports_document", "redirect_uri"),
+    [
+        ({}, True, _LOCAL_CALLBACK),
+        (
+            {"MINDROOM_PUBLIC_URL": "http://192.168.1.10:8765"},
+            True,
+            "http://192.168.1.10:8765/api/oauth/mcp_demo/callback",
+        ),
+        (
+            {"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"},
+            False,
+            "https://acme.mindroom.chat/api/oauth/mcp_demo/callback",
+        ),
+    ],
+    ids=["no-public-url", "http-public-url", "no-document-support"],
+)
+async def test_mcp_oauth_registers_when_no_server_can_fetch_a_client_id_metadata_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    supports_document: bool,
+    redirect_uri: str,
+) -> None:
+    """Without an HTTPS public URL or server support, a client is registered as before and no document is served."""
+    runtime_paths = _runtime_paths(tmp_path, **env)
+    _serve_movable_discovery(monkeypatch)
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "supports_client_id_metadata_document",
+        supports_document,
+    )
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
+
+    assert [payload["redirect_uris"] for _url, payload in _MovableAuthorizationServerDiscoveryClient.posts] == [
+        [redirect_uri],
+    ]
+    assert client_id_metadata_document(provider, runtime_paths) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "dynamic_client_registration"),
+    [({}, True), ({"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"}, False)],
+    ids=["no-public-url", "registration-disabled"],
+)
+async def test_mcp_oauth_document_only_server_without_a_usable_document_leaves_no_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    dynamic_client_registration: bool,
+) -> None:
+    """Without an HTTPS public URL, or with automatic clients disabled, a document-only server gets no client."""
+    runtime_paths = _runtime_paths(tmp_path, **env)
+    _serve_client_id_metadata_documents(monkeypatch, supports_registration=False)
+    provider = mcp_oauth_provider(
+        "demo",
+        _auto_oauth_mcp_server_config(dynamic_client_registration=dynamic_client_registration),
+    )
+
+    assert await provider.client_config_resolution_async(runtime_paths) is None
+    assert get_runtime_credentials_manager(runtime_paths).load_credentials("mcp_demo_oauth_client") is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_prefers_an_operator_client_over_a_client_id_metadata_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client the operator saved is used even when the server fetches client ID metadata documents."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
+    _serve_client_id_metadata_documents(monkeypatch, supports_registration=True)
+    operator_client = {"client_id": "operator-client-id"}
+    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", operator_client)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    assert await _authorized_client_id(provider, runtime_paths) == "operator-client-id"
+    assert _MovableAuthorizationServerDiscoveryClient.posts == []
+    assert _stored_mcp_client(runtime_paths) == operator_client
+    assert client_id_metadata_document(provider, runtime_paths) is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_client_id_metadata_document_follows_the_public_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving the public URL moves the document, so its new URL becomes the client ID and the old one is not served."""
+    _serve_client_id_metadata_documents(monkeypatch, supports_registration=False)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    acme_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
+    assert await _authorized_client_id(provider, acme_paths) == _ACME_DOCUMENT_URL
+    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://beta.mindroom.chat")
+
+    with capture_logs() as logs:
+        resolution = await provider.client_config_resolution_async(moved_paths)
+
+    moved_document_url = "https://beta.mindroom.chat/api/oauth/mcp_demo/client-metadata.json"
+    assert resolution is not None
+    assert resolution.config.client_id == moved_document_url
+    assert resolution.config.redirect_uri == "https://beta.mindroom.chat/api/oauth/mcp_demo/callback"
+    assert [entry["event"] for entry in logs] == ["oauth_dynamic_client_reregistered"]
+    assert _MovableAuthorizationServerDiscoveryClient.posts == []
+    assert client_id_metadata_document(provider, acme_paths) is None
+    document = client_id_metadata_document(provider, moved_paths)
+    assert document is not None
+    assert document["client_id"] == moved_document_url
 
 
 @pytest.mark.asyncio

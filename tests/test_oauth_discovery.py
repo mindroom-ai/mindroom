@@ -769,3 +769,61 @@ async def test_bootstrap_rejects_provider_method_mismatch(
 
     with pytest.raises(OAuthProviderError, match=error):
         await provider.runtime_endpoints(runtime_paths)
+
+
+class _ConfidentialDocumentServerClient(_ResourceOriginDiscoveryClient):
+    """Advertise client ID metadata documents and register confidential clients."""
+
+    async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _Response:
+        response = await super().get(url, headers=headers)
+        if url == "https://resource.example.test/.well-known/oauth-authorization-server":
+            response.payload["client_id_metadata_document_supported"] = True
+            response.payload["token_endpoint_auth_methods_supported"] = ["none", "client_secret_post"]
+        return response
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> _Response:
+        response = await super().post(url, json=json, headers=headers)
+        response.payload["client_secret"] = "registered-secret"  # noqa: S105
+        response.payload["redirect_uris"] = json["redirect_uris"]
+        return response
+
+
+@pytest.mark.asyncio
+async def test_confidential_client_registers_instead_of_using_a_client_id_metadata_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document cannot carry a client secret, so a confidential client is registered even when documents work."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"},
+    )
+    _ConfidentialDocumentServerClient.posts = []
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _ConfidentialDocumentServerClient)
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="",
+        token_url="",
+        scopes=("read",),
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="client_secret_post",  # noqa: S106
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(resource="https://resource.example.test"),
+        ),
+    )
+
+    await provider.runtime_endpoints(runtime_paths)
+
+    assert [url for url, _payload in _ConfidentialDocumentServerClient.posts] == ["https://auth.example.test/register"]
+    stored = get_runtime_credentials_manager(runtime_paths).load_credentials("example_oauth_client")
+    assert stored is not None
+    assert stored["client_id"] == "registered-public-client"

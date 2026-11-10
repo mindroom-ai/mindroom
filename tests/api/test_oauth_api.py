@@ -2836,6 +2836,48 @@ def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert scoped_credentials["token"] == "google_drive-access-token"
 
 
+@pytest.mark.parametrize(
+    ("provider_id", "stored_client_id", "status_code"),
+    [
+        ("test_drive", "https://acme.mindroom.chat/api/oauth/test_drive/client-metadata.json", 200),
+        ("test_drive", "operator-client-id", 404),
+        ("unknown_drive", "https://acme.mindroom.chat/api/oauth/test_drive/client-metadata.json", 404),
+    ],
+    ids=["document-client", "other-client", "unknown-provider"],
+)
+def test_client_id_metadata_document_is_public_only_for_a_client_it_identifies(
+    tmp_path: Path,
+    provider_id: str,
+    stored_client_id: str,
+    status_code: int,
+) -> None:
+    """Authorization servers fetch the document without signing in; other providers and clients have none."""
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"})
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = replace(_fake_provider(), token_endpoint_auth_method="none")
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "test_drive_oauth_client",
+        {"client_id": stored_client_id},
+    )
+
+    with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(f"/api/oauth/{provider_id}/client-metadata.json")
+
+    assert response.status_code == status_code
+    if status_code == 200:
+        assert response.headers["content-type"] == "application/json"
+        assert response.json() == {
+            "client_id": stored_client_id,
+            "client_name": "Test Drive",
+            "redirect_uris": ["https://acme.mindroom.chat/api/oauth/test_drive/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "scope.read",
+        }
+
+
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("worker_scope", "agent_users", "allowed"),

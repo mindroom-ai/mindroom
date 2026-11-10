@@ -214,6 +214,9 @@ These variables do not relax the address rules for the MCP connection itself.
 ### OAuth Client Registration
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
+When the authorization server advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom registers nothing and uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
+The authorization server fetches that client ID metadata document when a user connects, so it must be able to reach that URL; this also works with servers that offer no registration endpoint.
+Changing `MINDROOM_PUBLIC_URL` changes that client ID, so users connected through the old one must reconnect.
 See [Built-In Providers](https://docs.mindroom.chat/oauth-framework/#built-in-providers) for when a dynamically registered client works from a hosted address.
 If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
 With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
@@ -239,7 +242,7 @@ See [Provider And Credential Service Rules](https://docs.mindroom.chat/oauth-fra
 | `authorization_url` | string | `null` | Authorization endpoint; required for `manual` |
 | `token_url` | string | `null` | Token endpoint; required for `manual` |
 | `registration_url` | string | `null` | Dynamic client registration endpoint |
-| `dynamic_client_registration` | bool | `true` | Allow registering a client automatically |
+| `dynamic_client_registration` | bool | `true` | Allow a client automatically, by client ID metadata document or dynamic registration |
 | `token_endpoint_auth_method` | string | `none` | `none`, `client_secret_post`, or `client_secret_basic` |
 | `pkce_code_challenge_method` | string | `S256` | `S256`, or `null` to disable PKCE |
 | `scopes` | list[string] | `[]` | Requested OAuth scopes |
