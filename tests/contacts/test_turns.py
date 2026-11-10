@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ from mindroom.contacts.turns import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.custom_tools import chat_ui, computer_announcement
 from mindroom.delivery_gateway import ResponseIdentity
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
 from mindroom.final_delivery import Failed, FailureCause, Suppressed, Suppression
 from mindroom.hooks import (
@@ -52,14 +54,15 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.context import ResponseDraft
 from mindroom.logging_config import get_logger
-from mindroom.matrix.guarded_rooms import send_refused
+from mindroom.matrix.guarded_rooms import guarded_room, send_refused
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn_judgment import create_mid_turn_gate
+from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.reply_turn.locked_turn import LockedTurns
-from mindroom.reply_turn.request import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest, response_typing_indicator
 from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_sources import ResponseSources
 from mindroom.skill_learning.runner import SkillReviewRunner
@@ -649,6 +652,17 @@ class _Turn:
     on_defer: list[object] = field(default_factory=list)
 
 
+def _sent_after_eyes(bot: AgentBot) -> list[Any]:
+    """Return every send after the 👀 a contact turn first puts on its message, which it must have sent."""
+    eyes, *rest = bot.client.room_send.await_args_list
+    assert (eyes.kwargs["room_id"], eyes.kwargs["message_type"], eyes.kwargs["content"]) == (
+        CONTACT_ROOM,
+        "m.reaction",
+        {"m.relates_to": {"rel_type": "m.annotation", "event_id": EVENT_ID, "key": "👀"}},
+    )
+    return rest
+
+
 async def _run(bot: AgentBot, room_id: str) -> _Turn:
     """Run one turn in ``room_id`` in a room that streams."""
     turn = _Turn()
@@ -675,14 +689,15 @@ async def _run(bot: AgentBot, room_id: str) -> _Turn:
 
 
 @pytest.mark.asyncio
-async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
+async def test_a_contact_turn_shows_only_eyes_and_offers_only_its_contacts_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No placeholder, typing, stream, Stop button, reaction, or answer reaches the room, and only the contact's tools do.
+    """Only 👀 on the message reaches the room, never the answer, and the model gets only the contact's tools.
 
-    The approval-gated ``sleep`` is dropped though the contact lists it, and so are shell, the room tools, and the
-    tools ``matrix_message`` brings along. The agent stays itself: its identity, its configured instructions, and the
+    No placeholder, typing, stream, Stop button, or other reaction reaches the room either. The approval-gated
+    ``sleep`` is dropped though the contact lists it, and so are shell, the room tools, and the tools
+    ``matrix_message`` brings along. The agent stays itself: its identity, its configured instructions, and the
     contact's rules all reach the model.
     """
     config, paths = _setup(tmp_path)
@@ -695,7 +710,8 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
 
     [delivery], [context] = turn.ended, turn.contexts
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
-    bot.client.room_send.assert_not_awaited()
+    # The turn shows nothing else while it runs, so 👀 tells whoever wrote that the agent is on it.
+    assert _sent_after_eyes(bot) == []
     bot.client.room_typing.assert_not_awaited()
     assert turn.on_defer == [None]
     assert (context.persona, context.tool_names) == (None, ("calculator", "sleep", "matrix_message"))
@@ -713,6 +729,95 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
     assert "Sign every message with a haiku." in system_prompt
     assert CONFIG_RULE in system_prompt
     assert OWNER_RULE in system_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["respond", "stay_silent"])
+async def test_a_gated_contact_turn_shows_eyes_only_once_its_participation_lets_it(action: str) -> None:
+    """A contact turn whose participation is judged, as in a thread both owners wrote in, waits for it before its 👀."""
+    request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+    client = AsyncMock(spec=nio.AsyncClient)
+    receipts: list[str] = []
+
+    async def receipt() -> None:
+        receipts.append(request.room_id)
+
+    gate = ParticipationGate()
+    async with response_typing_indicator(
+        client,
+        request,
+        response_run_id=None,
+        participation=gate,
+        contact_receipt=receipt,
+    ):
+        await asyncio.sleep(0)
+        assert receipts == []
+        await gate.check(AsyncMock(return_value=ParticipationDecision(action=action, reason="judged")))
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    assert receipts == ([CONTACT_ROOM] if action == "respond" else [])
+    client.room_typing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_a_contact_turns_eyes_reread_its_contact(tmp_path: Path, status: str) -> None:
+    """A contact removed while its turn prepared or waited on its participation gets no 👀, like any other send."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+
+    def set_status(book: Any) -> None:  # noqa: ANN401
+        book.contacts[0].status = status
+
+    update_contacts(paths, set_status)
+    with guarded_room(CONTACT_ROOM):
+        await bot._response_runner._send_contact_receipt(request)
+
+    if status == "active":
+        assert _sent_after_eyes(bot) == []
+    else:
+        bot.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing",
+    ["mindroom.response_runner.contact_room", "mindroom.delivery_gateway.DeliveryGateway.send_judgment_reaction"],
+)
+async def test_a_contact_turns_eyes_that_fail_never_fail_the_turn(tmp_path: Path, failing: str) -> None:
+    """The 👀 is best-effort like typing, so an error rereading its contact or sending it never reaches the turn."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+
+    with (
+        patch(failing, side_effect=OSError("storage unavailable")),
+        guarded_room(CONTACT_ROOM),
+        capture_logs() as logs,
+    ):
+        await bot._response_runner._send_contact_receipt(request)
+
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["contact_turn_receipt_failed"]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_schedule_run_as_a_contact_turn_shows_no_eyes() -> None:
+    """A silent schedule's trigger is hidden and nobody waits on it, so even a contact turn puts no 👀 on it."""
+    contact_request = replace(_request(CONTACT_ROOM), contact=(_record(), "target"))
+    origin = message_origin(sender_id=OWNER, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    request = replace(contact_request, response_envelope=replace(contact_request.response_envelope, origin=origin))
+    client = AsyncMock(spec=nio.AsyncClient)
+    receipt = AsyncMock()
+
+    async with response_typing_indicator(client, request, response_run_id=None, contact_receipt=receipt):
+        await asyncio.sleep(0)
+
+    receipt.assert_not_awaited()
+    client.room_typing.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -844,7 +949,7 @@ async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
     assert [(log["room_id"], log["operation"]) for log in refused] == [(CONTACT_ROOM, "chat_ui_action")]
     assert browsed == ["navigate"]
     assert len(model.requests) == 3
-    [sent] = bot.client.room_send.await_args_list
+    [sent] = _sent_after_eyes(bot)
     assert (sent.kwargs["room_id"], sent.kwargs["content"]["body"]) == (CONTACT_ROOM, "Bob is free on Friday.")
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     assert not send_refused(CONTACT_ROOM)
@@ -1010,7 +1115,7 @@ async def test_an_empty_contact_turn_is_neither_retried_nor_shown(
 
     assert len(model.requests) == 1
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
-    bot.client.room_send.assert_not_awaited()
+    assert _sent_after_eyes(bot) == []
 
 
 @pytest.mark.asyncio
@@ -1045,7 +1150,10 @@ async def test_a_failed_contact_turn_keeps_its_error_out_of_the_contact_room(tmp
     assert reply is not None
     assert reply.terminal
     # Elsewhere the reply sends its placeholder, then edits the error note into it.
-    assert bot.client.room_send.await_count == (0 if room_id == CONTACT_ROOM else 2)
+    if room_id == CONTACT_ROOM:
+        assert _sent_after_eyes(bot) == []
+    else:
+        assert bot.client.room_send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1109,7 +1217,7 @@ async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_noth
     else:
         assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     assert context.tool_names == ("calculator", "sleep", "matrix_message")
-    bot.client.room_send.assert_not_awaited()
+    assert _sent_after_eyes(bot) == []
     bot.client.room_typing.assert_not_awaited()
 
 

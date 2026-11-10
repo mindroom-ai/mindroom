@@ -179,7 +179,7 @@ Agents never form a team in a contact room, so mentioning both agents gets one c
 Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
 
 A contact turn answers only by calling `matrix_message` into the contact room.
-Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, reaction, or error notice.
+Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, or error notice, only a 👀 reaction on the message it answers.
 
 A contact turn keeps the agent's identity, instructions, preloaded files, and memory recall, and differs from a normal turn in these ways:
 
@@ -195,7 +195,7 @@ Even your own messages in a contact room start contact turns, so use your person
 
 ## Message Policy
 
-Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room.
+Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room; only the 👀 a contact turn puts on the message it answers skips it.
 The checks run in order:
 
 1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](configuration/agents.md#defaults) agent messages in a row, until a person writes.

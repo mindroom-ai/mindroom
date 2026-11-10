@@ -246,7 +246,7 @@ async def _turn_row(principal: PrincipalStore, stage: DeliveryStage, turn_id: st
     return row
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_reuses_transaction_across_gateway_restarts(tmp_path: Path, kind: str) -> None:
     """Replaying an acknowledgement must use the same transaction, even if its configured emoji changes."""
     sent: list[dict[str, object]] = []
@@ -289,7 +289,7 @@ async def test_judgment_reaction_reuses_transaction_across_gateway_restarts(tmp_
     assert sent[3]["tx_id"] != sent[0]["tx_id"]
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_respects_retired_membership(tmp_path: Path, kind: str) -> None:
     """An agent that lost this turn's room membership must not leave an acknowledgement."""
     outbox = FakeOutbox()
@@ -306,7 +306,7 @@ async def test_judgment_reaction_respects_retired_membership(tmp_path: Path, kin
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("offline"), nio.RoomSendError("denied", "M_FORBIDDEN")])
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_delivery_failure_is_best_effort(tmp_path: Path, failure: object, kind: str) -> None:
     """Transport errors are logged without reopening a declined response."""
     gateway = _gateway(tmp_path)
@@ -322,7 +322,7 @@ async def test_judgment_reaction_delivery_failure_is_best_effort(tmp_path: Path,
     gateway.deps.logger.warning.assert_called_once()
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_preserves_cancellation(tmp_path: Path, kind: str) -> None:
     """Stopping a reaction send must still cancel its owning response turn."""
     gateway = _gateway(tmp_path)
