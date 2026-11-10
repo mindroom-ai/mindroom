@@ -449,7 +449,7 @@ def _registration_needed(
     metadata: _DiscoveredOAuthMetadata,
     document_url: str | None,
 ) -> bool:
-    """Return whether a client can be registered or the dynamic registration belongs to another token endpoint."""
+    """Return whether a client can be obtained, or the stored dynamic client belongs to another token endpoint."""
     if resolution is None:
         return document_url is not None or (
             config.dynamic_client_registration and metadata.registration_url is not None

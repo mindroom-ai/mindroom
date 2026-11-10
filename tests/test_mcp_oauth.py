@@ -279,10 +279,20 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
         )
 
 
-def _serve_movable_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Serve discovery from `_MovableAuthorizationServerDiscoveryClient` with registration on and no posts yet."""
+def _serve_movable_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    supports_registration: bool = True,
+    supports_client_id_metadata_document: bool = False,
+) -> None:
+    """Serve discovery from `_MovableAuthorizationServerDiscoveryClient` with no posts yet."""
     monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", supports_registration)
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "supports_client_id_metadata_document",
+        supports_client_id_metadata_document,
+    )
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
 
 
@@ -894,13 +904,6 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
 _ACME_DOCUMENT_URL = "https://acme.mindroom.chat/api/oauth/mcp_demo/client-metadata.json"
 
 
-def _serve_client_id_metadata_documents(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Serve discovery from an authorization server that fetches client ID metadata documents and offers no registration."""
-    _serve_movable_discovery(monkeypatch)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", False)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_client_id_metadata_document", True)
-
-
 @pytest.mark.asyncio
 async def test_mcp_oauth_identifies_with_a_client_id_metadata_document(
     tmp_path: Path,
@@ -908,7 +911,7 @@ async def test_mcp_oauth_identifies_with_a_client_id_metadata_document(
 ) -> None:
     """A server that fetches client ID metadata documents and offers no registration gets the document's URL."""
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
-    _serve_client_id_metadata_documents(monkeypatch)
+    _serve_movable_discovery(monkeypatch, supports_registration=False, supports_client_id_metadata_document=True)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
 
     assert await _authorized_client_id(provider, runtime_paths) == _ACME_DOCUMENT_URL
@@ -955,7 +958,7 @@ async def test_mcp_oauth_identifies_with_a_client_id_metadata_document(
             "https://acme.mindroom.chat/api/oauth/mcp_demo/callback",
         ),
     ],
-    ids=["no-public-url", "http-public-url", "no-document-support", "registration-offered"],
+    ids=["no-public-url", "http-public-url", "no-document-support", "document-and-registration"],
 )
 async def test_mcp_oauth_registers_when_it_can_instead_of_using_a_client_id_metadata_document(
     tmp_path: Path,
@@ -964,14 +967,9 @@ async def test_mcp_oauth_registers_when_it_can_instead_of_using_a_client_id_meta
     supports_document: bool,
     redirect_uri: str,
 ) -> None:
-    """Where the server offers registration, a client is registered as before, since the server may not reach MindRoom."""
+    """Where the server offers registration, MindRoom registers a client, since the server may not reach MindRoom."""
     runtime_paths = _runtime_paths(tmp_path, **env)
-    _serve_movable_discovery(monkeypatch)
-    monkeypatch.setattr(
-        _MovableAuthorizationServerDiscoveryClient,
-        "supports_client_id_metadata_document",
-        supports_document,
-    )
+    _serve_movable_discovery(monkeypatch, supports_client_id_metadata_document=supports_document)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
 
     assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
@@ -1002,11 +1000,10 @@ async def test_mcp_oauth_without_registration_or_a_usable_document_leaves_no_cli
 ) -> None:
     """A server without registration gets no client unless MindRoom can serve it a document from an HTTPS public URL."""
     runtime_paths = _runtime_paths(tmp_path, **env)
-    _serve_client_id_metadata_documents(monkeypatch)
-    monkeypatch.setattr(
-        _MovableAuthorizationServerDiscoveryClient,
-        "supports_client_id_metadata_document",
-        supports_document,
+    _serve_movable_discovery(
+        monkeypatch,
+        supports_registration=False,
+        supports_client_id_metadata_document=supports_document,
     )
     provider = mcp_oauth_provider(
         "demo",
@@ -1024,7 +1021,7 @@ async def test_mcp_oauth_prefers_an_operator_client_over_a_client_id_metadata_do
 ) -> None:
     """A client the operator saved is used even when the server fetches client ID metadata documents."""
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
-    _serve_client_id_metadata_documents(monkeypatch)
+    _serve_movable_discovery(monkeypatch, supports_registration=False, supports_client_id_metadata_document=True)
     operator_client = {"client_id": "operator-client-id"}
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", operator_client)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
@@ -1041,7 +1038,7 @@ async def test_mcp_oauth_client_id_metadata_document_follows_the_public_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Moving the public URL moves the document, so its new URL becomes the client ID and the old one is not served."""
-    _serve_client_id_metadata_documents(monkeypatch)
+    _serve_movable_discovery(monkeypatch, supports_registration=False, supports_client_id_metadata_document=True)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     acme_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     assert await _authorized_client_id(provider, acme_paths) == _ACME_DOCUMENT_URL
