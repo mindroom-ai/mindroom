@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.28",
+  "mindroom_plugin_api": "1.29",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -868,6 +868,8 @@ provider = OAuthProvider(
     ),
 )
 ```
+
+A provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client under the conditions in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), which include a public client, dynamic registration left enabled, and an HTTPS `MINDROOM_PUBLIC_URL` on a public DNS hostname; a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
 
 OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
 When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.

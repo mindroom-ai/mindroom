@@ -769,3 +769,48 @@ async def test_bootstrap_rejects_provider_method_mismatch(
 
     with pytest.raises(OAuthProviderError, match=error):
         await provider.runtime_endpoints(runtime_paths)
+
+
+class _DocumentOnlyServerClient(_ResourceOriginDiscoveryClient):
+    """Advertise client ID metadata documents and confidential clients, with no registration endpoint."""
+
+    async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _Response:
+        response = await super().get(url, headers=headers)
+        if url == "https://resource.example.test/.well-known/oauth-authorization-server":
+            del response.payload["registration_endpoint"]
+            response.payload["client_id_metadata_document_supported"] = True
+            response.payload["token_endpoint_auth_methods_supported"] = ["none", "client_secret_post"]
+        return response
+
+
+@pytest.mark.asyncio
+async def test_confidential_client_never_uses_a_client_id_metadata_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document cannot carry a client secret, so a confidential client gets no client from a document-only server."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"},
+    )
+    _DocumentOnlyServerClient.posts = []
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _DocumentOnlyServerClient)
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="",
+        token_url="",
+        scopes=("read",),
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="client_secret_post",  # noqa: S106
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(resource="https://resource.example.test"),
+        ),
+    )
+
+    await provider.runtime_endpoints(runtime_paths)
+
+    assert _DocumentOnlyServerClient.posts == []
+    assert get_runtime_credentials_manager(runtime_paths).load_credentials("example_oauth_client") is None

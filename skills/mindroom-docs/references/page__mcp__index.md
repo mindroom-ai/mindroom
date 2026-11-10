@@ -214,11 +214,13 @@ These variables do not relax the address rules for the MCP connection itself.
 ### OAuth Client Registration
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
+With `discovery: auto`, when the authorization server offers no registration endpoint but advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
+The authorization server fetches that client ID metadata document when a user connects, so it must be able to reach that URL without signing in.
 See [Built-In Providers](https://docs.mindroom.chat/oauth-framework/#built-in-providers) for when a dynamically registered client works from a hosted address.
 If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
-With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
+With dynamic registration disabled, or when the new server offers no registration endpoint and MindRoom cannot use a client ID metadata document, connecting fails instead.
 If the authorization server refuses the new callback, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
-A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`.
+A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`, and a client ID metadata document client stops working.
 
 To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
 Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.
@@ -239,7 +241,7 @@ See [Provider And Credential Service Rules](https://docs.mindroom.chat/oauth-fra
 | `authorization_url` | string | `null` | Authorization endpoint; required for `manual` |
 | `token_url` | string | `null` | Token endpoint; required for `manual` |
 | `registration_url` | string | `null` | Dynamic client registration endpoint |
-| `dynamic_client_registration` | bool | `true` | Allow registering a client automatically |
+| `dynamic_client_registration` | bool | `true` | Obtain a client automatically, by dynamic registration or client ID metadata document |
 | `token_endpoint_auth_method` | string | `none` | `none`, `client_secret_post`, or `client_secret_basic` |
 | `pkce_code_challenge_method` | string | `S256` | `S256`, or `null` to disable PKCE |
 | `scopes` | list[string] | `[]` | Requested OAuth scopes |

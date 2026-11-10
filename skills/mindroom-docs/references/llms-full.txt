@@ -8820,11 +8820,13 @@ These variables do not relax the address rules for the MCP connection itself.
 ### OAuth Client Registration
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
+With `discovery: auto`, when the authorization server offers no registration endpoint but advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
+The authorization server fetches that client ID metadata document when a user connects, so it must be able to reach that URL without signing in.
 See [Built-In Providers](https://docs.mindroom.chat/oauth-framework/#built-in-providers) for when a dynamically registered client works from a hosted address.
 If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
-With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
+With dynamic registration disabled, or when the new server offers no registration endpoint and MindRoom cannot use a client ID metadata document, connecting fails instead.
 If the authorization server refuses the new callback, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
-A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`.
+A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`, and a client ID metadata document client stops working.
 
 To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
 Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.
@@ -8845,7 +8847,7 @@ See [Provider And Credential Service Rules](https://docs.mindroom.chat/oauth-fra
 | `authorization_url` | string | `null` | Authorization endpoint; required for `manual` |
 | `token_url` | string | `null` | Token endpoint; required for `manual` |
 | `registration_url` | string | `null` | Dynamic client registration endpoint |
-| `dynamic_client_registration` | bool | `true` | Allow registering a client automatically |
+| `dynamic_client_registration` | bool | `true` | Obtain a client automatically, by dynamic registration or client ID metadata document |
 | `token_endpoint_auth_method` | string | `none` | `none`, `client_secret_post`, or `client_secret_basic` |
 | `pkce_code_challenge_method` | string | `S256` | `S256`, or `null` to disable PKCE |
 | `scopes` | list[string] | `[]` | Requested OAuth scopes |
@@ -16782,7 +16784,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering or MindRoom identifies itself with a client ID metadata document.
 Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
@@ -16800,7 +16802,7 @@ These rules apply to built-in providers and to providers that plugins register (
 - Credential responses redact `client_secret` for client config services.
   Saving a confidential client may omit `client_secret` only when `client_id` is unchanged, so changing its `client_id` requires the matching new secret.
 - Client config services cannot be copied through the generic copy route.
-- Automatic discovery with `oauth_runtime_bootstrapper()` can register a client dynamically only when the provider declares a provider-specific `client_config_services` entry to store it in.
+- Automatic discovery with `oauth_runtime_bootstrapper()` can register a client dynamically, or use a client ID metadata document for a public client as described in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), only when the provider declares a provider-specific `client_config_services` entry to store it in.
 - `requester_scoped_credentials=True` always stores the provider's tokens in the requester's `user` scope.
 - `pkce_code_challenge_method="S256"` enables PKCE; a custom `token_exchanger` receives `(provider, code, client_config, runtime_paths, code_verifier)` so it can send the verifier.
 - `allowed_email_domains`, `allowed_hosted_domains`, and a custom `claim_validator` restrict which accounts may connect.
@@ -17664,6 +17666,7 @@ Do not report or "fix" these; they are deliberate.
 - A Connections portal session can accept, decline, change, and remove its user's contacts on the Contacts page without an approval card, as it already connects accounts and allows Agent Keys; those requests must come from the portal's own origin, and no model takes part in them.
 - A contact's rules and judge are model judgments, not a security boundary; they reduce accidental disclosure, but a determined counterparty can still extract what the agent's context and contact tools expose.
 - A tool the owner approves for a contact reaches what it reaches, so with `file` approved the other side's requests can change files the agent reads in every turn, such as `MEMORY.md`; MindRoom adds no write guard there, because an approved tool is the owner's choice of what the other side may drive.
+- `GET /api/oauth/<provider_id>/client-metadata.json` is public, because the authorization server of a remote MCP server fetches it without a login: it answers only while the provider's stored OAuth client is identified by that document, and it holds the provider's display name, callback, and scopes, nothing secret.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
@@ -18062,7 +18065,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.28",
+  "mindroom_plugin_api": "1.29",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -18685,6 +18688,8 @@ provider = OAuthProvider(
     ),
 )
 ```
+
+A provider whose authorization server offers no registration endpoint but accepts client ID metadata documents also gets a client under the conditions in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), which include a public client, dynamic registration left enabled, and an HTTPS `MINDROOM_PUBLIC_URL` on a public DNS hostname; a plugin that relies on this states `"mindroom_plugin_api": "1.29"` in its manifest.
 
 OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
 When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.
@@ -21267,6 +21272,7 @@ Forward these paths to the MindRoom API:
 | Paths | Authentication at the access proxy |
 |-------|------------------------------------|
 | `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [sign-in from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) |
+| `/api/oauth/<provider_id>/client-metadata.json` | Public in both `MINDROOM_MCP_AUTH_MODE` modes; the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it |
 | `/mcp` | Pass through to gateway bearer authentication |
 | `/mcp/oauth/authorize`, `/mcp/oauth/register`, `/mcp/oauth/token`, `/mcp/oauth/revoke` | Public OAuth endpoints; pass through |
 | `/.well-known/oauth-authorization-server/mcp/oauth`, `/.well-known/oauth-protected-resource/mcp` | Public client discovery |
@@ -23933,6 +23939,7 @@ Access applies the most specific path application, so every other path keeps the
 | `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
 | `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
 | The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `/api/oauth/<provider_id>/client-metadata.json` | The authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) |
 | `POST /api/slack/events` | Slack, whose [event requests](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) MindRoom accepts only with a valid Slack signature |
 | `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
 

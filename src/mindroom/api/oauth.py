@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
@@ -74,6 +74,7 @@ from mindroom.oauth.credential_lifecycle import (
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
+from mindroom.oauth.discovery import client_id_metadata_document
 from mindroom.oauth.google import with_google_account_picker
 from mindroom.oauth.providers import OAuthUserFacingError, oauth_consent_group_provider
 from mindroom.oauth.registry import snapshot_oauth_providers
@@ -1374,6 +1375,16 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
     if not dashboard_flow:
         return _oauth_success_response(provider, opener_origin)
     return RedirectResponse(url=_success_redirect_url(provider, runtime_paths, opener_origin))
+
+
+@router.get("/{provider_id}/client-metadata.json")
+async def client_metadata(provider_id: str, request: Request) -> JSONResponse:
+    """Serve the client ID metadata document an authorization server fetches for a provider whose client it names."""
+    provider, runtime_paths = _load_provider(request, provider_id)
+    document = await asyncio.to_thread(client_id_metadata_document, provider, runtime_paths)
+    if document is None:
+        raise HTTPException(status_code=404, detail="No client ID metadata document for this OAuth provider")
+    return JSONResponse(document)
 
 
 @router.get("/{provider_id}/status")
