@@ -14,26 +14,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import random
 import secrets
 import signal
 import socket
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated
+from pathlib import Path as FilePath
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request
 from pydantic import Field
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker, worker_subprocess_env
 from mindroom.api.sandbox_runner import app_runtime_paths, prepare_route, validate_runner_token
+from mindroom.logging_config import get_logger
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN, WorkerServiceState
 from mindroom.previews.listeners import group_listens
 from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.workers.protocol import WorkerFailure, WorkerRoute
 
-if TYPE_CHECKING:
-    from pathlib import Path as FilePath
-
+logger = get_logger(__name__)
 router = APIRouter(
     prefix="/api/sandbox-runner/plugin-services",
     tags=["sandbox-runner"],
@@ -43,6 +44,10 @@ _Name = Annotated[str, Path(pattern=f"^{SERVICE_NAME_PATTERN}$")]
 # How long an ensure waits for a new instance to listen, and a stopped one's process group gets before it is killed.
 _START_SECONDS = 10.0
 _STOP_SECONDS = 5.0
+# Service ports lie above Linux's default local port range, 32768-60999, which the kernel numbers the sockets that bind
+# port 0 or connect from, so none of those can take a service's port between its probe and the service's bind.
+_SERVICE_PORTS = range(61000, 65536)
+_LOCAL_PORT_RANGE = FilePath("/proc/sys/net/ipv4/ip_local_port_range")
 
 
 class _Ensure(WorkerRoute):
@@ -190,7 +195,23 @@ async def close_worker_services(app: FastAPI) -> None:
 
 
 def _free_loopback_port() -> int:
-    """Return a loopback port no socket holds now, which another may take before the service binds it."""
+    """Return a loopback port no socket holds now, outside the kernel's local port range while one is free there.
+
+    Only a socket bound to that port by number can take it before the service binds it.
+    """
+    low, high = map(int, _LOCAL_PORT_RANGE.read_text().split())
+    candidates = [port for port in _SERVICE_PORTS if not low <= port <= high]
+    # In random order, so that services starting together rarely probe the same port.
+    for port in random.sample(candidates, len(candidates)):
+        with socket.socket() as probe, suppress(OSError):
+            probe.bind(("127.0.0.1", port))
+            return port
+    logger.warning(
+        "No worker service port is free outside the kernel's local port range, so the kernel picks one,"
+        " which another socket can take before the service binds it",
+        service_ports=f"{_SERVICE_PORTS.start}-{_SERVICE_PORTS.stop - 1}",
+        local_port_range=f"{low}-{high}",
+    )
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
