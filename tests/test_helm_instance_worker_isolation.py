@@ -432,7 +432,6 @@ def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
-    assert "MINDROOM_OWNER_USER_ID" not in env_values
 
 
 def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
@@ -466,9 +465,32 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     }
     Config.model_validate(mindroom_config)
     assert _tuwunel_config(docs, "42")["auto_join_rooms"] == ["#lobby:42.example.test", "#dev:42.example.test"]
+
+
+@pytest.mark.parametrize(
+    ("auth_args", "expected"),
+    [
+        (("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"), "@owner:42.example.test"),
+        (("allowUnauthenticatedPrimary=true",), None),
+    ],
+    ids=["platform-login", "open-access"],
+)
+def test_instance_chart_maps_platform_logins_to_the_owner_only_behind_supabase(
+    auth_args: tuple[str, ...],
+    expected: str | None,
+) -> None:
+    """Platform logins act as the owner; an open-access chart must not give credentialless requests that identity."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=42",
+        "baseDomain=example.test",
+        *auth_args,
+        set_string_args=("administrators[0]=@owner:42.example.test",),
+    )
     container = _resource(docs, "Deployment", "mindroom-42")["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
-    assert env_values["MINDROOM_OWNER_USER_ID"] == "@owner:42.example.test"
+
+    assert env_values.get("MINDROOM_OWNER_USER_ID") == expected
 
 
 @pytest.mark.parametrize(
