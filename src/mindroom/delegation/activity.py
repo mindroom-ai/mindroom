@@ -325,20 +325,10 @@ class ActivityFeed:
         feed.status("running")
         return feed
 
-    @property
-    def delegation_id(self) -> str:
-        """Return the ID of the delegation this feed publishes."""
-        return self._activity.delegation_id
-
     @staticmethod
     def find(delegation_id: str) -> ActivityFeed | None:
         """Return the feed of a child that has not ended, such as one waiting for its approvals."""
         return _OPEN.get(delegation_id)
-
-    @staticmethod
-    def forget(delegation_id: str) -> None:
-        """Forget the feed a paused attempt of the child left, so its sink takes no more updates."""
-        _OPEN.pop(delegation_id, None)
 
     def text(self, text: str) -> None:
         """Add the child's words; they go out with the next window's snapshot."""

@@ -1059,12 +1059,12 @@ async def test_a_background_child_cancelled_while_awaiting_approval_ends_cancell
 
 
 @pytest.mark.asyncio
-async def test_a_child_resumed_where_nothing_publishes_it_ends_its_paused_feed(
+async def test_a_child_resumed_where_nothing_publishes_it_ends_on_its_open_feed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     seen: _Sink,
 ) -> None:
-    """A child resumed after its approvals with no sink, as once live frames are off, leaves no feed on the old sink."""
+    """A child resumed after its approvals with no sink, as once live frames are off, still ends on its open feed."""
     leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch)
 
     async def approve_once_nothing_publishes() -> None:
@@ -1076,5 +1076,7 @@ async def test_a_child_resumed_where_nothing_publishes_it_ends_its_paused_feed(
     result = await _delegate_in_background(leader, runtime, context, approve_once_nothing_publishes)
 
     assert "Child done" in str(answer_of(result, "first").content)
+    last = await seen.wait_for_status("completed")
+    assert last is seen.snapshots[-1]
+    assert last.result_preview == "Child done"
     assert not _OPEN
-    assert "completed" not in {snapshot.status for snapshot in seen.snapshots}

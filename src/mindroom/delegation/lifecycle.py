@@ -89,8 +89,6 @@ class ChildRunObservation:
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
     turn_id: str = field(default_factory=lambda: uuid4().hex)
-    # What hands the child's run to its sink, None when nothing publishes it.
-    feed: ActivityFeed | None = None
     # Whether the child's published tool rows carry previews: whether the turn in the room that started its chain shows
     # its tool calls.
     previews: bool = False
@@ -275,21 +273,22 @@ async def finish_child_turn(
     if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
-    _publish(ActivityFeed.find(child.delegation_id), lambda feed: feed.status(child.status, result=child.result))
+    _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
     await update_subagent_turn(child, runtime_paths)
     if not child.record_locator:
         return ""
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
 
 
-def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]) -> None:
-    """Apply one update to a child's feed; a failure is logged and dropped, so it never reaches the child."""
+def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
+    """Apply one update to a child's open feed, if any; a failure is logged and dropped, so it never reaches the child."""
+    feed = ActivityFeed.find(delegation_id)
     if feed is None:
         return
     try:
         update(feed)
     except Exception:
-        logger.exception("Sub-agent activity update failed", delegation_id=feed.delegation_id)
+        logger.exception("Sub-agent activity update failed", delegation_id=delegation_id)
 
 
 def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
@@ -325,13 +324,11 @@ def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation
     )
 
 
-def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
-    """Open the child's feed when its caller's turn has a sink for it; None outside a turn or without one.
+def _open_feed(observation: ChildRunObservation, context: ToolRuntimeContext | None) -> None:
+    """Publish the attempt as running, to the sink of its caller's turn ``context`` or else on the feed a pause left.
 
-    An attempt that opens no feed also ends the one a paused attempt of the child left, whose sink would otherwise take
-    the child's later updates, as when live frames were switched off before it resumed.
+    Switching live frames off does not stop a feed already open, so a resumed attempt without a sink keeps its feed's.
     """
-    context = get_tool_runtime_context()
     child, parent = observation.child, observation.parent
     # The outermost child of the chain was delegated by the agent in the room whose turn started it.
     root = parent
@@ -339,8 +336,10 @@ def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
         root = root.parent
     try:
         sink = None if context is None else _subagent_sink(context, observation)
-        if sink is not None:
-            return ActivityFeed.open(
+        if sink is None:
+            _publish(child.delegation_id, lambda feed: feed.status("running"))
+        else:
+            ActivityFeed.open(
                 child,
                 parent_delegation_id=None if parent is None else parent.child.delegation_id,
                 root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
@@ -348,16 +347,14 @@ def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
             )
     except Exception:
         logger.exception("Sub-agent activity feed failed to open", delegation_id=child.delegation_id)
-    ActivityFeed.forget(child.delegation_id)
-    return None
 
 
-def _publish_exit(feed: ActivityFeed | None, child: DelegationChild, *, cancelled: bool, reason: str) -> None:
+def _publish_exit(child: DelegationChild, *, cancelled: bool, reason: str) -> None:
     """Publish how an attempt ended: its settled pause or outcome, else cancelled or failed with ``reason``."""
     if child.status == "paused" or child.status in TERMINAL_CHILD_STATUSES:
-        _publish(feed, lambda feed: feed.status(child.status, result=child.result))
+        _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
     else:
-        _publish(feed, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
+        _publish(child.delegation_id, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
 
 
 @asynccontextmanager
@@ -378,7 +375,7 @@ async def child_run_context(
     context = get_tool_runtime_context()
     previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
     observation = ChildRunObservation(child, audit, parent=parent, previews=previews)
-    observation.feed = _open_feed(observation)
+    _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)
     # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.
     cancelled, reason = False, "Delegated run ended without a retained terminal outcome."
@@ -401,15 +398,12 @@ async def child_run_context(
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
-                _publish_exit(observation.feed, child, cancelled=cancelled, reason=reason)
+                _publish_exit(child, cancelled=cancelled, reason=reason)
 
 
 def report_child_approval_wait(child: DelegationChild, *, awaiting: bool) -> None:
     """Show a paused child as awaiting the approvals its job asks for, or running again once they are decided."""
-    _publish(
-        ActivityFeed.find(child.delegation_id),
-        lambda feed: feed.status("awaiting_approval" if awaiting else "running"),
-    )
+    _publish(child.delegation_id, lambda feed: feed.status("awaiting_approval" if awaiting else "running"))
 
 
 def _report_child_activity(observation: ChildRunObservation, event: TextDelta | ToolStarted) -> None:
@@ -429,18 +423,19 @@ async def observe_child_event(event: RunEvent) -> None:
     observation = _CHILD_RUN.get()
     if observation is None:
         return
+    delegation_id = observation.child.delegation_id
     if isinstance(event, TextDelta):
         _report_child_activity(observation, event)
-        _publish(observation.feed, lambda feed: feed.text(event.text))
+        _publish(delegation_id, lambda feed: feed.text(event.text))
     elif isinstance(event, ToolStarted):
         _report_child_activity(observation, event)
-        _publish(observation.feed, lambda feed: feed.tool_started(event))
+        _publish(delegation_id, lambda feed: feed.tool_started(event))
     elif isinstance(event, RunFinished):
         if not observation.owns(record := event.record):
             return
         observation.response = record
     elif isinstance(event, ToolCompleted):
-        _publish(observation.feed, lambda feed: feed.tool_completed(event))
+        _publish(delegation_id, lambda feed: feed.tool_completed(event))
     else:
         return
     await record_child_event(observation.audit, event)
