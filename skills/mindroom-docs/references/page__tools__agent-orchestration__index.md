@@ -278,6 +278,7 @@ Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-
 Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
 A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
 For an agent with [`mid_turn`](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing), only a message its judge says cannot wait releases the wait; one that can wait gets the `defer_reaction` and the call keeps waiting.
+A `job` wait with no other call of the reply running is the exception: any newer message releases it at once, without a judgment, so the agent answers while the jobs run on.
 Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
 ### Seeing and cancelling jobs
