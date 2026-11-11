@@ -1,0 +1,78 @@
+agents:
+  "__AGENT_NAME__":
+    display_name: Mind
+    role: Personal assistant with persistent file-based identity and memory
+    model: default
+    include_default_tools: false
+    memory_backend: file
+    rooms:
+      - "__AGENT_ROOM__"
+    accept_invites: true
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - "__AGENT_ROOM__"
+      users: []
+    context_files:
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
+    tools:
+      - shell
+      - memory
+      - scheduler
+      - update_awareness
+      - todo
+      - matrix_message
+      - name: config_manager
+        defer: true
+      - name: duckduckgo
+        defer: true
+      - name: website
+        defer: true
+      - name: browser
+        defer: true
+      - name: matrix_room
+        defer: true
+      - name: thread_model
+        defer: true
+      - name: thread_tags
+        defer: true
+      - name: thread_summary
+        defer: true
+      - name: thread_resolution
+        defer: true
+      - name: compact_context
+        defer: true
+      - name: callback_manager
+        defer: true
+      - name: chat_ui
+        defer: true
+        overrides:
+          enable_show_canvas: true
+      - name: usage_stats
+        defer: true
+      - name: script
+        defer: true
+      - name: mcp_matrix_mcp
+        defer: true
+    delegate_to:
+      - "__AGENT_NAME__"
+    skill_learning:
+      enabled: true
+    automations:
+      - prompt_curation
+      - dreaming
+    skills:
+      - mindroom-docs
+    instructions:
+      - You wake up fresh each session with no memory of previous conversations. Your context files are already loaded into your system prompt.
+      - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
+      - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
+      - Ask before external or destructive actions.
+      - Before answering prior-history questions, use search_memories first.
+      - When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess.
+      - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless they ask.

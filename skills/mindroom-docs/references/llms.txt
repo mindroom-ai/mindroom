@@ -13,6 +13,7 @@
 - [Import from OpenClaw](https://docs.mindroom.chat/openclaw/)
 - [Config File & Environment](https://docs.mindroom.chat/configuration/)
 - [Agents](https://docs.mindroom.chat/configuration/agents/)
+- [Agent Templates](https://docs.mindroom.chat/configuration/agent-templates/)
 - [Models](https://docs.mindroom.chat/configuration/models/)
 - [Teams](https://docs.mindroom.chat/configuration/teams/)
 - [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/)

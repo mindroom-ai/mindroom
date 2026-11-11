@@ -20,6 +20,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Get Started | Import from OpenClaw | `openclaw.md` | `openclaw/index.md` | `page__openclaw__index.md` |
 | Configuration | Config File & Environment | `configuration/index.md` | `configuration/index.md` | `page__configuration__index.md` |
 | Configuration | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
+| Configuration | Agent Templates | `configuration/agent-templates.md` | `configuration/agent-templates/index.md` | `page__configuration__agent-templates__index.md` |
 | Configuration | Models | `configuration/models.md` | `configuration/models/index.md` | `page__configuration__models__index.md` |
 | Configuration | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
 | Configuration | Routing & Responder Selection | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
