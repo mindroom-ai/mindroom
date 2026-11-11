@@ -1590,30 +1590,45 @@ async def test_a_reply_left_only_waiting_after_judged_work_answers_the_waiting_m
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verdict", [True, False])
 async def test_a_message_during_a_model_step_is_left_to_the_judge(tmp_path: Path, *, verdict: bool) -> None:
-    """A message arriving while the model steps is judged after the tool batch that step starts."""
+    """A message arriving while the model steps is judged at the wait of the tool call that step starts.
+
+    The tool runs until the judge has answered, so its call is still waiting when the judge decides.
+    """
     runtime = await tool_job_runtime(tmp_path)
     reply = _JobReply(tmp_path, runtime)
     judged: list[JudgmentRequest] = []
+    finish = asyncio.Event()
 
     async def send() -> None:
         reply.send()
 
-    def check_disk() -> str:
+    async def check_disk() -> str:
+        await finish.wait()
         return "plenty of space"
 
     model = ScriptedModel(
         [[Await(send), *calls(tool_call("check_disk", "disk"))], answer("Done.")],
     )
     try:
-        record = await asyncio.wait_for(
-            reply.run(model, _judge(verdict, judged), job_tool(check_disk)),
-            JOB_TEST_TIMEOUT,
-        )
+        pending = reply.run(model, _judge(verdict, judged), job_tool(check_disk))
+        await _until(lambda: bool(judged))
+        if verdict:
+            # The message can wait, so the call keeps waiting for its tool.
+            for _ in range(100):
+                await asyncio.sleep(0)
+            assert not pending.done()
+            finish.set()
+        record = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
         assert len(judged) == 1
         assert record.tools is not None
-        assert str(record.tools[0].result) == "plenty of space"
+        result = str(record.tools[0].result)
+        if verdict:
+            assert result == "plenty of space"
+        else:
+            assert json.loads(result)["status"] == "running"
         assert _has_notice(model.requests[-1].messages) is not verdict
     finally:
+        finish.set()
         await runtime.shutdown()
 
 
