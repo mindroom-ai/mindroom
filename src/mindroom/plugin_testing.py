@@ -354,9 +354,10 @@ class LoadedPlugin:
         ``fields`` are the event's own; for ``message:before_response``, ``message:final_response_transform``,
         ``message:after_response`` and ``message:cancelled`` they are those of its draft, result or info, and for a
         custom event its ``payload`` and ``source_plugin``. ``subagent:changed`` takes the ``subagent`` snapshot and
-        ignores ``body``; it runs as the sub-agent's caller ``agent`` in ``room``, and returns its context. It raises ``TurnRefused`` when the agent would not answer
-        the sender there, and returns what the event's hooks returned to MindRoom: the enrichment items, the
-        transformed draft, the context the hooks changed, or None for a custom event.
+        ignores ``body``; it runs as ``agent``, the agent in ``room`` whose turn started the sub-agent's chain, and
+        returns its context. It raises ``TurnRefused`` when the agent would not answer the sender there, and returns
+        what the event's hooks returned to MindRoom: the enrichment items, the transformed draft, the context the hooks
+        changed, or None for a custom event.
         """
         event = validate_event_name(event)
         if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS and event != EVENT_SUBAGENT_CHANGED:

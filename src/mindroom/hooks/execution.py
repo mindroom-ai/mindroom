@@ -81,8 +81,8 @@ def _scope_agent_name(context: HookContext) -> str | None:
         ):
             agent_name = context.agent_name
         elif isinstance(context, SubagentChangedContext):
-            # The agent that delegated is the one present in the room; its sub-agent may have no account there.
-            agent_name = context.subagent.caller_agent_name
+            # The agent whose turn started the chain is in the room; its sub-agents may have no account there.
+            agent_name = context.subagent.root_caller_agent_name
     return agent_name
 
 

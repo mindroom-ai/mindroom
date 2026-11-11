@@ -611,6 +611,8 @@ class SubagentSnapshot:
     # Set for a sub-agent's own sub-agent.
     parent_delegation_id: str | None
     caller_agent_name: str
+    # The agent in the room whose turn started the delegation chain; the caller itself for a direct child.
+    root_caller_agent_name: str
     agent_name: str
     source: Literal["delegate", "workflow"]
     # Redacted, at most 2,000 characters.

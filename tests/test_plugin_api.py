@@ -282,9 +282,9 @@ _SIGNATURES = {
     "SubagentChangedContext": f"(config, runtime_paths, correlation_id, *, event_name, {_HOOK_HELPERS}, subagent)",
     "SubagentItem": "(kind, text, tool, tool_call_id, state)",
     "SubagentSnapshot": (
-        "(delegation_id, subagent_id, parent_delegation_id, caller_agent_name, agent_name, source, task, room_id, "
-        "thread_id, requester_id, model_name, status, started_at, updated_at, ended_at, items, items_dropped, "
-        "result_preview)"
+        "(delegation_id, subagent_id, parent_delegation_id, caller_agent_name, root_caller_agent_name, agent_name, "
+        "source, task, room_id, thread_id, requester_id, model_name, status, started_at, updated_at, ended_at, items, "
+        "items_dropped, result_preview)"
     ),
     "SystemEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "ToolAfterCallContext": (
@@ -662,7 +662,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 30), "794aafa5f188f7df7f8b70d1b680c53f86decf2debe6432ad1c51f922c08c025")
+_PINNED_VERSION = ((1, 30), "e6b70dd7746c39de4c6bc91c30c5b14eb5700f0c4f43130b641ffc63afdef36b")
 
 
 def _is_enum(obj: object) -> bool:

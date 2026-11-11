@@ -287,10 +287,15 @@ def _open_feed(child: DelegationChild, parent: ChildRunObservation | None) -> Ac
     context = get_tool_runtime_context()
     if context is None:
         return None
+    # The outermost child of the chain was delegated by the agent in the room whose turn started it.
+    root = parent
+    while root is not None and root.parent is not None:
+        root = root.parent
     try:
         return ActivityFeed.open(
             child,
             parent_delegation_id=None if parent is None else parent.child.delegation_id,
+            root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
             bindings=context.hooks,
             config=context.config,
             runtime_paths=context.runtime_paths,

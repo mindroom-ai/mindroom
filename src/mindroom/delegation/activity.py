@@ -32,12 +32,12 @@ _FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 16_000
 _MAX_TOOL_ITEMS = 50
 _MAX_LABEL_CHARACTERS = 2_000
-# How much raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
+# The raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
 _REDACTION_MARGIN = 4_000
 
 
 def _clip(text: str) -> str:
-    """Return the redacted head of ``text``, at most 2,000 characters; only a head with a margin past that is redacted."""
+    """Return the redacted head of ``text``, at most 2,000 characters, redacting only a head with a margin past that."""
     return redact_sensitive_text(text[: _MAX_LABEL_CHARACTERS + _REDACTION_MARGIN])[:_MAX_LABEL_CHARACTERS]
 
 
@@ -61,7 +61,7 @@ def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
 
 
 def _public_entry(entry: ToolTraceEntry) -> ToolTraceEntry:
-    """Return a new entry with only the names and redacted previews a shown tool row carries, as `serialize_tool_trace`."""
+    """Return a new entry with only the names and the redacted previews a shown tool trace carries."""
     return ToolTraceEntry(
         type=entry.type,
         tool_name=entry.tool_name,
@@ -79,6 +79,7 @@ class _SubagentActivity:
     subagent_id: str
     parent_delegation_id: str | None
     caller_agent_name: str
+    root_caller_agent_name: str
     agent_name: str
     source: Literal["delegate", "workflow"]
     # Redacted and capped once, at the start.
@@ -96,8 +97,15 @@ class _SubagentActivity:
     _items: list[SubagentItem] = field(default_factory=list)
 
     @classmethod
-    def start(cls, child: DelegationChild, *, parent_delegation_id: str | None, now: float) -> _SubagentActivity:
-        """Begin a running activity for one child."""
+    def start(
+        cls,
+        child: DelegationChild,
+        *,
+        parent_delegation_id: str | None,
+        root_caller_agent_name: str,
+        now: float,
+    ) -> _SubagentActivity:
+        """Begin a running activity for one child of the chain ``root_caller_agent_name``'s turn started."""
         identity = child_execution_identity(child)
         is_workflow = child.persona is not None and child.persona.source_kind == "workflow"
         return cls(
@@ -105,6 +113,7 @@ class _SubagentActivity:
             subagent_id=child.subagent_id,
             parent_delegation_id=parent_delegation_id,
             caller_agent_name=child.caller_agent_name,
+            root_caller_agent_name=root_caller_agent_name,
             agent_name=child.child_agent_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task),
@@ -164,7 +173,7 @@ class _SubagentActivity:
             self.result = result
 
     def snapshot(self) -> SubagentSnapshot:
-        """Build the redacted, capped snapshot a plugin sees: each whole text item is redacted, then the text cap cuts."""
+        """Build the redacted, capped snapshot a plugin sees: whole text items are redacted, then the text cap cuts."""
         items = [
             replace(item, text=redact_sensitive_text(item.text)) if item.kind == "text" else item
             for item in self._items
@@ -175,6 +184,7 @@ class _SubagentActivity:
             subagent_id=self.subagent_id,
             parent_delegation_id=self.parent_delegation_id,
             caller_agent_name=self.caller_agent_name,
+            root_caller_agent_name=self.root_caller_agent_name,
             agent_name=self.agent_name,
             source=self.source,
             task=self.task,
@@ -218,6 +228,7 @@ class ActivityFeed:
         child: DelegationChild,
         *,
         parent_delegation_id: str | None,
+        root_caller_agent_name: str,
         bindings: HookBindings,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -235,11 +246,16 @@ class ActivityFeed:
             correlation_id=correlation_id,
         )
         activity = (
-            _SubagentActivity.start(child, parent_delegation_id=parent_delegation_id, now=time.time())
+            _SubagentActivity.start(
+                child,
+                parent_delegation_id=parent_delegation_id,
+                root_caller_agent_name=root_caller_agent_name,
+                now=time.time(),
+            )
             if feed is None
             else feed._activity
         )
-        # Scoped hooks see a child by its caller and room, which no later attempt changes.
+        # Scoped hooks see a child by its chain's root caller and its room, which no later attempt changes.
         context = SubagentChangedContext(**context_kwargs, subagent=activity.snapshot())
         if not has_eligible_hooks(registry, EVENT_SUBAGENT_CHANGED, context):
             return None

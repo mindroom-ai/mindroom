@@ -14,6 +14,7 @@ def make_snapshot(**overrides: Any) -> SubagentSnapshot:  # noqa: ANN401
         "subagent_id": "s1",
         "parent_delegation_id": None,
         "caller_agent_name": "helper",
+        "root_caller_agent_name": "helper",
         "agent_name": "researcher",
         "source": "delegate",
         "task": "Find the answer",

@@ -162,7 +162,12 @@ def _child(
 
 
 def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> _SubagentActivity:
-    return _SubagentActivity.start(_child(task=task, persona=persona), parent_delegation_id="p0", now=1.0)
+    return _SubagentActivity.start(
+        _child(task=task, persona=persona),
+        parent_delegation_id="p0",
+        root_caller_agent_name="lead",
+        now=1.0,
+    )
 
 
 def _call(
@@ -182,8 +187,9 @@ def _call(
 
 
 def test_start_reads_the_child_identity() -> None:
-    """The snapshot carries the room, resolved thread, requester, model, and parent link."""
+    """The snapshot carries the room, resolved thread, requester, model, callers, and parent link."""
     snapshot = _activity().snapshot()
+    assert (snapshot.caller_agent_name, snapshot.root_caller_agent_name) == ("parent", "lead")
     assert (snapshot.room_id, snapshot.thread_id, snapshot.requester_id) == (ROOM, "$thread", ALICE)
     assert (snapshot.model_name, snapshot.parent_delegation_id, snapshot.source) == ("fast", "p0", "delegate")
     assert (snapshot.status, snapshot.started_at, snapshot.ended_at) == ("running", 1.0, None)
@@ -390,11 +396,15 @@ class _Hook:
             await self._arrived.wait_for(lambda: len(self.snapshots) >= count)
         return self.snapshots[count - 1]
 
-    async def wait_for_status(self, status: SubagentStatus) -> SubagentSnapshot:
-        """Return the first snapshot with ``status`` once it has arrived."""
+    async def wait_for_status(self, status: SubagentStatus, *, agent_name: str | None = None) -> SubagentSnapshot:
+        """Return the first snapshot with ``status``, of ``agent_name``'s run when given, once it has arrived."""
+
+        def matches(snapshot: SubagentSnapshot) -> bool:
+            return snapshot.status == status and agent_name in (None, snapshot.agent_name)
+
         async with asyncio.timeout(2), self._arrived:
-            await self._arrived.wait_for(lambda: any(snapshot.status == status for snapshot in self.snapshots))
-        return next(snapshot for snapshot in self.snapshots if snapshot.status == status)
+            await self._arrived.wait_for(lambda: any(map(matches, self.snapshots)))
+        return next(filter(matches, self.snapshots))
 
 
 def _open(tmp_path: Path, seen: _Hook | None, *, delegation_id: str = "d1") -> ActivityFeed | None:
@@ -403,6 +413,7 @@ def _open(tmp_path: Path, seen: _Hook | None, *, delegation_id: str = "d1") -> A
     return ActivityFeed.open(
         _child(delegation_id=delegation_id),
         parent_delegation_id="p0",
+        root_caller_agent_name="lead",
         bindings=HookBindings(registry=registry),
         config=bind_runtime_paths(Config(), runtime_paths),
         runtime_paths=runtime_paths,
@@ -579,23 +590,30 @@ async def test_a_room_scoped_hook_sees_only_the_runs_in_its_rooms(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_an_agent_scoped_hook_sees_only_the_runs_its_agents_delegated(tmp_path: Path) -> None:
-    """`agents=` scopes a hook by the agent that delegated, the one present in the room."""
+async def test_an_agent_scoped_hook_sees_the_runs_of_chains_its_agents_started(tmp_path: Path) -> None:
+    """`agents=` scopes a hook by the agent in the room whose turn started the chain, also for a nested sub-agent."""
     seen = _Hook(agents=["helper"])
     registry = HookRegistry.from_plugins([_plugin("t", [seen.callback])])
-    for caller in ("helper", "researcher"):
-        snapshot = make_snapshot(caller_agent_name=caller, agent_name="researcher")
+    for root, caller in (("helper", "helper"), ("helper", "researcher"), ("researcher", "researcher")):
+        snapshot = make_snapshot(caller_agent_name=caller, root_caller_agent_name=root, agent_name="researcher")
         await emit(registry, EVENT_SUBAGENT_CHANGED, _changed(tmp_path, snapshot))
-    assert [snapshot.caller_agent_name for snapshot in seen.snapshots] == ["helper"]
+    assert [(snapshot.root_caller_agent_name, snapshot.caller_agent_name) for snapshot in seen.snapshots] == [
+        ("helper", "helper"),
+        ("helper", "researcher"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_no_feed_when_every_hook_is_scoped_to_other_runs(tmp_path: Path) -> None:
-    """Hooks whose rooms or agents never include this child keep no entry for it; a matching scope does."""
+    """Hooks whose rooms or agents never include this child keep no entry for it; a matching scope does.
+
+    The agent a hook matches is the chain's root caller, not the child's own caller.
+    """
     assert _open(tmp_path, _Hook(rooms=["!elsewhere:example.org"])) is None
     assert _open(tmp_path, _Hook(agents=["someone_else"])) is None
     assert not _OPEN
-    seen = _Hook(rooms=[ROOM], agents=["parent"])
+    assert _open(tmp_path, _Hook(agents=["parent"])) is None
+    seen = _Hook(rooms=[ROOM], agents=["lead"])
     assert _open(tmp_path, seen) is not None
     assert (await seen.wait_for(1)).status == "running"
 
@@ -605,21 +623,30 @@ def _delegating_turn(
     monkeypatch: pytest.MonkeyPatch,
     seen: _Hook,
     child_turns: list[Sequence[ScriptStep]],
+    *,
+    grandchild_turns: list[Sequence[ScriptStep]] | None = None,
 ) -> tuple[ResponseTurnContext, ToolRuntimeContext, RuntimePaths, Config]:
-    """Return a `leader` turn that delegates one task to `child`, whose model plays ``child_turns``."""
-    config = native_delegation_config(
-        agents={
-            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
-            "child": AgentConfig(display_name="Child", tools=["calculator"]),
-        },
-    )
+    """Return a `leader` turn that delegates one task to `child`, whose model plays ``child_turns``.
+
+    With ``grandchild_turns``, `child` may delegate to `grandchild`, whose model plays them.
+    """
+    agents = {
+        "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+        "child": AgentConfig(display_name="Child", tools=["calculator"]),
+    }
+    models = {"child": ScriptedModel(child_turns)}
+    if grandchild_turns is not None:
+        agents["child"].delegate_to = ["grandchild"]
+        agents["grandchild"] = AgentConfig(display_name="Grandchild")
+        models["grandchild"] = ScriptedModel(grandchild_turns)
+    config = native_delegation_config(agents=agents)
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
     parent = ScriptedModel(
         [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
     )
-    ScriptedAgents({"child": ScriptedModel(child_turns)}, by_session={identity.session_id: parent}).install(monkeypatch)
+    ScriptedAgents(models, by_session={identity.session_id: parent}).install(monkeypatch)
     registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
     runtime = _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
     turn = replace(
@@ -664,6 +691,42 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
     assert last.room_id == _identity().room_id
     assert last.parent_delegation_id is None
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_nested_child_names_its_parent_and_reaches_hooks_scoped_to_the_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's own sub-agent links the child's run and names it caller, and the leader in the room as root caller."""
+    seen = _Hook(agents=["leader"])
+    child_turns = [
+        calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Go deeper")),
+        answer("Child done"),
+    ]
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        seen,
+        child_turns,
+        grandchild_turns=[answer("Grandchild done")],
+    )
+
+    with tool_runtime_context(runtime):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    child = await seen.wait_for_status("completed", agent_name="child")
+    grandchild = await seen.wait_for_status("completed", agent_name="grandchild")
+    assert (child.parent_delegation_id, child.caller_agent_name, child.root_caller_agent_name) == (
+        None,
+        "leader",
+        "leader",
+    )
+    assert grandchild.parent_delegation_id == child.delegation_id
+    assert (grandchild.caller_agent_name, grandchild.root_caller_agent_name) == ("child", "leader")
+    assert grandchild.result_preview == "Grandchild done"
     assert not _OPEN
 
 
