@@ -49,7 +49,7 @@ The steps are described in [Connections portal sign-in](architecture/security-po
 
 ## Published Reports
 
-With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](tools/agent-orchestration.md#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent, or a [trusted upstream](#trusted-upstream-sign-in) identity.
+With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](tools/agent-orchestration.md#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent or manage its credentials, or a [trusted upstream](#trusted-upstream-sign-in) identity.
 A signed-out browser goes to Chat's sign-in page described above and comes back to the report; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
 Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
 A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
@@ -63,7 +63,7 @@ Over plain HTTP, sign-in comes back to the report only when Chat and MindRoom sh
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat, including the iOS app's, off |
 | `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
-| `MINDROOM_PUBLISHED_REPORTS_ACCESS` | `anyone_with_link` | Who may open [published reports](#published-reports): `anyone_with_link`, or `signed_in` for people signed in through the portal or trusted upstream auth; any other value stops MindRoom from starting |
+| `MINDROOM_PUBLISHED_REPORTS_ACCESS` | `anyone_with_link` | Who may open [published reports](#published-reports): `anyone_with_link` (also when unset or blank), or `signed_in` for people signed in through the portal or trusted upstream auth; any other value stops MindRoom from starting |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](deployment/mcp-gateway.md) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary)) |
 
 A configured allowlist replaces both defaults.
