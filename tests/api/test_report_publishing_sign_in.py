@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api import auth, main
@@ -355,3 +355,49 @@ def test_open_mode_serves_reports_as_before_with_two_privacy_headers(signin: dic
     }
     assert index.text == "<!doctype html><script src='app.js'></script><img src='image.png'>"
     assert client.get(f"/reports/public/{UNKNOWN_SLUG}/").json() == {"detail": "Public report was not found."}
+
+
+def test_signed_in_browser_gets_a_fresh_view_link_for_a_stale_one(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session turns an expired view link, or one missing its slash, into a fresh one for the same asset."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+    assert sign_in(client, "alice").status_code == 200
+    view = _view_link(client, f"/reports/public/{slug}/")
+    token = view.removeprefix(f"/reports/public/{slug}/").rstrip("/")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(report_routes, "_view_link_valid", lambda *_args: False)
+        fresh = _view_link(client, f"{view}app.js")
+    assert fresh.startswith(f"/reports/public/{slug}/~")
+    assert fresh.endswith("/app.js")
+    assert fresh.count("~") == 1
+    slashless = _view_link(client, f"/reports/public/{slug}/{token}")
+    assert slashless.startswith(f"/reports/public/{slug}/~")
+    assert slashless.endswith("/")
+    assert slashless.count("~") == 1
+
+
+def test_signed_out_request_for_a_malformed_slug_remembers_no_way_back(signin: dict[str, Any]) -> None:
+    """Only a well-formed slug is remembered across sign-in."""
+    client = _signed_in_mode(signin)
+    response = client.get("/reports/public/not-a-slug%C3%A9/", follow_redirects=False)
+    assert (response.status_code, response.headers["location"]) == (303, SIGN_IN_PAGE)
+    assert "set-cookie" not in response.headers
+
+
+def test_sign_in_check_that_fails_on_the_server_is_not_a_sign_in_page(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sign-in check that cannot run answers its own error instead of sending the browser to sign in again."""
+    client = _signed_in_mode(signin)
+
+    async def unavailable(_request: Request) -> None:
+        raise HTTPException(503, "Matrix OpenID verifier is unavailable.")
+
+    monkeypatch.setattr(report_routes, "require_connections_user", unavailable)
+    response = client.get(f"/reports/public/{UNKNOWN_SLUG}/", follow_redirects=False)
+    assert response.status_code == 503
