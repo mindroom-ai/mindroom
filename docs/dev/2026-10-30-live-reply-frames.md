@@ -74,14 +74,14 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
 - Frame: `{"v": 1, "run", "sid", "seq", "meta", "snapshot"}` or the same with `"delta"` instead of `snapshot`.
   - `run` is the delegation ID, which names the run across its frames.
   - `sid` is a publisher ID like a reply's (zero-padded start milliseconds, a dash, 8 hex digits), `seq` starts at 0 within a `sid` and rises with each frame built, so a failed send leaves a gap; clients order frames by `(sid, seq)` and must not expect contiguous `seq`.
-    A run keeps its `sid` through pauses and resumes; it gets a new one, with `seq` back at 0, only when its stream restarts after the room refused a frame.
+    A run keeps its `sid` through pauses and resumes; it gets a new one, with `seq` back at 0, whenever its stream restarts: after the room refused a frame, and after the publisher stopped and started again, as when the sending account had no client past a retry, the relay check failed, or an error ended the publisher.
   - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
     `reasoning` and `activity` are always empty.
 - `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
   - `agent`: the sub-agent's name; `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the sub-agent that delegated to it, or `null`.
   - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
   - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
-  - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters).
+  - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
     Deltas carry neither, so a client keeps them from the snapshot.
 - Documents: text items are concatenated as the Markdown of `md`.
   Each tool call adds the marker line a reply shows for it (`🔧 \`name\` [n] ⏳`, with the hourglass replaced by the finished form once the call completes), numbered from 1 by its entry in `tools`, in order of appearance.
@@ -110,7 +110,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   A run is forgotten after the frame of its end.
 - A refused frame (`M_TOO_LARGE`, `M_UNRECOGNIZED`, `M_FORBIDDEN`, `M_UNKNOWN`, `M_NOT_FOUND`, or a bare 4xx) stops that run's frames until it resumes from a pause or ends, and its end then gets one more attempt.
   Other failures retry with a snapshot after a one second wait.
-- When no frames are sent: the delegating turn has no Matrix room (the OpenAI-compatible API, scheduled or API runs) or runs outside a managed runtime; `defaults.streaming.live_frames` is off when the run starts (switching it off later does not stop a run already publishing); the homeserver does not list `io.mindroom.ephemeral_opt_in`; the sending account has no client for a whole retry.
+- When no frames are sent: the delegating turn has no Matrix room (the OpenAI-compatible API) or runs outside a managed runtime; the turn is a silent schedule's, which shows nothing in the room while it runs (scheduled tasks and automations that post into a room do send frames); `defaults.streaming.live_frames` is off when the run starts (switching it off later does not stop a run already publishing); the homeserver does not list `io.mindroom.ephemeral_opt_in`, or the check failed, after which its runs send nothing for a minute before it is asked again; the sending account has no client for a whole retry.
   Frames are best effort: a failure building or sending one stops frames and never fails the run.
 - Restart: frames are memory only and an interrupted child is not rerun.
   After a crash no end is sent, because recovery runs in a new process that has no feed for the run.
