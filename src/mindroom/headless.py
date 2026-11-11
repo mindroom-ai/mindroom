@@ -11,7 +11,7 @@ from uuid import uuid4
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ai_response
 from mindroom.config.main import Config
-from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, memory_search
+from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, memory_search, uses_knowledge_graph
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -86,6 +86,8 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
             problems.append(f"agent {name!r}: knowledge bases need a running MindRoom to index them")
         if memory_backend(config, name) == "file" and memory_search(config, name).mode == "semantic":
             problems.append(f"agent {name!r}: semantic memory_search needs a running MindRoom to index memory")
+        if uses_knowledge_graph(config, name):
+            problems.append(f"agent {name!r}: the knowledge graph needs a running MindRoom")
         agent_tools = resolve_agent_tools(config, name, tools)
         mcp = [tool for tool in agent_tools.tool_names if (metadata := tools.get(tool)) and metadata.mcp_server_id]
         if mcp:
@@ -117,7 +119,7 @@ def _problems(config: Config, runtime_paths: RuntimePaths, agent: str, requester
         problems.append("administrators is empty; add the requester to it")
     elif requester_id not in config.administrators:
         problems.append(f"requester {requester_id!r} is not in administrators")
-    if config.plugins:
+    if any(entry.enabled for entry in config.plugins):
         problems.append("plugins need a running MindRoom to load them")
     if any(
         account.password or account.access_token
@@ -176,6 +178,8 @@ async def run_turn(
     validated, runtime_paths, requester = _validated(config, agent=agent, storage=storage, requester_id=requester_id)
     # The path tools open their base directory without following a link, so they get the directory itself.
     workdir = workdir.expanduser().resolve() if workdir is not None else None
+    if workdir is not None and not workdir.is_dir():
+        raise HeadlessConfigError([f"workdir {workdir} is not an existing directory"])
     persist_offline_entity_accounts(validated, runtime_paths)
     identity = build_tool_execution_identity(
         channel="headless",

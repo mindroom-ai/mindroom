@@ -31,7 +31,7 @@ print(result.text)
 
 | Argument | Meaning |
 |---|---|
-| `config` | A mapping with what `config.yaml` holds, validated as MindRoom validates `config.yaml`; nothing is read from or written to a `config.yaml` file. |
+| `config` | A mapping with what `config.yaml` holds, validated as MindRoom validates `config.yaml`; tools that read or edit the config, such as `self_config`, use a `config.yaml` in `storage` instead. |
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
@@ -39,7 +39,8 @@ print(result.text)
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 
 Provider API keys come from the process environment, or from a `.env` file in `storage`.
-Give headless runs a storage of their own: a storage that a `mindroom run` instance uses is refused.
+Give headless runs a storage of their own: a storage holding a MindRoom instance's Matrix accounts is refused, and `mindroom run` with its default password accounts cannot start on a storage a headless run used.
+[Budgets](https://docs.mindroom.chat/budgets/) never limit a headless run.
 Each call is a new conversation, so the agent sees no history from earlier calls, and it does not write memories on its own after the turn.
 
 `HeadlessResult` has these fields:
@@ -68,8 +69,8 @@ The checks cover the agent and every agent it can reach through `delegate_to`.
 | Tools that run in a worker, through `worker_tools` or the sandbox settings | Every tool of a headless run runs in the calling process. |
 | `shell` without `defaults.allow_shell_without_worker: true` | Without it, every command the agent runs returns an error. |
 | [MCP](https://docs.mindroom.chat/mcp/) tools | A running MindRoom connects to MCP servers. |
-| [`knowledge_bases`](https://docs.mindroom.chat/knowledge/) and semantic file `memory_search` | A running MindRoom indexes them. |
-| [`plugins`](https://docs.mindroom.chat/plugins/) | A running MindRoom loads them. |
+| [`knowledge_bases`](https://docs.mindroom.chat/knowledge/), semantic file `memory_search`, and the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) | A running MindRoom indexes them. |
+| Enabled [`plugins`](https://docs.mindroom.chat/plugins/) | A running MindRoom loads them. |
 | A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every agent's responder access, which delegation checks. |
 | A `storage` holding Matrix accounts of a MindRoom instance | Headless runs record accounts without credentials, which would stop that instance from starting. |
 
@@ -89,6 +90,6 @@ Code that `python` runs uses the calling process's current directory, so give it
 `file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `file` and `coding` can read that directory under `file_access: workspace`, but not write it.
-Tools that save files of their own, such as `file_generation`, `visualization`, and the downloads of `gmail` or `google_drive`, also save them there.
+Other tools that work on files, such as `file_generation`, `visualization`, and `gmail` or `google_drive` downloads and attachments, use that directory as their workspace, so under `file_access: workspace` they cannot reach files in the `workdir`.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).

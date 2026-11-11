@@ -237,6 +237,12 @@ def _credentialed_storage(tmp_path: Path, config: dict[str, Any]) -> None:
             "semantic memory_search needs a running MindRoom",
         ),
         (lambda c, p: c.update(plugins=[_plugin(p)]), "plugins need a running MindRoom"),
+        (
+            lambda c, _p: (
+                c.update(knowledge_graph={"model": "default"}) or c["agents"]["coder"].update(knowledge_graph=True)
+            ),
+            "the knowledge graph needs a running MindRoom",
+        ),
         (lambda c, p: _credentialed_storage(p, c), "give headless runs a storage of their own"),
     ],
     ids=[
@@ -249,6 +255,7 @@ def _credentialed_storage(tmp_path: Path, config: dict[str, Any]) -> None:
         "knowledge",
         "semantic-memory",
         "plugins",
+        "knowledge-graph",
         "storage",
     ],
 )
@@ -318,6 +325,29 @@ async def test_workdir_is_shell_cwd_and_file_base(
     assert str(shell_result.content).splitlines()[-1] == str(workdir)
     assert _files(workdir) == ["a.txt"]
     assert (storage / "agents" / "coder" / "sessions" / "coder.db").is_file()
+    # The notes on writing into the workspace, which the tools no longer resolve paths against, are left out.
+    system = str([message.content for message in provider.requests[0].messages if message.role == "system"])
+    assert "MINDROOM_AGENT_WORKSPACE" not in system
+    assert "skills/<skill-name>/" not in system
+
+
+@pytest.mark.asyncio
+async def test_run_turn_refuses_a_missing_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workdir that is not an existing directory is refused before the model is called."""
+    provider = _install(monkeypatch)
+    with pytest.raises(HeadlessConfigError, match="is not an existing directory"):
+        await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=tmp_path / "nope")
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_plugin_is_not_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plugin entry with `enabled: false` never loads, so it needs no running MindRoom."""
+    _install(monkeypatch, "hello")
+    config = _config()
+    config["plugins"] = [{"path": _plugin(tmp_path), "enabled": False}]
+    result = await run_turn(config, agent="coder", prompt="hi", storage=tmp_path / "storage")
+    assert result.completed
 
 
 @pytest.mark.asyncio
@@ -328,6 +358,9 @@ async def test_default_base_dir_is_the_workspace(tmp_path: Path, monkeypatch: py
     await run_turn(_config(), agent="coder", prompt="go", storage=storage)
 
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(storage / "agents" / "coder" / "workspace")
+    system = str([message.content for message in provider.requests[0].messages if message.role == "system"])
+    assert "MINDROOM_AGENT_WORKSPACE" in system
+    assert "skills/<skill-name>/" in system
 
 
 class _ReadsSavedOutput(ScriptedProvider):
@@ -434,16 +467,19 @@ def _chat_chunk(delta: dict[str, object], finish: str | None = None) -> bytes:
 @pytest.mark.asyncio
 async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_path: Path) -> None:
     """A turn that ends while another still streams from its model leaves the other's connection open."""
+    slow_streaming, fast_done = asyncio.Event(), asyncio.Event()
 
     async def completions(request: web.Request) -> web.StreamResponse:
         body = await request.json()
         slow = "slow" in json.dumps(body["messages"])
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
-        for part in ("one ", "two ", "three"):
-            await response.write(_chat_chunk({"content": part}))
-            if slow:
-                await asyncio.sleep(0.3)
+        await response.write(_chat_chunk({"content": "one "}))
+        if slow:
+            # The slow stream stays open until the fast turn has ended.
+            slow_streaming.set()
+            await asyncio.wait_for(fast_done.wait(), 10)
+        await response.write(_chat_chunk({"content": "two three"}))
         await response.write(_chat_chunk({}, "stop"))
         await response.write(b"data: [DONE]\n\n")
         return response
@@ -463,10 +499,11 @@ async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_pat
         "extra_kwargs": {"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "unused"},
     }
     try:
-        fast, slow = await asyncio.gather(
-            run_turn(config, agent="coder", prompt="fast", storage=tmp_path / "fast"),
-            run_turn(config, agent="coder", prompt="slow", storage=tmp_path / "slow"),
-        )
+        slow_turn = asyncio.create_task(run_turn(config, agent="coder", prompt="slow", storage=tmp_path / "slow"))
+        await asyncio.wait_for(slow_streaming.wait(), 10)
+        fast = await run_turn(config, agent="coder", prompt="fast", storage=tmp_path / "fast")
+        fast_done.set()
+        slow = await slow_turn
     finally:
         await runner.cleanup()
 

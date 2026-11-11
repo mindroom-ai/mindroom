@@ -1527,7 +1527,8 @@ def _build_agent_instructions(
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if not disable_runtime_capabilities:
+    # Beside a workdir the tools resolve relative paths there, so notes on writing into the workspace would misdirect.
+    if not disable_runtime_capabilities and current_tool_workdir() is None:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
         # A conditional expression keeps this builder within the complexity limit.
         instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())

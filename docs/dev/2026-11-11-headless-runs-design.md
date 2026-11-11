@@ -21,7 +21,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 4. A run records the router's, every agent's and team's, and the internal user's Matrix accounts in `matrix_state.yaml` without credentials, through the same helper the tests use.
    Turn code resolves every configured entity's Matrix ID, for prompts, sender attribution, and authorization.
    A storage that already holds credentialed accounts is refused, because a later `mindroom run` on it stops with `Stored Matrix credentials for <agent> are incomplete` for any agent that got such a record.
-5. Refusals cover only what a headless run cannot serve: a running MindRoom indexes knowledge bases and semantic file memory, loads plugins, connects MCP servers, and runs workers.
+5. Refusals cover only what a headless run cannot serve: a running MindRoom indexes knowledge bases, semantic file memory, and the knowledge graph, loads plugins, connects MCP servers, and runs workers.
    Without the refusals, knowledge, plugin tools, and MCP tools would silently be missing from the turn.
    `shell` without `defaults.allow_shell_without_worker` is refused because it would answer every command with an error.
    Mem0 recall and file memory run headless, so they are not refused; a caller that wants no memory sets `memory: none`.
@@ -31,6 +31,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 7. Saved tool outputs stay under `storage`, in the workspace's `mindroom_tool_outputs/`, and their receipts give the absolute path.
    A receipt's workspace-relative path would resolve against the workdir, where the file is not, or where a different file of the same name may be.
    Under `file_access: workspace`, `file` and `coding` get that one directory as an extra read-only root, which keeps their confinement as narrow as possible while they can still read what the receipts name.
+   The system prompt leaves out its notes on saving outputs and skills into the workspace, because the tools would resolve those relative paths in the workdir.
 8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 
