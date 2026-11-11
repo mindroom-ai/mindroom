@@ -7853,6 +7853,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.activity"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.hooks.context",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.delegation.lifecycle"]
+
+[[modules]]
 path = "mindroom.delegation.targets"
 depends_on = [
     "mindroom.delegation.lifecycle",
