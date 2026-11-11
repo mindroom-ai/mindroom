@@ -73,7 +73,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   A sub-agent has no account of its own, so clients should accept these frames only from a MindRoom agent on their homeserver, as for reply frames.
 - Frame: `{"v": 1, "run", "sid", "seq", "meta", "snapshot"}` or the same with `"delta"` instead of `snapshot`.
   - `run` is the delegation ID, which names the run across its frames.
-  - `sid` is a publisher ID like a reply's (zero-padded start milliseconds, a dash, 8 hex digits), `seq` counts from 0 within a `sid`, and `(sid, seq)` orders a run's frames.
+  - `sid` is a publisher ID like a reply's (zero-padded start milliseconds, a dash, 8 hex digits), `seq` starts at 0 within a `sid` and rises with each frame built, so a failed send leaves a gap; clients order frames by `(sid, seq)` and must not expect contiguous `seq`.
     A run keeps its `sid` through pauses and resumes; it gets a new one, with `seq` back at 0, only when its stream restarts after the room refused a frame.
   - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
     `reasoning` and `activity` are always empty.
@@ -112,7 +112,10 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   Other failures retry with a snapshot after a one second wait.
 - When no frames are sent: the delegating turn has no Matrix room (the OpenAI-compatible API, scheduled or API runs) or runs outside a managed runtime; `defaults.streaming.live_frames` is off when the run starts (switching it off later does not stop a run already publishing); the homeserver does not list `io.mindroom.ephemeral_opt_in`; the sending account has no client for a whole retry.
   Frames are best effort: a failure building or sending one stops frames and never fails the run.
-- Restart: frames are memory only and the buffer holds no history for a run, so a MindRoom restart ends every stream without a final frame, and an interrupted child is not rerun, so its run never sends an end.
+- Restart: frames are memory only and an interrupted child is not rerun.
+  After a crash no end is sent, because recovery runs in a new process that has no feed for the run.
+  On a graceful stop the old process may still publish the run as `failed` or `cancelled`, and that frame may or may not land.
+  A client should drop a `running` or `awaiting_approval` run that goes silent, and keep a `paused` or ended run for as long as it is useful.
   A client should drop a `running` or `awaiting_approval` run that sends nothing for a while, and keep a `paused` or ended run for as long as it is useful.
 
 ## Limitations
