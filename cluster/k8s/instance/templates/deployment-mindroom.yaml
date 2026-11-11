@@ -164,6 +164,12 @@ spec:
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
+        {{- if and .Values.administrators .Values.accountId .Values.supabaseUrl .Values.supabaseAnonKey }}
+        # Platform dashboard logins (accountId limits them to the tenant's account) carry the account id; act as the owner's Matrix user.
+        # Never without Supabase: an open-access chart would hand credentialless requests the owner's authority.
+        - name: MINDROOM_OWNER_USER_ID
+          value: {{ first .Values.administrators | quote }}
+        {{- end }}
         - name: MINDROOM_STORAGE_PATH
           value: {{ .Values.storagePath }}
         - name: MINDROOM_CONFIG_PATH

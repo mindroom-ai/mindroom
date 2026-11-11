@@ -468,6 +468,36 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
 
 
 @pytest.mark.parametrize(
+    ("auth_args", "expected"),
+    [
+        (
+            ("accountId=account-42", "supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"),
+            "@owner:42.example.test",
+        ),
+        (("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"), None),
+        (("accountId=account-42", "allowUnauthenticatedPrimary=true"), None),
+    ],
+    ids=["platform-login", "no-account-binding", "open-access"],
+)
+def test_instance_chart_maps_platform_logins_to_the_owner_only_behind_supabase(
+    auth_args: tuple[str, ...],
+    expected: str | None,
+) -> None:
+    """Only account-bound platform logins act as the owner; never other project users or credentialless requests."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=42",
+        "baseDomain=example.test",
+        *auth_args,
+        set_string_args=("administrators[0]=@owner:42.example.test",),
+    )
+    container = _resource(docs, "Deployment", "mindroom-42")["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values.get("MINDROOM_OWNER_USER_ID") == expected
+
+
+@pytest.mark.parametrize(
     "oidc_args",
     [(), ("matrixOidc.enabled=true", "matrixOidc.issuer=https://api.example.test/matrix-oidc")],
     ids=["default", "oidc"],
