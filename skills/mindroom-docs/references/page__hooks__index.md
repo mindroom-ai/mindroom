@@ -216,8 +216,7 @@ async def keep_prices_private(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
-| `tool:environment` | Collector | `SubagentChangedContext` | `subagent`, a `SubagentSnapshot` with `delegation_id`, `subagent_id` (stable across `continue_subagent`), `parent_delegation_id` (set for a sub-agent's own sub-agent), `caller_agent_name`, `agent_name`, `source` (`"delegate"` or `"workflow"`), `task`, `room_id`, `thread_id`, `requester_id`, `model_name`, `status`, `started_at`, `updated_at`, `ended_at`, `items` (oldest first; each a `SubagentItem` with `kind` `"text"` or `"tool"`, `text`, `tool`, `tool_call_id`, `state` of `"running"`, `"done"`, or `"error"`), `items_dropped`, `result_preview` |
-| `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 | `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
 | `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
@@ -265,7 +264,7 @@ Custom events default to 1000 ms.
   A plugin that uses it states `"mindroom_plugin_api": "1.30"` in its manifest.
   `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` still do not fire for a child's turn; this event is how a plugin sees one.
   - **Coalescing**: a child emits at most once per 250 ms, with its latest snapshot, and a status change emits at once.
-    Each child has one emission in flight at a time, and the child never waits on hooks, so a slow or failing hook drops only its own update; the next snapshot carries everything.
+    Each child has one emission in flight at a time, and the child never waits on hooks, so a failing hook loses only its own update, and a slow one holds that child's later snapshots back for up to its timeout; each snapshot carries the whole run, so nothing is lost.
   - **Scoping**: `agents=` matches the delegating agent (`ctx.subagent.caller_agent_name`), which is the agent present in the room, not the child's `agent_name`, and `rooms=` matches the run's `ctx.subagent.room_id`.
   - **Statuses**: `running`, `awaiting_approval`, `paused`, `completed`, `failed`, `cancelled`, `denied`; the last four are final, and a final snapshot sets `ended_at` and `result_preview`.
     `awaiting_approval` is a background sub-agent waiting for the approval cards of its gated calls, and returns to `running` once they are decided.
@@ -273,7 +272,7 @@ Custom events default to 1000 ms.
     A gated tool call that a running child makes as its own background job still shows `running`.
   - **Caps**: `task` and `result_preview` are cut to 2,000 characters, the child's text keeps its newest 16,000 characters, and `items` keeps the newest 50 tool items; `items_dropped` counts the items the caps removed.
   - **Redaction**: `task`, `result_preview`, and text items are redacted.
-    A tool item carries only the public trace fields in `item.tool` (`type`, `tool_name`, `args_preview`, `result_preview`, `truncated`), as a shown reply's tool trace does, never the full arguments or result.
+    A tool item's `item.tool` never includes the full arguments or result, only the previews (`args_preview`, `result_preview`, `truncated`) and names (`type`, `tool_name`) that a shown reply's tool trace carries.
 
 ```python
 from mindroom.plugin_api import hook
@@ -512,6 +511,7 @@ All contexts include these fields:
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `shown`, `chat_preview()`, `result`, `error`, `blocked`, `duration_ms` |
 | `ContactBeforeSendContext` | `agent_name`, `room_id`, `thread_id`, `requester_id`, `contact_id`, `counterparty_id`, `counterparty_name`, `rules`, `text`, `message_received_depth`, `verdict` (`"send"`, `"revise"`, or `"deny"`), `feedback`, `rewrite(text)`, `revise(feedback)`, `deny(reason)` |
 | `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
+| `SubagentChangedContext` | `subagent`, a `SubagentSnapshot` with `delegation_id`, `subagent_id` (stable across `continue_subagent`), `parent_delegation_id` (set for a sub-agent's own sub-agent), `caller_agent_name`, `agent_name`, `source` (`"delegate"` or `"workflow"`), `task`, `room_id`, `thread_id`, `requester_id`, `model_name`, `status`, `started_at`, `updated_at`, `ended_at`, `items` (oldest first; each a `SubagentItem` with `kind` `"text"` or `"tool"`, `text`, `tool`, `tool_call_id`, `state` of `"running"`, `"done"`, or `"error"`), `items_dropped`, `result_preview` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
