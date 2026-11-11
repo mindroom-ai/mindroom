@@ -276,10 +276,20 @@ async def test_an_unchanged_snapshot_sends_nothing_and_a_status_change_sends_a_s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("leading_tool", [False, True], ids=["text", "tool_first"])
-async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch, leading_tool: bool) -> None:
-    """A run writing 50,000 characters sends only appends between cuts, a snapshot after each cut, all under 60,000 bytes."""
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plaintext", "encrypted"])
+@pytest.mark.parametrize("previews", [True, False], ids=["previews", "hidden"])
+async def test_long_text_stays_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    leading_tool: bool,
+    encrypted: bool,
+    previews: bool,
+) -> None:
+    """A run writing 50,000 characters sends only appends between cuts, a snapshot after each cut, all under 60,000 bytes.
+
+    Hidden previews stay hidden in every frame, deltas and the snapshots after cuts alike.
+    """
     monkeypatch.setattr(subagents_module, "_SEND_INTERVAL_SECONDS", 0)
-    room = FrameRoom()
+    room = FrameRoom(encrypted=encrypted)
     activity = _activity()
     if leading_tool:
         activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})), 1000.0)
@@ -288,11 +298,11 @@ async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch, le
         activity.add_text(f"{index:03d} Größe 日本語 {'text ' * 20}"[:100], 1000.0)
         snapshot = activity.snapshot()
         texts.append("".join(item.text for item in snapshot.items if item.kind == "text"))
-        room.publish(snapshot)
+        room.publish(snapshot, previews=previews)
         # The publisher sends without a pause here, so it answers within a few turns of the event loop.
         while len(room.sent) <= index:  # noqa: ASYNC110
             await asyncio.sleep(0)
-    room.publish(replace(snapshot, status="completed", ended_at=1001.0))
+    room.publish(replace(snapshot, status="completed", ended_at=1001.0), previews=previews)
     await _until(_forgotten)
 
     cut = [False, *(not later.startswith(earlier) for earlier, later in pairwise(texts))]
@@ -300,6 +310,8 @@ async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch, le
     assert ["snapshot" in frame for frame in room.sent] == [True, *cut[1:], True]
     assert all(frame["delta"]["md"]["del"] == 0 for frame in room.sent if "delta" in frame)
     assert max(room.sent_bytes) < _MAX_FRAME_BYTES
+    assert room.encrypted == []
+    assert ("_preview" in json.dumps(room.sent)) is (previews and leading_tool)
 
 
 @pytest.mark.asyncio
