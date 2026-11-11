@@ -54,13 +54,14 @@ def _make_context(
     *,
     public_url: str = "https://acme.mindroom.chat",
     agent_memory_backend: Literal["file"] | None = None,
+    env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
     runtime_paths = replace(
         runtime_paths,
         # The test's paths keep no control state root.
         control_state_root=None,
-        process_env={**runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
+        process_env={**runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url, **(env or {})},
     )
     config = bind_runtime_paths(
         Config(
@@ -816,6 +817,44 @@ async def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: 
     assert published["source"] == {"path": "public-demo"}
     assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
     assert published["public_path"] == f"/reports/public/{published['slug']}/"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("access", "who_can_open"),
+    [
+        (None, "anyone with the link"),
+        ("anyone_with_link", "anyone with the link"),
+        ("signed_in", "people signed in to this deployment"),
+    ],
+)
+async def test_report_publishing_tool_says_who_can_open_the_link(
+    tmp_path: Path,
+    access: str | None,
+    who_can_open: str,
+) -> None:
+    """The tool's description names both audiences, and its result names the one this deployment uses."""
+    report_tool = ReportPublishingTools()
+    env = {} if access is None else {"MINDROOM_PUBLISHED_REPORTS_ACCESS": access}
+    context = _make_context(tmp_path, agent_memory_backend="file", env=env)
+    site_dir = context.runtime_paths.storage_root / "agents" / "general" / "workspace" / "site"
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            await report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "site", "title": "Site"},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["who_can_open"] == who_can_open
+    assert published["public_path"] == f"/reports/public/{published['slug']}/"
+    description = " ".join((ReportPublishingTools.publish_report.__doc__ or "").split())
+    assert "people signed in to this deployment" in description
+    assert "anyone with the link" in description
 
 
 @pytest.mark.asyncio

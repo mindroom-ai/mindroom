@@ -14,7 +14,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import AGENT_SCOPE
-from mindroom.origins import configured_public_url
+from mindroom.origins import configured_public_url, published_reports_require_sign_in
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,
@@ -49,13 +49,14 @@ class ReportPublishingTools(Toolkit):
         source: dict[str, Any],
         confirm_public: bool,
     ) -> str:
-        """Publish an authorized report source through a revocable public link.
+        """Publish an authorized report source through a revocable link.
 
         Args:
             source_type: Either dynamic_workflow_run or static_site.
             source: For dynamic_workflow_run, workflow_id and run_id of a completed run; for static_site, path
                 (workspace-relative, to a directory with index.html or to one HTML file) and title.
-            confirm_public: Must be true; anyone with the link can open the report until it is revoked.
+            confirm_public: Must be true; until it is revoked, anyone with the link can open the report, or only
+                people signed in to this deployment where it requires sign-in (the result's who_can_open says which).
 
         """
         if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
@@ -89,6 +90,11 @@ class ReportPublishingTools(Toolkit):
             public_url=report.public_url,
             public_path=_public_path_for_report(report),
             published_at=report.published_at,
+            who_can_open=(
+                "people signed in to this deployment"
+                if published_reports_require_sign_in(context.runtime_paths)
+                else "anyone with the link"
+            ),
         )
 
     @tool

@@ -15663,7 +15663,8 @@ agents:
 The tool exposes `publish_report(source_type, source, confirm_public)` and `revoke_public_report(slug)`, each returning JSON with a `status` field.
 `confirm_public=True` is required, so an accidental call publishes nothing.
 A successful publish returns a `slug` and the public path `/reports/public/<slug>`, plus an absolute `public_url` when `MINDROOM_PUBLIC_URL` is set.
-Anyone with the link can open it without signing in until it is revoked.
+Anyone with the link can open it without signing in until it is revoked, unless the deployment sets [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](https://docs.mindroom.chat/connections-portal/#published-reports) to `signed_in`; the result's `who_can_open` names who can.
+To have a person approve each publication, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `publish_report`.
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
@@ -16943,12 +16944,23 @@ The app confirms the browser's session with its own token, so a link forwarded t
 It confirms only a nonce issued by the backend it started with, so another backend, such as one an agent published in a shared room, cannot obtain a nonce from this one through the app.
 The steps are described in [Connections portal sign-in](https://docs.mindroom.chat/architecture/security-posture/#connections-portal-sign-in).
 
+## Published Reports
+
+With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent, or a [trusted upstream](#trusted-upstream-sign-in) identity.
+A signed-out browser goes to Chat's sign-in page described above and comes back to the report; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
+Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
+A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
+Anyone given the view address can open that report until its key expires, the report is revoked, or MindRoom restarts, so share the report's link instead.
+Changing the setting keeps every link's address, and a revoked link stops opening at once.
+Over plain HTTP, sign-in comes back to the report only when Chat and MindRoom share a host name; otherwise it opens the portal, and the link opens when opened again.
+
 ## Settings
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat, including the iOS app's, off |
 | `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
+| `MINDROOM_PUBLISHED_REPORTS_ACCESS` | `anyone_with_link` | Who may open [published reports](#published-reports): `anyone_with_link`, or `signed_in` for people signed in through the portal or trusted upstream auth; any other value stops MindRoom from starting |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
 A configured allowlist replaces both defaults.
@@ -17487,6 +17499,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal never sends the same tab there twice in a row, and links to it the second time instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
+When a [published report that requires sign-in](https://docs.mindroom.chat/connections-portal/#published-reports) sent the browser to Chat, the hand-off redirects to `/reports/public/<slug>` instead, read from the ten-minute `__Host-mindroom_report_return` cookie (`mindroom_report_return` over plain HTTP), which holds only a slug; it is `SameSite=None` over HTTPS because the hand-off is a cross-site post, and any other value lands on the portal.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
 MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
@@ -17666,7 +17679,7 @@ Do not report or "fix" these; they are deliberate.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
-  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, its user's own conversation connect and reset links for requester-owned connections, the OAuth callback for flows it started, and the OAuth success page.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, its user's own conversation connect and reset links for requester-owned connections, the OAuth callback for flows it started, the OAuth success page, and `GET` requests for published reports.
   The portal opens a connect or reset link given as `?next=` after its sign-in attempt, which grants nothing beyond opening that link directly: the link still checks that the signed-in user is its requester, and the user still approves at the provider or on the reset confirmation page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
   Binding is proven by the homeserver's `/_matrix/client/versions` and a second verification of the token after reading it, so turning binding on or off once during a sign-in cannot promote an unbound token; turning it on and off again within that one sign-in is not covered.
@@ -17674,6 +17687,8 @@ Do not report or "fix" these; they are deliberate.
   Over plain HTTP on a local address, the session cookie and the OAuth flow cross that network unencrypted, as the rest of a plain-HTTP stack does, and because cookies ignore ports, every other web service on that host receives the session cookie too.
   On a homeserver that does not bind tokens to one deployment, a backend that Chat opens could replay a user's token to another deployment on the same homeserver until it expires; [audience binding](https://docs.mindroom.chat/connections-portal/#token-binding) closes that where the homeserver supports it.
   The `/connections` page shell is served without authentication, while every API stays protected.
+- While published reports require sign-in, a signed-in browser opens a report under a view address whose four-hour key, signed with a key each MindRoom process generates at start, opens that one report, because a sandboxed site's own requests carry no cookie.
+  Anyone holding the view address opens that report, and no other, until the key expires, the report is revoked, or MindRoom restarts; its answers carry `Access-Control-Allow-Origin: *`, which the site's module scripts and CSS fonts need and which gives nothing beyond holding the address.
 - With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
 - An accepted [contact](https://docs.mindroom.chat/agent-contacts/) lets the other side start turns of an agent that run with its owner's authority, limited to the tools the owner approved for that contact; anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything the agent's worker or process can.
@@ -23967,7 +23982,7 @@ Access applies the most specific path application, so every other path keeps the
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
 Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
-Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
+Published reports under `/reports/public/` need no MindRoom login unless [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](https://docs.mindroom.chat/connections-portal/#published-reports) is `signed_in`, so behind Access only the people Access admits can open them.
 An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
 
 ## Service Worker

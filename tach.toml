@@ -1840,8 +1840,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.report_publishing"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
+    "mindroom.origins",
     "mindroom.report_publishing",
 ]
 
@@ -1974,6 +1976,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix_openid",
     "mindroom.origins",
+    "mindroom.api.report_publishing",
 ]
 
 [[modules]]

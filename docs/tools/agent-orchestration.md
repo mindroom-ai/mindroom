@@ -530,7 +530,8 @@ agents:
 The tool exposes `publish_report(source_type, source, confirm_public)` and `revoke_public_report(slug)`, each returning JSON with a `status` field.
 `confirm_public=True` is required, so an accidental call publishes nothing.
 A successful publish returns a `slug` and the public path `/reports/public/<slug>`, plus an absolute `public_url` when `MINDROOM_PUBLIC_URL` is set.
-Anyone with the link can open it without signing in until it is revoked.
+Anyone with the link can open it without signing in until it is revoked, unless the deployment sets [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](../connections-portal.md#published-reports) to `signed_in`; the result's `who_can_open` names who can.
+To have a person approve each publication, add a [tool approval](../tool-approval.md) rule for `publish_report`.
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
