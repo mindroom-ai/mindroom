@@ -165,16 +165,12 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
     It reads the route's values, which the builder filled from the runtime env, with ``client_params`` over them,
     as the client does.
     """
-    client_params = settings.client_params or {}
+    base_url = (settings.client_params or {}).get("base_url") or settings.base_url
     if route == "anthropic":
-        return str(client_params.get("base_url") or settings.base_url or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
+        return str(base_url or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
         project, region = vertex_project_and_region(settings)
-        base_url = (
-            client_params.get("base_url")
-            or settings.base_url
-            or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
-        )
+        base_url = base_url or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
     return None
 

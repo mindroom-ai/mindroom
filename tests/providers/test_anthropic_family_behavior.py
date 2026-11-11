@@ -1647,61 +1647,43 @@ def test_bedrock_reads_the_region_variables_in_the_order_aws_tools_read_them(tmp
     assert bedrock.settings.aws_region == "eu-central-1"
 
 
-def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
-    """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+@pytest.mark.asyncio
+async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic_base_url(tmp_path: Path) -> None:
+    """The endpoint is ``client_params.base_url``, else ``base_url`` (a root the SDK appends ``/v1`` to), else the env."""
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
         process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example/"},
     )
-    own = {"client_params": {"base_url": "https://own-gateway.example"}}
-    with isolated_provider_environment():
-        from_env = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
-        configured = build_provider(
-            ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
-            runtime_paths,
-        )
-    assert from_env.identity.endpoint == "https://env-gateway.example"
-    assert configured.identity.endpoint == "https://own-gateway.example"
-    assert configured.settings.client_params == own["client_params"]
-
-
-@pytest.mark.asyncio
-async def test_base_url_sends_direct_requests_to_a_gateway_root_unless_client_params_set_one(tmp_path: Path) -> None:
-    """``base_url`` is a gateway root the SDK appends ``/v1`` to; it wins over ``ANTHROPIC_BASE_URL``, not over ``client_params``."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "data",
-        process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example"},
-    )
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    params = {"client_params": {"base_url": "https://params-gateway.example"}}
     own = {"base_url": "https://gateway.example/anthropic/"}
-    both = {**own, "client_params": {"base_url": "https://params-gateway.example"}}
     with isolated_provider_environment():
-        gateway, overridden = (
+        providers = [
             build_provider(
                 ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
                 runtime_paths,
             )
-            for extra_kwargs in (own, both)
-        )
-        for provider in (gateway, overridden):
+            for extra_kwargs in (None, params, own, {**own, **params})
+        ]
+        for provider in providers:
             await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
 
     assert [(sent.url.host, sent.url.path) for sent in wire.requests] == [
+        ("env-gateway.example", "/v1/messages"),
+        ("params-gateway.example", "/v1/messages"),
         ("gateway.example", "/anthropic/v1/messages"),
         ("params-gateway.example", "/v1/messages"),
     ]
-    assert (gateway.identity.endpoint, overridden.identity.endpoint) == (
+    assert [provider.identity.endpoint for provider in providers] == [
+        "https://env-gateway.example",
+        "https://params-gateway.example",
         "https://gateway.example/anthropic",
         "https://params-gateway.example",
-    )
+    ]
+    assert providers[1].settings.client_params == params["client_params"]
     # MindRoom adds its compaction trigger only on Anthropic's own endpoint.
-    assert gateway.capabilities.native_compaction is False
+    assert providers[2].capabilities.native_compaction is False
 
 
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
