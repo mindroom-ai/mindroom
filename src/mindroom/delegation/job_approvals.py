@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
-from mindroom.delegation.lifecycle import live_delegation_config
+from mindroom.delegation.lifecycle import live_delegation_config, report_child_approval_wait
 from mindroom.event_journal import ApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
@@ -57,6 +57,10 @@ async def request_child_approvals(
         room_id=owner.room_id,
         thread_id=owner.resolved_thread_id,
     )
+    # The child waits for the requester only while a card is open; a call policy decided needs none.
+    gated = any(call.decision is None for call in plan.calls)
+    if gated:
+        report_child_approval_wait(child, awaiting=True)
     decided = await ask_job_approvals(
         runtime,
         job_id,
@@ -68,6 +72,8 @@ async def request_child_approvals(
         # The child's calls are not in the reply that started the job, so the cards name no reply event.
         response_event_id=None,
     )
+    if gated:
+        report_child_approval_wait(child, awaiting=False)
     return tuple(
         replace(
             call,

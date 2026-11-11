@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -11,6 +12,8 @@ from uuid import uuid4
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.constants import runtime_matrix_homeserver
+from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.audit import (
     ChildAudit,
     child_response_usage,
@@ -27,8 +30,13 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.workers import child_placement
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.failure_text import failure_text
+from mindroom.live_frames import subagents as subagent_frames
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -38,13 +46,16 @@ from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 from mindroom.workers.placements import dedicated_worker_placement
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from typing import TypeGuard
+
+    import nio
 
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.activity import SubagentSink
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
@@ -52,6 +63,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName
+
+logger = get_logger(__name__)
 
 MAX_DELEGATION_DEPTH = 3
 
@@ -76,6 +89,9 @@ class ChildRunObservation:
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
     turn_id: str = field(default_factory=lambda: uuid4().hex)
+    # Whether the child's published tool rows carry previews: whether the turn in the room that started its chain shows
+    # its tool calls.
+    previews: bool = False
 
     def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
         """Return whether a terminal record is of the child's current run and session, the run this context streams."""
@@ -246,17 +262,99 @@ async def finish_child_turn(
     status: DelegationTerminalStatus | None = None,
     reason: str | None = None,
 ) -> str:
-    """Settle an interruption without overwriting an already retained terminal outcome."""
+    """Settle an interruption without overwriting an already retained terminal outcome.
+
+    A child interrupted outside its run, such as one whose job was cancelled while it waited for an approval, is
+    published with this outcome; one whose run already published its end has no feed left.
+    """
     if status is not None and child.status not in TERMINAL_CHILD_STATUSES:
         child.status = status
         child.result = reason
     if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
+    _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
     await update_subagent_turn(child, runtime_paths)
     if not child.record_locator:
         return ""
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
+
+
+def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
+    """Apply one update to a child's open feed, if any; a failure is logged and dropped, so it never reaches the child."""
+    feed = ActivityFeed.find(delegation_id)
+    if feed is None:
+        return
+    try:
+        update(feed)
+    except Exception:
+        logger.exception("Sub-agent activity update failed", delegation_id=delegation_id)
+
+
+def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
+    """Return the sink that streams the child's snapshots as frames to its caller's room.
+
+    None outside a Matrix room or a managed runtime, in a silent schedule's turn, which shows nothing in the room while
+    it runs, or when the operator has live frames off as the feed opens; switching them off later does not stop a feed
+    already open. The account answering the caller's turn sends the frames, through its bot's client at each send: a
+    bot that logs in again has a new client, and a stopped bot none.
+    """
+    orchestrator = context.orchestrator
+    if (
+        orchestrator is None
+        or not context.room_id
+        or context.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        or not context.current_config.defaults.streaming.live_frames
+    ):
+        return None
+    account, room_id, previews = context.recipient, context.room_id, observation.previews
+    homeserver_url = runtime_matrix_homeserver(context.runtime_paths)
+
+    def client() -> nio.AsyncClient | None:
+        bot = orchestrator.agent_bots.get(account)
+        return None if bot is None else bot.client
+
+    return lambda snapshot: subagent_frames.publish(
+        account,
+        room_id,
+        snapshot,
+        previews=previews,
+        client=client,
+        homeserver_url=homeserver_url,
+    )
+
+
+def _open_feed(observation: ChildRunObservation, context: ToolRuntimeContext | None) -> None:
+    """Publish the attempt as running, to the sink of its caller's turn ``context`` or else on the feed a pause left.
+
+    Switching live frames off does not stop a feed already open, so a resumed attempt without a sink keeps its feed's.
+    """
+    child, parent = observation.child, observation.parent
+    # The outermost child of the chain was delegated by the agent in the room whose turn started it.
+    root = parent
+    while root is not None and root.parent is not None:
+        root = root.parent
+    try:
+        sink = None if context is None else _subagent_sink(context, observation)
+        if sink is None:
+            _publish(child.delegation_id, lambda feed: feed.status("running"))
+        else:
+            ActivityFeed.open(
+                child,
+                parent_delegation_id=None if parent is None else parent.child.delegation_id,
+                root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
+                sink=sink,
+            )
+    except Exception:
+        logger.exception("Sub-agent activity feed failed to open", delegation_id=child.delegation_id)
+
+
+def _publish_exit(child: DelegationChild, *, cancelled: bool, reason: str) -> None:
+    """Publish how an attempt ended: its settled pause or outcome, else cancelled or failed with ``reason``."""
+    if child.status == "paused" or child.status in TERMINAL_CHILD_STATUSES:
+        _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
+    else:
+        _publish(child.delegation_id, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
 
 
 @asynccontextmanager
@@ -266,15 +364,30 @@ async def child_run_context(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[ChildRunObservation]:
-    """Observe and audit one child attempt, then settle it even when its last buffered output fails to record."""
+    """Observe and audit one child attempt, then settle it even when its last buffered output fails to record.
+
+    The attempt is published to its sub-agent sink as it starts and with how it ended, after its settlement.
+    """
     audit = await open_child_audit(child, config=config, runtime_paths=runtime_paths)
-    observation = ChildRunObservation(child, audit, parent=_CHILD_RUN.get())
+    parent = _CHILD_RUN.get()
+    # The caller's context is current until the child's run rebinds it. A nested child's caller is a child, whose context
+    # always hides its calls, so the nested child takes its parent's previews instead.
+    context = get_tool_runtime_context()
+    previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
+    observation = ChildRunObservation(child, audit, parent=parent, previews=previews)
+    _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)
+    # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.
+    cancelled, reason = False, "Delegated run ended without a retained terminal outcome."
     try:
         # The operator's current setting decides, not the snapshot the parent's response started with.
         placement = child_placement(child, live_delegation_config(config), runtime_paths)
         with dedicated_worker_placement(child.session_id, placement):
             yield observation
+    except BaseException as error:
+        cancelled = isinstance(error, asyncio.CancelledError)
+        reason = "Delegation cancelled." if cancelled else redact_sensitive_text(failure_text(error))
+        raise
     finally:
         try:
             await flush_child_audit(audit)
@@ -285,6 +398,12 @@ async def child_run_context(
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
+                _publish_exit(child, cancelled=cancelled, reason=reason)
+
+
+def report_child_approval_wait(child: DelegationChild, *, awaiting: bool) -> None:
+    """Show a paused child as awaiting the approvals its job asks for, or running again once they are decided."""
+    _publish(child.delegation_id, lambda feed: feed.status("awaiting_approval" if awaiting else "running"))
 
 
 def _report_child_activity(observation: ChildRunObservation, event: TextDelta | ToolStarted) -> None:
@@ -295,7 +414,7 @@ def _report_child_activity(observation: ChildRunObservation, event: TextDelta | 
 
 
 async def observe_child_event(event: RunEvent) -> None:
-    """Retain execution evidence and report the child's activity before recording the event in the child's audit.
+    """Retain execution evidence and report the child's activity, to its caller and its feed, before auditing the event.
 
     The loop's events carry no run identity; they are the events of the child turn running in this context, whose
     terminal record, which ends the stream of every run that is not cancelled, names the run it ended. A terminal
@@ -304,13 +423,20 @@ async def observe_child_event(event: RunEvent) -> None:
     observation = _CHILD_RUN.get()
     if observation is None:
         return
-    if isinstance(event, TextDelta | ToolStarted):
+    delegation_id = observation.child.delegation_id
+    if isinstance(event, TextDelta):
         _report_child_activity(observation, event)
+        _publish(delegation_id, lambda feed: feed.text(event.text))
+    elif isinstance(event, ToolStarted):
+        _report_child_activity(observation, event)
+        _publish(delegation_id, lambda feed: feed.tool_started(event))
     elif isinstance(event, RunFinished):
         if not observation.owns(record := event.record):
             return
         observation.response = record
-    elif not isinstance(event, ToolCompleted):
+    elif isinstance(event, ToolCompleted):
+        _publish(delegation_id, lambda feed: feed.tool_completed(event))
+    else:
         return
     await record_child_event(observation.audit, event)
 

@@ -7848,6 +7848,23 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.activity"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.delegation.lifecycle"]
+
+[[modules]]
+path = "mindroom.live_frames.subagents"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.llm",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.delegation.lifecycle"]
+
+[[modules]]
 path = "mindroom.delegation.targets"
 depends_on = [
     "mindroom.delegation.lifecycle",
@@ -8170,12 +8187,16 @@ depends_on = [
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.ai_run_metadata",
+    "mindroom.constants",
+    "mindroom.delegation.activity",
+    "mindroom.failure_text",
     "mindroom.delegation.personas",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
+    "mindroom.live_frames.subagents",
     "mindroom.tool_system.progress",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",

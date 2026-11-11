@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "snapshot of the run's first text, with its task",
+      "before": null,
+      "after": {
+        "md": "Looking it up.",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-1",
+        "sid": "1762790000123-0a1b2c3d",
+        "seq": 0,
+        "meta": {
+          "agent": "researcher",
+          "caller": "lead",
+          "root": "lead",
+          "parent": null,
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "running",
+          "started_at": 1762790000.1,
+          "ended_at": null,
+          "task": "Find when version 2 shipped."
+        },
+        "snapshot": {
+          "md": "Looking it up.",
+          "reasoning": "",
+          "tools": [],
+          "status": "streaming",
+          "activity": ""
+        }
+      }
+    },
+    {
+      "name": "text appends",
+      "before": {
+        "md": "Looking it up.",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Looking it up. Checking the tags.",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-1",
+        "sid": "1762790000123-0a1b2c3d",
+        "seq": 1,
+        "meta": {
+          "agent": "researcher",
+          "caller": "lead",
+          "root": "lead",
+          "parent": null,
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "running",
+          "started_at": 1762790000.1,
+          "ended_at": null
+        },
+        "delta": {
+          "md": {
+            "at": 14,
+            "del": 0,
+            "ins": " Checking the tags.",
+            "len": 33
+          }
+        }
+      }
+    },
+    {
+      "name": "a tool call starts: its marker and its row",
+      "before": {
+        "md": "Looking it up. Checking the tags.",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "run_shell_command",
+            "args_preview": "command=git tag"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-1",
+        "sid": "1762790000123-0a1b2c3d",
+        "seq": 2,
+        "meta": {
+          "agent": "researcher",
+          "caller": "lead",
+          "root": "lead",
+          "parent": null,
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "running",
+          "started_at": 1762790000.1,
+          "ended_at": null
+        },
+        "delta": {
+          "md": {
+            "at": 33,
+            "del": 0,
+            "ins": "\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+            "len": 65
+          },
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_started",
+                  "tool_name": "run_shell_command",
+                  "args_preview": "command=git tag"
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "the run waits for an approval: a meta change is a snapshot",
+      "before": {
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "run_shell_command",
+            "args_preview": "command=git tag"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "run_shell_command",
+            "args_preview": "command=git tag"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-1",
+        "sid": "1762790000123-0a1b2c3d",
+        "seq": 3,
+        "meta": {
+          "agent": "researcher",
+          "caller": "lead",
+          "root": "lead",
+          "parent": null,
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "awaiting_approval",
+          "started_at": 1762790000.1,
+          "ended_at": null,
+          "task": "Find when version 2 shipped."
+        },
+        "snapshot": {
+          "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+          "reasoning": "",
+          "tools": [
+            {
+              "type": "tool_call_started",
+              "tool_name": "run_shell_command",
+              "args_preview": "command=git tag"
+            }
+          ],
+          "status": "streaming",
+          "activity": ""
+        }
+      }
+    },
+    {
+      "name": "the run ends: a snapshot with its result",
+      "before": {
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "run_shell_command",
+            "args_preview": "command=git tag"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1]\n\nVersion 2 is tagged.",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "run_shell_command",
+            "args_preview": "command=git tag",
+            "result_preview": "v1.0\nv2.0"
+          }
+        ],
+        "status": "pending",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-1",
+        "sid": "1762790000123-0a1b2c3d",
+        "seq": 4,
+        "meta": {
+          "agent": "researcher",
+          "caller": "lead",
+          "root": "lead",
+          "parent": null,
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "completed",
+          "started_at": 1762790000.1,
+          "ended_at": 1762790012.5,
+          "task": "Find when version 2 shipped.",
+          "result": "Version 2 shipped as tag v2.0."
+        },
+        "snapshot": {
+          "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1]\n\nVersion 2 is tagged.",
+          "reasoning": "",
+          "tools": [
+            {
+              "type": "tool_call_completed",
+              "tool_name": "run_shell_command",
+              "args_preview": "command=git tag",
+              "result_preview": "v1.0\nv2.0"
+            }
+          ],
+          "status": "pending",
+          "activity": ""
+        }
+      }
+    },
+    {
+      "name": "a nested run cancelled before it wrote anything: its only frame, without a result",
+      "before": null,
+      "after": {
+        "md": "",
+        "reasoning": "",
+        "tools": [],
+        "status": "pending",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "run": "del-2",
+        "sid": "1762790003456-4e5f6a7b",
+        "seq": 0,
+        "meta": {
+          "agent": "reviewer",
+          "caller": "researcher",
+          "root": "lead",
+          "parent": "del-1",
+          "thread_id": "$thread:example.org",
+          "source": "delegate",
+          "status": "cancelled",
+          "started_at": 1762790003.4,
+          "ended_at": 1762790004.0,
+          "task": "Check the release notes.",
+          "result": null
+        },
+        "snapshot": {
+          "md": "",
+          "reasoning": "",
+          "tools": [],
+          "status": "pending",
+          "activity": ""
+        }
+      }
+    }
+  ]
+}

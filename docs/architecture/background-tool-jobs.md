@@ -102,4 +102,4 @@ Only functions of toolkits MindRoom assembles become jobs; the knowledge search,
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
 A shell job's `mindroom-agent` calls fail once its response's CLI grant reaches its 24-hour cap, which bounds how long a leaked grant stays usable.
-The jobs bar does not show progress.
+The jobs bar does not show progress; a subagent job's child is shown live in MindRoom Chat's Sub-agents panel through `io.mindroom.subagents` frames, which is separate from the job and from its state event.

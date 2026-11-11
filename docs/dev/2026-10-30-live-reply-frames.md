@@ -61,6 +61,62 @@ Reasoning and finer progress the runtime already had never reached the user.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 
+## Sub-agent frames
+
+Each running sub-agent, a delegated child run (`run_subagent`, `continue_subagent`, `delegate`) or a Dynamic Workflow participant, is published as `io.mindroom.subagents` frames, so MindRoom Chat can show a live Sub-agents panel.
+A run's frames have a reply frame's structure, so one delta format serves both: the run's transcript is projected into the live documents of a reply.
+`tests/live_frames/fixtures/subagent-frames-v1.json` pins the format; mindroom-chat carries the same file.
+
+- Send: the same route as reply frames, with `io.mindroom.subagents` as the event type and transaction ID `subagents.{sid}.{seq}`.
+  Encrypted rooms send `{"v": 1, "encrypted": <Megolm content>}` with the event type bound to `io.mindroom.subagents`, in the room's current outbound session and outside its rotation count, as reply frames do.
+- Sender: the account that answers the delegating turn in the room (the agent, or the team for a team turn), through its bot's current client at each send.
+  A sub-agent has no account of its own, so clients should accept these frames only from a MindRoom agent on their homeserver, as for reply frames.
+- Frame: `{"v": 1, "run", "sid", "seq", "meta", "snapshot"}` or the same with `"delta"` instead of `snapshot`.
+  - `run` is the delegation ID, which names the run across its frames.
+  - `sid` is a publisher ID like a reply's (zero-padded start milliseconds, a dash, 8 hex digits), `seq` starts at 0 within a `sid` and rises with each frame built, so a failed send leaves a gap; clients order frames by `(sid, seq)` and must not expect contiguous `seq`.
+    A run keeps its `sid` through pauses and resumes; it gets a new one, with `seq` back at 0, whenever its stream restarts: after the room refused a frame, and after the publisher stopped and started again, as when the sending account had no client past a retry, the relay check failed, or an error ended the publisher.
+  - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
+    `reasoning` and `activity` are always empty.
+- `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
+  - `agent`: the sub-agent's name; `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the sub-agent that delegated to it, or `null`.
+  - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
+  - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
+  - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
+    Deltas carry neither, so a client keeps them from the snapshot.
+- Documents: text items are concatenated as the Markdown of `md`.
+  Each tool call adds the marker line a reply shows for it (`🔧 \`name\` [n] ⏳`, with the hourglass replaced by the finished form once the call completes), numbered from 1 by its entry in `tools`, in order of appearance.
+  So the n-th marker of `md` belongs to `tools[n-1]`, and a client renders the documents with the reply renderer.
+  Text on both sides of a tool call is separated by the marker's blank lines; text items that meet because a cap removed what was between them are joined by a blank line.
+  A completed call's entry has `type: "tool_call_completed"`, a running call's `tool_call_started`; a paused call that resumes keeps its row.
+- `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
+- Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
+  An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.
+  A run's last frame is a snapshot of its end, and `ended_at` is set from then on.
+- Caps: the transcript's text is cut to its newest 5,000 characters once it passes 6,000, so the frames after a cut are appends again until the next cut; at most the 20 newest tool rows; `args_preview` and `result_preview` at 300 characters, with `truncated: true` on a row whose preview was cut.
+  Text and previews are redacted before any cut, so a secret is masked whole.
+  How many older items the caps removed is not part of the frame.
+- Size: a frame must fit the 60,000-byte limit as nio sends it (compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes; in an encrypted room the Megolm ciphertext, padding, base64, and envelope are counted as well).
+  A snapshot that does not fit drops the tool previews first, then cuts the oldest text from the front by the least that fits.
+  A fitted frame is always a snapshot, and later deltas keep its fit, so they stay appends.
+  A delta that does not fit is replaced by a fitted snapshot.
+- A frame never carries an empty delta: when only `meta` changed, such as a status, the frame is a snapshot.
+- 🔒 Previews: `args_preview` and `result_preview` appear only when the turn in the room that started the chain shows its tool calls (`show_tool_calls`); nested sub-agents follow their root's turn.
+  Otherwise a row carries only `type` and `tool_name`, so the room sees for a sub-agent what it sees for the agent that delegated.
+- Budget: one publisher per (sending account, room) sends all of that account's runs in that room, one send in flight and at least 125 ms between sends, so at most 8 frames a second, which leaves at least 12 of the homeserver's 30 events a second per sender and room for the account's own reply frames.
+  Runs with something to send are served in turn.
+  A run's changes are coalesced to at most one per 250 ms before they reach the publisher, and a status change goes out at once.
+  A run sends a snapshot first, after a failed send, after the caps cut its transcript, when only `meta` changed, every 10 s while `running` or `awaiting_approval`, at its end, and when a delta would not fit; otherwise a delta from the last frame that landed.
+  A `paused` run sends its snapshot and then nothing until it resumes, so a client must not time a paused run out by silence; a `running` or `awaiting_approval` run sends at least every 10 s while its runtime is alive.
+  A run is forgotten after the frame of its end.
+- A refused frame (`M_TOO_LARGE`, `M_UNRECOGNIZED`, `M_FORBIDDEN`, `M_UNKNOWN`, `M_NOT_FOUND`, or a bare 4xx) stops that run's frames until it resumes from a pause or ends, and its end then gets one more attempt.
+  Other failures retry with a snapshot after a one second wait.
+- When no frames are sent: the delegating turn has no Matrix room (the OpenAI-compatible API) or runs outside a managed runtime; the turn is a silent schedule's, which shows nothing in the room while it runs (scheduled tasks and automations that post into a room do send frames); `defaults.streaming.live_frames` is off when the run starts (switching it off later does not stop a run already publishing); the homeserver does not list `io.mindroom.ephemeral_opt_in`, or the check failed, after which its runs send nothing for a minute before it is asked again; the sending account has no client for a whole retry.
+  Frames are best effort: a failure building or sending one stops frames and never fails the run.
+- Restart: frames are memory only and an interrupted child is not rerun.
+  After a crash no end is sent, because recovery runs in a new process that has no feed for the run.
+  On a graceful stop the old process may still publish the run as `failed` or `cancelled`, and that frame may or may not land.
+  A client should drop a `running` or `awaiting_approval` run that goes silent, and keep a `paused` or ended run for as long as it is useful.
+
 ## Limitations
 
 - Clients without frame support (Element, bridges, older Chat builds) see the reply in steps of `update_interval` instead of the former fast start.
