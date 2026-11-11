@@ -1,4 +1,4 @@
-"""A redacted, capped snapshot of what one sub-agent run has done so far, and its coalesced publication to hooks."""
+"""A redacted, capped snapshot of what one sub-agent run has done so far, and its coalesced hand-off to a sink."""
 
 from __future__ import annotations
 
@@ -7,38 +7,96 @@ import time
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import create_background_task
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
-from mindroom.hooks.context import SubagentChangedContext, SubagentItem, SubagentSnapshot
-from mindroom.hooks.execution import emit, has_eligible_hooks
-from mindroom.hooks.types import EVENT_SUBAGENT_CHANGED
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
+    from collections.abc import Callable
+
     from mindroom.delegation.state import DelegationChild
-    from mindroom.hooks.context import HookBindings, SubagentStatus
-    from mindroom.hooks.registry import HookRegistry
     from mindroom.llm.events import ToolCompleted, ToolStarted
 
 logger = get_logger(__name__)
 
+# The snapshot types are this module's interface for the sinks that take them.
+__all__ = ["ActivityFeed", "SubagentItem", "SubagentSink", "SubagentSnapshot", "SubagentStatus"]
+
 _FLUSH_INTERVAL_SECONDS = 0.25
-_MAX_TEXT_CHARACTERS = 16_000
-_MAX_TOOL_ITEMS = 50
-_MAX_LABEL_CHARACTERS = 2_000
+_MAX_TEXT_CHARACTERS = 6_000
+_MAX_TOOL_ITEMS = 20
+_MAX_TASK_CHARACTERS = 1_000
+_MAX_RESULT_CHARACTERS = 1_000
+_MAX_PREVIEW_CHARACTERS = 300
 # The raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
 _REDACTION_MARGIN = 4_000
 
+type SubagentStatus = Literal["running", "awaiting_approval", "paused", "completed", "failed", "cancelled", "denied"]
 
-def _clip(text: str) -> str:
-    """Return the redacted head of ``text``, at most 2,000 characters, redacting only a head with a margin past that."""
-    return redact_sensitive_text(text[: _MAX_LABEL_CHARACTERS + _REDACTION_MARGIN])[:_MAX_LABEL_CHARACTERS]
+
+@dataclass(frozen=True, slots=True)
+class SubagentItem:
+    """One step of a sub-agent's transcript: a stretch of its text or one of its tool calls."""
+
+    kind: Literal["text", "tool"]
+    # kind "text": the child's words so far, redacted Markdown.
+    text: str = ""
+    # kind "tool": the public trace fields a shown tool row carries.
+    tool: ToolTraceEntry | None = None
+    tool_call_id: str | None = None
+    state: Literal["running", "done", "error"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentSnapshot:
+    """What one sub-agent run has done so far, redacted and capped."""
+
+    delegation_id: str
+    # Stable across continue_subagent.
+    subagent_id: str
+    # Set for a sub-agent's own sub-agent.
+    parent_delegation_id: str | None
+    caller_agent_name: str
+    # The agent in the room whose turn started the delegation chain; the caller itself for a direct child.
+    root_caller_agent_name: str
+    agent_name: str
+    source: Literal["delegate", "workflow"]
+    # Redacted, at most 1,000 characters.
+    task: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    model_name: str
+    status: SubagentStatus
+    started_at: float
+    updated_at: float
+    ended_at: float | None
+    # Oldest first.
+    items: tuple[SubagentItem, ...]
+    # How many older items the transcript caps removed.
+    items_dropped: int
+    # Redacted, at most 1,000 characters; set only once the run ended.
+    result_preview: str | None
+
+
+type SubagentSink = Callable[[SubagentSnapshot], None]
+
+
+def _clip(text: str, limit: int) -> str:
+    """Return the redacted head of ``text``, at most ``limit`` characters, redacting only a head with a margin past it."""
+    return redact_sensitive_text(text[: limit + _REDACTION_MARGIN])[:limit]
+
+
+def _cut_preview(preview: str | None) -> tuple[str | None, bool]:
+    """Return the redacted ``preview`` cut to the entry cap, and whether the cut removed anything."""
+    if preview is None:
+        return None, False
+    redacted = redact_sensitive_text(preview)
+    return redacted[:_MAX_PREVIEW_CHARACTERS], len(redacted) > _MAX_PREVIEW_CHARACTERS
 
 
 def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
@@ -61,19 +119,21 @@ def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
 
 
 def _public_entry(entry: ToolTraceEntry) -> ToolTraceEntry:
-    """Return a new entry with only the names and the redacted previews a shown tool trace carries."""
+    """Return a new entry with only the names and the redacted previews a shown tool trace carries, cut to 300 characters."""
+    args_preview, args_cut = _cut_preview(entry.args_preview)
+    result_preview, result_cut = _cut_preview(entry.result_preview)
     return ToolTraceEntry(
         type=entry.type,
         tool_name=entry.tool_name,
-        args_preview=None if entry.args_preview is None else redact_sensitive_text(entry.args_preview),
-        result_preview=None if entry.result_preview is None else redact_sensitive_text(entry.result_preview),
-        truncated=entry.truncated,
+        args_preview=args_preview,
+        result_preview=result_preview,
+        truncated=entry.truncated or args_cut or result_cut,
     )
 
 
 @dataclass(slots=True)
 class _SubagentActivity:
-    """The transcript and status of one child run, turned into snapshots a hook can publish."""
+    """The transcript and status of one child run, turned into snapshots a sink can take."""
 
     delegation_id: str
     subagent_id: str
@@ -116,7 +176,7 @@ class _SubagentActivity:
             root_caller_agent_name=root_caller_agent_name,
             agent_name=child.child_agent_name,
             source="workflow" if is_workflow else "delegate",
-            task=_clip(child.task),
+            task=_clip(child.task, _MAX_TASK_CHARACTERS),
             room_id=identity.room_id or "",
             thread_id=identity.resolved_thread_id or identity.thread_id,
             requester_id=identity.requester_id or "",
@@ -173,7 +233,7 @@ class _SubagentActivity:
             self.result = result
 
     def snapshot(self) -> SubagentSnapshot:
-        """Build the redacted, capped snapshot a plugin sees: whole text items are redacted, then the text cap cuts."""
+        """Build the redacted, capped snapshot: whole text items are redacted, then the text cap cuts."""
         items = [
             replace(item, text=redact_sensitive_text(item.text)) if item.kind == "text" else item
             for item in self._items
@@ -198,7 +258,7 @@ class _SubagentActivity:
             ended_at=self.ended_at,
             items=tuple(items),
             items_dropped=self.items_dropped + dropped,
-            result_preview=None if self.result is None else _clip(self.result),
+            result_preview=None if self.result is None else _clip(self.result, _MAX_RESULT_CHARACTERS),
         )
 
 
@@ -207,17 +267,16 @@ _OPEN: dict[str, ActivityFeed] = {}
 
 
 class ActivityFeed:
-    """Publish one child's snapshots to `subagent:changed` hooks without ever delaying or failing the child.
+    """Hand one child's snapshots to a sink without ever delaying or failing the child.
 
-    Changes only update the activity and mark it dirty. One sender task per feed emits the latest snapshot at most once
-    per 250 ms window, or at once after a status change, with one emission in flight at a time. A child that pauses keeps
-    its feed, so every attempt of one delegation publishes through one sender, in order.
+    Changes only update the activity and mark it dirty. One sender task per feed hands the sink the latest snapshot at
+    most once per 250 ms window, or at once after a status change. A child that pauses keeps its feed, so every attempt
+    of one delegation publishes through one sender, in order.
     """
 
-    def __init__(self, activity: _SubagentActivity, *, registry: HookRegistry, context_kwargs: dict[str, Any]) -> None:
+    def __init__(self, activity: _SubagentActivity, *, sink: SubagentSink) -> None:
         self._activity = activity
-        self._registry = registry
-        self._context_kwargs = context_kwargs
+        self._sink = sink
         self._dirty = False
         self._wake = asyncio.Event()
         self._sender: asyncio.Task[None] | None = None
@@ -229,41 +288,21 @@ class ActivityFeed:
         *,
         parent_delegation_id: str | None,
         root_caller_agent_name: str,
-        bindings: HookBindings,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        correlation_id: str,
-    ) -> ActivityFeed | None:
-        """Publish a running child, resuming the feed a paused attempt left; None when no hook would see it."""
-        registry = bindings.registry
+        sink: SubagentSink,
+    ) -> ActivityFeed:
+        """Publish a running child to ``sink``, resuming the feed a paused attempt left."""
         feed = _OPEN.pop(child.delegation_id, None)
-        if not registry.has_hooks(EVENT_SUBAGENT_CHANGED):
-            return None
-        context_kwargs = bindings.context_kwargs(
-            EVENT_SUBAGENT_CHANGED,
-            config=config,
-            runtime_paths=runtime_paths,
-            correlation_id=correlation_id,
-        )
-        activity = (
-            _SubagentActivity.start(
+        if feed is None:
+            activity = _SubagentActivity.start(
                 child,
                 parent_delegation_id=parent_delegation_id,
                 root_caller_agent_name=root_caller_agent_name,
                 now=time.time(),
             )
-            if feed is None
-            else feed._activity
-        )
-        # Scoped hooks see a child by its chain's root caller and its room, which no later attempt changes.
-        context = SubagentChangedContext(**context_kwargs, subagent=activity.snapshot())
-        if not has_eligible_hooks(registry, EVENT_SUBAGENT_CHANGED, context):
-            return None
-        if feed is None:
-            feed = cls(activity, registry=registry, context_kwargs=context_kwargs)
+            feed = cls(activity, sink=sink)
         else:
-            # The resumed attempt's hooks and turn publish from now on.
-            feed._registry, feed._context_kwargs = registry, context_kwargs
+            # The resumed attempt's sink publishes from now on.
+            feed._sink = sink
         _OPEN[child.delegation_id] = feed
         feed.status("running")
         return feed
@@ -321,7 +360,6 @@ class ActivityFeed:
             self._wake.clear()
             self._dirty = False
             try:
-                context = SubagentChangedContext(**self._context_kwargs, subagent=self._activity.snapshot())
-                await emit(self._registry, EVENT_SUBAGENT_CHANGED, context)
+                self._sink(self._activity.snapshot())
             except Exception:
-                logger.exception("Sub-agent activity emission failed", delegation_id=self._activity.delegation_id)
+                logger.exception("Sub-agent activity sink failed", delegation_id=self._activity.delegation_id)

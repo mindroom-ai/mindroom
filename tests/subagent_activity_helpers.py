@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mindroom.plugin_api import SubagentSnapshot
+from mindroom.delegation.activity import SubagentSnapshot
 
 
 def make_snapshot(**overrides: Any) -> SubagentSnapshot:  # noqa: ANN401

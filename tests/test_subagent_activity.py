@@ -1,42 +1,44 @@
-"""Sub-agent activity: the `subagent:changed` hook event, the snapshot a child run keeps, and its publication."""
+"""Sub-agent activity: the snapshot a child run keeps, its caps, and its hand-off to a sink."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom import plugin_api
 from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
-from mindroom.delegation.activity import _FLUSH_INTERVAL_SECONDS, _OPEN, ActivityFeed, _SubagentActivity
-from mindroom.delegation.state import DelegationChild, SubagentPersona
-from mindroom.event_journal import BackgroundApprovalDecision
-from mindroom.hooks import HookBindings, HookRegistry, emit, hook
-from mindroom.hooks.types import _DEFAULT_EVENT_TIMEOUT_MS, BUILTIN_EVENT_NAMES, validate_event_name
-from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
-from mindroom.plugin_api import (
-    EVENT_SUBAGENT_CHANGED,
-    PLUGIN_API_VERSION,
-    SubagentChangedContext,
+from mindroom.delegation import lifecycle
+from mindroom.delegation.activity import (
+    _FLUSH_INTERVAL_SECONDS,
+    _OPEN,
+    ActivityFeed,
     SubagentItem,
     SubagentSnapshot,
+    _SubagentActivity,
 )
-from mindroom.plugin_testing import load_plugin
+from mindroom.delegation.state import DelegationChild, SubagentPersona
+from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.hooks.types import BUILTIN_EVENT_NAMES, validate_event_name
+from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
+from mindroom.plugin_api import PLUGIN_API_VERSION
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
+from tests.conftest import make_turn_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -47,7 +49,6 @@ from tests.test_delegation_direct_audit import _identity
 from tests.test_delegation_direct_audit import _tools as _direct_tools
 from tests.test_dynamic_workflow_subagents import _config as _workflow_config
 from tests.test_dynamic_workflow_subagents import _spec, _Workflow
-from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
@@ -62,33 +63,26 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks import HookContext
+    from mindroom.delegation.activity import SubagentStatus
     from mindroom.llm.runs import RunRecord
-    from mindroom.plugin_api import SubagentStatus
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_jobs.runtime import ToolJobRuntime
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from tests.fakes.scripted_model import ScriptStep
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
-CONFIG = {"agents": {"helper": {"display_name": "Helper", "access": {"users": [ALICE]}}}}
 
 
-def test_subagent_changed_is_a_builtin_observer_with_a_500_ms_timeout() -> None:
-    """The event is built in, observes with a 500 ms timeout, and its namespace is reserved."""
-    assert EVENT_SUBAGENT_CHANGED == "subagent:changed"
-    assert EVENT_SUBAGENT_CHANGED in BUILTIN_EVENT_NAMES
-    assert _DEFAULT_EVENT_TIMEOUT_MS[EVENT_SUBAGENT_CHANGED] == 500
-    with pytest.raises(ValueError, match="reserved"):
-        validate_event_name("subagent:custom")
-
-
-def test_plugin_api_version_is_1_30() -> None:
-    """The plugin API version names the release that added the event."""
-    assert PLUGIN_API_VERSION == (1, 30)
+def test_no_subagent_hook_event_remains() -> None:
+    """Sub-agent activity is not a plugin hook: the event, its reserved namespace, and the snapshot types are gone."""
+    removed_event = "subagent:" + "changed"  # Two parts, so a search for the removed name finds no trace of it.
+    assert removed_event not in BUILTIN_EVENT_NAMES
+    assert validate_event_name("subagent:x") == "subagent:x"
+    assert PLUGIN_API_VERSION == (1, 29)
+    assert not hasattr(plugin_api, "SubagentSnapshot")
 
 
 def test_snapshot_items_are_frozen() -> None:
@@ -97,40 +91,6 @@ def test_snapshot_items_are_frozen() -> None:
     with pytest.raises(AttributeError):
         snapshot.status = "failed"  # type: ignore[misc]
     assert snapshot.items[0].tool is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_plugin_testing_fires_subagent_changed(tmp_path: Path) -> None:
-    """`fire` runs a plugin's `subagent:changed` hooks with the snapshot and returns the context."""
-    plugin_dir = tmp_path / "watcher"
-    plugin_dir.mkdir()
-    (plugin_dir / "mindroom.plugin.json").write_text(
-        '{"name": "watcher", "hooks_module": "hooks.py"}',
-        encoding="utf-8",
-    )
-    (plugin_dir / "hooks.py").write_text(
-        "from pathlib import Path\n"
-        "from mindroom.plugin_api import hook\n"
-        "@hook('subagent:changed')\n"
-        "async def seen(ctx):\n"
-        "    with Path(__file__).with_name('seen.txt').open('a') as f:\n"
-        "        f.write(ctx.subagent.delegation_id + '\\n')\n",
-        encoding="utf-8",
-    )
-    with load_plugin(plugin_dir, tmp_path / "runtime", config=CONFIG) as plugin:
-        plugin.add_room(ROOM, members={ALICE: "Alice"})
-        context = await plugin.fire(
-            "subagent:changed",
-            agent="helper",
-            sender=ALICE,
-            room=ROOM,
-            subagent=make_snapshot(),
-        )
-        assert isinstance(context, SubagentChangedContext)
-        assert context.event_name == EVENT_SUBAGENT_CHANGED
-        assert context.subagent.delegation_id == "d1"
-        assert (plugin_dir / "seen.txt").read_text(encoding="utf-8").split() == ["d1"]
 
 
 def _child(
@@ -225,13 +185,13 @@ def test_a_secret_stays_redacted_while_the_text_cap_cuts_through_it() -> None:
     a = _activity()
     link = "see https://x.sharepoint.com/a/download.aspx?UniqueId=1&tempauth=v1.secret done\n"
     a.add_text(link, 1)
-    a.add_text("x" * (16_000 - len(link) - 100), 2)
+    a.add_text("x" * (6_000 - len(link) - 100), 2)
     snapshots = []
     for step in range((4_200 + len(link)) // 7 + 1):
         a.add_text("x" * 7, 3 + step)
         snapshots.append(a.snapshot())
     assert not [snapshot for snapshot in snapshots if "v1.secret" in _text(snapshot)]
-    assert _text(snapshots[-1]) == "x" * 16_000
+    assert _text(snapshots[-1]) == "x" * 6_000
 
 
 def _checked_entry(item: SubagentItem) -> ToolTraceEntry:
@@ -278,16 +238,16 @@ def test_failed_tool_call_is_an_error_row() -> None:
     assert a.snapshot().items[0].state == "error"
 
 
-def test_text_keeps_the_newest_16000_characters() -> None:
+def test_text_keeps_the_newest_6000_characters() -> None:
     """The oldest text loses its head first; the order of items stays."""
     a = _activity()
-    a.add_text("a" * 10_000, 1)
+    a.add_text("a" * 4_000, 1)
     a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.add_text("b" * 10_000, 3)
+    a.add_text("b" * 4_000, 3)
     items = a.snapshot().items
     texts = [i.text for i in items if i.kind == "text"]
-    assert sum(map(len, texts)) == 16_000
-    assert texts == ["a" * 6_000, "b" * 10_000]
+    assert sum(map(len, texts)) == 6_000
+    assert texts == ["a" * 2_000, "b" * 4_000]
     assert a.snapshot().items_dropped == 0
 
 
@@ -296,30 +256,45 @@ def test_an_emptied_text_item_is_removed_and_counted() -> None:
     a = _activity()
     a.add_text("a" * 100, 1)
     a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.add_text("b" * 16_000, 3)
+    a.add_text("b" * 6_000, 3)
     snapshot = a.snapshot()
     assert [i.kind for i in snapshot.items] == ["tool", "text"]
     assert snapshot.items_dropped == 1
 
 
-def test_tool_items_keep_the_newest_50_and_count_the_rest() -> None:
-    """The 51st tool row removes the oldest one."""
+def test_tool_items_keep_the_newest_20_and_count_the_rest() -> None:
+    """The 21st tool row removes the oldest one."""
     a = _activity()
-    for n in range(53):
+    for n in range(23):
         a.tool_started(ToolStarted(call=_call(f"c{n}")), n)
     snapshot = a.snapshot()
-    assert len(snapshot.items) == 50
+    assert len(snapshot.items) == 20
     assert snapshot.items[0].tool_call_id == "c3"
     assert snapshot.items_dropped == 3
 
 
-def test_task_and_result_are_cut_to_2000_characters() -> None:
+def test_task_and_result_are_cut_to_1000_characters() -> None:
     """Both previews are capped."""
     a = _activity(task="t" * 3_000)
     a.set_status("completed", 5, result="r" * 3_000)
     snapshot = a.snapshot()
-    assert len(snapshot.task) == 2_000
-    assert snapshot.result_preview == "r" * 2_000
+    assert len(snapshot.task) == 1_000
+    assert snapshot.result_preview == "r" * 1_000
+
+
+def test_tool_previews_are_cut_to_300_characters_and_marked_truncated() -> None:
+    """A long argument or result preview is cut, with `truncated` set; a short one is left whole."""
+    long_entry = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="read_file",
+        args_preview="a" * 500,
+        result_preview="r" * 500,
+    )
+    short_entry = ToolTraceEntry(type="tool_call_started", tool_name="read_file", args_preview="path=a.txt")
+    long_row, short_row = activity_module._public_entry(long_entry), activity_module._public_entry(short_entry)
+    assert (long_row.args_preview, long_row.result_preview) == ("a" * 300, "r" * 300)
+    assert long_row.truncated
+    assert (short_row.args_preview, short_row.result_preview, short_row.truncated) == ("path=a.txt", None, False)
 
 
 def test_the_task_is_redacted_once_from_a_capped_head(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,8 +309,8 @@ def test_the_task_is_redacted_once_from_a_capped_head(monkeypatch: pytest.Monkey
     a = _activity(task="t" * 50_000)
     a.snapshot()
     a.snapshot()
-    assert [len(text) for text in redacted] == [6_000]
-    assert a.snapshot().task == "t" * 2_000
+    assert [len(text) for text in redacted] == [5_000]
+    assert a.snapshot().task == "t" * 1_000
 
 
 def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:
@@ -364,41 +339,30 @@ def _forget_open_runs() -> Iterator[None]:
     _OPEN.clear()
 
 
-class _Hook:
-    """A `subagent:changed` hook that records each snapshot it receives, holding or failing each call on request.
+class _Sink:
+    """A sink that records each snapshot it receives, taking its time or failing each call on request."""
 
-    ``agents`` and ``rooms`` scope the hook as a plugin's decorator would.
-    """
-
-    def __init__(
-        self,
-        *,
-        hold: asyncio.Event | None = None,
-        fail: bool = False,
-        timeout_ms: int = 5_000,
-        agents: list[str] | None = None,
-        rooms: list[str] | None = None,
-    ) -> None:
+    def __init__(self, *, delay: float = 0.0, fail: bool = False) -> None:
         self.snapshots: list[SubagentSnapshot] = []
-        self._arrived = asyncio.Condition()
+        self._delay = delay
+        self._fail = fail
+        self._arrived = asyncio.Event()
 
-        @hook(EVENT_SUBAGENT_CHANGED, timeout_ms=timeout_ms, agents=agents, rooms=rooms)
-        async def seen(ctx: SubagentChangedContext) -> None:
-            async with self._arrived:
-                self.snapshots.append(ctx.subagent)
-                self._arrived.notify_all()
-            if hold is not None:
-                await hold.wait()
-            if fail:
-                msg = "hook failed"
-                raise RuntimeError(msg)
-
-        self.callback = seen
+    def __call__(self, snapshot: SubagentSnapshot) -> None:
+        self.snapshots.append(snapshot)
+        self._arrived.set()
+        if self._delay:
+            time.sleep(self._delay)
+        if self._fail:
+            msg = "sink failed"
+            raise RuntimeError(msg)
 
     async def wait_for(self, count: int) -> SubagentSnapshot:
         """Return the `count`th snapshot once it has arrived."""
-        async with asyncio.timeout(2), self._arrived:
-            await self._arrived.wait_for(lambda: len(self.snapshots) >= count)
+        async with asyncio.timeout(2):
+            while len(self.snapshots) < count:
+                self._arrived.clear()
+                await self._arrived.wait()
         return self.snapshots[count - 1]
 
     async def wait_for_status(self, status: SubagentStatus, *, agent_name: str | None = None) -> SubagentSnapshot:
@@ -407,22 +371,19 @@ class _Hook:
         def matches(snapshot: SubagentSnapshot) -> bool:
             return snapshot.status == status and agent_name in (None, snapshot.agent_name)
 
-        async with asyncio.timeout(2), self._arrived:
-            await self._arrived.wait_for(lambda: any(map(matches, self.snapshots)))
+        async with asyncio.timeout(2):
+            while not any(map(matches, self.snapshots)):
+                self._arrived.clear()
+                await self._arrived.wait()
         return next(filter(matches, self.snapshots))
 
 
-def _open(tmp_path: Path, seen: _Hook | None, *, delegation_id: str = "d1") -> ActivityFeed | None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    registry = HookRegistry.empty() if seen is None else HookRegistry.from_plugins([_plugin("t", [seen.callback])])
+def _open(seen: _Sink, *, delegation_id: str = "d1") -> ActivityFeed:
     return ActivityFeed.open(
         _child(delegation_id=delegation_id),
         parent_delegation_id="p0",
         root_caller_agent_name="lead",
-        bindings=HookBindings(registry=registry),
-        config=bind_runtime_paths(Config(), runtime_paths),
-        runtime_paths=runtime_paths,
-        correlation_id="corr",
+        sink=seen,
     )
 
 
@@ -431,28 +392,20 @@ def _text(snapshot: SubagentSnapshot) -> str:
 
 
 @pytest.mark.asyncio
-async def test_no_feed_without_a_subagent_changed_hook(tmp_path: Path) -> None:
-    """Without a listening hook there is nothing to publish, so no feed and no entry."""
-    assert _open(tmp_path, None) is None
-    assert not _OPEN
-
-
-@pytest.mark.asyncio
-async def test_opening_publishes_a_running_snapshot_at_once(tmp_path: Path) -> None:
+async def test_opening_publishes_a_running_snapshot_at_once() -> None:
     """A new child shows up as soon as it starts."""
-    seen = _Hook()
-    assert _open(tmp_path, seen) is not None
+    seen = _Sink()
+    _open(seen)
     snapshot = await seen.wait_for(1)
     assert (snapshot.delegation_id, snapshot.status, snapshot.parent_delegation_id) == ("d1", "running", "p0")
     assert snapshot.items == ()
 
 
 @pytest.mark.asyncio
-async def test_bursts_coalesce_to_one_emission_per_window(tmp_path: Path) -> None:
-    """Twenty text deltas in one burst reach the hook as one snapshot, a window after the first."""
-    seen = _Hook()
-    feed = _open(tmp_path, seen)
-    assert feed is not None
+async def test_bursts_coalesce_to_one_hand_off_per_window() -> None:
+    """Twenty text deltas in one burst reach the sink as one snapshot, a window after the first."""
+    seen = _Sink()
+    feed = _open(seen)
     await seen.wait_for(1)
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -468,12 +421,11 @@ async def test_bursts_coalesce_to_one_emission_per_window(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_status_change_emits_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_status_change_is_handed_off_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A status change wakes the sender instead of waiting out the window, and carries the text before it."""
     monkeypatch.setattr(activity_module, "_FLUSH_INTERVAL_SECONDS", 60)
-    seen = _Hook()
-    feed = _open(tmp_path, seen)
-    assert feed is not None
+    seen = _Sink()
+    feed = _open(seen)
     await seen.wait_for(1)
     feed.text("asking")
     await asyncio.sleep(0)
@@ -483,30 +435,10 @@ async def test_a_status_change_emits_at_once(tmp_path: Path, monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_one_emission_in_flight_and_latest_wins(tmp_path: Path) -> None:
-    """Marks during a slow emission wait for it, then go out together as one snapshot."""
-    hold = asyncio.Event()
-    seen = _Hook(hold=hold)
-    feed = _open(tmp_path, seen)
-    assert feed is not None
-    await seen.wait_for(1)
-    for letter in "abcde":
-        feed.text(letter)
-    await asyncio.sleep(_FLUSH_INTERVAL_SECONDS * 1.2)
-    assert len(seen.snapshots) == 1
-    hold.set()
-    snapshot = await seen.wait_for(2)
-    assert _text(snapshot) == "abcde"
-    await asyncio.sleep(_FLUSH_INTERVAL_SECONDS * 1.2)
-    assert len(seen.snapshots) == 2
-
-
-@pytest.mark.asyncio
-async def test_a_failing_hook_does_not_raise_into_the_feed(tmp_path: Path) -> None:
-    """A hook that raises on every call never reaches the child, and later changes still reach the hook."""
-    seen = _Hook(fail=True)
-    feed = _open(tmp_path, seen)
-    assert feed is not None
+async def test_a_failing_sink_does_not_raise_into_the_feed() -> None:
+    """A sink that raises on every call never reaches the child, and later changes still reach the sink."""
+    seen = _Sink(fail=True)
+    feed = _open(seen)
     await seen.wait_for(1)
     feed.text("still here")
     feed.status("completed", result="done")
@@ -515,118 +447,59 @@ async def test_a_failing_hook_does_not_raise_into_the_feed(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_an_emission_error_keeps_the_sender_sending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An error outside the hooks is logged, and marks made while that emission ran still go out."""
-    entered, release = asyncio.Event(), asyncio.Event()
-    seen = _Hook()
-
-    async def flaky_emit(registry: HookRegistry, event_name: str, context: HookContext) -> None:
-        if not entered.is_set():
-            entered.set()
-            await release.wait()
-            msg = "emit failed"
-            raise RuntimeError(msg)
-        await emit(registry, event_name, context)
-
-    monkeypatch.setattr(activity_module, "emit", flaky_emit)
-    feed = _open(tmp_path, seen)
-    assert feed is not None
-    await asyncio.wait_for(entered.wait(), 2)
-    feed.text("after")
-    release.set()
-    snapshot = await seen.wait_for(1)
-    assert _text(snapshot) == "after"
-
-
-@pytest.mark.asyncio
-async def test_a_paused_child_reopens_with_its_transcript(tmp_path: Path) -> None:
+async def test_a_paused_child_reopens_with_its_transcript() -> None:
     """Resuming the same delegation keeps its transcript and start time, and runs again."""
-    seen = _Hook()
-    feed = _open(tmp_path, seen)
-    assert feed is not None
+    seen = _Sink()
+    feed = _open(seen)
     feed.text("a")
     feed.status("paused")
     paused = await seen.wait_for(1)
     assert paused.status == "paused"
-    assert _open(tmp_path, seen) is not None
+    _open(seen)
     resumed = await seen.wait_for(2)
     assert (resumed.status, _text(resumed), resumed.ended_at) == ("running", "a", None)
     assert resumed.started_at == paused.started_at
 
 
 @pytest.mark.asyncio
-async def test_a_terminal_status_forgets_the_entry(tmp_path: Path) -> None:
+async def test_a_resumed_attempt_publishes_to_its_own_sink() -> None:
+    """The sink of the attempt that resumes a paused child takes the later snapshots."""
+    first, second = _Sink(), _Sink()
+    feed = _open(first)
+    feed.status("paused")
+    await first.wait_for(1)
+    _open(second)
+    assert (await second.wait_for(1)).status == "running"
+    assert len(first.snapshots) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_status_forgets_the_entry() -> None:
     """A finished run is published once with its result, and the same id later starts empty."""
-    seen = _Hook()
-    feed = _open(tmp_path, seen)
-    assert feed is not None
+    seen = _Sink()
+    feed = _open(seen)
     feed.text("a")
     feed.status("completed", result="done")
     finished = await seen.wait_for(1)
     assert (finished.status, finished.result_preview, _text(finished)) == ("completed", "done", "a")
     assert finished.ended_at is not None
     assert not _OPEN
-    assert _open(tmp_path, seen) is not None
+    _open(seen)
     fresh = await seen.wait_for(2)
     assert (fresh.status, fresh.items) == ("running", ())
 
 
-def _changed(tmp_path: Path, snapshot: SubagentSnapshot) -> SubagentChangedContext:
-    runtime_paths = test_runtime_paths(tmp_path)
-    return SubagentChangedContext(
-        **HookBindings().context_kwargs(
-            EVENT_SUBAGENT_CHANGED,
-            config=bind_runtime_paths(Config(), runtime_paths),
-            runtime_paths=runtime_paths,
-            correlation_id="corr",
-        ),
-        subagent=snapshot,
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_room_scoped_hook_sees_only_the_runs_in_its_rooms(tmp_path: Path) -> None:
-    """`rooms=` scopes a hook by the room the sub-agent runs in."""
-    seen = _Hook(rooms=[ROOM])
-    registry = HookRegistry.from_plugins([_plugin("t", [seen.callback])])
-    for room_id in (ROOM, "!elsewhere:example.org"):
-        await emit(registry, EVENT_SUBAGENT_CHANGED, _changed(tmp_path, make_snapshot(room_id=room_id)))
-    assert [snapshot.room_id for snapshot in seen.snapshots] == [ROOM]
-
-
-@pytest.mark.asyncio
-async def test_an_agent_scoped_hook_sees_the_runs_of_chains_its_agents_started(tmp_path: Path) -> None:
-    """`agents=` scopes a hook by the agent in the room whose turn started the chain, also for a nested sub-agent."""
-    seen = _Hook(agents=["helper"])
-    registry = HookRegistry.from_plugins([_plugin("t", [seen.callback])])
-    for root, caller in (("helper", "helper"), ("helper", "researcher"), ("researcher", "researcher")):
-        snapshot = make_snapshot(caller_agent_name=caller, root_caller_agent_name=root, agent_name="researcher")
-        await emit(registry, EVENT_SUBAGENT_CHANGED, _changed(tmp_path, snapshot))
-    assert [(snapshot.root_caller_agent_name, snapshot.caller_agent_name) for snapshot in seen.snapshots] == [
-        ("helper", "helper"),
-        ("helper", "researcher"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_no_feed_when_every_hook_is_scoped_to_other_runs(tmp_path: Path) -> None:
-    """Hooks whose rooms or agents never include this child keep no entry for it; a matching scope does.
-
-    The agent a hook matches is the chain's root caller, not the child's own caller.
-    """
-    assert _open(tmp_path, _Hook(rooms=["!elsewhere:example.org"])) is None
-    assert _open(tmp_path, _Hook(agents=["someone_else"])) is None
-    assert not _OPEN
-    assert _open(tmp_path, _Hook(agents=["parent"])) is None
-    seen = _Hook(rooms=[ROOM], agents=["lead"])
-    assert _open(tmp_path, seen) is not None
-    assert (await seen.wait_for(1)).status == "running"
+@pytest.fixture
+def seen(monkeypatch: pytest.MonkeyPatch) -> _Sink:
+    """Return a sink that takes the snapshots of every child run in the test."""
+    sink = _Sink()
+    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: sink)
+    return sink
 
 
 def _delegating_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    seen: _Hook,
     child_turns: list[Sequence[ScriptStep]],
     *,
     grandchild_turns: list[Sequence[ScriptStep]] | None = None,
@@ -652,8 +525,7 @@ def _delegating_turn(
         [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
     )
     ScriptedAgents(models, by_session={identity.session_id: parent}).install(monkeypatch)
-    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
-    runtime = _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
+    runtime = _delegate_runtime_context(config, paths, execution_identity=identity)
     turn = replace(
         make_turn_context(
             "leader",
@@ -675,11 +547,11 @@ def _delegating_turn(
 async def test_a_delegated_child_reports_running_text_tools_then_completed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
 ) -> None:
-    """A child's run reaches the hook as it starts, with its tool and words, and finally with its result."""
-    seen = _Hook()
+    """A child's run reaches the sink as it starts, with its tool and words, and finally with its result."""
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
-    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, seen, child_turns)
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
         result = await ai_response(turn, paths, config)
@@ -700,12 +572,12 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
 
 
 @pytest.mark.asyncio
-async def test_a_nested_child_names_its_parent_and_reaches_hooks_scoped_to_the_leader(
+async def test_a_nested_child_names_its_parent_and_the_leader_as_root_caller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
 ) -> None:
     """A child's own sub-agent links the child's run and names it caller, and the leader in the room as root caller."""
-    seen = _Hook(agents=["leader"])
     child_turns = [
         calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Go deeper")),
         answer("Child done"),
@@ -713,7 +585,6 @@ async def test_a_nested_child_names_its_parent_and_reaches_hooks_scoped_to_the_l
     turn, runtime, paths, config = _delegating_turn(
         tmp_path,
         monkeypatch,
-        seen,
         child_turns,
         grandchild_turns=[answer("Grandchild done")],
     )
@@ -736,34 +607,43 @@ async def test_a_nested_child_names_its_parent_and_reaches_hooks_scoped_to_the_l
 
 
 @pytest.mark.asyncio
-async def test_a_child_stays_on_time_while_a_hook_is_slow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hook that blocks every call never holds the child or its caller up; the hook still gets the end."""
-    hold = asyncio.Event()
-    seen = _Hook(hold=hold, timeout_ms=10_000)
+async def test_a_child_stays_on_time_while_the_sink_is_slow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sink that takes a long time per snapshot never fails the child or its caller; the sink still gets the end."""
+    seen = _Sink(delay=0.3)
+    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: seen)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
-    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, seen, child_turns)
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
         result = await asyncio.wait_for(ai_response(turn, paths, config), 5)
 
     assert result.text.endswith("Done")
-    assert [snapshot.status for snapshot in seen.snapshots] == ["running"]
-    hold.set()
     assert (await seen.wait_for_status("completed")).result_preview == "Three"
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_child_ends_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_child_without_a_sink_opens_no_feed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With nothing publishing sub-agent activity, a delegation runs and leaves no feed behind."""
+    child_turns = [answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_child_ends_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seen: _Sink) -> None:
     """A child whose stream is cancelled is published as cancelled, with what it wrote before."""
 
     async def cancel() -> None:
         raise asyncio.CancelledError
 
-    seen = _Hook()
     turn, runtime, paths, config = _delegating_turn(
         tmp_path,
         monkeypatch,
-        seen,
         [[TextDelta("Working"), Await(cancel)]],
     )
 
@@ -775,12 +655,6 @@ async def test_a_cancelled_child_ends_cancelled(tmp_path: Path, monkeypatch: pyt
     assert _text(last) == "Working"
     assert last.ended_at is not None
     assert last.result_preview == "Delegation cancelled."
-
-
-def _watching(seen: _Hook, config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
-    """Return the `leader` requester context whose turn's hooks include ``seen``."""
-    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
-    return _delegate_runtime_context(config, paths, execution_identity=_identity(), hook_registry=registry)
 
 
 @pytest.mark.asyncio
@@ -802,12 +676,15 @@ async def test_a_direct_child_that_settles_no_outcome_ends_failed_with_why(
     tmp_path: Path,
     child_response: AsyncMock,
     reason: str,
+    seen: _Sink,
 ) -> None:
     """A direct child whose run raises, or ends without its outcome, is published failed with what its caller is told."""
-    seen = _Hook()
     tools, config, paths = _direct_tools(tmp_path)
 
-    with tool_runtime_context(_watching(seen, config, paths)), patch("mindroom.ai.ai_response", child_response):
+    with (
+        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_identity())),
+        patch("mindroom.ai.ai_response", child_response),
+    ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     assert "example-secret" not in result
@@ -819,14 +696,19 @@ async def test_a_direct_child_that_settles_no_outcome_ends_failed_with_why(
 
 
 @pytest.mark.asyncio
-async def test_a_workflow_participant_reports_source_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_workflow_participant_reports_source_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
     """A Dynamic Workflow participant, the caller's own copy on the direct path, ends completed as a workflow run."""
-    seen = _Hook()
     workflow = _Workflow(tmp_path, monkeypatch, _workflow_config())
     created = await workflow.create(_spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}]))
     assert created["status"] == "ok", created
 
-    with tool_runtime_context(_watching(seen, workflow.config, workflow.paths)):
+    with tool_runtime_context(
+        _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity()),
+    ):
         run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
 
     assert run["status"] == "completed", run
@@ -845,7 +727,6 @@ async def test_a_workflow_participant_reports_source_workflow(tmp_path: Path, mo
 async def _background_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    seen: _Hook,
 ) -> tuple[DelegatingLeader, ToolJobRuntime, JobApprovalCards, ToolRuntimeContext]:
     """Return a leader whose subagent calls run as jobs, delegating to `code`, whose `write_report` needs approval."""
     paths = _runtime_paths(tmp_path)
@@ -862,8 +743,7 @@ async def _background_delegation(
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     agents = ScriptedAgents({"code": ScriptedModel([calls(tool_call("write_report", "w")), answer("Child done")])})
     agents.install(monkeypatch)
-    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
-    context = _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
+    context = _delegate_runtime_context(config, paths, execution_identity=identity)
     return DelegatingLeader(config, paths, identity, agents), runtime, cards, context
 
 
@@ -895,10 +775,10 @@ async def _delegate_in_background(
 async def test_a_background_childs_approval_wait_reports_awaiting_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
 ) -> None:
     """A child its job asks approvals for shows as awaiting them, runs again once decided, then completes."""
-    seen = _Hook()
-    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch, seen)
+    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch)
 
     async def approve() -> None:
         await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
@@ -921,10 +801,10 @@ async def test_a_background_childs_approval_wait_reports_awaiting_approval(
 async def test_a_background_child_cancelled_while_awaiting_approval_ends_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
 ) -> None:
     """A job cancelled while its child waits for an approval publishes the child as cancelled, not still waiting."""
-    seen = _Hook()
-    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch, seen)
+    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch)
 
     async def cancel() -> None:
         await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)

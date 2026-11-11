@@ -31,7 +31,6 @@ from .context import (
     RoomMemberLeftContext,
     ScheduleFiredContext,
     SessionHookContext,
-    SubagentChangedContext,
     SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -80,9 +79,6 @@ def _scope_agent_name(context: HookContext) -> str | None:
             CompactionHookContext | SessionHookContext | RoomMemberJoinedContext | RoomMemberLeftContext,
         ):
             agent_name = context.agent_name
-        elif isinstance(context, SubagentChangedContext):
-            # The agent whose turn started the chain is in the room; its sub-agents may have no account there.
-            agent_name = context.subagent.root_caller_agent_name
     return agent_name
 
 
@@ -104,12 +100,9 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
         return context.rooms
-    room_id: str | None = None
-    if isinstance(context, CustomEventContext):
-        room_id = context.room_id
-    elif isinstance(context, SubagentChangedContext):
-        room_id = context.subagent.room_id
-    return (room_id,) if room_id else ()
+    if isinstance(context, CustomEventContext) and context.room_id:
+        return (context.room_id,)
+    return ()
 
 
 def _hook_in_scope(hook: RegisteredHook, context: HookContext) -> bool:
@@ -247,11 +240,6 @@ def _eligible_hooks(
             continue
         eligible_hooks.append(hook)
     return tuple(eligible_hooks)
-
-
-def has_eligible_hooks(registry: HookRegistry, event_name: str, context: HookContext) -> bool:
-    """Return whether any hook of ``event_name`` would run for ``context``, its agent and room scopes applied."""
-    return bool(_eligible_hooks(registry, event_name, context))
 
 
 async def emit(

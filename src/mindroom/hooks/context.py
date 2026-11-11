@@ -25,7 +25,6 @@ from .state import (
 )
 from .types import (
     EVENT_CONTACT_BEFORE_SEND,
-    EVENT_SUBAGENT_CHANGED,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
@@ -583,62 +582,6 @@ class TranscriptLine:
     display_name: str | None
     # The words without the context hooks attached to the message; not redacted.
     text: str
-
-
-@dataclass(frozen=True, slots=True)
-class SubagentItem:
-    """One step of a sub-agent's transcript: a stretch of its text or one of its tool calls."""
-
-    kind: Literal["text", "tool"]
-    # kind "text": the child's words so far, redacted Markdown.
-    text: str = ""
-    # kind "tool": the public trace fields a shown tool row carries.
-    tool: ToolTraceEntry | None = None
-    tool_call_id: str | None = None
-    state: Literal["running", "done", "error"] | None = None
-
-
-SubagentStatus = Literal["running", "awaiting_approval", "paused", "completed", "failed", "cancelled", "denied"]
-
-
-@dataclass(frozen=True, slots=True)
-class SubagentSnapshot:
-    """What one sub-agent run has done so far, redacted, as `subagent:changed` hands it to plugins."""
-
-    delegation_id: str
-    # Stable across continue_subagent.
-    subagent_id: str
-    # Set for a sub-agent's own sub-agent.
-    parent_delegation_id: str | None
-    caller_agent_name: str
-    # The agent in the room whose turn started the delegation chain; the caller itself for a direct child.
-    root_caller_agent_name: str
-    agent_name: str
-    source: Literal["delegate", "workflow"]
-    # Redacted, at most 2,000 characters.
-    task: str
-    room_id: str
-    thread_id: str | None
-    requester_id: str
-    model_name: str
-    status: SubagentStatus
-    started_at: float
-    updated_at: float
-    ended_at: float | None
-    # Oldest first.
-    items: tuple[SubagentItem, ...]
-    # How many older items the transcript caps removed.
-    items_dropped: int
-    # Redacted, at most 2,000 characters; set only once the run ended.
-    result_preview: str | None
-
-
-@dataclass(slots=True, kw_only=True)
-class SubagentChangedContext(HookContext):
-    """Context for subagent:changed observer hooks."""
-
-    event_name: str = EVENT_SUBAGENT_CHANGED
-    subagent: SubagentSnapshot
 
 
 @dataclass(slots=True)

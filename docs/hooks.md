@@ -227,7 +227,6 @@ async def keep_prices_private(ctx):
 | `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
 | `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
 | `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
-| `subagent:changed` | Observer | `SubagentChangedContext` | As each `delegate` or Dynamic Workflow child starts, writes, calls tools, and changes status, with a snapshot of its run so far | None | 500 |
 
 Custom events default to 1000 ms.
 
@@ -263,31 +262,6 @@ Custom events default to 1000 ms.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
-- **`subagent:changed`**: fires for each child of [`delegate`](tools/agent-orchestration.md#delegate) (`run_subagent` and `continue_subagent`, on every execution path) and each [Dynamic Workflow](tools/agent-orchestration.md#dynamic_workflow) participant: as the child starts, as it writes and calls tools, and when its status changes.
-  It runs in the primary process, and each call gets `ctx.subagent`, a `SubagentSnapshot` of the whole run so far, not a delta.
-  A plugin that uses it states `"mindroom_plugin_api": "1.30"` in its manifest.
-  `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` still do not fire for a child's turn; this event is how a plugin sees one.
-  - **Coalescing**: a child emits at most once per 250 ms, with its latest snapshot, and a status change emits at once.
-    Each child has one emission in flight at a time, and the child never waits on hooks, so a failing hook loses only its own update, and a slow one holds that child's later snapshots back for up to its timeout; each snapshot carries the whole run, so nothing is lost.
-  - **Scoping**: `agents=` scopes by the agent in the room whose turn started the chain (`ctx.subagent.root_caller_agent_name`), not the child's `agent_name` or, for a sub-agent's own sub-agent, its `caller_agent_name`, and `rooms=` matches the run's `ctx.subagent.room_id`.
-  - **Statuses**: `running`, `awaiting_approval`, `paused`, `completed`, `failed`, `cancelled`, `denied`; the last four are final, and a final snapshot sets `ended_at` and `result_preview`.
-    `awaiting_approval` is a background sub-agent waiting for the approval cards of its gated calls, and returns to `running` once they are decided.
-    A native child waiting on a tool approval is `paused`, and resumes as `running`.
-    A gated tool call that a running child makes as its own background job still shows `running`.
-  - **Caps**: `task` and `result_preview` are cut to 2,000 characters, the child's text keeps its newest 16,000 characters, and `items` keeps the newest 50 tool items; `items_dropped` counts the items the caps removed.
-  - **Redaction**: `task`, `result_preview`, and text items are redacted.
-    A tool item's `item.tool` never includes the full arguments or result, only the previews (`args_preview`, `result_preview`, `truncated`) and names (`type`, `tool_name`) that a shown reply's tool trace carries.
-
-```python
-from mindroom.plugin_api import hook
-
-
-@hook("subagent:changed", agents=["lead"])
-async def log_subagent(ctx):
-    snapshot = ctx.subagent
-    ctx.logger.info("subagent", agent=snapshot.agent_name, status=snapshot.status, items=len(snapshot.items))
-```
-
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
   Once MindRoom has created the [server emoji room](custom-emoji.md#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
@@ -515,7 +489,6 @@ All contexts include these fields:
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `shown`, `chat_preview()`, `result`, `error`, `blocked`, `duration_ms` |
 | `ContactBeforeSendContext` | `agent_name`, `room_id`, `thread_id`, `requester_id`, `contact_id`, `counterparty_id`, `counterparty_name`, `rules`, `text`, `message_received_depth`, `verdict` (`"send"`, `"revise"`, or `"deny"`), `feedback`, `rewrite(text)`, `revise(feedback)`, `deny(reason)` |
 | `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
-| `SubagentChangedContext` | `subagent`, a `SubagentSnapshot` with `delegation_id`, `subagent_id` (stable across `continue_subagent`), `parent_delegation_id` (set for a sub-agent's own sub-agent), `caller_agent_name`, `root_caller_agent_name` (the agent in the room whose turn started the delegation chain; `caller_agent_name` for a direct child), `agent_name`, `source` (`"delegate"` or `"workflow"`), `task`, `room_id`, `thread_id`, `requester_id`, `model_name`, `status`, `started_at`, `updated_at`, `ended_at`, `items` (oldest first; each a `SubagentItem` with `kind` `"text"` or `"tool"`, `text`, `tool`, `tool_call_id`, `state` of `"running"`, `"done"`, or `"error"`), `items_dropped`, `result_preview` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.

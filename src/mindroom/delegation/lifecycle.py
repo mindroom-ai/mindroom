@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.activity import SubagentSink
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
@@ -83,7 +84,7 @@ class ChildRunObservation:
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
     turn_id: str = field(default_factory=lambda: uuid4().hex)
-    # What publishes the child's run to `subagent:changed` hooks, None when none would see it.
+    # What hands the child's run to its sink, None when nothing publishes it.
     feed: ActivityFeed | None = None
 
     def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
@@ -283,24 +284,31 @@ def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]
         logger.exception("Sub-agent activity update failed", delegation_id=feed.delegation_id)
 
 
-def _open_feed(child: DelegationChild, parent: ChildRunObservation | None) -> ActivityFeed | None:
-    """Open the child's feed on the hooks of the caller's turn; None outside a turn or when no hook would see it."""
+def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
+    """Return where the child's snapshots go, or None when nothing publishes them."""
+    del context, observation
+    return None
+
+
+def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
+    """Open the child's feed when its caller's turn has a sink for it; None outside a turn or without one."""
     context = get_tool_runtime_context()
     if context is None:
         return None
+    child, parent = observation.child, observation.parent
     # The outermost child of the chain was delegated by the agent in the room whose turn started it.
     root = parent
     while root is not None and root.parent is not None:
         root = root.parent
     try:
+        sink = _subagent_sink(context, observation)
+        if sink is None:
+            return None
         return ActivityFeed.open(
             child,
             parent_delegation_id=None if parent is None else parent.child.delegation_id,
             root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
-            bindings=context.hooks,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            correlation_id=context.correlation_id or child.delegation_id,
+            sink=sink,
         )
     except Exception:
         logger.exception("Sub-agent activity feed failed to open", delegation_id=child.delegation_id)
@@ -324,11 +332,12 @@ async def child_run_context(
 ) -> AsyncIterator[ChildRunObservation]:
     """Observe and audit one child attempt, then settle it even when its last buffered output fails to record.
 
-    The attempt is published to `subagent:changed` hooks as it starts and with how it ended, after its settlement.
+    The attempt is published to its sub-agent sink as it starts and with how it ended, after its settlement.
     """
     audit = await open_child_audit(child, config=config, runtime_paths=runtime_paths)
     parent = _CHILD_RUN.get()
-    observation = ChildRunObservation(child, audit, parent=parent, feed=_open_feed(child, parent))
+    observation = ChildRunObservation(child, audit, parent=parent)
+    observation.feed = _open_feed(observation)
     token = _CHILD_RUN.set(observation)
     # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.
     cancelled, reason = False, "Delegated run ended without a retained terminal outcome."
