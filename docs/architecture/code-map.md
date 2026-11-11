@@ -533,6 +533,7 @@ Matrix sync callback
 | `live_frames/frames.py` | The `io.mindroom.live` frame format: snapshots and UTF-16 splice deltas of a reply's live documents, and the durable checkpoint watermark key |
 | `live_frames/publisher.py` | One streaming reply's frame loop: a frame per tick when its documents changed, periodic snapshots, and the watermark its durable writes carry |
 | `live_frames/transport.py` | Whether the homeserver relays live frames, and sending one frame, Megolm-encrypted in encrypted rooms, over the MSC2477 ephemeral route |
+| `live_frames/subagents.py` | The `io.mindroom.subagents` frame format of a sub-agent run's transcript and status, and the publisher that sends the runs one account shows in a room within one budget |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

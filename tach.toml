@@ -7856,6 +7856,14 @@ depends_on = [
 visibility = ["mindroom.delegation.lifecycle"]
 
 [[modules]]
+path = "mindroom.live_frames.subagents"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.llm",
+    "mindroom.tool_system.events",
+]
+
+[[modules]]
 path = "mindroom.delegation.targets"
 depends_on = [
     "mindroom.delegation.lifecycle",

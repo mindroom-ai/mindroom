@@ -67,8 +67,9 @@ async def send_live_frame(
     frame: dict[str, object],
     *,
     transaction_id: str,
+    event_type: str = LIVE_EVENT_TYPE,
 ) -> LiveSendOutcome:
-    """Send one frame to the room, encrypting it with the room's current group session when the room is encrypted."""
+    """Send one frame of ``event_type`` to the room, encrypted with the room's current group session when it is encrypted."""
     room = client.rooms.get(room_id)
     if room is None:
         return LiveSendOutcome.STOP
@@ -81,7 +82,7 @@ async def send_live_frame(
         # ten seconds, each rotation sharing a new key with every device. Age and membership rotation still apply.
         encrypted = await client.room_encrypt(
             room_id,
-            LIVE_EVENT_TYPE,
+            event_type,
             frame,
             ignore_unverified_devices=True,
             count_toward_rotation=False,
@@ -90,7 +91,7 @@ async def send_live_frame(
     if _serialized_size(content) > _MAX_FRAME_BYTES:
         logger.info("live_frames_too_large", room_id=room_id)
         return LiveSendOutcome.STOP
-    response = await client.room_send_ephemeral(room_id, LIVE_EVENT_TYPE, content, tx_id=transaction_id)
+    response = await client.room_send_ephemeral(room_id, event_type, content, tx_id=transaction_id)
     if isinstance(response, nio.RoomSendEphemeralResponse):
         return LiveSendOutcome.SENT
     status = response.transport_response.status if response.transport_response is not None else None

@@ -22,8 +22,8 @@ _FRAME_INTERVAL_SECONDS = 0.1
 # A snapshot this often lets a client that missed frames, or opened the room mid-reply, catch up, and tells clients
 # the reply is still live while nothing changes.
 _SNAPSHOT_INTERVAL_SECONDS = 5.0
-_SEND_TIMEOUT_SECONDS = 5.0
-_RETRY_BACKOFF_SECONDS = 1.0
+SEND_TIMEOUT_SECONDS = 5.0
+RETRY_BACKOFF_SECONDS = 1.0
 
 
 @dataclass
@@ -63,7 +63,7 @@ class LivePublisher:
         try:
             outcome = await asyncio.wait_for(
                 send_live_frame(self.client, self.room_id, frame, transaction_id=f"{self.publisher_id}.{self.seq}"),
-                timeout=_SEND_TIMEOUT_SECONDS,
+                timeout=SEND_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             outcome = LiveSendOutcome.RETRY
@@ -111,4 +111,4 @@ class LivePublisher:
             if outcome is LiveSendOutcome.RETRY:
                 # A send that fails at once, as through a proxy while the homeserver restarts, is not repeated every
                 # tick; the next frame is a snapshot.
-                await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS)

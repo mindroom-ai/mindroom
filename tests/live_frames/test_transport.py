@@ -74,6 +74,35 @@ async def test_an_encrypted_room_gets_the_frame_encrypted_without_counting_towar
 
 
 @pytest.mark.asyncio
+async def test_send_live_frame_encrypts_with_the_given_type() -> None:
+    """A frame of another type is encrypted and sent as that type, so the event a client decrypts names it."""
+    client = _client(encrypted=True, response=nio.RoomSendEphemeralResponse(_ROOM_ID))
+
+    outcome = await send_live_frame(
+        client,
+        _ROOM_ID,
+        _FRAME,
+        transaction_id="subagents.sid.0",
+        event_type="io.mindroom.subagents",
+    )
+
+    assert outcome is LiveSendOutcome.SENT
+    client.room_encrypt.assert_awaited_once_with(
+        _ROOM_ID,
+        "io.mindroom.subagents",
+        _FRAME,
+        ignore_unverified_devices=True,
+        count_toward_rotation=False,
+    )
+    client.room_send_ephemeral.assert_awaited_once_with(
+        _ROOM_ID,
+        "io.mindroom.subagents",
+        {"v": 1, "encrypted": _MEGOLM},
+        tx_id="subagents.sid.0",
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_frame_over_the_size_limit_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
     """A frame too large for one ephemeral event stops frames instead of being refused by the homeserver."""
     monkeypatch.setattr(transport_module, "_MAX_FRAME_BYTES", 40)
