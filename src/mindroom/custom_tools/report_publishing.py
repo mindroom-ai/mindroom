@@ -67,6 +67,12 @@ class ReportPublishingTools(Toolkit):
                 source_type=source_type,
                 message="Set confirm_public to true to publish this report as a public link.",
             )
+        # Read before publishing, so a setting MindRoom does not know fails the call without leaving a link behind.
+        who_can_open = (
+            "people signed in to this deployment"
+            if published_reports_require_sign_in(context.runtime_paths)
+            else "anyone with the link"
+        )
         try:
             publishable = await run_blocking_until_complete(_resolve_publishable_source, context, source_type, source)
             store = ReportPublishingStore(context.runtime_paths.storage_root)
@@ -90,11 +96,7 @@ class ReportPublishingTools(Toolkit):
             public_url=report.public_url,
             public_path=_public_path_for_report(report),
             published_at=report.published_at,
-            who_can_open=(
-                "people signed in to this deployment"
-                if published_reports_require_sign_in(context.runtime_paths)
-                else "anyone with the link"
-            ),
+            who_can_open=who_can_open,
         )
 
     @tool
