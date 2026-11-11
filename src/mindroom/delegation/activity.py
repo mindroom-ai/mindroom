@@ -1,22 +1,36 @@
-"""A redacted, capped snapshot of what one sub-agent run has done so far."""
+"""A redacted, capped snapshot of what one sub-agent run has done so far, and its coalesced publication to hooks."""
 
 from __future__ import annotations
 
+import asyncio
+import time
+from contextlib import suppress
+from contextvars import Context
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.background_tasks import create_background_task
 from mindroom.delegation.state import child_execution_identity
-from mindroom.hooks.context import SubagentItem, SubagentSnapshot
+from mindroom.hooks.context import SubagentChangedContext, SubagentItem, SubagentSnapshot
+from mindroom.hooks.execution import emit
+from mindroom.hooks.types import EVENT_SUBAGENT_CHANGED
+from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-    from mindroom.hooks.context import SubagentStatus
+    from mindroom.hooks.context import HookBindings, SubagentStatus
+    from mindroom.hooks.registry import HookRegistry
     from mindroom.llm.events import ToolCompleted, ToolStarted
     from mindroom.tool_system.events import ToolTraceEntry
 
+logger = get_logger(__name__)
+
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
+FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 16_000
 _MAX_TOOL_ITEMS = 50
 _MAX_LABEL_CHARACTERS = 2_000
@@ -155,3 +169,103 @@ class SubagentActivity:
             items_dropped=self.items_dropped,
             result_preview=None if self.result is None else _clip(self.result),
         )
+
+
+# The activity of each child that may still resume, such as one paused for an approval; a terminal status drops it.
+_OPEN: dict[str, SubagentActivity] = {}
+
+
+class ActivityFeed:
+    """Publish one child attempt's snapshots to `subagent:changed` hooks without ever delaying or failing the child.
+
+    Changes only update the activity and mark it dirty. One sender task per feed emits the latest snapshot at most once
+    per `FLUSH_INTERVAL_SECONDS`, or at once after a status change, with one emission in flight at a time.
+    """
+
+    def __init__(self, activity: SubagentActivity, *, registry: HookRegistry, context_kwargs: dict[str, Any]) -> None:
+        self._activity = activity
+        self._registry = registry
+        self._context_kwargs = context_kwargs
+        self._dirty = False
+        self._wake = asyncio.Event()
+        self._sender: asyncio.Task[None] | None = None
+
+    @classmethod
+    def open(
+        cls,
+        child: DelegationChild,
+        *,
+        parent_delegation_id: str | None,
+        bindings: HookBindings,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        correlation_id: str,
+    ) -> ActivityFeed | None:
+        """Publish a running child, resuming the activity a paused attempt left; None when no hook listens."""
+        if not bindings.registry.has_hooks(EVENT_SUBAGENT_CHANGED):
+            _OPEN.pop(child.delegation_id, None)
+            return None
+        activity = _OPEN.get(child.delegation_id)
+        if activity is None:
+            activity = SubagentActivity.start(child, parent_delegation_id=parent_delegation_id, now=time.time())
+            _OPEN[child.delegation_id] = activity
+        feed = cls(
+            activity,
+            registry=bindings.registry,
+            context_kwargs=bindings.context_kwargs(
+                EVENT_SUBAGENT_CHANGED,
+                config=config,
+                runtime_paths=runtime_paths,
+                correlation_id=correlation_id,
+            ),
+        )
+        feed.status("running")
+        return feed
+
+    def text(self, text: str) -> None:
+        """Add the child's words; they go out with the next window's snapshot."""
+        self._activity.add_text(text, time.time())
+        self._mark()
+
+    def tool_started(self, event: ToolStarted) -> None:
+        """Add a running tool row; it goes out with the next window's snapshot."""
+        self._activity.tool_started(event, time.time())
+        self._mark()
+
+    def tool_completed(self, event: ToolCompleted) -> None:
+        """Finish a tool row; it goes out with the next window's snapshot."""
+        self._activity.tool_completed(event, time.time())
+        self._mark()
+
+    def status(self, status: SubagentStatus, *, result: str | None = None) -> None:
+        """Move to a status and publish it at once; a terminal status also forgets the activity."""
+        self._activity.set_status(status, time.time(), result=result)
+        self._mark(urgent=True)
+        if status in TERMINAL_STATUSES:
+            _OPEN.pop(self._activity.delegation_id, None)
+
+    def _mark(self, *, urgent: bool = False) -> None:
+        self._dirty = True
+        if urgent:
+            self._wake.set()
+        if self._sender is None or self._sender.done():
+            self._sender = create_background_task(
+                self._send(),
+                name=f"subagent_activity_{self._activity.delegation_id}",
+                # Outside the child's span and context: publishing is no part of the child's turn.
+                context=Context(),
+            )
+
+    async def _send(self) -> None:
+        while self._dirty:
+            if not self._wake.is_set():
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(FLUSH_INTERVAL_SECONDS):
+                        await self._wake.wait()
+            self._wake.clear()
+            self._dirty = False
+            try:
+                context = SubagentChangedContext(**self._context_kwargs, subagent=self._activity.snapshot())
+                await emit(self._registry, EVENT_SUBAGENT_CHANGED, context)
+            except Exception:
+                logger.exception("Sub-agent activity emission failed", delegation_id=self._activity.delegation_id)

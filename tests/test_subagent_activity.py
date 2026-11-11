@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.delegation.activity import TERMINAL_STATUSES, SubagentActivity
+from mindroom.config.main import Config
+from mindroom.delegation import activity as activity_module
+from mindroom.delegation.activity import (
+    _OPEN,
+    FLUSH_INTERVAL_SECONDS,
+    TERMINAL_STATUSES,
+    ActivityFeed,
+    SubagentActivity,
+)
 from mindroom.delegation.state import DelegationChild, SubagentPersona
+from mindroom.hooks import HookBindings, HookRegistry, emit, hook
 from mindroom.hooks.types import _DEFAULT_EVENT_TIMEOUT_MS, BUILTIN_EVENT_NAMES, validate_event_name
 from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
 from mindroom.plugin_api import (
@@ -15,13 +25,19 @@ from mindroom.plugin_api import (
     PLUGIN_API_VERSION,
     SubagentChangedContext,
     SubagentItem,
+    SubagentSnapshot,
 )
 from mindroom.plugin_testing import load_plugin
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.subagent_activity_helpers import make_snapshot
+from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+
+    from mindroom.hooks import HookContext
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
@@ -84,7 +100,12 @@ async def test_plugin_testing_fires_subagent_changed(tmp_path: Path) -> None:
         assert (plugin_dir / "seen.txt").read_text(encoding="utf-8").split() == ["d1"]
 
 
-def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> SubagentActivity:
+def _child(
+    *,
+    delegation_id: str = "d1",
+    task: str = "research",
+    persona: SubagentPersona | None = None,
+) -> DelegationChild:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="child",
@@ -94,8 +115,8 @@ def _activity(*, task: str = "research", persona: SubagentPersona | None = None)
         resolved_thread_id="$thread",
         session_id="child-session",
     )
-    child = DelegationChild(
-        delegation_id="d1",
+    return DelegationChild(
+        delegation_id=delegation_id,
         parent_tool_call_id="call",
         caller_agent_name="parent",
         child_agent_name="child",
@@ -110,7 +131,10 @@ def _activity(*, task: str = "research", persona: SubagentPersona | None = None)
         agent_mode="standard",
         persona=persona,
     )
-    return SubagentActivity.start(child, parent_delegation_id="p0", now=1.0)
+
+
+def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> SubagentActivity:
+    return SubagentActivity.start(_child(task=task, persona=persona), parent_delegation_id="p0", now=1.0)
 
 
 def _call(call_id: str, *, result: str | None = None, is_error: bool | None = None) -> ReportedCall:
@@ -240,3 +264,194 @@ def test_workflow_children_report_source_workflow() -> None:
     """A workflow persona marks the snapshot's source."""
     persona = SubagentPersona(source_kind="workflow", source_name="w", system_prompt="p")
     assert _activity(persona=persona).snapshot().source == "workflow"
+
+
+@pytest.fixture(autouse=True)
+def _forget_open_runs() -> Iterator[None]:
+    yield
+    _OPEN.clear()
+
+
+class _Hook:
+    """A `subagent:changed` hook that records each snapshot it receives, holding or failing each call on request."""
+
+    def __init__(self, *, hold: asyncio.Event | None = None, fail: bool = False) -> None:
+        self.snapshots: list[SubagentSnapshot] = []
+        self._arrived = asyncio.Condition()
+
+        @hook(EVENT_SUBAGENT_CHANGED, timeout_ms=5_000)
+        async def seen(ctx: SubagentChangedContext) -> None:
+            async with self._arrived:
+                self.snapshots.append(ctx.subagent)
+                self._arrived.notify_all()
+            if hold is not None:
+                await hold.wait()
+            if fail:
+                msg = "hook failed"
+                raise RuntimeError(msg)
+
+        self.callback = seen
+
+    async def wait_for(self, count: int) -> SubagentSnapshot:
+        """Return the `count`th snapshot once it has arrived."""
+        async with asyncio.timeout(2), self._arrived:
+            await self._arrived.wait_for(lambda: len(self.snapshots) >= count)
+        return self.snapshots[count - 1]
+
+
+def _open(tmp_path: Path, seen: _Hook | None, *, delegation_id: str = "d1") -> ActivityFeed | None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    registry = HookRegistry.empty() if seen is None else HookRegistry.from_plugins([_plugin("t", [seen.callback])])
+    return ActivityFeed.open(
+        _child(delegation_id=delegation_id),
+        parent_delegation_id="p0",
+        bindings=HookBindings(registry=registry),
+        config=bind_runtime_paths(Config(), runtime_paths),
+        runtime_paths=runtime_paths,
+        correlation_id="corr",
+    )
+
+
+def _text(snapshot: SubagentSnapshot) -> str:
+    return "".join(item.text for item in snapshot.items if item.kind == "text")
+
+
+@pytest.mark.asyncio
+async def test_no_feed_without_a_subagent_changed_hook(tmp_path: Path) -> None:
+    """Without a listening hook there is nothing to publish, so no feed and no entry."""
+    assert _open(tmp_path, None) is None
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_opening_publishes_a_running_snapshot_at_once(tmp_path: Path) -> None:
+    """A new child shows up as soon as it starts."""
+    seen = _Hook()
+    assert _open(tmp_path, seen) is not None
+    snapshot = await seen.wait_for(1)
+    assert (snapshot.delegation_id, snapshot.status, snapshot.parent_delegation_id) == ("d1", "running", "p0")
+    assert snapshot.items == ()
+
+
+@pytest.mark.asyncio
+async def test_bursts_coalesce_to_one_emission_per_window(tmp_path: Path) -> None:
+    """Twenty text deltas in one burst reach the hook as one snapshot, a window after the first."""
+    seen = _Hook()
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    await seen.wait_for(1)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    feed.text("0 ")
+    await asyncio.sleep(0)
+    for n in range(1, 20):
+        feed.text(f"{n} ")
+    snapshot = await seen.wait_for(2)
+    assert loop.time() - started >= FLUSH_INTERVAL_SECONDS * 0.8
+    assert _text(snapshot) == "".join(f"{n} " for n in range(20))
+    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    assert len(seen.snapshots) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_status_change_emits_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A status change wakes the sender instead of waiting out the window, and carries the text before it."""
+    monkeypatch.setattr(activity_module, "FLUSH_INTERVAL_SECONDS", 60)
+    seen = _Hook()
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    await seen.wait_for(1)
+    feed.text("asking")
+    await asyncio.sleep(0)
+    feed.status("awaiting_approval")
+    snapshot = await seen.wait_for(2)
+    assert (snapshot.status, _text(snapshot)) == ("awaiting_approval", "asking")
+
+
+@pytest.mark.asyncio
+async def test_one_emission_in_flight_and_latest_wins(tmp_path: Path) -> None:
+    """Marks during a slow emission wait for it, then go out together as one snapshot."""
+    hold = asyncio.Event()
+    seen = _Hook(hold=hold)
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    await seen.wait_for(1)
+    for letter in "abcde":
+        feed.text(letter)
+    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    assert len(seen.snapshots) == 1
+    hold.set()
+    snapshot = await seen.wait_for(2)
+    assert _text(snapshot) == "abcde"
+    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    assert len(seen.snapshots) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failing_hook_does_not_raise_into_the_feed(tmp_path: Path) -> None:
+    """A hook that raises on every call never reaches the child, and later changes still reach the hook."""
+    seen = _Hook(fail=True)
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    await seen.wait_for(1)
+    feed.text("still here")
+    feed.status("completed", result="done")
+    snapshot = await seen.wait_for(2)
+    assert (snapshot.status, _text(snapshot)) == ("completed", "still here")
+
+
+@pytest.mark.asyncio
+async def test_an_emission_error_keeps_the_sender_sending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An error outside the hooks is logged, and marks made while that emission ran still go out."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    seen = _Hook()
+
+    async def flaky_emit(registry: HookRegistry, event_name: str, context: HookContext) -> None:
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+            msg = "emit failed"
+            raise RuntimeError(msg)
+        await emit(registry, event_name, context)
+
+    monkeypatch.setattr(activity_module, "emit", flaky_emit)
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    await asyncio.wait_for(entered.wait(), 2)
+    feed.text("after")
+    release.set()
+    snapshot = await seen.wait_for(1)
+    assert _text(snapshot) == "after"
+
+
+@pytest.mark.asyncio
+async def test_a_paused_child_reopens_with_its_transcript(tmp_path: Path) -> None:
+    """Resuming the same delegation keeps its transcript and start time, and runs again."""
+    seen = _Hook()
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    feed.text("a")
+    feed.status("paused")
+    paused = await seen.wait_for(1)
+    assert paused.status == "paused"
+    assert _open(tmp_path, seen) is not None
+    resumed = await seen.wait_for(2)
+    assert (resumed.status, _text(resumed), resumed.ended_at) == ("running", "a", None)
+    assert resumed.started_at == paused.started_at
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_status_forgets_the_entry(tmp_path: Path) -> None:
+    """A finished run is published once with its result, and the same id later starts empty."""
+    seen = _Hook()
+    feed = _open(tmp_path, seen)
+    assert feed is not None
+    feed.text("a")
+    feed.status("completed", result="done")
+    finished = await seen.wait_for(1)
+    assert (finished.status, finished.result_preview, _text(finished)) == ("completed", "done", "a")
+    assert finished.ended_at is not None
+    assert not _OPEN
+    assert _open(tmp_path, seen) is not None
+    fresh = await seen.wait_for(2)
+    assert (fresh.status, fresh.items) == ("running", ())

@@ -7857,6 +7857,8 @@ path = "mindroom.delegation.activity"
 depends_on = [
     "mindroom.delegation.state",
     "mindroom.hooks.context",
+    "mindroom.hooks.execution",
+    "mindroom.hooks.types",
     "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.delegation.lifecycle"]
