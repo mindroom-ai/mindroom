@@ -394,3 +394,10 @@ def test_shell_output_destination_keeps_the_workdir_flag_across_the_supervisor()
     destination = ShellOutputDestination(workspace_root="/w", path="out.txt", max_bytes=1, tools_use_workdir=True)
 
     assert ShellOutputDestination.from_payload(dataclasses.asdict(destination)) == destination
+
+
+def test_validate_config_returns_the_config_or_names_an_unknown_agent(tmp_path: Path) -> None:
+    """A config headless runs can serve validates to its `Config`; an agent it does not configure is refused."""
+    assert set(validate_config(_config(), agent="coder", storage=tmp_path / "storage").agents) == {"coder"}
+    with pytest.raises(HeadlessConfigError, match="no agent named 'ghost' is configured"):
+        validate_config(_config(), agent="ghost", storage=tmp_path / "storage")

@@ -146,7 +146,6 @@ async def run_turn(
     and its subagents work. Cancelling the call cancels the turn and its running tool calls.
     """
     validated = validate_config(config, agent=agent, storage=storage, requester_id=requester_id)
-    workdir = workdir.expanduser().resolve() if workdir is not None else None
     runtime_paths = _runtime_paths(storage)
     requester = requester_id or validated.administrators[0]
     persist_offline_entity_accounts(validated, runtime_paths)
