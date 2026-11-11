@@ -321,11 +321,11 @@ class _Publisher:
             if outcome is None:
                 continue
             del self._streams[run]
-            unfinished = stream.dirty or stream.snapshot.status not in TERMINAL_CHILD_STATUSES
-            if outcome is LiveSendOutcome.STOP:
-                if unfinished:
-                    self._refused[run] = stream.snapshot.status
-            elif unfinished:
+            ended = stream.snapshot.status in TERMINAL_CHILD_STATUSES
+            if outcome is LiveSendOutcome.STOP and not ended:
+                self._refused[run] = stream.snapshot.status
+            elif stream.dirty or not ended:
+                # A run that ended while its refused frame was in flight still gets its end's one attempt.
                 self._streams[run] = stream
             return outcome
         return None

@@ -92,7 +92,8 @@ class _Room:
         assert (room_id, event_type) == (_ROOM_ID, SUBAGENT_EVENT_TYPE)
         assert tx_id == f"subagents.{frame['sid']}.{frame['seq']}"
         self.sent.append(frame)
-        self.sent_bytes.append(len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()))
+        # The body nio sends: compact JSON with ASCII escapes.
+        self.sent_bytes.append(len(Api.to_json(content)))
         self.sent_at.append(time.monotonic())
         return self.responses.pop(0) if self.responses else nio.RoomSendEphemeralResponse(room_id)
 
@@ -132,7 +133,10 @@ async def relaying(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    # A stopped publisher forgets itself; one still registered would hold its runs forever.
+    leaked = dict(subagents_module._PUBLISHERS)
     subagents_module._PUBLISHERS.clear()
+    assert leaked == {}
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -383,10 +387,14 @@ async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch, le
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("character", ["ж", "日", "😀"], ids=["cyrillic", "cjk", "emoji"])
-async def test_frames_at_the_caps_fit_an_encrypted_room(character: str) -> None:
-    """With the text, tool rows, task, and result at their caps, every encrypted frame stays under 60,000 bytes."""
-    room = _Room(encrypted=True)
+@pytest.mark.parametrize(
+    ("character", "encrypted"),
+    [("ж", True), ("日", True), ("😀", True), ("ж", False), ("😀", False)],
+    ids=["encrypted-cyrillic", "encrypted-cjk", "encrypted-emoji", "plaintext-cyrillic", "plaintext-emoji"],
+)
+async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) -> None:
+    """With the text, tool rows, task, and result at their caps, every frame goes out under 60,000 bytes."""
+    room = _Room(encrypted=encrypted)
     activity = _activity(task=character * 1_000)
     for index in range(20):
         call = ReportedCall(f"call-{index}", "run_shell_command", {"command": character * 400}, result=character * 400)
@@ -521,6 +529,32 @@ async def test_a_refused_run_stays_quiet_until_it_ends() -> None:
     assert (b_delta["run"], "delta" in b_delta) == ("b", True)
     assert (end_a["run"], end_a["seq"], end_a["meta"]["status"], end_a["snapshot"]["md"]) == ("a", 0, "completed", "a4")
     assert end_a["sid"] != first_a["sid"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_ends_while_its_refused_frame_is_in_flight_still_sends_its_end() -> None:
+    """The end that arrives during a frame the room then refuses gets its one attempt, and the publisher is forgotten."""
+    room = _Room(nio.RoomSendEphemeralResponse(_ROOM_ID), _refusal("M_FORBIDDEN"))
+    record = room.client.room_send_ephemeral.side_effect
+    release = asyncio.Event()
+
+    async def held(*args: object, **kwargs: object) -> nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError:
+        response = await record(*args, **kwargs)
+        if len(room.sent) == 2:
+            await release.wait()
+        return response
+
+    room.client.room_send_ephemeral.side_effect = held
+    room.publish(make_snapshot(items=(_text("a"),)))
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(make_snapshot(items=(_text("ab"),)))
+    await _until(lambda: len(room.sent) == 2)
+    room.publish(make_snapshot(status="completed", ended_at=1001.0, items=(_text("abc"),), result_preview="Done."))
+    release.set()
+    await _until(_forgotten)
+
+    assert [frame["meta"]["status"] for frame in room.sent] == ["running", "running", "completed"]
+    assert (room.sent[2]["snapshot"]["md"], room.sent[2]["meta"]["result"]) == ("abc", "Done.")
 
 
 @pytest.mark.asyncio

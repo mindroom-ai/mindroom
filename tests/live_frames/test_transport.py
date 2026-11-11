@@ -138,6 +138,17 @@ def test_a_frame_fits_by_the_size_it_goes_out_at() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_plaintext_frame_is_measured_as_nio_sends_it() -> None:
+    """A frame goes out as JSON with ASCII escapes, so one of 22,000 UTF-8 bytes is 66,000 on the wire and not sent."""
+    frame = {**_FRAME, "snapshot": {"md": "ж" * 11_000}}
+    client = _client(encrypted=False, response=nio.RoomSendEphemeralResponse(_ROOM_ID))
+
+    assert not frame_fits(client, _ROOM_ID, frame, event_type="io.mindroom.live")
+    assert await send_live_frame(client, _ROOM_ID, frame, transaction_id="sid.0") is LiveSendOutcome.STOP
+    client.room_send_ephemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_send_that_hangs_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """A send still waiting at the timeout is given up, and the next frame is a snapshot."""
     monkeypatch.setattr(transport_module, "_SEND_TIMEOUT_SECONDS", 0.01)

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from enum import Enum
 from typing import TYPE_CHECKING
 
 import nio
+from nio.api import Api
 
 from mindroom.live_frames.frames import FRAME_VERSION, LIVE_EVENT_TYPE
 from mindroom.logging_config import get_logger
@@ -66,7 +66,11 @@ _REFUSAL_ERRCODES = frozenset({"M_TOO_LARGE", "M_UNRECOGNIZED", "M_FORBIDDEN", "
 
 
 def _serialized_size(content: Mapping[str, object]) -> int:
-    return len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode())
+    """Return the size of the body nio sends for ``content``.
+
+    nio sends compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes and one outside the BMP 12.
+    """
+    return len(Api.to_json(dict(content)))
 
 
 def frame_fits(client: nio.AsyncClient, room_id: str, frame: dict[str, object], *, event_type: str) -> bool:
@@ -83,7 +87,7 @@ def _encrypted_size(room_id: str, frame: dict[str, object], *, event_type: str) 
     nio encrypts the event as JSON with ASCII escapes, padded to whole 16-byte blocks, and sends it base64-encoded, so a
     character outside ASCII can take 8 bytes and one outside the BMP 16.
     """
-    plaintext = len(json.dumps({"content": frame, "type": event_type, "room_id": room_id}, separators=(",", ":")))
+    plaintext = _serialized_size({"content": frame, "type": event_type, "room_id": room_id})
     ciphertext = (plaintext // 16 + 1) * 16 + _MEGOLM_OVERHEAD_BYTES
     return (ciphertext * 4 + 2) // 3 + _ENVELOPE_BYTES
 
