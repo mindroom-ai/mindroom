@@ -30,6 +30,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.workers import child_placement
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.failure_text import failure_text
 from mindroom.live_frames import subagents as subagent_frames
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
@@ -294,12 +295,18 @@ def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]
 def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
     """Return the sink that streams the child's snapshots as frames to its caller's room.
 
-    None outside a Matrix room or a managed runtime, or when the operator has live frames off as the feed opens;
-    switching them off later does not stop a feed already open. The account answering the caller's turn sends the
-    frames, through its bot's client at each send: a bot that logs in again has a new client, and a stopped bot none.
+    None outside a Matrix room or a managed runtime, in a silent schedule's turn, which shows nothing in the room while
+    it runs, or when the operator has live frames off as the feed opens; switching them off later does not stop a feed
+    already open. The account answering the caller's turn sends the frames, through its bot's client at each send: a
+    bot that logs in again has a new client, and a stopped bot none.
     """
     orchestrator = context.orchestrator
-    if orchestrator is None or not context.room_id or not context.current_config.defaults.streaming.live_frames:
+    if (
+        orchestrator is None
+        or not context.room_id
+        or context.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        or not context.current_config.defaults.streaming.live_frames
+    ):
         return None
     account, room_id, previews = context.recipient, context.room_id, observation.previews
     homeserver_url = runtime_matrix_homeserver(context.runtime_paths)

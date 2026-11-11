@@ -31,6 +31,7 @@ from mindroom.delegation.activity import (
     _SubagentActivity,
 )
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.hooks.types import BUILTIN_EVENT_NAMES, validate_event_name
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
@@ -852,6 +853,31 @@ async def test_no_frames_when_live_frames_are_off(tmp_path: Path, monkeypatch: p
 
     assert result.text.endswith("Done")
     assert config.defaults.streaming.live_frames
+    assert room.sent == []
+    assert subagents_module._PUBLISHERS == {}
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("relaying")
+async def test_a_silent_scheduled_check_streams_no_sub_agent_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent schedule shows nothing in the room while it runs, so neither its child nor that child's own send frames."""
+    room = FrameRoom()
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Go deeper")), answer("Child done")],
+        grandchild_turns=[answer("Grandchild done")],
+    )
+    context, _bot = _in_room(runtime, room)
+
+    with tool_runtime_context(replace(context, source_kind=SILENT_SCHEDULE_SOURCE_KIND)):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
     assert room.sent == []
     assert subagents_module._PUBLISHERS == {}
     assert not _OPEN
