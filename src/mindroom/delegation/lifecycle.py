@@ -29,9 +29,11 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.workers import child_placement
+from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -50,7 +52,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
-    from mindroom.hooks.context import SubagentStatus
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -279,7 +280,7 @@ def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]
     try:
         update(feed)
     except Exception:
-        logger.exception("Sub-agent activity update failed")
+        logger.exception("Sub-agent activity update failed", delegation_id=feed.delegation_id)
 
 
 def _open_feed(child: DelegationChild, parent: ChildRunObservation | None) -> ActivityFeed | None:
@@ -306,11 +307,12 @@ def _open_feed(child: DelegationChild, parent: ChildRunObservation | None) -> Ac
         return None
 
 
-def _exit_status(child: DelegationChild, raised: BaseException | None) -> SubagentStatus:
-    """Name how an attempt ended: its settled pause or outcome, else cancelled or failed by what ended it."""
+def _publish_exit(feed: ActivityFeed | None, child: DelegationChild, *, cancelled: bool, reason: str) -> None:
+    """Publish how an attempt ended: its settled pause or outcome, else cancelled or failed with ``reason``."""
     if child.status == "paused" or child.status in TERMINAL_CHILD_STATUSES:
-        return child.status
-    return "cancelled" if isinstance(raised, asyncio.CancelledError) else "failed"
+        _publish(feed, lambda feed: feed.status(child.status, result=child.result))
+    else:
+        _publish(feed, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
 
 
 @asynccontextmanager
@@ -328,14 +330,16 @@ async def child_run_context(
     parent = _CHILD_RUN.get()
     observation = ChildRunObservation(child, audit, parent=parent, feed=_open_feed(child, parent))
     token = _CHILD_RUN.set(observation)
-    raised: BaseException | None = None
+    # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.
+    cancelled, reason = False, "Delegated run ended without a retained terminal outcome."
     try:
         # The operator's current setting decides, not the snapshot the parent's response started with.
         placement = child_placement(child, live_delegation_config(config), runtime_paths)
         with dedicated_worker_placement(child.session_id, placement):
             yield observation
     except BaseException as error:
-        raised = error
+        cancelled = isinstance(error, asyncio.CancelledError)
+        reason = "Delegation cancelled." if cancelled else redact_sensitive_text(failure_text(error))
         raise
     finally:
         try:
@@ -347,7 +351,7 @@ async def child_run_context(
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
-                _publish(observation.feed, lambda feed: feed.status(_exit_status(child, raised), result=child.result))
+                _publish_exit(observation.feed, child, cancelled=cancelled, reason=reason)
 
 
 def report_child_approval_wait(child: DelegationChild, *, awaiting: bool) -> None:

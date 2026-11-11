@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.ai import ai_response
+from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
@@ -42,6 +44,9 @@ from tests.subagent_activity_helpers import make_snapshot
 from tests.test_background_delegation import _identity as _background_identity
 from tests.test_background_delegation import _registered_reports
 from tests.test_delegation_direct_audit import _identity
+from tests.test_delegation_direct_audit import _tools as _direct_tools
+from tests.test_dynamic_workflow_subagents import _config as _workflow_config
+from tests.test_dynamic_workflow_subagents import _spec, _Workflow
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -769,6 +774,72 @@ async def test_a_cancelled_child_ends_cancelled(tmp_path: Path, monkeypatch: pyt
     assert last is seen.snapshots[-1]
     assert _text(last) == "Working"
     assert last.ended_at is not None
+    assert last.result_preview == "Delegation cancelled."
+
+
+def _watching(seen: _Hook, config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
+    """Return the `leader` requester context whose turn's hooks include ``seen``."""
+    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
+    return _delegate_runtime_context(config, paths, execution_identity=_identity(), hook_registry=registry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("child_response", "reason"),
+    [
+        (
+            AsyncMock(side_effect=RuntimeError("child exploded: api_key=example-secret")),
+            redact_sensitive_text("child exploded: api_key=example-secret"),
+        ),
+        (
+            AsyncMock(return_value=TurnResult("child answer")),
+            "Delegated run ended without a retained terminal outcome.",
+        ),
+    ],
+    ids=["raises", "retains_no_outcome"],
+)
+async def test_a_direct_child_that_settles_no_outcome_ends_failed_with_why(
+    tmp_path: Path,
+    child_response: AsyncMock,
+    reason: str,
+) -> None:
+    """A direct child whose run raises, or ends without its outcome, is published failed with what its caller is told."""
+    seen = _Hook()
+    tools, config, paths = _direct_tools(tmp_path)
+
+    with tool_runtime_context(_watching(seen, config, paths)), patch("mindroom.ai.ai_response", child_response):
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
+
+    assert "example-secret" not in result
+    last = await seen.wait_for_status("failed")
+    assert last is seen.snapshots[-1]
+    assert (last.source, last.agent_name, last.result_preview) == ("delegate", "child", reason)
+    assert last.ended_at is not None
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_workflow_participant_reports_source_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Dynamic Workflow participant, the caller's own copy on the direct path, ends completed as a workflow run."""
+    seen = _Hook()
+    workflow = _Workflow(tmp_path, monkeypatch, _workflow_config())
+    created = await workflow.create(_spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}]))
+    assert created["status"] == "ok", created
+
+    with tool_runtime_context(_watching(seen, workflow.config, workflow.paths)):
+        run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
+
+    assert run["status"] == "completed", run
+    last = await seen.wait_for_status("completed")
+    assert last is seen.snapshots[-1]
+    assert (last.source, last.caller_agent_name, last.root_caller_agent_name, last.agent_name) == (
+        "workflow",
+        "leader",
+        "leader",
+        "leader",
+    )
+    assert last.result_preview == "Answer 0."
+    assert not _OPEN
 
 
 async def _background_delegation(

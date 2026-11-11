@@ -8187,6 +8187,7 @@ path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.delegation.activity",
+    "mindroom.failure_text",
     "mindroom.delegation.personas",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
