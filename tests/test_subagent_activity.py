@@ -191,7 +191,8 @@ def test_a_secret_stays_redacted_while_the_text_cap_cuts_through_it() -> None:
         a.add_text("x" * 7, 3 + step)
         snapshots.append(a.snapshot())
     assert not [snapshot for snapshot in snapshots if "v1.secret" in _text(snapshot)]
-    assert _text(snapshots[-1]) == "x" * 6_000
+    assert set(_text(snapshots[-1])) == {"x"}
+    assert 5_000 <= len(_text(snapshots[-1])) <= 6_000
 
 
 def _checked_entry(item: SubagentItem) -> ToolTraceEntry:
@@ -238,7 +239,7 @@ def test_failed_tool_call_is_an_error_row() -> None:
     assert a.snapshot().items[0].state == "error"
 
 
-def test_text_keeps_the_newest_6000_characters() -> None:
+def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
     """The oldest text loses its head first; the order of items stays."""
     a = _activity()
     a.add_text("a" * 4_000, 1)
@@ -246,9 +247,31 @@ def test_text_keeps_the_newest_6000_characters() -> None:
     a.add_text("b" * 4_000, 3)
     items = a.snapshot().items
     texts = [i.text for i in items if i.kind == "text"]
-    assert sum(map(len, texts)) == 6_000
-    assert texts == ["a" * 2_000, "b" * 4_000]
+    assert texts == ["a" * 1_000, "b" * 4_000]
     assert a.snapshot().items_dropped == 0
+
+
+def test_text_after_a_cut_keeps_its_start_until_the_next_cut() -> None:
+    """Between cuts the text only grows at its end, so the frames that carry it are appends."""
+    a = _activity()
+    a.add_text("a" * 6_001, 1)
+    after_cut = _text(a.snapshot())
+    a.add_text("b" * 900, 2)
+    grown = _text(a.snapshot())
+    a.add_text("c" * 200, 3)
+    next_cut = _text(a.snapshot())
+    assert (len(after_cut), len(grown), len(next_cut)) == (5_000, 5_900, 5_000)
+    assert grown.startswith(after_cut)
+    assert not next_cut.startswith(after_cut)
+    assert next_cut == "a" * 3_900 + "b" * 900 + "c" * 200
+
+
+def test_raw_text_past_the_cap_and_its_margin_is_cut_and_shows_its_newest_5000() -> None:
+    """Text arriving faster than snapshots stays bounded, and the next snapshot cuts afresh."""
+    a = _activity()
+    a.add_text("a" * 6_000, 1)
+    a.add_text("b" * 5_000, 2)
+    assert _text(a.snapshot()) == "b" * 5_000
 
 
 def test_an_emptied_text_item_is_removed_and_counted() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -10,9 +12,11 @@ import nio
 import pytest
 import pytest_asyncio
 from aiohttp import web
+from nio.api import Api
+from nio.crypto.sessions import OutboundGroupSession
 
 import mindroom.live_frames.transport as transport_module
-from mindroom.live_frames.transport import LiveSendOutcome, homeserver_relays_live_frames, send_live_frame
+from mindroom.live_frames.transport import LiveSendOutcome, frame_fits, homeserver_relays_live_frames, send_live_frame
 from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
@@ -100,6 +104,60 @@ async def test_send_live_frame_encrypts_with_the_given_type() -> None:
         {"v": 1, "encrypted": _MEGOLM},
         tx_id="subagents.sid.0",
     )
+
+
+def _megolm_content(room_id: str, event_type: str, frame: dict[str, object]) -> dict[str, object]:
+    """Return the content nio sends for the frame in an encrypted room, encrypted with a real Megolm session."""
+    session = OutboundGroupSession()
+    session.mark_as_shared()
+    ciphertext = session.encrypt(Api.to_json({"content": frame, "type": event_type, "room_id": room_id}), count=False)
+    encrypted = {**_MEGOLM, "ciphertext": ciphertext, "session_id": session.id, "sender_key": "k" * 43}
+    return {"v": 1, "encrypted": encrypted}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a" * 10_000, "ж" * 5_000, "日本" * 2_500, "😀" * 2_000, ""],
+    ids=["ascii", "cyrillic", "cjk", "emoji", "empty"],
+)
+def test_the_encrypted_size_bounds_what_megolm_sends(text: str) -> None:
+    """The size estimate is never below the real encrypted content and stays within a few hundred bytes of it."""
+    frame = {**_FRAME, "snapshot": {"md": text}}
+    sent = len(json.dumps(_megolm_content(_ROOM_ID, "io.mindroom.subagents", frame), separators=(",", ":")))
+    estimate = transport_module._encrypted_size(_ROOM_ID, frame, event_type="io.mindroom.subagents")
+    assert sent <= estimate <= sent + 300
+
+
+def test_a_frame_fits_by_the_size_it_goes_out_at() -> None:
+    """Characters outside ASCII cost far more once encrypted, so a frame can fit a plaintext room but not an encrypted one."""
+    frame = {**_FRAME, "snapshot": {"md": "ж" * 8_000}}
+    plaintext = _client(encrypted=False, response=None)
+    encrypted = _client(encrypted=True, response=None)
+    assert frame_fits(plaintext, _ROOM_ID, frame, event_type="io.mindroom.live")
+    assert not frame_fits(encrypted, _ROOM_ID, frame, event_type="io.mindroom.live")
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_hangs_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A send still waiting at the timeout is given up, and the next frame is a snapshot."""
+    monkeypatch.setattr(transport_module, "_SEND_TIMEOUT_SECONDS", 0.01)
+    client = _client(encrypted=False, response=None)
+
+    async def hang(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(1)
+
+    client.room_send_ephemeral = AsyncMock(side_effect=hang)
+
+    assert await send_live_frame(client, _ROOM_ID, _FRAME, transaction_id="sid.0") is LiveSendOutcome.RETRY
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_raises_stops_frames() -> None:
+    """A send that raises, as when the room's group session cannot be shared, ends frames instead of failing the caller."""
+    client = _client(encrypted=True, response=None)
+    client.room_encrypt = AsyncMock(side_effect=nio.exceptions.GroupEncryptionError("not shared"))
+
+    assert await send_live_frame(client, _ROOM_ID, _FRAME, transaction_id="sid.0") is LiveSendOutcome.STOP
 
 
 @pytest.mark.asyncio

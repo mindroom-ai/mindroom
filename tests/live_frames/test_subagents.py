@@ -1,4 +1,4 @@
-"""Sub-agent runs as `io.mindroom.subagents` frames: their documents, the pinned fixture, and the per-room budget."""
+"""Sub-agent runs as `io.mindroom.subagents` frames: their documents, the pinned fixture, and the per-room publisher."""
 
 from __future__ import annotations
 
@@ -15,11 +15,14 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 import pytest_asyncio
+from nio.api import Api
+from nio.crypto.sessions import OutboundGroupSession
 
 import mindroom.live_frames.subagents as subagents_module
 from mindroom.delegation.activity import SubagentItem, SubagentSnapshot, _SubagentActivity
 from mindroom.live_frames.frames import LiveDocs
-from mindroom.live_frames.subagents import SUBAGENT_EVENT_TYPE, SubagentFramePublisher, publisher_for, run_docs
+from mindroom.live_frames.subagents import SUBAGENT_EVENT_TYPE, publish, run_docs
+from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from tests.conftest import make_matrix_client_mock
 from tests.subagent_activity_helpers import make_snapshot
@@ -33,18 +36,49 @@ _HOMESERVER = "http://homeserver.test"
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "subagent-frames-v1.json").read_text(encoding="utf-8"))
 # The real spacing between sends; every other test sends faster.
 _SEND_INTERVAL = subagents_module._SEND_INTERVAL_SECONDS
+_MAX_FRAME_BYTES = 60_000
 
 
 class _Room:
-    """The room a fake client sends frames to: each frame and when it was sent, answered by scripted responses."""
+    """A fake client's room, recording each frame, its size as sent, and when; replies are scripted, ok by default.
 
-    def __init__(self, *responses: nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError) -> None:
+    An encrypted room encrypts with a real Megolm session, as nio does, so frame sizes are the real ones.
+    """
+
+    def __init__(
+        self,
+        *responses: nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError,
+        encrypted: bool = False,
+    ) -> None:
         self.client = make_matrix_client_mock(user_id=_ACCOUNT)
-        self.client.rooms = {_ROOM_ID: SimpleNamespace(encrypted=False)}
+        self.client.rooms = {_ROOM_ID: SimpleNamespace(encrypted=encrypted)}
+        self.client.room_encrypt = AsyncMock(side_effect=self._encrypt)
         self.client.room_send_ephemeral = AsyncMock(side_effect=self._send)
         self.sent: list[dict[str, Any]] = []
+        self.sent_bytes: list[int] = []
         self.sent_at: list[float] = []
         self.responses = list(responses)
+        # The frame encrypted for the send in flight.
+        self.encrypted: list[dict[str, Any]] = []
+        self._session = OutboundGroupSession()
+        self._session.mark_as_shared()
+
+    async def _encrypt(
+        self,
+        room_id: str,
+        event_type: str,
+        content: dict[str, Any],
+        **_kwargs: object,
+    ) -> dict[str, str]:
+        plaintext = Api.to_json({"content": content, "type": event_type, "room_id": room_id})
+        self.encrypted.append(content)
+        return {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "sender_key": "k" * 43,
+            "ciphertext": self._session.encrypt(plaintext, count=False),
+            "session_id": self._session.id,
+            "device_id": "TESTDEVICE",
+        }
 
     async def _send(
         self,
@@ -54,17 +88,27 @@ class _Room:
         *,
         tx_id: str,
     ) -> nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError:
+        frame = self.encrypted.pop() if "encrypted" in content else content
         assert (room_id, event_type) == (_ROOM_ID, SUBAGENT_EVENT_TYPE)
-        assert tx_id == f"subagents.{content['sid']}.{content['seq']}"
-        self.sent.append(content)
+        assert tx_id == f"subagents.{frame['sid']}.{frame['seq']}"
+        self.sent.append(frame)
+        self.sent_bytes.append(len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()))
         self.sent_at.append(time.monotonic())
         return self.responses.pop(0) if self.responses else nio.RoomSendEphemeralResponse(room_id)
 
-    def publisher(self) -> SubagentFramePublisher:
-        return publisher_for(
+    def publish(
+        self,
+        snapshot: SubagentSnapshot,
+        *,
+        previews: bool = True,
+        client: Callable[[], nio.AsyncClient | None] | None = None,
+    ) -> None:
+        publish(
             _ACCOUNT,
             _ROOM_ID,
-            client=lambda: self.client,
+            snapshot,
+            previews=previews,
+            client=client or (lambda: self.client),
             homeserver_url=_HOMESERVER,
         )
 
@@ -75,25 +119,30 @@ def _refusal(errcode: str) -> nio.RoomSendEphemeralError:
 
 @pytest_asyncio.fixture(autouse=True)
 async def relaying(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
-    """Relay frames, send them 10 ms apart, and end any publisher a test left running."""
+    """Relay frames, send them 10 ms apart, retry after 10 ms, and end any publisher a test left running."""
 
     async def relays(_homeserver_url: str) -> bool:
         return True
 
     monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
     monkeypatch.setattr(subagents_module, "_SEND_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(subagents_module, "RETRY_BACKOFF_SECONDS", 0.01)
     yield
     tasks = [publisher._task for publisher in subagents_module._PUBLISHERS.values() if publisher._task is not None]
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
-    assert subagents_module._PUBLISHERS == {}
+    subagents_module._PUBLISHERS.clear()
 
 
 async def _until(condition: Callable[[], bool]) -> None:
     async with asyncio.timeout(2):
         while not condition():  # noqa: ASYNC110
             await asyncio.sleep(0.001)
+
+
+def _forgotten() -> bool:
+    return subagents_module._PUBLISHERS == {}
 
 
 def _text(text: str) -> SubagentItem:
@@ -104,8 +153,31 @@ def _tool(entry: ToolTraceEntry, state: Literal["running", "done", "error"], cal
     return SubagentItem(kind="tool", tool=entry, tool_call_id=call_id, state=state)
 
 
-def _scripted_run() -> list[SubagentSnapshot]:
-    """One run as its feed hands it over: text, more text, a tool call, an approval wait, and its end."""
+def _activity(*, task: str = "Write it all down.") -> _SubagentActivity:
+    return _SubagentActivity(
+        delegation_id="del-1",
+        subagent_id="sub-1",
+        parent_delegation_id=None,
+        caller_agent_name="lead",
+        root_caller_agent_name="lead",
+        agent_name="researcher",
+        source="delegate",
+        task=task,
+        room_id=_ROOM_ID,
+        thread_id=None,
+        requester_id="@user:example.org",
+        model_name="default",
+        started_at=1000.0,
+        updated_at=1000.0,
+    )
+
+
+def _scripted_runs() -> list[SubagentSnapshot]:
+    """Two runs as their feeds hand them over.
+
+    The first writes, writes more, calls a tool, waits for an approval, and ends; the second, nested in it, is cancelled
+    before it wrote anything.
+    """
     listing = ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", args_preview="command=git tag")
     listed = replace(listing, type="tool_call_completed", result_preview="v1.0\nv2.0")
     running = make_snapshot(
@@ -118,25 +190,31 @@ def _scripted_run() -> list[SubagentSnapshot]:
         started_at=1762790000.1,
         updated_at=1762790000.1,
     )
+    checking = (_text("Looking it up. Checking the tags."), _tool(listing, "running"))
     return [
         replace(running, items=(_text("Looking it up."),)),
         replace(running, items=(_text("Looking it up. Checking the tags."),)),
-        replace(running, items=(_text("Looking it up. Checking the tags."), _tool(listing, "running"))),
-        replace(
-            running,
-            status="awaiting_approval",
-            items=(_text("Looking it up. Checking the tags."), _tool(listing, "running")),
-        ),
+        replace(running, items=checking),
+        replace(running, status="awaiting_approval", items=checking),
         replace(
             running,
             status="completed",
             ended_at=1762790012.5,
-            items=(
-                _text("Looking it up. Checking the tags."),
-                _tool(listed, "done"),
-                _text("Version 2 is tagged."),
-            ),
+            items=(checking[0], _tool(listed, "done"), _text("Version 2 is tagged.")),
             result_preview="Version 2 shipped as tag v2.0.",
+        ),
+        make_snapshot(
+            delegation_id="del-2",
+            parent_delegation_id="del-1",
+            caller_agent_name="researcher",
+            root_caller_agent_name="lead",
+            agent_name="reviewer",
+            task="Check the release notes.",
+            thread_id="$thread:example.org",
+            status="cancelled",
+            started_at=1762790003.4,
+            updated_at=1762790004.0,
+            ended_at=1762790004.0,
         ),
     ]
 
@@ -157,22 +235,31 @@ def _frame_tools(frame: dict[str, Any]) -> list[dict[str, Any]]:
     return [entry for _, entry in frame["delta"].get("tools", {}).get("set", [])]
 
 
+def _with_sids(frames: list[dict[str, Any]], sids: list[str]) -> list[dict[str, Any]]:
+    """Return the frames with each stream id replaced, in order of first appearance, by the next of ``sids``."""
+    names = dict(zip(dict.fromkeys(frame["sid"] for frame in frames), sids, strict=True))
+    return [{**frame, "sid": names[frame["sid"]]} for frame in frames]
+
+
 @pytest.mark.asyncio
 async def test_frames_match_the_pinned_fixture() -> None:
-    """A run's snapshots go out as exactly the frames MindRoom Chat's parser is tested against."""
+    """Two runs' snapshots go out as exactly the frames MindRoom Chat's parser is tested against."""
     room = _Room()
     cases = _FIXTURE["cases"]
-    snapshots = _scripted_run()
+    snapshots = _scripted_runs()
     for count, snapshot in enumerate(snapshots, start=1):
-        room.publisher().update(snapshot, previews=True)
+        room.publish(snapshot)
         await _until(lambda count=count: len(room.sent) == count)
-    await _until(lambda: subagents_module._PUBLISHERS == {})
+    await _until(_forgotten)
 
-    assert len({frame["sid"] for frame in room.sent}) == 1
-    sid = cases[0]["frame"]["sid"]
-    assert [{**frame, "sid": sid} for frame in room.sent] == [case["frame"] for case in cases]
+    fixture_sids = list(dict.fromkeys(case["frame"]["sid"] for case in cases))
+    assert _with_sids(room.sent, fixture_sids) == [case["frame"] for case in cases]
     assert [run_docs(snapshot, previews=True) for snapshot in snapshots] == [_docs(case["after"]) for case in cases]
-    assert [case["before"] for case in cases] == [None, *(case["after"] for case in cases[:-1])]
+    first_of_run = [
+        index == 0 or case["frame"]["run"] != cases[index - 1]["frame"]["run"] for index, case in enumerate(cases)
+    ]
+    expected_before = [None if first else cases[index - 1]["after"] for index, first in enumerate(first_of_run)]
+    assert [case["before"] for case in cases] == expected_before
 
 
 def test_markers_and_tools_line_up() -> None:
@@ -204,6 +291,17 @@ def test_text_left_adjacent_by_a_dropped_tool_row_stays_two_paragraphs() -> None
     assert run_docs(make_snapshot(items=(_text("Before."), _text("After."))), previews=True).md == "Before.\n\nAfter."
 
 
+def test_a_text_cut_drops_the_oldest_text_and_keeps_every_tool_call() -> None:
+    """Cutting text to fit a frame keeps each marker and its tools entry, so they still line up."""
+    entry = ToolTraceEntry(type="tool_call_completed", tool_name="read_file")
+    snapshot = make_snapshot(items=(_text("abcdef"), _tool(entry, "done"), _text("ghi")))
+
+    docs = run_docs(snapshot, previews=True, text_cut=8)
+
+    assert docs.md == "\n\n🔧 `read_file` [1]\n\ni"
+    assert tool_markers_match_trace(docs.md, [entry])
+
+
 @pytest.mark.parametrize(
     ("status", "docs_status"),
     [
@@ -228,58 +326,86 @@ async def test_no_previews_when_hidden() -> None:
     first = ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", args_preview="command=ls")
     done = replace(first, type="tool_call_completed", result_preview="a.txt", truncated=True)
     second = ToolTraceEntry(type="tool_call_started", tool_name="read_file", args_preview="path=a.txt")
-    room.publisher().update(make_snapshot(items=(_tool(first, "running"),)), previews=False)
+    room.publish(make_snapshot(items=(_tool(first, "running"),)), previews=False)
     await _until(lambda: len(room.sent) == 1)
-    room.publisher().update(
-        make_snapshot(items=(_tool(done, "done"), _tool(second, "running", "call-2"))),
-        previews=False,
-    )
+    room.publish(make_snapshot(items=(_tool(done, "done"), _tool(second, "running", "call-2"))), previews=False)
     await _until(lambda: len(room.sent) == 2)
 
-    assert "snapshot" in room.sent[0]
-    assert "delta" in room.sent[1]
+    assert ["snapshot" in frame for frame in room.sent] == [True, False]
     tools = [entry for frame in room.sent for entry in _frame_tools(frame)]
     assert len(tools) == 3
     assert all(set(entry) == {"type", "tool_name"} for entry in tools)
 
 
 @pytest.mark.asyncio
-async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run writing 50,000 characters never sends a frame over 60,000 bytes, and each cut of its oldest text is a snapshot."""
+async def test_an_unchanged_snapshot_sends_nothing_and_a_status_change_sends_a_snapshot() -> None:
+    """No frame carries an empty delta: nothing new sends nothing, and a change of meta alone is a snapshot."""
+    room = _Room()
+    snapshot = make_snapshot(items=(_text("Working"),))
+    room.publish(snapshot)
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(snapshot)
+    await asyncio.sleep(0.05)
+    assert len(room.sent) == 1
+    room.publish(replace(snapshot, status="awaiting_approval"))
+    await _until(lambda: len(room.sent) == 2)
+
+    assert (room.sent[1]["seq"], room.sent[1]["meta"]["status"]) == (1, "awaiting_approval")
+    assert room.sent[1]["snapshot"] == run_docs(snapshot, previews=True).to_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leading_tool", [False, True], ids=["text", "tool_first"])
+async def test_long_text_stays_under_the_cap(monkeypatch: pytest.MonkeyPatch, leading_tool: bool) -> None:
+    """A run writing 50,000 characters sends only appends between cuts, a snapshot after each cut, all under 60,000 bytes."""
     monkeypatch.setattr(subagents_module, "_SEND_INTERVAL_SECONDS", 0)
     room = _Room()
-    activity = _SubagentActivity(
-        delegation_id="del-1",
-        subagent_id="sub-1",
-        parent_delegation_id=None,
-        caller_agent_name="lead",
-        root_caller_agent_name="lead",
-        agent_name="researcher",
-        source="delegate",
-        task="Write it all down.",
-        room_id=_ROOM_ID,
-        thread_id=None,
-        requester_id="@user:example.org",
-        model_name="default",
-        started_at=1000.0,
-        updated_at=1000.0,
-    )
-    chunks = [f"{index:03d} Größe 日本語 {'text ' * 20}"[:100] for index in range(500)]
-    for chunk in chunks:
-        activity.add_text(chunk, 1000.0)
-        room.publisher().update(activity.snapshot(), previews=True)
-        await asyncio.sleep(0)
-    activity.set_status("completed", 1001.0, result="Done.")
-    room.publisher().update(activity.snapshot(), previews=True)
-    await _until(lambda: subagents_module._PUBLISHERS == {})
+    activity = _activity()
+    if leading_tool:
+        activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})), 1000.0)
+    texts = []
+    for index in range(500):
+        activity.add_text(f"{index:03d} Größe 日本語 {'text ' * 20}"[:100], 1000.0)
+        snapshot = activity.snapshot()
+        texts.append("".join(item.text for item in snapshot.items if item.kind == "text"))
+        room.publish(snapshot)
+        # The publisher sends without a pause here, so it answers within a few turns of the event loop.
+        while len(room.sent) <= index:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    room.publish(replace(snapshot, status="completed", ended_at=1001.0))
+    await _until(_forgotten)
 
-    sizes = [len(json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()) for frame in room.sent]
-    assert max(sizes) < 60_000
-    # Only appends go out as deltas; once the cap cuts the oldest text, the frame is a snapshot.
+    cut = [False, *(not later.startswith(earlier) for earlier, later in pairwise(texts))]
+    assert sum(cut) > 40
+    assert ["snapshot" in frame for frame in room.sent] == [True, *cut[1:], True]
     assert all(frame["delta"]["md"]["del"] == 0 for frame in room.sent if "delta" in frame)
-    capped = [frame for frame in room.sent if "snapshot" in frame and len(frame["snapshot"]["md"]) == 6_000]
-    assert len(capped) > 1
-    assert room.sent[-1]["snapshot"]["md"] == "".join(chunks)[-6_000:]
+    assert max(room.sent_bytes) < _MAX_FRAME_BYTES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("character", ["ж", "日", "😀"], ids=["cyrillic", "cjk", "emoji"])
+async def test_frames_at_the_caps_fit_an_encrypted_room(character: str) -> None:
+    """With the text, tool rows, task, and result at their caps, every encrypted frame stays under 60,000 bytes."""
+    room = _Room(encrypted=True)
+    activity = _activity(task=character * 1_000)
+    for index in range(20):
+        call = ReportedCall(f"call-{index}", "run_shell_command", {"command": character * 400}, result=character * 400)
+        activity.tool_started(ToolStarted(call=call), 1000.0)
+        activity.tool_completed(ToolCompleted(call=call), 1000.0)
+    for index in range(12):
+        activity.add_text(character * 500, 1000.0)
+        room.publish(activity.snapshot())
+        await _until(lambda index=index: len(room.sent) > index)
+    activity.set_status("completed", 1001.0, result=character * 1_000)
+    room.publish(activity.snapshot())
+    await _until(_forgotten)
+
+    assert max(room.sent_bytes) < _MAX_FRAME_BYTES
+    # Every frame encrypted went out: none was refused for its size after encrypting.
+    assert room.encrypted == []
+    assert (room.sent[-1]["meta"]["status"], room.sent[-1]["meta"]["result"]) == ("completed", character * 1_000)
+    snapshots = [frame["snapshot"] for frame in room.sent if "snapshot" in frame]
+    assert all("args_preview" not in entry for snapshot in snapshots for entry in snapshot["tools"])
 
 
 @pytest.mark.asyncio
@@ -289,7 +415,7 @@ async def test_budget_round_robin(monkeypatch: pytest.MonkeyPatch) -> None:
     room = _Room()
     for count in range(6):
         for run in ("a", "b", "c"):
-            room.publisher().update(make_snapshot(delegation_id=run, items=(_text("x" * (count + 1)),)), previews=True)
+            room.publish(make_snapshot(delegation_id=run, items=(_text("x" * (count + 1)),)))
         await _until(lambda count=count: len(room.sent) > count)
 
     assert _SEND_INTERVAL == 0.125
@@ -299,85 +425,121 @@ async def test_budget_round_robin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_every_10_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run's frames are deltas between snapshots 10 s apart, which also tell clients a quiet run is alive."""
+    """A working run's frames are deltas between snapshots 10 s apart."""
     clock = [1000.0]
     monkeypatch.setattr(subagents_module, "monotonic", lambda: clock[0])
     room = _Room()
-    for text, now in (("a", 1000.0), ("ab", 1009.9), (None, 1010.0), ("abc", 1015.0)):
+    for text, now in (("a", 1000.0), ("ab", 1009.9), ("ab", 1010.0), ("abc", 1015.0)):
         clock[0] = now
         sent = len(room.sent)
-        if text is not None:
-            room.publisher().update(make_snapshot(items=(_text(text),)), previews=True)
+        room.publish(make_snapshot(items=(_text(text),)))
         await _until(lambda sent=sent: len(room.sent) > sent)
-    room.publisher().update(make_snapshot(status="completed", ended_at=1016.0), previews=True)
-    await _until(lambda: subagents_module._PUBLISHERS == {})
+    room.publish(make_snapshot(status="completed", ended_at=1016.0))
+    await _until(_forgotten)
 
     assert ["snapshot" in frame for frame in room.sent] == [True, False, True, False, True]
     assert room.sent[2]["snapshot"]["md"] == "ab"
 
 
 @pytest.mark.asyncio
-async def test_terminal_frame_is_a_snapshot_and_ends_the_stream() -> None:
-    """A run's last frame is a snapshot with its result; then its stream ends and the idle publisher is forgotten."""
+async def test_a_working_run_keeps_alive_and_a_paused_one_goes_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quiet running run still sends snapshots, so clients keep it; a paused run sends its snapshot, then nothing."""
+    monkeypatch.setattr(subagents_module, "_SNAPSHOT_INTERVAL_SECONDS", 0.05)
     room = _Room()
-    room.publisher().update(make_snapshot(items=(_text("Working"),)), previews=True)
-    await _until(lambda: len(room.sent) == 1)
-    room.publisher().update(
-        make_snapshot(status="failed", ended_at=1002.0, items=(_text("Working"),), result_preview="It broke."),
-        previews=True,
-    )
-    await _until(lambda: subagents_module._PUBLISHERS == {})
+    snapshot = make_snapshot(items=(_text("Working"),))
+    room.publish(snapshot)
+    await _until(lambda: len(room.sent) == 3)
+    room.publish(replace(snapshot, status="paused"))
+    await _until(lambda: len(room.sent) == 4)
+    await asyncio.sleep(0.2)
+    assert len(room.sent) == 4
+    room.publish(snapshot)
+    await _until(lambda: len(room.sent) == 5)
 
-    assert len(room.sent) == 2
-    last = room.sent[1]
-    assert last["snapshot"]["status"] == "pending"
-    assert last["meta"]["status"] == "failed"
-    assert last["meta"]["ended_at"] == 1002.0
-    assert last["meta"]["result"] == "It broke."
-    assert last["meta"]["task"] == "Find the answer"
-    assert "result" not in room.sent[0]["meta"]
+    assert all("snapshot" in frame for frame in room.sent[:5])
+    assert [frame["meta"]["status"] for frame in room.sent[:5]] == ["running"] * 3 + ["paused", "running"]
 
 
 @pytest.mark.asyncio
-async def test_retry_resends_a_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_terminal_frame_is_a_snapshot_and_ends_the_stream() -> None:
+    """A run's last frame is a snapshot with its result; the idle publisher is then forgotten, and a new run starts one."""
+    room = _Room()
+    room.publish(make_snapshot(items=(_text("Working"),)))
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(make_snapshot(status="failed", ended_at=1002.0, items=(_text("Working"),), result_preview="It broke."))
+    await _until(_forgotten)
+    room.publish(make_snapshot(delegation_id="d2", items=(_text("Next"),)))
+    await _until(lambda: len(room.sent) == 3)
+
+    first, last, next_run = room.sent
+    assert "result" not in first["meta"]
+    assert (last["snapshot"]["status"], last["meta"]["status"], last["meta"]["ended_at"]) == (
+        "pending",
+        "failed",
+        1002.0,
+    )
+    assert (last["meta"]["task"], last["meta"]["result"]) == ("Find the answer", "It broke.")
+    assert (next_run["run"], next_run["seq"], "snapshot" in next_run) == ("d2", 0, True)
+
+
+@pytest.mark.asyncio
+async def test_retry_resends_a_snapshot() -> None:
     """A frame the homeserver failed to take is followed by a snapshot, so clients never apply a delta to a gap."""
-    monkeypatch.setattr(subagents_module, "RETRY_BACKOFF_SECONDS", 0.01)
     room = _Room(nio.RoomSendEphemeralResponse(_ROOM_ID), _refusal("M_UNKNOWN_TOKEN"))
-    room.publisher().update(make_snapshot(items=(_text("a"),)), previews=True)
+    room.publish(make_snapshot(items=(_text("a"),)))
     await _until(lambda: len(room.sent) == 1)
     latest = make_snapshot(items=(_text("ab"),))
-    room.publisher().update(latest, previews=True)
+    room.publish(latest)
     await _until(lambda: len(room.sent) == 3)
-    room.publisher().update(replace(latest, status="completed", ended_at=1001.0), previews=True)
-    await _until(lambda: subagents_module._PUBLISHERS == {})
 
-    assert [frame["seq"] for frame in room.sent] == [0, 1, 2, 3]
+    assert [frame["seq"] for frame in room.sent] == [0, 1, 2]
     assert "delta" in room.sent[1]
     assert room.sent[2]["snapshot"] == run_docs(latest, previews=True).to_json()
     assert room.sent[2]["meta"]["task"] == latest.task
 
 
 @pytest.mark.asyncio
-async def test_stop_drops_the_stream() -> None:
-    """A refused frame ends that run's stream while the other runs go on; its next update starts a new stream."""
+async def test_a_refused_run_stays_quiet_until_it_ends() -> None:
+    """A refused frame ends that run's stream while the others go on; the run sends nothing more but its end."""
     ok = nio.RoomSendEphemeralResponse(_ROOM_ID)
     room = _Room(ok, ok, _refusal("M_FORBIDDEN"))
-    publisher = room.publisher()
-    publisher.update(make_snapshot(delegation_id="a", items=(_text("a"),)), previews=True)
-    publisher.update(make_snapshot(delegation_id="b", items=(_text("b"),)), previews=True)
+    room.publish(make_snapshot(delegation_id="a", items=(_text("a"),)))
+    room.publish(make_snapshot(delegation_id="b", items=(_text("b"),)))
     await _until(lambda: len(room.sent) == 2)
-    publisher.update(make_snapshot(delegation_id="a", items=(_text("a2"),)), previews=True)
+    room.publish(make_snapshot(delegation_id="a", items=(_text("a2"),)))
     await _until(lambda: len(room.sent) == 3)
-    publisher.update(make_snapshot(delegation_id="b", items=(_text("b2"),)), previews=True)
+    room.publish(make_snapshot(delegation_id="a", items=(_text("a3"),)))
+    room.publish(make_snapshot(delegation_id="b", items=(_text("b2"),)))
     await _until(lambda: len(room.sent) == 4)
-    publisher.update(make_snapshot(delegation_id="a", items=(_text("a3"),)), previews=True)
+    await asyncio.sleep(0.05)
+    assert len(room.sent) == 4
+    room.publish(make_snapshot(delegation_id="a", status="completed", ended_at=1001.0, items=(_text("a4"),)))
     await _until(lambda: len(room.sent) == 5)
 
-    first_a, _, refused, b_delta, new_a = room.sent
+    first_a, _, refused, b_delta, end_a = room.sent
     assert (refused["run"], "delta" in refused) == ("a", True)
     assert (b_delta["run"], "delta" in b_delta) == ("b", True)
-    assert (new_a["run"], new_a["seq"], new_a["snapshot"]["md"]) == ("a", 0, "a3")
-    assert new_a["sid"] != first_a["sid"]
+    assert (end_a["run"], end_a["seq"], end_a["meta"]["status"], end_a["snapshot"]["md"]) == ("a", 0, "completed", "a4")
+    assert end_a["sid"] != first_a["sid"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_run_starts_a_new_stream_when_it_resumes() -> None:
+    """A resumed attempt of a refused run is a new stream, starting with a snapshot."""
+    room = _Room(nio.RoomSendEphemeralResponse(_ROOM_ID), _refusal("M_FORBIDDEN"))
+    room.publish(make_snapshot(items=(_text("a"),)))
+    await _until(lambda: len(room.sent) == 1)
+    room.publish(make_snapshot(items=(_text("ab"),)))
+    await _until(lambda: len(room.sent) == 2)
+    room.publish(make_snapshot(items=(_text("ab2"),)))
+    room.publish(make_snapshot(status="paused", items=(_text("ab2"),)))
+    await asyncio.sleep(0.05)
+    assert len(room.sent) == 2
+    room.publish(make_snapshot(items=(_text("abc"),)))
+    await _until(lambda: len(room.sent) == 3)
+
+    assert (room.sent[2]["seq"], room.sent[2]["snapshot"]["md"]) == (0, "abc")
+    assert room.sent[2]["sid"] != room.sent[0]["sid"]
 
 
 @pytest.mark.asyncio
@@ -389,7 +551,40 @@ async def test_unrelayed_homeserver_sends_nothing(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
     room = _Room()
-    room.publisher().update(make_snapshot(items=(_text("a"),)), previews=True)
-    await _until(lambda: subagents_module._PUBLISHERS == {})
+    room.publish(make_snapshot(items=(_text("a"),)))
+    await _until(_forgotten)
 
     room.client.room_send_ephemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_client_missing_for_one_retry_is_waited_for() -> None:
+    """An account between clients, as while it signs in again, sends its frames once its client is back."""
+    room = _Room()
+    clients = iter([None])
+    room.publish(make_snapshot(items=(_text("a"),)), client=lambda: next(clients, room.client))
+    await _until(lambda: len(room.sent) == 1)
+
+    assert "snapshot" in room.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_a_client_missing_for_longer_ends_the_publisher() -> None:
+    """An account without a client past one retry, as when its bot stopped, drops its runs and is forgotten."""
+    room = _Room()
+    room.publish(make_snapshot(items=(_text("a"),)), client=lambda: None)
+    await _until(_forgotten)
+
+    room.client.room_send_ephemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_error_in_the_loop_ends_the_publisher_and_a_later_run_starts_anew() -> None:
+    """A bug building a frame ends the room's frames without touching the run; the next publish starts afresh."""
+    room = _Room()
+    room.publish(make_snapshot(items=(SubagentItem(kind="tool"),)))
+    await _until(_forgotten)
+    room.publish(make_snapshot(delegation_id="d2", items=(_text("a"),)))
+    await _until(lambda: len(room.sent) == 1)
+
+    assert (room.sent[0]["run"], room.sent[0]["seq"]) == ("d2", 0)

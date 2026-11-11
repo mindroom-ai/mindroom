@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
-from mindroom.live_frames.transport import LiveSendOutcome, send_live_frame
+from mindroom.live_frames.transport import RETRY_BACKOFF_SECONDS, LiveSendOutcome, send_live_frame
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -22,8 +22,6 @@ _FRAME_INTERVAL_SECONDS = 0.1
 # A snapshot this often lets a client that missed frames, or opened the room mid-reply, catch up, and tells clients
 # the reply is still live while nothing changes.
 _SNAPSHOT_INTERVAL_SECONDS = 5.0
-SEND_TIMEOUT_SECONDS = 5.0
-RETRY_BACKOFF_SECONDS = 1.0
 
 
 @dataclass
@@ -60,17 +58,12 @@ class LivePublisher:
             snapshot=docs if snapshot_due else None,
             delta=None if snapshot_due or self.last_sent is None else live_delta(self.last_sent, docs),
         )
-        try:
-            outcome = await asyncio.wait_for(
-                send_live_frame(self.client, self.room_id, frame, transaction_id=f"{self.publisher_id}.{self.seq}"),
-                timeout=SEND_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            outcome = LiveSendOutcome.RETRY
-        except Exception:
-            # Frames are best effort: a send that raises ends them for this reply instead of failing the reply.
-            logger.warning("live_frame_send_failed", room_id=self.room_id, event_id=reply_event_id, exc_info=True)
-            outcome = LiveSendOutcome.STOP
+        outcome = await send_live_frame(
+            self.client,
+            self.room_id,
+            frame,
+            transaction_id=f"{self.publisher_id}.{self.seq}",
+        )
         if outcome is LiveSendOutcome.SENT:
             self.last_sent = docs
             if snapshot_due:

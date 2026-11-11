@@ -532,7 +532,7 @@ Matrix sync callback
 | `streaming.py` | Streaming state machine: placeholder, progressive edits (durable checkpoints while live frames run), tool traces, reasoning, and the terminal write of a stream that finished; a stopped or failed stream raises for its span exit to end |
 | `live_frames/frames.py` | The `io.mindroom.live` frame format: snapshots and UTF-16 splice deltas of a reply's live documents, and the durable checkpoint watermark key |
 | `live_frames/publisher.py` | One streaming reply's frame loop: a frame per tick when its documents changed, periodic snapshots, and the watermark its durable writes carry |
-| `live_frames/transport.py` | Whether the homeserver relays live frames, and sending one frame, Megolm-encrypted in encrypted rooms, over the MSC2477 ephemeral route |
+| `live_frames/transport.py` | Whether the homeserver relays live frames, whether a frame fits the size limit as it goes out, and sending one frame, Megolm-encrypted in encrypted rooms, over the MSC2477 ephemeral route |
 | `live_frames/subagents.py` | The `io.mindroom.subagents` frame format of a sub-agent run's transcript and status, and the publisher that sends the runs one account shows in a room within one budget |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |

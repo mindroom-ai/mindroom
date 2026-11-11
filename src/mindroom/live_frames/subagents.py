@@ -7,22 +7,31 @@ projected into a reply's live documents, and ``meta`` says whose run it is and w
 from __future__ import annotations
 
 import asyncio
+import math
+from bisect import bisect_left
+from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.live_frames.frames import FRAME_VERSION, LiveDocs, live_delta, new_publisher_id
-from mindroom.live_frames.publisher import RETRY_BACKOFF_SECONDS, SEND_TIMEOUT_SECONDS
-from mindroom.live_frames.transport import LiveSendOutcome, homeserver_relays_live_frames, send_live_frame
+from mindroom.live_frames.transport import (
+    RETRY_BACKOFF_SECONDS,
+    LiveSendOutcome,
+    frame_fits,
+    homeserver_relays_live_frames,
+    send_live_frame,
+)
 from mindroom.llm.events import ReportedCall
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.events import complete_pending_tool_block, format_tool_started_event, serialize_tool_trace
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     import nio
 
@@ -31,8 +40,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The frame format and the publisher are this module's interface for the sub-agent activity feed's sink.
-__all__ = ["SUBAGENT_EVENT_TYPE", "SubagentFramePublisher", "publisher_for", "run_docs", "run_meta", "subagent_frame"]
+# The frame format and `publish` are this module's interface for the sub-agent activity feed's sink.
+__all__ = ["SUBAGENT_EVENT_TYPE", "publish", "run_docs", "run_meta", "subagent_frame"]
 
 SUBAGENT_EVENT_TYPE = "io.mindroom.subagents"
 
@@ -40,28 +49,31 @@ SUBAGENT_EVENT_TYPE = "io.mindroom.subagents"
 # sender and room for the account's own reply frames at 10 a second.
 _SEND_INTERVAL_SECONDS = 0.125
 # Less often than a reply's snapshots, because a run's snapshots are bigger and share the room's frame buffer with
-# reply frames. A snapshot this often still lets a client that missed frames catch up, and tells clients a quiet run,
-# such as one waiting for an approval, is still live.
+# reply frames. A snapshot this often lets a client that missed frames catch up and tells clients a working run is
+# still live; a paused run, which can wait for hours, goes quiet instead.
 _SNAPSHOT_INTERVAL_SECONDS = 10.0
 _WORKING_STATUSES = frozenset({"running", "awaiting_approval"})
 
-type _Send = Callable[[dict[str, object], str], Awaitable[LiveSendOutcome]]
+type _Frame = dict[str, object]
 
 
-def run_docs(snapshot: SubagentSnapshot, *, previews: bool) -> LiveDocs:
-    """Return a run's transcript as a reply's live documents, with tool previews only when ``previews``.
+def run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) -> LiveDocs:
+    """Return a run's transcript as a reply's live documents, without its oldest ``text_cut`` characters of text.
 
     Text items are the Markdown; each tool item adds the marker line a reply shows for it, numbered by its entry in
-    ``tools``. The documents stream while the run works or waits for an approval.
+    ``tools``, which carries previews only when ``previews``. The documents stream while the run works.
     """
     parts: list[str] = []
     entries: list[ToolTraceEntry] = []
-    for index, item in enumerate(snapshot.items):
+    after_text = False
+    for item in snapshot.items:
         if item.kind == "text":
-            # Text items meet only where the tool row cap dropped the call between them.
-            if index and snapshot.items[index - 1].kind == "text":
-                parts.append("\n\n")
-            parts.append(item.text)
+            text = item.text[text_cut:]
+            text_cut = max(0, text_cut - len(item.text))
+            if text:
+                # Text items meet only where a cut or the tool row cap removed what was between them.
+                parts.append(f"\n\n{text}" if after_text else text)
+                after_text = True
             continue
         assert item.tool is not None
         entries.append(item.tool)
@@ -70,16 +82,12 @@ def run_docs(snapshot: SubagentSnapshot, *, previews: bool) -> LiveDocs:
         if item.state != "running":
             marker = complete_pending_tool_block(marker, item.tool.tool_name, len(entries))
         parts.append(marker)
+        after_text = False
     tools = serialize_tool_trace(entries)
     if not previews:
         tools = tuple({"type": entry["type"], "tool_name": entry["tool_name"]} for entry in tools)
-    return LiveDocs(
-        md="".join(parts),
-        reasoning="",
-        tools=tools,
-        status="streaming" if snapshot.status in _WORKING_STATUSES else "pending",
-        activity="",
-    )
+    status = "streaming" if snapshot.status in _WORKING_STATUSES else "pending"
+    return LiveDocs(md="".join(parts), reasoning="", tools=tools, status=status, activity="")
 
 
 def run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
@@ -110,34 +118,22 @@ def subagent_frame(
     meta: dict[str, object],
     snapshot: LiveDocs | None = None,
     delta: dict[str, object] | None = None,
-) -> dict[str, object]:
-    """Return one frame of a run's stream, carrying a whole snapshot or a delta, which is empty when only meta changed."""
-    frame: dict[str, object] = {"v": FRAME_VERSION, "run": run, "sid": sid, "seq": seq, "meta": meta}
+) -> _Frame:
+    """Return one frame of a run's stream, carrying either a whole snapshot or a delta."""
+    frame: _Frame = {"v": FRAME_VERSION, "run": run, "sid": sid, "seq": seq, "meta": meta}
     if snapshot is not None:
         frame["snapshot"] = snapshot.to_json()
     else:
-        assert delta is not None, "a frame carries a snapshot or a delta"
+        assert delta, "a delta frame carries at least one change"
         frame["delta"] = delta
     return frame
 
 
-def _front_cut(before: SubagentSnapshot, after: SubagentSnapshot) -> bool:
-    """Return whether the transcript caps removed items or the start of the oldest text between two snapshots."""
-    if after.items_dropped != before.items_dropped:
-        return True
-    if not before.items or not after.items:
-        return False
-    oldest, now_oldest = before.items[0], after.items[0]
-    return oldest.kind == "text" and (now_oldest.kind != "text" or not now_oldest.text.startswith(oldest.text))
-
-
-@dataclass(frozen=True, slots=True)
-class _Landed:
-    """What the last frame of a run's stream that landed showed."""
-
-    snapshot: SubagentSnapshot
-    docs: LiveDocs
-    meta: dict[str, object]
+def _trimmed(before: SubagentSnapshot, after: SubagentSnapshot) -> bool:
+    """Return whether the transcript caps removed items, or the start of the oldest text, between two snapshots."""
+    oldest = next((item.text for item in before.items if item.kind == "text"), None)
+    now_oldest = next((item.text for item in after.items if item.kind == "text"), "")
+    return after.items_dropped != before.items_dropped or (oldest is not None and not now_oldest.startswith(oldest))
 
 
 @dataclass
@@ -150,177 +146,217 @@ class _Stream:
     seq: int = -1
     # Whether the latest snapshot has not gone out yet.
     dirty: bool = True
-    # None makes the next frame a snapshot.
-    landed: _Landed | None = None
+    # The snapshot and documents of the last frame that landed; None makes the next frame a snapshot.
+    landed: tuple[SubagentSnapshot, LiveDocs] | None = None
     snapshot_at: float = 0.0
+    # How the last snapshot fitted the size limit: whether it kept the previews and how much of the oldest text it
+    # cut. Deltas keep that fit, so they stay appends.
+    fit: tuple[bool, int] = (True, 0)
 
-    def due(self, now: float) -> bool:
-        """Whether the stream has a newer snapshot to send or owes clients a snapshot."""
-        return self.dirty or now - self.snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
+    def keepalive_at(self) -> float:
+        """Return when a working run owes clients its next snapshot; never for a paused or ended one."""
+        return self.snapshot_at + _SNAPSHOT_INTERVAL_SECONDS if self.snapshot.status in _WORKING_STATUSES else math.inf
 
-    @property
-    def ended(self) -> bool:
-        """Whether the frame of the run's end landed."""
-        return self.landed is not None and self.landed.snapshot.status in TERMINAL_CHILD_STATUSES
+    async def send_next(self, client: nio.AsyncClient, room_id: str, now: float) -> LiveSendOutcome | None:
+        """Send the latest snapshot as the next frame; return the outcome, None when nothing changed.
 
-    async def send_next(self, send: _Send, now: float) -> LiveSendOutcome | None:
-        """Send the latest snapshot as the next frame; return the outcome, None when there was nothing new to send.
-
-        The frame is a snapshot first, after a failed send, after the caps cut the transcript's start, every 10 s, and
-        at the run's end; otherwise a delta from what landed last.
+        The frame is a snapshot first, after a failed send, after the caps cut the transcript, when only meta changed,
+        every 10 s, at the run's end, and when a delta would not fit; otherwise a delta from what landed last.
         """
+        snapshot, landed = self.snapshot, self.landed
         self.dirty = False
-        snapshot = self.snapshot
-        docs = run_docs(snapshot, previews=self.previews)
-        landed = self.landed
-        whole = (
+        fits = partial(frame_fits, client, room_id, event_type=SUBAGENT_EVENT_TYPE)
+        if (
             landed is None
             or snapshot.status in TERMINAL_CHILD_STATUSES
             or now - self.snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
-            or _front_cut(landed.snapshot, snapshot)
-        )
-        meta = run_meta(snapshot, full=whole)
-        delta = None if whole or landed is None else live_delta(landed.docs, docs)
-        if landed is not None and delta == {} and meta == landed.meta:
-            return None
+            or _trimmed(landed[0], snapshot)
+            or run_meta(landed[0], full=False) != run_meta(snapshot, full=False)
+        ):
+            frame, docs = self._fitted_snapshot(snapshot, fits)
+        else:
+            docs = run_docs(snapshot, previews=self.previews and self.fit[0], text_cut=self.fit[1])
+            delta = live_delta(landed[1], docs)
+            if not delta:
+                return None
+            frame = self._frame(snapshot, delta=delta)
+            if not fits(frame):
+                frame, docs = self._fitted_snapshot(snapshot, fits)
         self.seq += 1
-        frame = subagent_frame(
-            run=snapshot.delegation_id,
-            sid=self.sid,
-            seq=self.seq,
-            meta=meta,
-            snapshot=docs if whole else None,
-            delta=delta,
+        outcome = await send_live_frame(
+            client,
+            room_id,
+            frame,
+            transaction_id=f"subagents.{self.sid}.{self.seq}",
+            event_type=SUBAGENT_EVENT_TYPE,
         )
-        outcome = await send(frame, f"subagents.{self.sid}.{self.seq}")
         if outcome is LiveSendOutcome.SENT:
-            self.landed = _Landed(snapshot, docs, meta)
-            if whole:
+            self.landed = (snapshot, docs)
+            if "snapshot" in frame:
                 self.snapshot_at = now
         elif outcome is LiveSendOutcome.RETRY:
             self.landed = None
             self.dirty = True
         return outcome
 
+    def _frame(
+        self,
+        snapshot: SubagentSnapshot,
+        *,
+        docs: LiveDocs | None = None,
+        delta: _Frame | None = None,
+    ) -> _Frame:
+        run, meta = snapshot.delegation_id, run_meta(snapshot, full=docs is not None)
+        return subagent_frame(run=run, sid=self.sid, seq=self.seq + 1, meta=meta, snapshot=docs, delta=delta)
 
-class SubagentFramePublisher:
+    def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
+        """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text."""
+
+        def built(previews: bool, text_cut: int) -> tuple[_Frame, LiveDocs]:
+            self.fit = (previews, text_cut)
+            docs = run_docs(snapshot, previews=previews, text_cut=text_cut)
+            return self._frame(snapshot, docs=docs), docs
+
+        frame, docs = built(self.previews, 0)
+        if self.previews and not fits(frame):
+            frame, docs = built(False, 0)
+        if fits(frame):
+            return frame, docs
+        # The least cut of the oldest text that fits; the frame without any text always fits, as the caps bound the rest.
+        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
+        text_cut = bisect_left(range(text_length + 1), True, lo=1, key=lambda cut: fits(built(False, cut)[0]))
+        return built(False, text_cut)
+
+
+class _Publisher:
     """Send the frames of every sub-agent run one account shows in one room, within one budget.
 
     One send is in flight at a time and sends are at least 125 ms apart, serving the runs with something to send in
-    turn. A run's stream ends after the frame of its end; the publisher stops when no stream remains.
+    turn. A run's stream ends after the frame of its end, or when the room refuses one of its frames; such a run sends
+    nothing more until it resumes from a pause or ends. The publisher stops when no stream remains.
     """
 
     def __init__(
         self,
-        account: str,
-        room_id: str,
+        key: tuple[str, str],
         *,
         client: Callable[[], nio.AsyncClient | None],
         homeserver_url: str,
     ) -> None:
-        self._key = (account, room_id)
-        self._room_id = room_id
+        self._key = key
+        self._room_id = key[1]
         self._client = client
         self._homeserver_url = homeserver_url
         self._streams: dict[str, _Stream] = {}
+        # The latest status of each unfinished run whose frame the room refused.
+        self._refused: dict[str, str] = {}
+        self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     def update(self, snapshot: SubagentSnapshot, *, previews: bool) -> None:
         """Queue a run's latest snapshot for its next frame, starting the publisher when it is idle."""
-        stream = self._streams.get(snapshot.delegation_id)
+        run = snapshot.delegation_id
+        refused = self._refused.get(run)
+        if refused is not None:
+            resumed = refused == "paused" and snapshot.status != "paused"
+            if snapshot.status not in TERMINAL_CHILD_STATUSES and not resumed:
+                self._refused[run] = snapshot.status
+                return
+            del self._refused[run]
+        stream = self._streams.get(run)
         if stream is None:
-            self._streams[snapshot.delegation_id] = _Stream(
-                sid=new_publisher_id(),
-                snapshot=snapshot,
-                previews=previews,
-            )
+            self._streams[run] = _Stream(sid=new_publisher_id(), snapshot=snapshot, previews=previews)
         else:
-            stream.snapshot = snapshot
-            stream.previews = previews
-            stream.dirty = True
+            stream.snapshot, stream.previews, stream.dirty = snapshot, previews, True
+        self._wake.set()
         if self._task is None or self._task.done():
-            self._task = create_background_task(
-                self._run(),
-                name=f"subagent_frames_{self._room_id}",
-                # Outside any turn's context: the frames of every run in the room go out from here.
-                context=Context(),
-            )
+            # Outside any turn's context: the frames of every run in the room go out from here.
+            self._task = create_background_task(self._run(), name=f"subagent_frames_{self._room_id}", context=Context())
 
     async def _run(self) -> None:
         try:
-            if not await homeserver_relays_live_frames(self._homeserver_url):
-                return
-            while self._streams:
-                outcome = await self._send_next()
-                # A failed send waits longer, so a homeserver failing every send at once, as through a proxy while it
-                # restarts, is not asked again every 125 ms.
-                await asyncio.sleep(
-                    RETRY_BACKOFF_SECONDS if outcome is LiveSendOutcome.RETRY else _SEND_INTERVAL_SECONDS,
-                )
+            if await homeserver_relays_live_frames(self._homeserver_url):
+                await self._send_frames()
+            else:
+                self._refused.clear()
         except Exception:
             # Frames are best effort: a bug building or sending one ends the room's frames, never a run.
             logger.warning("subagent_frames_stopped_after_error", room_id=self._room_id, exc_info=True)
+            self._refused.clear()
         finally:
             self._streams.clear()
-            if _PUBLISHERS.get(self._key) is self:
+            # A publisher that still holds refused runs stays, so their next updates are still ignored.
+            if not self._refused and _PUBLISHERS.get(self._key) is self:
                 del _PUBLISHERS[self._key]
 
-    async def _send_next(self) -> LiveSendOutcome | None:
+    async def _send_frames(self) -> None:
+        client_missing = False
+        while self._streams:
+            self._wake.clear()
+            client = self._client()
+            if client is None:
+                if client_missing:
+                    # The account had no client for a whole retry, as when its bot stopped: its frames end here.
+                    self._refused.clear()
+                    return
+                client_missing = True
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS)
+                continue
+            client_missing = False
+            outcome = await self._send_next(client)
+            if outcome is None:
+                await self._wait()
+            else:
+                # A failed send waits longer, so a homeserver failing every send at once, as through a proxy while it
+                # restarts, is not asked again every 125 ms.
+                retried = outcome is LiveSendOutcome.RETRY
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS if retried else _SEND_INTERVAL_SECONDS)
+
+    async def _send_next(self, client: nio.AsyncClient) -> LiveSendOutcome | None:
         """Send one frame of the first due stream with something new, which then waits behind the others."""
         now = monotonic()
         for run, stream in list(self._streams.items()):
-            if not stream.due(now):
-                continue
-            outcome = await stream.send_next(self._send, now)
+            due = stream.dirty or now >= stream.keepalive_at()
+            outcome = await stream.send_next(client, self._room_id, now) if due else None
             if outcome is None:
                 continue
             del self._streams[run]
-            # A refused frame ends its run's stream; a later update starts a new one with a snapshot.
-            if outcome is not LiveSendOutcome.STOP and not stream.ended:
+            unfinished = stream.dirty or stream.snapshot.status not in TERMINAL_CHILD_STATUSES
+            if outcome is LiveSendOutcome.STOP:
+                if unfinished:
+                    self._refused[run] = stream.snapshot.status
+            elif unfinished:
                 self._streams[run] = stream
             return outcome
         return None
 
-    async def _send(self, frame: dict[str, object], transaction_id: str) -> LiveSendOutcome:
-        client = self._client()
-        if client is None:
-            # The account is between clients, as while it signs in again; its next frame is a snapshot.
-            return LiveSendOutcome.RETRY
-        try:
-            return await asyncio.wait_for(
-                send_live_frame(
-                    client,
-                    self._room_id,
-                    frame,
-                    transaction_id=transaction_id,
-                    event_type=SUBAGENT_EVENT_TYPE,
-                ),
-                timeout=SEND_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            return LiveSendOutcome.RETRY
-        except Exception:
-            logger.warning("subagent_frame_send_failed", room_id=self._room_id, run=frame["run"], exc_info=True)
-            return LiveSendOutcome.STOP
+    async def _wait(self) -> None:
+        """Wait for an update, or until a working run owes clients its next snapshot."""
+        keepalive_at = min(stream.keepalive_at() for stream in self._streams.values())
+        with suppress(TimeoutError):
+            async with asyncio.timeout(None if keepalive_at == math.inf else max(0.0, keepalive_at - monotonic())):
+                await self._wake.wait()
 
 
 # The publisher of each sending account and room with runs to send.
-_PUBLISHERS: dict[tuple[str, str], SubagentFramePublisher] = {}
+_PUBLISHERS: dict[tuple[str, str], _Publisher] = {}
 
 
-def publisher_for(
+def publish(
     account: str,
     room_id: str,
+    snapshot: SubagentSnapshot,
     *,
+    previews: bool,
     client: Callable[[], nio.AsyncClient | None],
     homeserver_url: str,
-) -> SubagentFramePublisher:
-    """Return the publisher of ``account``'s frames in ``room_id``; ``client`` returns the account's live client.
+) -> None:
+    """Queue a run's latest snapshot as frames from ``account`` in ``room_id``, with tool previews only when ``previews``.
 
-    A publisher whose streams all ended is forgotten, so look it up for each update instead of keeping it.
+    ``client`` returns the account's live client at each send.
     """
     publisher = _PUBLISHERS.get((account, room_id))
     if publisher is None:
-        publisher = SubagentFramePublisher(account, room_id, client=client, homeserver_url=homeserver_url)
+        publisher = _Publisher((account, room_id), client=client, homeserver_url=homeserver_url)
         _PUBLISHERS[(account, room_id)] = publisher
-    return publisher
+    publisher.update(snapshot, previews=previews)

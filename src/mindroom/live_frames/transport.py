@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from enum import Enum
@@ -22,6 +23,13 @@ logger = get_logger(__name__)
 _LIVE_FRAMES_FEATURE = "io.mindroom.ephemeral_opt_in"
 # The fork refuses bodies above 64 KiB; this leaves room for the encryption envelope's JSON.
 _MAX_FRAME_BYTES = 60_000
+# Megolm's bytes around the AES-CBC ciphertext at most: version, message index, length, MAC, and signature.
+_MEGOLM_OVERHEAD_BYTES = 83
+# The encrypted content's JSON without its ciphertext: algorithm, both keys, and a device ID of up to 95 characters.
+_ENVELOPE_BYTES = 300
+_SEND_TIMEOUT_SECONDS = 5.0
+# How long a publisher waits after a send failed at once, as through a proxy while the homeserver restarts.
+RETRY_BACKOFF_SECONDS = 1.0
 _FEATURE_CHECK_SECONDS = 600.0
 _FEATURE_CHECK_FAILED = "Could not check whether the homeserver relays live reply frames"
 _feature_checks: dict[str, tuple[float, bool]] = {}
@@ -61,6 +69,25 @@ def _serialized_size(content: Mapping[str, object]) -> int:
     return len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+def frame_fits(client: nio.AsyncClient, room_id: str, frame: dict[str, object], *, event_type: str) -> bool:
+    """Return whether the frame is within the size limit as it goes out to the room, encrypted in an encrypted room."""
+    room = client.rooms.get(room_id)
+    if room is None or not room.encrypted:
+        return _serialized_size(frame) <= _MAX_FRAME_BYTES
+    return _encrypted_size(room_id, frame, event_type=event_type) <= _MAX_FRAME_BYTES
+
+
+def _encrypted_size(room_id: str, frame: dict[str, object], *, event_type: str) -> int:
+    """Return at most how big the encrypted content of the frame is.
+
+    nio encrypts the event as JSON with ASCII escapes, padded to whole 16-byte blocks, and sends it base64-encoded, so a
+    character outside ASCII can take 8 bytes and one outside the BMP 16.
+    """
+    plaintext = len(json.dumps({"content": frame, "type": event_type, "room_id": room_id}, separators=(",", ":")))
+    ciphertext = (plaintext // 16 + 1) * 16 + _MEGOLM_OVERHEAD_BYTES
+    return (ciphertext * 4 + 2) // 3 + _ENVELOPE_BYTES
+
+
 async def send_live_frame(
     client: nio.AsyncClient,
     room_id: str,
@@ -69,7 +96,31 @@ async def send_live_frame(
     transaction_id: str,
     event_type: str = LIVE_EVENT_TYPE,
 ) -> LiveSendOutcome:
-    """Send one frame of ``event_type`` to the room, encrypted with the room's current group session when it is encrypted."""
+    """Send one frame of ``event_type`` to the room, giving up on a send that hangs past the send timeout.
+
+    Frames are best effort: a send that raises stops them instead of failing what they show.
+    """
+    try:
+        return await asyncio.wait_for(
+            _send(client, room_id, frame, transaction_id=transaction_id, event_type=event_type),
+            timeout=_SEND_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        return LiveSendOutcome.RETRY
+    except Exception:
+        logger.warning("live_frame_send_failed", room_id=room_id, event_type=event_type, exc_info=True)
+        return LiveSendOutcome.STOP
+
+
+async def _send(
+    client: nio.AsyncClient,
+    room_id: str,
+    frame: dict[str, object],
+    *,
+    transaction_id: str,
+    event_type: str,
+) -> LiveSendOutcome:
+    """Send one frame, encrypted with the room's current group session when the room is encrypted."""
     room = client.rooms.get(room_id)
     if room is None:
         return LiveSendOutcome.STOP

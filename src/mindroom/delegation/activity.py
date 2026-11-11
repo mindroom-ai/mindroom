@@ -28,6 +28,9 @@ __all__ = ["ActivityFeed", "SubagentItem", "SubagentSink", "SubagentSnapshot", "
 
 _FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 6_000
+# Text past the cap is cut to this, so the text after a cut grows at its end until the next cut, and the frames that
+# carry it are appends.
+_CUT_TEXT_CHARACTERS = 5_000
 _MAX_TOOL_ITEMS = 20
 _MAX_TASK_CHARACTERS = 1_000
 _MAX_RESULT_CHARACTERS = 1_000
@@ -99,9 +102,13 @@ def _cut_preview(preview: str | None) -> tuple[str | None, bool]:
     return redacted[:_MAX_PREVIEW_CHARACTERS], len(redacted) > _MAX_PREVIEW_CHARACTERS
 
 
+def _text_length(items: list[SubagentItem]) -> int:
+    return sum(len(item.text) for item in items if item.kind == "text")
+
+
 def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
     """Cut the oldest text in place until the items' text totals at most ``limit``; return how many items it removed."""
-    excess = sum(len(item.text) for item in items if item.kind == "text") - limit
+    excess = _text_length(items) - limit
     removed = 0
     index = 0
     while excess > 0 and index < len(items):
@@ -155,6 +162,9 @@ class _SubagentActivity:
     result: str | None = None
     items_dropped: int = 0
     _items: list[SubagentItem] = field(default_factory=list)
+    # How many characters of the redacted text the cap hides, kept from one cut to the next; None after the raw text
+    # was cut, so the next snapshot cuts afresh.
+    _hidden: int | None = 0
 
     @classmethod
     def start(
@@ -197,7 +207,9 @@ class _SubagentActivity:
             self._items[-1] = replace(self._items[-1], text=self._items[-1].text + text)
         else:
             self._items.append(SubagentItem(kind="text", text=text))
-        self.items_dropped += _cut_oldest_text(self._items, _MAX_TEXT_CHARACTERS + _REDACTION_MARGIN)
+        if _text_length(self._items) > _MAX_TEXT_CHARACTERS + _REDACTION_MARGIN:
+            self.items_dropped += _cut_oldest_text(self._items, _CUT_TEXT_CHARACTERS + _REDACTION_MARGIN)
+            self._hidden = None
 
     def tool_started(self, event: ToolStarted, now: float) -> None:
         """Add a running tool row, dropping the oldest tool row past the cap."""
@@ -233,12 +245,18 @@ class _SubagentActivity:
             self.result = result
 
     def snapshot(self) -> SubagentSnapshot:
-        """Build the redacted, capped snapshot: whole text items are redacted, then the text cap cuts."""
+        """Build the redacted, capped snapshot: whole text items are redacted, then the text cap cuts.
+
+        Text past 6,000 characters is cut to its newest 5,000; until the next cut, the text keeps its start.
+        """
         items = [
             replace(item, text=redact_sensitive_text(item.text)) if item.kind == "text" else item
             for item in self._items
         ]
-        dropped = _cut_oldest_text(items, _MAX_TEXT_CHARACTERS)
+        total = _text_length(items)
+        if self._hidden is None or total - self._hidden > _MAX_TEXT_CHARACTERS:
+            self._hidden = max(0, total - _CUT_TEXT_CHARACTERS)
+        dropped = _cut_oldest_text(items, total - self._hidden)
         return SubagentSnapshot(
             delegation_id=self.delegation_id,
             subagent_id=self.subagent_id,
