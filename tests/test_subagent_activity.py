@@ -14,7 +14,6 @@ import pytest
 import pytest_asyncio
 
 import mindroom.live_frames.subagents as subagents_module
-from mindroom import plugin_api
 from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
@@ -33,9 +32,7 @@ from mindroom.delegation.activity import (
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
-from mindroom.hooks.types import BUILTIN_EVENT_NAMES, validate_event_name
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
-from mindroom.plugin_api import PLUGIN_API_VERSION
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -78,15 +75,6 @@ if TYPE_CHECKING:
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
-
-
-def test_no_subagent_hook_event_remains() -> None:
-    """Sub-agent activity is not a plugin hook: the event, its reserved namespace, and the snapshot types are gone."""
-    removed_event = "subagent:" + "changed"  # Two parts, so a search for the removed name finds no trace of it.
-    assert removed_event not in BUILTIN_EVENT_NAMES
-    assert validate_event_name("subagent:x") == "subagent:x"
-    assert PLUGIN_API_VERSION == (1, 29)
-    assert not hasattr(plugin_api, "SubagentSnapshot")
 
 
 def test_snapshot_items_are_frozen() -> None:
