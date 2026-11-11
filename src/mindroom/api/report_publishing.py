@@ -7,6 +7,7 @@ import hmac
 import re
 import secrets
 import time
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -15,7 +16,7 @@ from mindroom.api.auth import require_connections_user
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.report_headers import set_report_headers
 from mindroom.origins import connections_sign_in_page, deployment_origin, published_reports_require_sign_in
-from mindroom.report_publishing.store import ReportPublishingError, ReportPublishingStore
+from mindroom.report_publishing.store import PUBLIC_REPORT_SLUG_RE, ReportPublishingError, ReportPublishingStore
 
 public_router = APIRouter(tags=["report-publishing"])
 
@@ -35,7 +36,6 @@ _VIEW_LINK_SEGMENT = re.compile(r"~(\d{1,12})\.([0-9a-f]{64})")
 # Remembers, across Chat's sign-in, the slug of the report that sent the browser there.
 _RETURN_COOKIE = "mindroom_report_return"
 _RETURN_SECONDS = 600
-_SLUG = re.compile(r"pub_[0-9a-f]{32}")
 
 
 @public_router.get("/reports/public/{slug}", include_in_schema=False)
@@ -87,8 +87,11 @@ async def _published_report_response(
         return _sign_in_response(request, slug)
     # A stale view link is replaced, keeping the asset it led to.
     asset = rest if view_link is not None else asset_path or ""
+    # `request.url` is rebuilt from the decoded path, so a `#` or `?` in a file name would swallow its query.
+    query_string = request.scope["query_string"].decode("latin-1")
+    query = f"?{query_string}" if query_string else ""
     return RedirectResponse(
-        f"/reports/public/{slug}/{_view_link(slug)}/{asset}",
+        f"/reports/public/{quote(slug, safe='')}/{_view_link(slug)}/{quote(asset)}{query}",
         status_code=303,
         headers=_NO_STORE_HEADERS,
     )
@@ -142,7 +145,7 @@ def _sign_in_response(request: Request, slug: str) -> Response:
     if sign_in_url is None:
         return HTMLResponse(_SIGN_IN_REQUIRED_PAGE, status_code=401, headers=_NO_STORE_HEADERS)
     response = RedirectResponse(sign_in_url, status_code=303, headers=_NO_STORE_HEADERS)
-    if _SLUG.fullmatch(slug):
+    if PUBLIC_REPORT_SLUG_RE.fullmatch(slug):
         name, secure = _return_cookie(request)
         # Chat's hand-off is a cross-site post, which carries only a `SameSite=None` cookie; that needs HTTPS.
         samesite = "none" if secure else "lax"
@@ -170,7 +173,7 @@ def sign_in_landing(request: Request) -> RedirectResponse:
     name, secure = _return_cookie(request)
     slug = request.cookies.get(name)
     redirect = RedirectResponse(
-        f"/reports/public/{slug}" if slug and _SLUG.fullmatch(slug) else "/connections/",
+        f"/reports/public/{slug}" if slug and PUBLIC_REPORT_SLUG_RE.fullmatch(slug) else "/connections/",
         status_code=303,
     )
     if slug is not None:

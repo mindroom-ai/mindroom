@@ -1973,10 +1973,10 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.connection_agents",
     "mindroom.api.connections_session_cookie",
+    "mindroom.api.report_publishing",
     "mindroom.constants",
     "mindroom.matrix_openid",
     "mindroom.origins",
-    "mindroom.api.report_publishing",
 ]
 
 [[modules]]

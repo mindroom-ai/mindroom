@@ -401,3 +401,15 @@ def test_sign_in_check_that_fails_on_the_server_is_not_a_sign_in_page(
     monkeypatch.setattr(report_routes, "require_connections_user", unavailable)
     response = client.get(f"/reports/public/{UNKNOWN_SLUG}/", follow_redirects=False)
     assert response.status_code == 503
+
+
+def test_view_link_keeps_the_asked_for_file_name_and_query(signin: dict[str, Any]) -> None:
+    """The redirect to a view link names the same file, however its name is spelled, and keeps the query."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+    assert sign_in(client, "alice").status_code == 200
+
+    index = _view_link(client, f"/reports/public/{slug}/?region=emea")
+    assert index.endswith("/?region=emea")
+    named = _view_link(client, f"/reports/public/{slug}/Issue%20%2342%3F.html?x=1")
+    assert named.endswith("/Issue%20%2342%3F.html?x=1")
