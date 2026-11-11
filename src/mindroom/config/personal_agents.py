@@ -9,13 +9,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import validate_matrix_localpart
-from mindroom.constants import AGENT_NAME_PATTERN, tracking_dir
+from mindroom.constants import AGENT_NAME_PATTERN, config_relative_path, tracking_dir
+from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, validate_workspace_template_dir
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -85,6 +86,15 @@ class PersonalAgentTemplateConfig(BaseModel):
         ),
         json_schema_extra=dashboard_hint(key_placeholder="@alice:example.org"),
     )
+    workspace_template: str | None = Field(
+        default=MIND_WORKSPACE_TEMPLATE,
+        min_length=1,
+        description=(
+            "Files copied into each user's agent workspace without overwriting any: 'mind' for the starter files "
+            "mindroom config init gives the mind agent, whose six context files load unless agent.context_files "
+            "is set, a directory relative to the config file, or null for none"
+        ),
+    )
 
     def agent_name(self, key: str, username: str) -> str:
         """Render the agent key for one `{username}`, by default '<template key>_<username>'."""
@@ -144,6 +154,21 @@ class PersonalAgentTemplateConfig(BaseModel):
             matrix_username=self.agent.matrix_username,
             where="agent",
         )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workspace_template(self, info: ValidationInfo) -> Self:
+        template = self.workspace_template
+        if template is None or template == MIND_WORKSPACE_TEMPLATE:
+            return self
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
+        try:
+            validate_workspace_template_dir(config_relative_path(template, runtime_paths))
+        except ValueError as exc:
+            msg = f"workspace_template is invalid: {exc}"
+            raise ValueError(msg) from exc
         return self
 
 
@@ -302,6 +327,8 @@ def personal_agent_data(template: Mapping[str, Any], entry: PersonalAgentRosterE
         access["users"] = _with_owner(access.get("users"), entry.user_id)
         agent["access"] = access
     agent["credential_managers"] = _with_owner(agent.get("credential_managers"), entry.user_id)
+    if template.get("workspace_template", MIND_WORKSPACE_TEMPLATE) == MIND_WORKSPACE_TEMPLATE:
+        agent.setdefault("context_files", list(MIND_TEMPLATE_CONTEXT_FILES))
     # self_config edits agents.<name>, which a generated agent does not have; defaults.allow_self_config must not apply.
     agent["allow_self_config"] = False
     return agent

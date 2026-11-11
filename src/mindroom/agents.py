@@ -83,7 +83,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_owned_path,
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workspaces import ensure_workspace_template
+from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -110,14 +110,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _DEFAULT_MIND_AGENT_NAME = "mind"
-_DEFAULT_MIND_CONTEXT_FILES = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
 _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
@@ -223,43 +215,55 @@ class _AgentRoleContext:
         return [path.relative_to(workspace_root).as_posix() for path in paths if path.is_relative_to(workspace_root)]
 
 
-def _uses_default_mind_workspace_scaffold(config: Config, agent_name: str) -> bool:
+def _workspace_template(config: Config, agent_name: str) -> str | None:
+    """Return the template an agent's workspace starts from: 'mind', a config-relative directory, or None."""
+    if (instance := config.personal_agent_instance(agent_name)) is not None:
+        return config.personal_agents[instance.template].workspace_template
     agent_config = config.agents[agent_name]
-    return (
+    uses_mind_starter = (
         agent_name == _DEFAULT_MIND_AGENT_NAME
         and agent_config.private is None
         and memory_backend(config, agent_name) == "file"
-        and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
+        and tuple(agent_config.context_files) == MIND_TEMPLATE_CONTEXT_FILES
     )
+    return MIND_WORKSPACE_TEMPLATE if uses_mind_starter else None
 
 
-def _ensure_default_mind_workspace(storage_path: Path) -> None:
-    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
+def _ensure_agent_workspace(config: Config, agent_name: str, runtime_paths: constants.RuntimePaths) -> None:
+    """Copy the files an agent's workspace template has that its workspace lacks, overwriting nothing."""
+    template = _workspace_template(config, agent_name)
+    if template is None:
+        return
+    workspace_path = agent_workspace_root_path(runtime_paths.storage_root, agent_name)
     try:
-        ensure_workspace_template(workspace_path, template="mind")
+        ensure_workspace_template(
+            workspace_path,
+            template=template
+            if template == MIND_WORKSPACE_TEMPLATE
+            else constants.config_relative_path(template, runtime_paths),
+        )
     except (OSError, ValueError) as exc:
         # Worker code writes the workspace; a planted entry must not fail every agent build.
-        logger.warning("default_mind_workspace_scaffold_skipped", path=str(workspace_path), error=str(exc))
+        logger.warning("agent_workspace_scaffold_skipped", agent=agent_name, path=str(workspace_path), error=str(exc))
 
 
-def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
-    """Materialize built-in starter workspaces under the active runtime storage root."""
+def ensure_default_agent_workspaces(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    """Materialize every agent's workspace template under the active runtime storage root."""
     for agent_name in config.agents:
-        if _uses_default_mind_workspace_scaffold(config, agent_name):
-            _ensure_default_mind_workspace(storage_path)
+        _ensure_agent_workspace(config, agent_name, runtime_paths)
 
 
 def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
     """Return True when it is safe to overlap agent construction with file-memory reads."""
-    if not _uses_default_mind_workspace_scaffold(config, agent_name):
+    if _workspace_template(config, agent_name) is None:
         return True
     memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
     return memory_path.is_file()
 
 
-def _get_mind_runtime_context(agent_name: str, runtime_paths: constants.RuntimePaths) -> str:
-    """Render live installation facts for the default Mind agent."""
-    if agent_name != _DEFAULT_MIND_AGENT_NAME:
+def _get_mind_runtime_context(agent_name: str, config: Config, runtime_paths: constants.RuntimePaths) -> str:
+    """Render live installation facts for the default Mind agent and agents given its starter files."""
+    if agent_name != _DEFAULT_MIND_AGENT_NAME and _workspace_template(config, agent_name) != MIND_WORKSPACE_TEMPLATE:
         return ""
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     return f"\n## MindRoom Runtime\n- Active Matrix homeserver: `{homeserver}`\n"
@@ -1395,7 +1399,7 @@ def _build_agent_role_context(
     """
     runtime_facts = join_sections(
         (
-            _get_mind_runtime_context(agent_name, runtime_paths),
+            _get_mind_runtime_context(agent_name, config, runtime_paths),
             None
             if disable_runtime_capabilities
             else _render_tool_execution_environment(
@@ -1711,7 +1715,7 @@ def create_agent(
 
     agent_config = config.get_agent(agent_name)
     if create_runtime_state:
-        ensure_default_agent_workspaces(config, runtime_paths.storage_root)
+        _ensure_agent_workspace(config, agent_name, runtime_paths)
 
     model_name = model.model_name
     if provider is None:
@@ -1910,7 +1914,7 @@ def create_agent(
                 if workspace.file_memory_path is not None
                 else None
             ),
-            runtime_context=_get_mind_runtime_context(agent_name, runtime_paths),
+            runtime_context=_get_mind_runtime_context(agent_name, config, runtime_paths),
             minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
             interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
             if include_interactive_questions

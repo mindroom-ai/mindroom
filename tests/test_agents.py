@@ -99,7 +99,7 @@ from mindroom.tool_system.worker_routing import (
     visible_workspace_roots,
     worker_root_path,
 )
-from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
+from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, _copy_workspace_template, validate_workspace_template_dir
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import publish_hook_plugin, register_test_tool, runtime_paths_for
 from tests.fakes.knowledge import published_index_lookup
@@ -3608,13 +3608,13 @@ def test_planted_link_in_the_default_mind_workspace_never_breaks_agent_builds(tm
             "mind": AgentConfig(
                 display_name="Mind",
                 memory_backend="file",
-                context_files=list(agents_module._DEFAULT_MIND_CONTEXT_FILES),
+                context_files=list(MIND_TEMPLATE_CONTEXT_FILES),
             ),
         },
     )
 
     with capture_logs() as logs:
-        agents_module.ensure_default_agent_workspaces(config, storage_path)
+        agents_module.ensure_default_agent_workspaces(config, _runtime_paths(storage_path))
 
     assert any(entry["log_level"] == "warning" for entry in logs)
     assert not (tmp_path / "missing.md").exists()

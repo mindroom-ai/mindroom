@@ -4239,6 +4239,20 @@
           "x-mindroom": {
             "key_placeholder": "@alice:example.org"
           }
+        },
+        "workspace_template": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "mind",
+          "description": "Files copied into each user's agent workspace without overwriting any: 'mind' for the starter files mindroom config init gives the mind agent, whose six context files load unless agent.context_files is set, a directory relative to the config file, or null for none",
+          "title": "Workspace Template"
         }
       },
       "required": [
