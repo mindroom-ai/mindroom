@@ -65,6 +65,7 @@ import mindroom.cli.desktop as cli_desktop_module
 import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler_module
+import mindroom.live_frames.subagents as subagent_frames_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -3796,12 +3797,16 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep streams from asking a homeserver whether it relays live frames; a test that needs frames opts in."""
+    """Keep streams and sub-agent frames from asking a homeserver whether it relays live frames.
+
+    A test that needs frames opts in.
+    """
 
     async def no_live_frames(_homeserver_url: str) -> bool:
         return False
 
     monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", no_live_frames)
+    monkeypatch.setattr(subagent_frames_module, "homeserver_relays_live_frames", no_live_frames)
 
 
 @pytest.fixture(autouse=True)

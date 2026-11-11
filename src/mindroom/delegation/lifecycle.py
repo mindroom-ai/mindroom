@@ -294,9 +294,9 @@ def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]
 def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
     """Return the sink that streams the child's snapshots as frames to its caller's room.
 
-    None outside a Matrix room or a managed runtime, or while the operator has live frames off. The account answering
-    the caller's turn sends the frames, through its bot's client at each send: a bot that logs in again has a new
-    client, and a stopped bot none.
+    None outside a Matrix room or a managed runtime, or when the operator has live frames off as the feed opens;
+    switching them off later does not stop a feed already open. The account answering the caller's turn sends the
+    frames, through its bot's client at each send: a bot that logs in again has a new client, and a stopped bot none.
     """
     orchestrator = context.orchestrator
     if orchestrator is None or not context.room_id or not context.current_config.defaults.streaming.live_frames:
@@ -319,28 +319,30 @@ def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation
 
 
 def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
-    """Open the child's feed when its caller's turn has a sink for it; None outside a turn or without one."""
+    """Open the child's feed when its caller's turn has a sink for it; None outside a turn or without one.
+
+    An attempt that opens no feed also ends the one a paused attempt of the child left, whose sink would otherwise take
+    the child's later updates, as when live frames were switched off before it resumed.
+    """
     context = get_tool_runtime_context()
-    if context is None:
-        return None
     child, parent = observation.child, observation.parent
     # The outermost child of the chain was delegated by the agent in the room whose turn started it.
     root = parent
     while root is not None and root.parent is not None:
         root = root.parent
     try:
-        sink = _subagent_sink(context, observation)
-        if sink is None:
-            return None
-        return ActivityFeed.open(
-            child,
-            parent_delegation_id=None if parent is None else parent.child.delegation_id,
-            root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
-            sink=sink,
-        )
+        sink = None if context is None else _subagent_sink(context, observation)
+        if sink is not None:
+            return ActivityFeed.open(
+                child,
+                parent_delegation_id=None if parent is None else parent.child.delegation_id,
+                root_caller_agent_name=(child if root is None else root.child).caller_agent_name,
+                sink=sink,
+            )
     except Exception:
         logger.exception("Sub-agent activity feed failed to open", delegation_id=child.delegation_id)
-        return None
+    ActivityFeed.forget(child.delegation_id)
+    return None
 
 
 def _publish_exit(feed: ActivityFeed | None, child: DelegationChild, *, cancelled: bool, reason: str) -> None:

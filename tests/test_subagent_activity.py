@@ -45,8 +45,7 @@ from tests.conftest import make_turn_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.live_frames.test_subagents import _Room
-from tests.subagent_activity_helpers import make_snapshot
+from tests.subagent_activity_helpers import FrameRoom, make_snapshot
 from tests.test_background_delegation import _identity as _background_identity
 from tests.test_background_delegation import _registered_reports
 from tests.test_delegation_direct_audit import _identity
@@ -693,7 +692,7 @@ async def relaying(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
 
 def _in_room(
     runtime: ToolRuntimeContext,
-    room: _Room,
+    room: FrameRoom,
     *,
     shown: bool = False,
 ) -> tuple[ToolRuntimeContext, SimpleNamespace]:
@@ -708,7 +707,7 @@ def _in_room(
     return context, bot
 
 
-async def _run_frames(room: _Room, *, agent_name: str = "child") -> list[dict[str, Any]]:
+async def _run_frames(room: FrameRoom, *, agent_name: str = "child") -> list[dict[str, Any]]:
     """Return the frames of ``agent_name``'s run that went out through ``room``'s client, once its end did."""
 
     def frames() -> list[dict[str, Any]]:
@@ -733,7 +732,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
 
     In an encrypted room every frame goes out encrypted.
     """
-    room = _Room(encrypted=encrypted)
+    room = FrameRoom(encrypted=encrypted)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
     context, _bot = _in_room(runtime, room)
@@ -758,13 +757,15 @@ async def test_a_delegated_child_streams_frames_to_its_room(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shown", [True, False], ids=["root_shows_tools", "root_hides_tools"])
 @pytest.mark.usefixtures("relaying")
-async def test_nested_child_keeps_previews_when_the_root_turn_shows_tools(
+async def test_nested_child_previews_follow_the_root_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    shown: bool,
 ) -> None:
-    """A child's own turn hides its calls, yet its sub-agent's tool rows carry previews: the turn in the room shows them."""
-    room = _Room()
+    """A child's own turn hides its calls, so its sub-agent's tool rows carry previews only as the turn in the room does."""
+    room = FrameRoom()
     child_turns = [
         calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Add one and two")),
         answer("Child done"),
@@ -776,7 +777,7 @@ async def test_nested_child_keeps_previews_when_the_root_turn_shows_tools(
         child_turns,
         grandchild_turns=grandchild_turns,
     )
-    context, _bot = _in_room(runtime, room, shown=True)
+    context, _bot = _in_room(runtime, room, shown=shown)
 
     with tool_runtime_context(context):
         result = await ai_response(turn, paths, config)
@@ -788,16 +789,15 @@ async def test_nested_child_keeps_previews_when_the_root_turn_shows_tools(
     [delegated] = child[-1]["snapshot"]["tools"]
     [add] = grandchild[-1]["snapshot"]["tools"]
     assert (delegated["tool_name"], add["tool_name"]) == ("run_subagent", "add")
-    assert delegated["args_preview"]
-    assert add["args_preview"]
-    assert add["result_preview"]
+    assert ("args_preview" in delegated, "args_preview" in add, "result_preview" in add) == (shown, shown, shown)
+    assert ("_preview" in json.dumps(grandchild)) is shown
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("relaying")
 async def test_root_turn_hiding_tools_hides_child_previews(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn in the room that hides its tool calls streams its child's tool rows by name only."""
-    room = _Room()
+    room = FrameRoom()
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
     context, _bot = _in_room(runtime, room, shown=False)
@@ -815,7 +815,7 @@ async def test_root_turn_hiding_tools_hides_child_previews(tmp_path: Path, monke
 @pytest.mark.usefixtures("relaying")
 async def test_frames_follow_a_relogged_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A bot that logs in again while its child runs sends the run's later frames through its new client."""
-    first, second = _Room(), _Room()
+    first, second = FrameRoom(), FrameRoom()
     sent_before: list[int] = []
 
     async def log_in_again() -> None:
@@ -841,7 +841,7 @@ async def test_frames_follow_a_relogged_client(tmp_path: Path, monkeypatch: pyte
 @pytest.mark.usefixtures("relaying")
 async def test_no_frames_when_live_frames_are_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator who switched live frames off gets no sub-agent frames, though the turn's own config had them on."""
-    room = _Room()
+    room = FrameRoom()
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, [answer("Three")])
     current = config.model_copy(deep=True)
     current.defaults.streaming.live_frames = False
@@ -1042,3 +1042,25 @@ async def test_a_background_child_cancelled_while_awaiting_approval_ends_cancell
     assert last is seen.snapshots[-1]
     assert last.ended_at is not None
     assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_child_resumed_where_nothing_publishes_it_ends_its_paused_feed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """A child resumed after its approvals with no sink, as once live frames are off, leaves no feed on the old sink."""
+    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch)
+
+    async def approve_once_nothing_publishes() -> None:
+        await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
+        await seen.wait_for_status("awaiting_approval")
+        monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: None)
+        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+
+    result = await _delegate_in_background(leader, runtime, context, approve_once_nothing_publishes)
+
+    assert "Child done" in str(answer_of(result, "first").content)
+    assert not _OPEN
+    assert "completed" not in {snapshot.status for snapshot in seen.snapshots}

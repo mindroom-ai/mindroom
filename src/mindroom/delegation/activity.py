@@ -335,6 +335,11 @@ class ActivityFeed:
         """Return the feed of a child that has not ended, such as one waiting for its approvals."""
         return _OPEN.get(delegation_id)
 
+    @staticmethod
+    def forget(delegation_id: str) -> None:
+        """Forget the feed a paused attempt of the child left, so its sink takes no more updates."""
+        _OPEN.pop(delegation_id, None)
+
     def text(self, text: str) -> None:
         """Add the child's words; they go out with the next window's snapshot."""
         self._activity.add_text(text, time.time())
