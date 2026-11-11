@@ -24,7 +24,7 @@ class _PendingHumanMessages(Protocol):
 class ReplyToolCalls:
     """The tool calls one reply runs now, and how many of them do nothing but wait on background jobs."""
 
-    # Called when a call ends or starts waiting, so the reply's waits look again at the messages waiting for it.
+    # Called when a call ends, so the reply's waits look again at the messages waiting for it.
     on_change: Callable[[], None]
     running: int = 0
     waiting: int = 0
@@ -103,7 +103,6 @@ def waiting_on_jobs() -> Iterator[None]:
         yield
         return
     calls.waiting += 1
-    calls.on_change()
     try:
         yield
     finally:
