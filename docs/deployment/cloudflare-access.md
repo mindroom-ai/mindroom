@@ -66,7 +66,7 @@ Access applies the most specific path application, so every other path keeps the
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](../external-triggers.md) or the API keys of the [OpenAI-compatible API](../openai-api.md).
 Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
-Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
+Published reports under `/reports/public/` need no MindRoom login unless [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](../connections-portal.md#published-reports) is `signed_in`, so behind Access only the people Access admits can open them.
 An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
 
 ## Service Worker

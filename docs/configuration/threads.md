@@ -272,6 +272,7 @@ Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unav
 
 The check runs between completed tool batches and never interrupts a running tool.
 With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).
+A reply that is doing nothing but waiting on its background jobs, with no model step and no other tool running, gets the wrap-up notice for a queued message at once and without a judgment, even when the judge let that message wait during earlier work; its jobs keep running and their results arrive in a later reply.
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](../tool-approval.md) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision.

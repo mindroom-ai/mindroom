@@ -19,6 +19,7 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_runtime import queued_notice_after_tool_batch
 from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -461,6 +462,7 @@ def _job_turn(
     generated: tuple[ToolFunction, ...],
     middleware: tuple[ToolMiddleware, ...],
     participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
 ) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
     functions = (*(tool.function for tool in actor.tools.values()), *generated)
     spec = AgentSpec(
@@ -477,7 +479,10 @@ def _job_turn(
             *((participation_hook(participation, model),) if participation is not None else ()),
         ),
         tool_middleware=with_job_admission(actor, middleware),
-        after_tool_batch=(job_notice_hook(actor.name),),
+        after_tool_batch=(
+            *((queued_notice_after_tool_batch(queued_notice),) if queued_notice is not None else ()),
+            job_notice_hook(actor.name),
+        ),
     )
     session = ConversationSession(
         session_id=session_id,
@@ -500,13 +505,15 @@ async def run_job_turn(
     generated: tuple[ToolFunction, ...] = (),
     middleware: tuple[ToolMiddleware, ...] = (),
     participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
 ) -> RunRecord:
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
     reply does. ``generated`` are functions beside the actor's assembled toolkits, as MindRoom adds knowledge search,
     skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's
-    turn does, deciding after the job definitions project.
+    turn does, deciding after the job definitions project. ``queued_notice`` is the text of the queued-message notice
+    the turn's batches give when a newer message waits, as a reply's turn installs it.
     """
     spec, hooks, session, persist = _job_turn(
         actor,
@@ -517,6 +524,7 @@ async def run_job_turn(
         generated=generated,
         middleware=middleware,
         participation=participation,
+        queued_notice=queued_notice,
     )
     run = RunContext(run_id=run_id, session=session)
     events = run_agent(

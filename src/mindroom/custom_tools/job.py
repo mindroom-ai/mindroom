@@ -7,6 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
+from mindroom.tool_jobs.control import waiting_on_jobs
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
@@ -185,14 +186,16 @@ class JobTools(Toolkit):
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":
-                waited = await runtime.wait(
-                    job_id,
-                    owner=owner,
-                    depth=0,
-                    timeout=wait_timeout,
-                    # A job awaiting a human decision holds the reply no longer than the gated call itself does.
-                    approval_timeout=current_approval_wait_timeout(),
-                )
+                # A newer human message releases a reply whose running calls all only wait, without its judge.
+                with waiting_on_jobs():
+                    waited = await runtime.wait(
+                        job_id,
+                        owner=owner,
+                        depth=0,
+                        timeout=wait_timeout,
+                        # A job awaiting a human decision holds the reply no longer than the gated call itself does.
+                        approval_timeout=current_approval_wait_timeout(),
+                    )
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return format_job_handle(waited.job)

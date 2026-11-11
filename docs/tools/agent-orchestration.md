@@ -282,6 +282,7 @@ Tools that run long in a [worker](../deployment/sandbox-proxy.md) are not limite
 Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
 A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
 For an agent with [`mid_turn`](../configuration/threads.md#mid-turn-coalescing), only a message its judge says cannot wait releases the wait; one that can wait gets the `defer_reaction` and the call keeps waiting.
+A `job` wait with no other call of the reply running is the exception: any newer message releases it at once, without a judgment, so the agent answers while the jobs run on.
 Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
 ### Seeing and cancelling jobs
@@ -530,7 +531,8 @@ agents:
 The tool exposes `publish_report(source_type, source, confirm_public)` and `revoke_public_report(slug)`, each returning JSON with a `status` field.
 `confirm_public=True` is required, so an accidental call publishes nothing.
 A successful publish returns a `slug` and the public path `/reports/public/<slug>`, plus an absolute `public_url` when `MINDROOM_PUBLIC_URL` is set.
-Anyone with the link can open it without signing in until it is revoked.
+Anyone with the link can open it without signing in until it is revoked, unless the deployment sets [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](../connections-portal.md#published-reports) to `signed_in`; the result's `who_can_open` names who can.
+To have a person approve each publication, add a [tool approval](../tool-approval.md) rule for `publish_report`.
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 

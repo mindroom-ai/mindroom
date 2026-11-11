@@ -106,10 +106,19 @@ class MidTurnGate:
         self._acknowledged.add(message.event_id)
         await self.on_defer(message.event_id)
 
-    async def defers(self, pending: tuple[QueuedMessage, ...], *, current: Callable[[], bool]) -> bool:
-        """Return whether ``pending`` can wait for the active reply, acknowledging each message while ``current`` holds."""
+    async def defers(
+        self,
+        pending: tuple[QueuedMessage, ...],
+        *,
+        current: Callable[[], bool],
+        judge: bool = True,
+    ) -> bool:
+        """Return whether ``pending`` can wait for the active reply, acknowledging each message while ``current`` holds.
+
+        Without ``judge``, ``pending`` cannot wait, whatever an earlier judgment of it said, and the judge is not asked.
+        """
         try:
-            finish = await self._should_finish(pending)
+            finish = await self._should_finish(pending, judge=judge)
         except Exception:
             # Callers hand off as on a failed judgment, so a judgment that raises never costs the active reply.
             finish = False
@@ -125,13 +134,14 @@ class MidTurnGate:
                 logger.warning("mid_turn_reaction_failed")
         return current()
 
-    async def _should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
+    async def _should_finish(self, pending: tuple[QueuedMessage, ...], *, judge: bool) -> bool:
         """Continue only with sufficient confidence that no interruption is needed."""
         async with self._lock:
-            if self._checked == pending:
+            if judge and self._checked == pending:
                 return self._finish
             finish = False
-            request = self._request(pending)
+            # An earlier judgment weighed the work that ran then, not a reply that only waits on jobs.
+            request = self._request(pending) if judge else "only_waiting_on_jobs"
             if isinstance(request, str):
                 reason = request
             else:
