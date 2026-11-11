@@ -709,7 +709,7 @@ class _MultiAgentOrchestrator:
                 config,
                 self.runtime_paths,
             )
-        ensure_default_agent_workspaces(config, self.runtime_paths.storage_root)
+        await asyncio.to_thread(ensure_default_agent_workspaces, config, self.runtime_paths)
         self._configure_approval_store_transport()
         for service in self._services:
             await service.sync(config)

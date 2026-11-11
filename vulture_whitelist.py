@@ -34,6 +34,7 @@ _._validate_name  # Pydantic field validator (src/mindroom/config/personal_agent
 _._validate_matrix_username  # Pydantic field validator (src/mindroom/config/agent.py, src/mindroom/config/personal_agents.py)
 _._validate_users  # Pydantic field validator (src/mindroom/config/personal_agents.py)
 _._validate_agent  # Pydantic model validator (src/mindroom/config/personal_agents.py)
+_._validate_workspace_template  # Pydantic model validator (src/mindroom/config/personal_agents.py)
 _.validate_identity_mapping  # Pydantic model validator (src/mindroom/config/slack.py)
 _._refuse_unknown_identity_fields  # Pydantic field validator (src/mindroom/workers/protocol.py)
 _._enum_matches_types  # Pydantic model validator (src/mindroom/dynamic_workflows/spec.py)

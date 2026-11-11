@@ -41,6 +41,7 @@ A key follows the [agent naming rules](https://docs.mindroom.chat/configuration/
 | `matrix_username` | string | `mindroom_<agent key>` | Matrix localpart pattern; it contains `{username}` exactly once plus at least one other character, so no agent takes a person's bare localpart, and renders to `[a-z0-9._=/-]`. `_<MINDROOM_NAMESPACE>` is appended when a namespace is set, and the default account carries the same suffix. |
 | `agent` | object | Required | Any [agent](https://docs.mindroom.chat/configuration/agents/#configuration-options) fields; the defaults for every user's agent. |
 | `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
+| `workspace_template` | string or null | `mind` | Files copied into each user's agent workspace, as described in [Starter workspace](#starter-workspace). |
 
 In the template's `delegate_to`, the template key names each user's own agent, so `delegate_to: [mind]` lets every user's agent run fresh copies of itself as [subagents](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
 
@@ -67,6 +68,16 @@ Every generated agent also gets these settings, whatever the template says:
 Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
 It also rejects `matrix_username` there, because the template's own `matrix_username` names every user's account.
 A template or override that would produce an invalid agent fails validation as soon as you save or load it, even before anyone has onboarded, with `personal_agents would generate an invalid agent for a new user:` and the reason.
+
+## Starter Workspace
+
+By default every generated agent's workspace starts with the files `mindroom config init` gives the `mind` agent: `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and an empty `memory/` folder.
+The first six load into the agent's prompt as [`context_files`](https://docs.mindroom.chat/configuration/agents/#configuration-options), about 16 KB of text, unless the template's `agent` sets `context_files`, in which case exactly those load.
+Set `workspace_template` to a directory, relative to `config.yaml` or absolute, to copy its files instead; then only the template's `context_files` load, and a missing directory is a config error (`workspace_template is invalid`).
+Set `workspace_template: null` to start every workspace empty.
+
+Files are copied when the agent starts and before each reply, and a file the workspace already has is never overwritten, so the agent's own edits, its `MEMORY.md`, and its notes stay as they are.
+An agent onboarded before you changed the template gets only the files its workspace lacks.
 
 ## Generated Agents
 

@@ -43,7 +43,7 @@ from mindroom.cli.main import main as cli_main
 from mindroom.cli.service import _shell_service_keys
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER, resolve_runtime_paths
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
@@ -901,7 +901,7 @@ class TestConfigInit:
         config = load_config_yaml(target)
         assert "mind_memory" not in config.knowledge_bases
 
-        ensure_default_agent_workspaces(config, runtime_storage)
+        ensure_default_agent_workspaces(config, resolve_runtime_paths(config_path=target))
         runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
         assert (runtime_workspace / "SOUL.md").exists()
         assert (runtime_workspace / "AGENTS.md").exists()
