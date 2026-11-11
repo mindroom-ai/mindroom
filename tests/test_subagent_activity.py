@@ -1,25 +1,26 @@
-"""The `subagent:changed` hook event: its names, snapshot types, plugin API version, and `plugin_testing` support."""
+"""Sub-agent activity: the `subagent:changed` hook event, the snapshot a child run keeps, and its publication."""
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.ai import ai_response
+from mindroom.approval import manager as approval_manager
+from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
-from mindroom.delegation.activity import (
-    _OPEN,
-    FLUSH_INTERVAL_SECONDS,
-    TERMINAL_STATUSES,
-    ActivityFeed,
-    SubagentActivity,
-)
+from mindroom.delegation.activity import _FLUSH_INTERVAL_SECONDS, _OPEN, ActivityFeed, _SubagentActivity
 from mindroom.delegation.state import DelegationChild, SubagentPersona
+from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.hooks import HookBindings, HookRegistry, emit, hook
 from mindroom.hooks.types import _DEFAULT_EVENT_TIMEOUT_MS, BUILTIN_EVENT_NAMES, validate_event_name
-from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.plugin_api import (
     EVENT_SUBAGENT_CHANGED,
     PLUGIN_API_VERSION,
@@ -28,16 +29,41 @@ from mindroom.plugin_api import (
     SubagentSnapshot,
 )
 from mindroom.plugin_testing import load_plugin
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
 from tests.subagent_activity_helpers import make_snapshot
+from tests.test_background_delegation import _identity as _background_identity
+from tests.test_background_delegation import _registered_reports
+from tests.test_delegation_direct_audit import _identity
 from tests.test_tool_hooks import _plugin
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    DelegatingLeader,
+    JobApprovalCards,
+    answer_of,
+    delegating_config,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookContext
+    from mindroom.llm.runs import RunRecord
+    from mindroom.plugin_api import SubagentStatus
+    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from tests.fakes.scripted_model import ScriptStep
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
@@ -133,8 +159,8 @@ def _child(
     )
 
 
-def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> SubagentActivity:
-    return SubagentActivity.start(_child(task=task, persona=persona), parent_delegation_id="p0", now=1.0)
+def _activity(*, task: str = "research", persona: SubagentPersona | None = None) -> _SubagentActivity:
+    return _SubagentActivity.start(_child(task=task, persona=persona), parent_delegation_id="p0", now=1.0)
 
 
 def _call(call_id: str, *, result: str | None = None, is_error: bool | None = None) -> ReportedCall:
@@ -257,7 +283,9 @@ def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:
     assert (a.snapshot().ended_at, a.snapshot().status) == (None, "running")
     a.set_status("awaiting_approval", 7)
     assert a.snapshot().ended_at is None
-    assert {"completed", "failed", "cancelled", "denied"} == TERMINAL_STATUSES
+    for terminal in ("completed", "cancelled", "denied"):
+        a.set_status(terminal, 8)
+        assert a.snapshot().ended_at == 8
 
 
 def test_workflow_children_report_source_workflow() -> None:
@@ -273,13 +301,24 @@ def _forget_open_runs() -> Iterator[None]:
 
 
 class _Hook:
-    """A `subagent:changed` hook that records each snapshot it receives, holding or failing each call on request."""
+    """A `subagent:changed` hook that records each snapshot it receives, holding or failing each call on request.
 
-    def __init__(self, *, hold: asyncio.Event | None = None, fail: bool = False) -> None:
+    ``agents`` and ``rooms`` scope the hook as a plugin's decorator would.
+    """
+
+    def __init__(
+        self,
+        *,
+        hold: asyncio.Event | None = None,
+        fail: bool = False,
+        timeout_ms: int = 5_000,
+        agents: list[str] | None = None,
+        rooms: list[str] | None = None,
+    ) -> None:
         self.snapshots: list[SubagentSnapshot] = []
         self._arrived = asyncio.Condition()
 
-        @hook(EVENT_SUBAGENT_CHANGED, timeout_ms=5_000)
+        @hook(EVENT_SUBAGENT_CHANGED, timeout_ms=timeout_ms, agents=agents, rooms=rooms)
         async def seen(ctx: SubagentChangedContext) -> None:
             async with self._arrived:
                 self.snapshots.append(ctx.subagent)
@@ -297,6 +336,12 @@ class _Hook:
         async with asyncio.timeout(2), self._arrived:
             await self._arrived.wait_for(lambda: len(self.snapshots) >= count)
         return self.snapshots[count - 1]
+
+    async def wait_for_status(self, status: SubagentStatus) -> SubagentSnapshot:
+        """Return the first snapshot with ``status`` once it has arrived."""
+        async with asyncio.timeout(2), self._arrived:
+            await self._arrived.wait_for(lambda: any(snapshot.status == status for snapshot in self.snapshots))
+        return next(snapshot for snapshot in self.snapshots if snapshot.status == status)
 
 
 def _open(tmp_path: Path, seen: _Hook | None, *, delegation_id: str = "d1") -> ActivityFeed | None:
@@ -347,16 +392,16 @@ async def test_bursts_coalesce_to_one_emission_per_window(tmp_path: Path) -> Non
     for n in range(1, 20):
         feed.text(f"{n} ")
     snapshot = await seen.wait_for(2)
-    assert loop.time() - started >= FLUSH_INTERVAL_SECONDS * 0.8
+    assert loop.time() - started >= _FLUSH_INTERVAL_SECONDS * 0.8
     assert _text(snapshot) == "".join(f"{n} " for n in range(20))
-    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    await asyncio.sleep(_FLUSH_INTERVAL_SECONDS * 1.2)
     assert len(seen.snapshots) == 2
 
 
 @pytest.mark.asyncio
 async def test_a_status_change_emits_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A status change wakes the sender instead of waiting out the window, and carries the text before it."""
-    monkeypatch.setattr(activity_module, "FLUSH_INTERVAL_SECONDS", 60)
+    monkeypatch.setattr(activity_module, "_FLUSH_INTERVAL_SECONDS", 60)
     seen = _Hook()
     feed = _open(tmp_path, seen)
     assert feed is not None
@@ -378,12 +423,12 @@ async def test_one_emission_in_flight_and_latest_wins(tmp_path: Path) -> None:
     await seen.wait_for(1)
     for letter in "abcde":
         feed.text(letter)
-    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    await asyncio.sleep(_FLUSH_INTERVAL_SECONDS * 1.2)
     assert len(seen.snapshots) == 1
     hold.set()
     snapshot = await seen.wait_for(2)
     assert _text(snapshot) == "abcde"
-    await asyncio.sleep(FLUSH_INTERVAL_SECONDS * 1.2)
+    await asyncio.sleep(_FLUSH_INTERVAL_SECONDS * 1.2)
     assert len(seen.snapshots) == 2
 
 
@@ -455,3 +500,255 @@ async def test_a_terminal_status_forgets_the_entry(tmp_path: Path) -> None:
     assert _open(tmp_path, seen) is not None
     fresh = await seen.wait_for(2)
     assert (fresh.status, fresh.items) == ("running", ())
+
+
+def _changed(tmp_path: Path, snapshot: SubagentSnapshot) -> SubagentChangedContext:
+    runtime_paths = test_runtime_paths(tmp_path)
+    return SubagentChangedContext(
+        **HookBindings().context_kwargs(
+            EVENT_SUBAGENT_CHANGED,
+            config=bind_runtime_paths(Config(), runtime_paths),
+            runtime_paths=runtime_paths,
+            correlation_id="corr",
+        ),
+        subagent=snapshot,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_room_scoped_hook_sees_only_the_runs_in_its_rooms(tmp_path: Path) -> None:
+    """`rooms=` scopes a hook by the room the sub-agent runs in."""
+    seen = _Hook(rooms=[ROOM])
+    registry = HookRegistry.from_plugins([_plugin("t", [seen.callback])])
+    for room_id in (ROOM, "!elsewhere:example.org"):
+        await emit(registry, EVENT_SUBAGENT_CHANGED, _changed(tmp_path, make_snapshot(room_id=room_id)))
+    assert [snapshot.room_id for snapshot in seen.snapshots] == [ROOM]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_scoped_hook_sees_only_the_runs_its_agents_delegated(tmp_path: Path) -> None:
+    """`agents=` scopes a hook by the agent that delegated, the one present in the room."""
+    seen = _Hook(agents=["helper"])
+    registry = HookRegistry.from_plugins([_plugin("t", [seen.callback])])
+    for caller in ("helper", "researcher"):
+        snapshot = make_snapshot(caller_agent_name=caller, agent_name="researcher")
+        await emit(registry, EVENT_SUBAGENT_CHANGED, _changed(tmp_path, snapshot))
+    assert [snapshot.caller_agent_name for snapshot in seen.snapshots] == ["helper"]
+
+
+@pytest.mark.asyncio
+async def test_no_feed_when_every_hook_is_scoped_to_other_runs(tmp_path: Path) -> None:
+    """Hooks whose rooms or agents never include this child keep no entry for it; a matching scope does."""
+    assert _open(tmp_path, _Hook(rooms=["!elsewhere:example.org"])) is None
+    assert _open(tmp_path, _Hook(agents=["someone_else"])) is None
+    assert not _OPEN
+    seen = _Hook(rooms=[ROOM], agents=["parent"])
+    assert _open(tmp_path, seen) is not None
+    assert (await seen.wait_for(1)).status == "running"
+
+
+def _delegating_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Hook,
+    child_turns: list[Sequence[ScriptStep]],
+) -> tuple[ResponseTurnContext, ToolRuntimeContext, RuntimePaths, Config]:
+    """Return a `leader` turn that delegates one task to `child`, whose model plays ``child_turns``."""
+    config = native_delegation_config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child", tools=["calculator"]),
+        },
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
+    )
+    ScriptedAgents({"child": ScriptedModel(child_turns)}, by_session={identity.session_id: parent}).install(monkeypatch)
+    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
+    runtime = _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
+    turn = replace(
+        make_turn_context(
+            "leader",
+            session_id=identity.session_id,
+            run_id="leader-run",
+            correlation_id="corr-leader",
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+        ),
+        prompt="Delegate",
+        execution_identity=runtime.execution_identity,
+        supports_native_tool_approval=True,
+    )
+    return turn, runtime, paths, config
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_reports_running_text_tools_then_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's run reaches the hook as it starts, with its tool and words, and finally with its result."""
+    seen = _Hook()
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, seen, child_turns)
+
+    with tool_runtime_context(runtime):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    last = await seen.wait_for_status("completed")
+    assert seen.snapshots[0].status == "running"
+    assert last is seen.snapshots[-1]
+    assert last.result_preview == "Three"
+    assert [item.kind for item in last.items] == ["tool", "text"]
+    assert last.items[0].tool is not None
+    assert (last.items[0].tool.tool_name, last.items[0].state) == ("add", "done")
+    assert _text(last) == "Three"
+    assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
+    assert last.room_id == _identity().room_id
+    assert last.parent_delegation_id is None
+    assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_child_stays_on_time_while_a_hook_is_slow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hook that blocks every call never holds the child or its caller up; the hook still gets the end."""
+    hold = asyncio.Event()
+    seen = _Hook(hold=hold, timeout_ms=10_000)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, seen, child_turns)
+
+    with tool_runtime_context(runtime):
+        result = await asyncio.wait_for(ai_response(turn, paths, config), 5)
+
+    assert result.text.endswith("Done")
+    assert [snapshot.status for snapshot in seen.snapshots] == ["running"]
+    hold.set()
+    assert (await seen.wait_for_status("completed")).result_preview == "Three"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_child_ends_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child whose stream is cancelled is published as cancelled, with what it wrote before."""
+
+    async def cancel() -> None:
+        raise asyncio.CancelledError
+
+    seen = _Hook()
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        seen,
+        [[TextDelta("Working"), Await(cancel)]],
+    )
+
+    with tool_runtime_context(runtime), pytest.raises(asyncio.CancelledError):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("cancelled")
+    assert last is seen.snapshots[-1]
+    assert _text(last) == "Working"
+    assert last.ended_at is not None
+
+
+async def _background_delegation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Hook,
+) -> tuple[DelegatingLeader, ToolJobRuntime, JobApprovalCards, ToolRuntimeContext]:
+    """Return a leader whose subagent calls run as jobs, delegating to `code`, whose `write_report` needs approval."""
+    paths = _runtime_paths(tmp_path)
+    config = delegating_config(
+        child_tools=["reports"],
+        rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
+    )
+    config.background_tool_jobs.approval_wait_timeout = 30
+    identity = _background_identity("p")
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    cards = JobApprovalCards(asyncio.get_running_loop().create_future(), runtime.journal)
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    agents = ScriptedAgents({"code": ScriptedModel([calls(tool_call("write_report", "w")), answer("Child done")])})
+    agents.install(monkeypatch)
+    registry = HookRegistry.from_plugins([_plugin("watch", [seen.callback])])
+    context = _delegate_runtime_context(config, paths, execution_identity=identity, hook_registry=registry)
+    return DelegatingLeader(config, paths, identity, agents), runtime, cards, context
+
+
+async def _delegate_in_background(
+    leader: DelegatingLeader,
+    runtime: ToolJobRuntime,
+    context: ToolRuntimeContext,
+    while_waiting: Callable[[], Awaitable[None]],
+) -> RunRecord:
+    """Run the leader's one subagent call as a job, with ``while_waiting`` running beside it, then stop the runtime."""
+    with _registered_reports():
+        try:
+            with tool_runtime_context(context):
+                beside = asyncio.create_task(while_waiting())
+                result = await asyncio.wait_for(
+                    leader.reply(
+                        calls(tool_call("run_subagent", "first", task="Report", agent_name="code")),
+                        answer("Parent done"),
+                    ),
+                    JOB_TEST_TIMEOUT,
+                )
+                await beside
+        finally:
+            await runtime.shutdown()
+    return result
+
+
+@pytest.mark.asyncio
+async def test_a_background_childs_approval_wait_reports_awaiting_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child its job asks approvals for shows as awaiting them, runs again once decided, then completes."""
+    seen = _Hook()
+    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch, seen)
+
+    async def approve() -> None:
+        await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
+        waiting = await seen.wait_for_status("awaiting_approval")
+        assert waiting.items[0].tool_call_id == "w"
+        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+
+    result = await _delegate_in_background(leader, runtime, context, approve)
+
+    assert "Child done" in str(answer_of(result, "first").content)
+    last = await seen.wait_for_status("completed")
+    statuses = [snapshot.status for snapshot in seen.snapshots]
+    assert statuses[0] == "running"
+    assert "running" in statuses[statuses.index("awaiting_approval") :]
+    assert last is seen.snapshots[-1]
+    assert last.result_preview == "Child done"
+
+
+@pytest.mark.asyncio
+async def test_a_background_child_cancelled_while_awaiting_approval_ends_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job cancelled while its child waits for an approval publishes the child as cancelled, not still waiting."""
+    seen = _Hook()
+    leader, runtime, cards, context = await _background_delegation(tmp_path, monkeypatch, seen)
+
+    async def cancel() -> None:
+        await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
+        await seen.wait_for_status("awaiting_approval")
+        [job] = runtime.retained_jobs()
+        await JobTools(leader.paths).job("cancel", job.job_id)
+        await wait_for_status(runtime, job.job_id, "cancelled")
+
+    await _delegate_in_background(leader, runtime, context, cancel)
+
+    last = await seen.wait_for_status("cancelled")
+    assert last is seen.snapshots[-1]
+    assert last.ended_at is not None
+    assert not _OPEN

@@ -10,9 +10,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import child_execution_identity
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
 from mindroom.hooks.context import SubagentChangedContext, SubagentItem, SubagentSnapshot
-from mindroom.hooks.execution import emit
+from mindroom.hooks.execution import emit, has_eligible_hooks
 from mindroom.hooks.types import EVENT_SUBAGENT_CHANGED
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -29,8 +29,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
-FLUSH_INTERVAL_SECONDS = 0.25
+_FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 16_000
 _MAX_TOOL_ITEMS = 50
 _MAX_LABEL_CHARACTERS = 2_000
@@ -41,7 +40,7 @@ def _clip(text: str) -> str:
 
 
 @dataclass(slots=True)
-class SubagentActivity:
+class _SubagentActivity:
     """The transcript and status of one child run, turned into snapshots a hook can publish."""
 
     delegation_id: str
@@ -64,7 +63,7 @@ class SubagentActivity:
     _items: list[SubagentItem] = field(default_factory=list)
 
     @classmethod
-    def start(cls, child: DelegationChild, *, parent_delegation_id: str | None, now: float) -> SubagentActivity:
+    def start(cls, child: DelegationChild, *, parent_delegation_id: str | None, now: float) -> _SubagentActivity:
         """Begin a running activity for one child."""
         identity = child_execution_identity(child)
         is_workflow = child.persona is not None and child.persona.source_kind == "workflow"
@@ -139,7 +138,7 @@ class SubagentActivity:
         """Move to a status; terminal ones set `ended_at`, `running` clears it."""
         self.status = status
         self.updated_at = now
-        self.ended_at = now if status in TERMINAL_STATUSES else None
+        self.ended_at = now if status in TERMINAL_CHILD_STATUSES else None
         if result is not None:
             self.result = result
 
@@ -171,18 +170,19 @@ class SubagentActivity:
         )
 
 
-# The activity of each child that may still resume, such as one paused for an approval; a terminal status drops it.
-_OPEN: dict[str, SubagentActivity] = {}
+# The feed of each child that may still resume, such as one paused for an approval; a terminal status drops it.
+_OPEN: dict[str, ActivityFeed] = {}
 
 
 class ActivityFeed:
-    """Publish one child attempt's snapshots to `subagent:changed` hooks without ever delaying or failing the child.
+    """Publish one child's snapshots to `subagent:changed` hooks without ever delaying or failing the child.
 
     Changes only update the activity and mark it dirty. One sender task per feed emits the latest snapshot at most once
-    per `FLUSH_INTERVAL_SECONDS`, or at once after a status change, with one emission in flight at a time.
+    per 250 ms window, or at once after a status change, with one emission in flight at a time. A child that pauses keeps
+    its feed, so every attempt of one delegation publishes through one sender, in order.
     """
 
-    def __init__(self, activity: SubagentActivity, *, registry: HookRegistry, context_kwargs: dict[str, Any]) -> None:
+    def __init__(self, activity: _SubagentActivity, *, registry: HookRegistry, context_kwargs: dict[str, Any]) -> None:
         self._activity = activity
         self._registry = registry
         self._context_kwargs = context_kwargs
@@ -201,26 +201,39 @@ class ActivityFeed:
         runtime_paths: RuntimePaths,
         correlation_id: str,
     ) -> ActivityFeed | None:
-        """Publish a running child, resuming the activity a paused attempt left; None when no hook listens."""
-        if not bindings.registry.has_hooks(EVENT_SUBAGENT_CHANGED):
-            _OPEN.pop(child.delegation_id, None)
+        """Publish a running child, resuming the feed a paused attempt left; None when no hook would see it."""
+        registry = bindings.registry
+        feed = _OPEN.pop(child.delegation_id, None)
+        if not registry.has_hooks(EVENT_SUBAGENT_CHANGED):
             return None
-        activity = _OPEN.get(child.delegation_id)
-        if activity is None:
-            activity = SubagentActivity.start(child, parent_delegation_id=parent_delegation_id, now=time.time())
-            _OPEN[child.delegation_id] = activity
-        feed = cls(
-            activity,
-            registry=bindings.registry,
-            context_kwargs=bindings.context_kwargs(
-                EVENT_SUBAGENT_CHANGED,
-                config=config,
-                runtime_paths=runtime_paths,
-                correlation_id=correlation_id,
-            ),
+        context_kwargs = bindings.context_kwargs(
+            EVENT_SUBAGENT_CHANGED,
+            config=config,
+            runtime_paths=runtime_paths,
+            correlation_id=correlation_id,
         )
+        activity = (
+            _SubagentActivity.start(child, parent_delegation_id=parent_delegation_id, now=time.time())
+            if feed is None
+            else feed._activity
+        )
+        # Scoped hooks see a child by its caller and room, which no later attempt changes.
+        context = SubagentChangedContext(**context_kwargs, subagent=activity.snapshot())
+        if not has_eligible_hooks(registry, EVENT_SUBAGENT_CHANGED, context):
+            return None
+        if feed is None:
+            feed = cls(activity, registry=registry, context_kwargs=context_kwargs)
+        else:
+            # The resumed attempt's hooks and turn publish from now on.
+            feed._registry, feed._context_kwargs = registry, context_kwargs
+        _OPEN[child.delegation_id] = feed
         feed.status("running")
         return feed
+
+    @staticmethod
+    def find(delegation_id: str) -> ActivityFeed | None:
+        """Return the feed of a child that has not ended, such as one waiting for its approvals."""
+        return _OPEN.get(delegation_id)
 
     def text(self, text: str) -> None:
         """Add the child's words; they go out with the next window's snapshot."""
@@ -238,10 +251,10 @@ class ActivityFeed:
         self._mark()
 
     def status(self, status: SubagentStatus, *, result: str | None = None) -> None:
-        """Move to a status and publish it at once; a terminal status also forgets the activity."""
+        """Move to a status and publish it at once; a terminal status also forgets the feed."""
         self._activity.set_status(status, time.time(), result=result)
         self._mark(urgent=True)
-        if status in TERMINAL_STATUSES:
+        if status in TERMINAL_CHILD_STATUSES:
             _OPEN.pop(self._activity.delegation_id, None)
 
     def _mark(self, *, urgent: bool = False) -> None:
@@ -260,7 +273,7 @@ class ActivityFeed:
         while self._dirty:
             if not self._wake.is_set():
                 with suppress(TimeoutError):
-                    async with asyncio.timeout(FLUSH_INTERVAL_SECONDS):
+                    async with asyncio.timeout(_FLUSH_INTERVAL_SECONDS):
                         await self._wake.wait()
             self._wake.clear()
             self._dirty = False
