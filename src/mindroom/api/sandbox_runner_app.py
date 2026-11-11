@@ -61,23 +61,23 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runner_token=runner_token,
     )
     computer = None
+    dedicated_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    dedicated_scope = resolved_worker_key_scope(dedicated_key) if dedicated_key is not None else None
     if runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             msg = "Worker computer requires a dedicated worker."
             raise RuntimeError(msg)
-        if os.name == "posix" and os.geteuid() == 0:
-            msg = "Worker computer requires a non-root effective user."
-            raise RuntimeError(msg)
-        root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
-        computer = WorkerComputerRuntime(WorkerDisplay(root / ".computer"))
+        # Only one requester's worker for one agent can be a Computer (computer_runtime, execute), so the flag, which
+        # reaches every worker, leaves the others their persistent browser.
+        if dedicated_scope == "user_agent":
+            if os.name == "posix" and os.geteuid() == 0:
+                msg = "Worker computer requires a non-root effective user."
+                raise RuntimeError(msg)
+            root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
+            computer = WorkerComputerRuntime(WorkerDisplay(root / ".computer"))
     app.state.worker_computer = computer
-    dedicated_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
     browser = (
-        WorkerBrowserRuntime()
-        if computer is None
-        and dedicated_key is not None
-        and resolved_worker_key_scope(dedicated_key) in {"shared", "user", "user_agent"}
-        else None
+        WorkerBrowserRuntime() if computer is None and dedicated_scope in {"shared", "user", "user_agent"} else None
     )
     app.state.worker_browser = browser
     try:

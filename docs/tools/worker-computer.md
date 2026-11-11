@@ -48,6 +48,8 @@ agents:
     worker_scope: user_agent
 ```
 
+Workers of agents with a `shared` or `user` worker scope never become a Computer, even with Computer enabled: their worker-routed `browser` keeps running in the worker without a Computer panel, while `browser_mcp` works only in a Computer.
+
 Keep the `browser` tool's default `target: host`; the connected-user `target: desktop` is a separate feature and does not run in the Computer.
 Browser URL restrictions still apply, so private networks stay blocked unless allowed.
 The `browser` tool uses the worker image's bundled Chromium in a Computer unless `BROWSER_EXECUTABLE_PATH` is set.
