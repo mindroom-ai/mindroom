@@ -20,7 +20,7 @@ from mindroom.delegation.state import DelegationChild, SubagentPersona
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.hooks import HookBindings, HookRegistry, emit, hook
 from mindroom.hooks.types import _DEFAULT_EVENT_TIMEOUT_MS, BUILTIN_EVENT_NAMES, validate_event_name
-from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.plugin_api import (
     EVENT_SUBAGENT_CHANGED,
     PLUGIN_API_VERSION,
@@ -29,6 +29,7 @@ from mindroom.plugin_api import (
     SubagentSnapshot,
 )
 from mindroom.plugin_testing import load_plugin
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.plugin_api import SubagentStatus
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_jobs.runtime import ToolJobRuntime
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from tests.fakes.scripted_model import ScriptStep
 
@@ -163,11 +165,17 @@ def _activity(*, task: str = "research", persona: SubagentPersona | None = None)
     return _SubagentActivity.start(_child(task=task, persona=persona), parent_delegation_id="p0", now=1.0)
 
 
-def _call(call_id: str, *, result: str | None = None, is_error: bool | None = None) -> ReportedCall:
+def _call(
+    call_id: str,
+    *,
+    args: dict[str, object] | None = None,
+    result: str | None = None,
+    is_error: bool | None = None,
+) -> ReportedCall:
     return ReportedCall(
         tool_call_id=call_id,
         tool_name="read_file",
-        tool_args={"path": "a.txt"},
+        tool_args={"path": "a.txt"} if args is None else args,
         result=result,
         is_error=is_error,
     )
@@ -201,18 +209,47 @@ def test_a_secret_split_across_deltas_is_redacted() -> None:
     assert "***redacted***" in text
 
 
-def test_tool_rows_pair_by_call_id_and_carry_no_full_call() -> None:
-    """A completion fills the row its call id started."""
+def test_a_secret_stays_redacted_while_the_text_cap_cuts_through_it() -> None:
+    """The cap cuts the redacted text, so a secret whose head the cut passes never shows in any snapshot."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")), 2)
-    assert a.snapshot().items[0].state == "running"
-    a.tool_completed(ToolCompleted(call=_call("c1", result="hello")), 3)
+    link = "see https://x.sharepoint.com/a/download.aspx?UniqueId=1&tempauth=v1.secret done\n"
+    a.add_text(link, 1)
+    a.add_text("x" * (16_000 - len(link) - 100), 2)
+    snapshots = []
+    for step in range((4_200 + len(link)) // 7 + 1):
+        a.add_text("x" * 7, 3 + step)
+        snapshots.append(a.snapshot())
+    assert not [snapshot for snapshot in snapshots if "v1.secret" in _text(snapshot)]
+    assert _text(snapshots[-1]) == "x" * 16_000
+
+
+def _checked_entry(item: SubagentItem) -> ToolTraceEntry:
+    """Return the item's tool entry after checking it carries only the public trace fields."""
+    entry = item.tool
+    assert entry is not None
+    assert entry.call is None
+    assert (entry.tool_call_id, entry.member_id, entry.parent_bash_call_id, entry.toolkit_name) == (None,) * 4
+    assert entry.is_error is False
+    return entry
+
+
+def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> None:
+    """A completion fills the row its call id started; neither row carries the call or internal fields."""
+    a = _activity()
+    origin = ToolCallOrigin(parent_bash_call_id="bash-1", toolkit_name="files")
+    keyed = "api_key=example-secret"
+    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin), 2)
+    (running,) = a.snapshot().items
+    assert running.state == "running"
+    assert "example-secret" not in (_checked_entry(running).args_preview or "")
+    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin), 3)
     (item,) = a.snapshot().items
     assert item.state == "done"
     assert item.tool_call_id == "c1"
-    assert item.tool is not None
-    assert item.tool.result_preview
-    assert item.tool.call is None
+    entry = _checked_entry(item)
+    assert entry.result_preview
+    assert "example-secret" not in entry.result_preview
+    assert "example-secret" not in (entry.args_preview or "")
 
 
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
@@ -272,6 +309,22 @@ def test_task_and_result_are_cut_to_2000_characters() -> None:
     snapshot = a.snapshot()
     assert len(snapshot.task) == 2_000
     assert snapshot.result_preview == "r" * 2_000
+
+
+def test_the_task_is_redacted_once_from_a_capped_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Starting redacts the task's head, capped with a margin past the preview, and snapshots reuse that preview."""
+    redacted: list[str] = []
+
+    def recording(text: str) -> str:
+        redacted.append(text)
+        return redact_sensitive_text(text)
+
+    monkeypatch.setattr(activity_module, "redact_sensitive_text", recording)
+    a = _activity(task="t" * 50_000)
+    a.snapshot()
+    a.snapshot()
+    assert [len(text) for text in redacted] == [6_000]
+    assert a.snapshot().task == "t" * 2_000
 
 
 def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:

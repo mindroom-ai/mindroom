@@ -16,7 +16,7 @@ from mindroom.hooks.execution import emit, has_eligible_hooks
 from mindroom.hooks.types import EVENT_SUBAGENT_CHANGED
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.hooks.context import HookBindings, SubagentStatus
     from mindroom.hooks.registry import HookRegistry
     from mindroom.llm.events import ToolCompleted, ToolStarted
-    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -33,10 +32,43 @@ _FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 16_000
 _MAX_TOOL_ITEMS = 50
 _MAX_LABEL_CHARACTERS = 2_000
+# How much raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
+_REDACTION_MARGIN = 4_000
 
 
 def _clip(text: str) -> str:
-    return redact_sensitive_text(text)[:_MAX_LABEL_CHARACTERS]
+    """Return the redacted head of ``text``, at most 2,000 characters; only a head with a margin past that is redacted."""
+    return redact_sensitive_text(text[: _MAX_LABEL_CHARACTERS + _REDACTION_MARGIN])[:_MAX_LABEL_CHARACTERS]
+
+
+def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
+    """Cut the oldest text in place until the items' text totals at most ``limit``; return how many items it removed."""
+    excess = sum(len(item.text) for item in items if item.kind == "text") - limit
+    removed = 0
+    index = 0
+    while excess > 0 and index < len(items):
+        item = items[index]
+        if item.kind != "text":
+            index += 1
+            continue
+        if len(item.text) > excess:
+            items[index] = replace(item, text=item.text[excess:])
+            break
+        excess -= len(item.text)
+        del items[index]
+        removed += 1
+    return removed
+
+
+def _public_entry(entry: ToolTraceEntry) -> ToolTraceEntry:
+    """Return a new entry with only the names and redacted previews a shown tool row carries, as `serialize_tool_trace`."""
+    return ToolTraceEntry(
+        type=entry.type,
+        tool_name=entry.tool_name,
+        args_preview=None if entry.args_preview is None else redact_sensitive_text(entry.args_preview),
+        result_preview=None if entry.result_preview is None else redact_sensitive_text(entry.result_preview),
+        truncated=entry.truncated,
+    )
 
 
 @dataclass(slots=True)
@@ -49,6 +81,7 @@ class _SubagentActivity:
     caller_agent_name: str
     agent_name: str
     source: Literal["delegate", "workflow"]
+    # Redacted and capped once, at the start.
     task: str
     room_id: str
     thread_id: str | None
@@ -74,7 +107,7 @@ class _SubagentActivity:
             caller_agent_name=child.caller_agent_name,
             agent_name=child.child_agent_name,
             source="workflow" if is_workflow else "delegate",
-            task=child.task,
+            task=_clip(child.task),
             room_id=identity.room_id or "",
             thread_id=identity.resolved_thread_id or identity.thread_id,
             requester_id=identity.requester_id or "",
@@ -84,7 +117,10 @@ class _SubagentActivity:
         )
 
     def add_text(self, text: str, now: float) -> None:
-        """Append the child's words, merging into the last item when that is text, then enforce the text cap."""
+        """Append the child's raw words, merging into the last item when that is text, keeping the newest raw text.
+
+        The raw text keeps a margin past the text cap, which snapshots apply to the redacted text.
+        """
         if not text:
             return
         self.updated_at = now
@@ -92,33 +128,18 @@ class _SubagentActivity:
             self._items[-1] = replace(self._items[-1], text=self._items[-1].text + text)
         else:
             self._items.append(SubagentItem(kind="text", text=text))
-        self._trim_text()
-
-    def _trim_text(self) -> None:
-        excess = sum(len(item.text) for item in self._items if item.kind == "text") - _MAX_TEXT_CHARACTERS
-        index = 0
-        while excess > 0 and index < len(self._items):
-            item = self._items[index]
-            if item.kind != "text":
-                index += 1
-                continue
-            if len(item.text) > excess:
-                self._items[index] = replace(item, text=item.text[excess:])
-                return
-            excess -= len(item.text)
-            del self._items[index]
-            self.items_dropped += 1
+        self.items_dropped += _cut_oldest_text(self._items, _MAX_TEXT_CHARACTERS + _REDACTION_MARGIN)
 
     def tool_started(self, event: ToolStarted, now: float) -> None:
         """Add a running tool row, dropping the oldest tool row past the cap."""
         self.updated_at = now
-        _, entry = format_tool_started_event(event.call, origin=event.origin)
-        self._add_tool(event.call.tool_call_id, replace(entry, call=None), "running")
+        _, entry = format_tool_started_event(event.call)
+        self._add_tool(event.call.tool_call_id, _public_entry(entry), "running")
 
     def tool_completed(self, event: ToolCompleted, now: float) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
         self.updated_at = now
-        entry = replace(format_tool_completed_event(event.call, origin=event.origin), call=None)
+        entry = _public_entry(format_tool_completed_event(event.call))
         state: Literal["done", "error"] = "error" if event.call.is_error else "done"
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
@@ -143,11 +164,12 @@ class _SubagentActivity:
             self.result = result
 
     def snapshot(self) -> SubagentSnapshot:
-        """Build the redacted, capped snapshot a plugin sees."""
-        items = tuple(
+        """Build the redacted, capped snapshot a plugin sees: each whole text item is redacted, then the text cap cuts."""
+        items = [
             replace(item, text=redact_sensitive_text(item.text)) if item.kind == "text" else item
             for item in self._items
-        )
+        ]
+        dropped = _cut_oldest_text(items, _MAX_TEXT_CHARACTERS)
         return SubagentSnapshot(
             delegation_id=self.delegation_id,
             subagent_id=self.subagent_id,
@@ -155,7 +177,7 @@ class _SubagentActivity:
             caller_agent_name=self.caller_agent_name,
             agent_name=self.agent_name,
             source=self.source,
-            task=_clip(self.task),
+            task=self.task,
             room_id=self.room_id,
             thread_id=self.thread_id,
             requester_id=self.requester_id,
@@ -164,8 +186,8 @@ class _SubagentActivity:
             started_at=self.started_at,
             updated_at=self.updated_at,
             ended_at=self.ended_at,
-            items=items,
-            items_dropped=self.items_dropped,
+            items=tuple(items),
+            items_dropped=self.items_dropped + dropped,
             result_preview=None if self.result is None else _clip(self.result),
         )
 
