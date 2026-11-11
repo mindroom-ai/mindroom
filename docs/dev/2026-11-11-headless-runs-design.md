@@ -1,0 +1,54 @@
+# Headless Runs
+
+This record covers why headless runs work as they do and what was rejected.
+The behavior itself is in [Headless Runs](../headless.md).
+
+## Goal
+
+Let another Python program run one configured agent's turn, with no Matrix homeserver and no `mindroom run`, in a directory the caller chooses.
+Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses that run the same tasks across agents, models, and configurations (as [Compare modes](../tools/agent-cli.md#compare-modes) asks for), and applications that embed an agent.
+
+## Decisions
+
+1. The API is a coroutine awaited on the caller's event loop, with no thread or subprocess, so the caller's cancellation reaches the turn and its shell commands.
+   The turn seam `ai_response` needs no Matrix; `mindroom run` first waits for a homeserver.
+2. Headless turns have their own execution channel, `headless`, beside `openai_compat`.
+   Delegation outside Matrix needs a bound detached requester on a non-Matrix channel, and the prompt drops Matrix identity and sender attribution for both channels.
+   Reusing `openai_compat` would have needed no new sites but would label headless tool calls, logs, and subagent records as API traffic.
+3. The requester must be an administrator, the first one by default.
+   Delegation rechecks the requester's responder access to each target, and outside a room only administrators pass it for every agent.
+4. A run records the router's, every agent's and team's, and the internal user's Matrix accounts in `matrix_state.yaml` without credentials, through the same helper the tests use.
+   Turn code resolves every configured entity's Matrix ID, for prompts, sender attribution, and authorization.
+   A storage that already holds credentialed accounts is refused, because a later `mindroom run` on it stops with `Stored Matrix credentials for <agent> are incomplete` for any agent that got such a record.
+5. Refusals cover only what a headless run cannot serve: a running MindRoom indexes knowledge bases and semantic file memory, loads plugins, connects MCP servers, and runs workers.
+   Without the refusals, knowledge, plugin tools, and MCP tools would silently be missing from the turn.
+   `shell` without `defaults.allow_shell_without_worker` is refused because it would answer every command with an error.
+   Mem0 recall and file memory run headless, so they are not refused; a caller that wants no memory sets `memory: none`.
+   Teams are out of scope for now.
+6. `workdir` is a parameter of the run, not a config key, so `base_dir` stays unauthorable in `config.yaml`.
+   It is bound in a context variable for the turn, which the tools of every subagent are built in, so subagents share it.
+7. Saved tool outputs stay under `storage`, in the workspace's `mindroom_tool_outputs/`, and their receipts give the absolute path.
+   A receipt's workspace-relative path would resolve against the workdir, where the file is not, or where a different file of the same name may be.
+   Under `file_access: workspace`, `file` and `coding` get that one directory as an extra read-only root, which keeps their confinement as narrow as possible while they can still read what the receipts name.
+8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
+   Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
+
+## Rejected alternatives
+
+- `/v1` without Matrix, through `mindroom run` with only its API.
+  `/v1` exists only inside `mindroom run`, which needs a homeserver; delegation over `/v1` needs an API key mapped to a human Matrix user; and a caller would own a server's lifecycle and an HTTP request that its cancellation does not cross.
+- Pointing the agent's workspace at the caller's directory.
+  It would put context files, `mindroom_tool_outputs/`, subagent profiles, and delegation records among the caller's files.
+- Saving tool outputs in the workdir.
+  They are MindRoom's state, and they would appear among the caller's files.
+- Giving `file` and `coding` the whole agent workspace as an extra root.
+  Reading saved outputs needs only their directory.
+- Refusing Mem0 memory.
+  It runs headless, and a caller that wants none can say so in its config.
+
+## Limitations
+
+- Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
+- The agent's identity prompt is the one the OpenAI-compatible API uses, which names that API.
+- Each call is a new conversation, and memories are not written automatically after a turn, as in the OpenAI-compatible API.
+- Tools that save files of their own under the workspace, such as `file_generation`, save them under `mindroom_tool_outputs/` in workdir mode; the paths their replies name are not rewritten.

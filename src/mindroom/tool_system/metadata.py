@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import math
 import os
 import re
@@ -16,6 +15,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager, load_s
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.shared_directories.paths import shared_directory_roots
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -581,11 +581,26 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
+    tools_use_workdir: bool,
     workspace_in_worker: bool | None,
     agent_state_root: Path | None,
 ) -> dict[str, object]:
-    """Build declared MindRoom-managed constructor kwargs for one tool."""
+    """Build declared MindRoom-managed constructor kwargs for one tool.
+
+    Path tools working in a workdir can read the directory of saved outputs, whose receipts name files there.
+    """
     execution_identity = worker_target.execution_identity if worker_target is not None else None
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    saved_outputs = (
+        (SharedDirectoryRoot(path=tool_output_workspace_root, writable=False),)
+        if tools_use_workdir and tool_output_workspace_root is not None
+        else ()
+    )
+
+    def path_tool_roots() -> tuple[SharedDirectoryRoot, ...]:
+        # Shared directories change during a response, so path tools resolve them on each call.
+        return (*shared_directory_roots(runtime_config, runtime_paths, agent_name), *saved_outputs)
+
     managed_values: dict[ToolManagedInitArg, Callable[[], object]] = {
         ToolManagedInitArg.RUNTIME_PATHS: lambda: runtime_paths,
         ToolManagedInitArg.CREDENTIALS_MANAGER: lambda: credentials_manager,
@@ -600,16 +615,10 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
         ),
-        ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
+        ToolManagedInitArg.AGENT_NAME: lambda: agent_name,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
-        # Shared directories change during a response, so path tools resolve them on each call.
-        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
-            shared_directory_roots,
-            runtime_config,
-            runtime_paths,
-            worker_target.routing_agent_name if worker_target is not None else None,
-        ),
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: path_tool_roots,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -756,6 +765,7 @@ def get_tool_by_name(
     runtime_overrides: dict[str, object] | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    tools_use_workdir: bool = False,
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
@@ -771,6 +781,8 @@ def get_tool_by_name(
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
     None follows the sandbox settings for those tools.
+    ``tools_use_workdir`` says the toolkit works in a directory other than ``tool_output_workspace_root``, which then
+    holds only its saved outputs.
     """
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
@@ -837,6 +849,7 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tool_output_workspace_root=tool_output_workspace_root,
+                tools_use_workdir=tools_use_workdir,
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
             ),
@@ -861,6 +874,7 @@ def get_tool_by_name(
                 tool_output_workspace_root,
                 runtime_paths,
                 auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+                tools_use_workdir=tools_use_workdir,
             )
             if tool_output_workspace_root is not None
             else None

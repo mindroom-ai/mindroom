@@ -104,6 +104,7 @@ __all__ = [
     "build_llm_request_log_context",
     "build_matrix_run_metadata",
     "collect_streamed_response_content",
+    "detached_turn_context",
     "is_empty_reply",
     "own_approved_calls",
     "pause_without_approval_error",
@@ -397,8 +398,40 @@ class ResponseTurnContext:
 
     @property
     def include_openai_compat_guidance(self) -> bool:
-        """Whether the turn answers the OpenAI-compatible API, which omits Matrix sender attribution."""
-        return self.execution_identity is not None and self.execution_identity.channel == "openai_compat"
+        """Whether the turn answers the OpenAI-compatible API or a headless run, which omit Matrix sender attribution."""
+        return self.execution_identity is not None and self.execution_identity.channel in ("openai_compat", "headless")
+
+
+def detached_turn_context(
+    entity_label: str,
+    *,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity,
+    model_name: str | None = None,
+    prompt: str = "",
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    knowledge: AgentKnowledge | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+) -> ResponseTurnContext:
+    """Build the turn context of a turn without a Matrix conversation: an OpenAI-compatible completion or a headless run."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=None,
+        correlation_id=uuid4().hex,
+        reply_to_event_id=None,
+        room_id=None,
+        thread_id=None,
+        requester_id=execution_identity.requester_id,
+        matrix_run_metadata=None,
+        active_model_name=model_name,
+        prompt=prompt,
+        thread_history=thread_history,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        knowledge=knowledge,
+        include_interactive_questions=False,
+    )
 
 
 @dataclass(frozen=True)

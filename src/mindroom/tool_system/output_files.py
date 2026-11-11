@@ -37,7 +37,7 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
-_AUTO_SAVE_ROOT = "mindroom_tool_outputs"
+SAVED_OUTPUT_DIRNAME = "mindroom_tool_outputs"
 _AUTO_SAVE_READ_HINT = (
     "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
     "Read it in parts instead, such as a line range (for example with read_file_chunk) or a search for what you need."
@@ -54,6 +54,9 @@ class ToolOutputFilePolicy:
     workspace_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    # Whether the agent's tools work in a directory other than ``workspace_root``, as in a headless run with a workdir,
+    # where ``workspace_root`` is the directory for saved outputs only: receipts then name saved files by absolute path.
+    tools_use_workdir: bool = False
 
     @classmethod
     def from_runtime(
@@ -62,12 +65,14 @@ class ToolOutputFilePolicy:
         runtime_paths: RuntimePaths,
         *,
         auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        tools_use_workdir: bool = False,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
             auto_save_threshold_bytes=auto_save_threshold_bytes,
+            tools_use_workdir=tools_use_workdir,
         )
 
 
@@ -379,9 +384,19 @@ def _safe_tool_name(tool_name: str) -> str:
     return safe[:80] or "tool"
 
 
-def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "json", "binary"]) -> str:
+def _auto_output_relative_path(
+    policy: ToolOutputFilePolicy,
+    tool_name: str,
+    output_format: Literal["text", "json", "binary"],
+) -> str:
     suffix = {"text": "txt", "json": "json", "binary": "bin"}[output_format]
-    return f"{_AUTO_SAVE_ROOT}/{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    name = f"{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    return name if policy.tools_use_workdir else f"{SAVED_OUTPUT_DIRNAME}/{name}"
+
+
+def _receipt_path(policy: ToolOutputFilePolicy, validated_path: _ValidatedOutputPath) -> str:
+    """Name a saved file as the agent's tools can open it: from their workdir only by its absolute path."""
+    return str(validated_path.absolute_path) if policy.tools_use_workdir else validated_path.requested_path
 
 
 def _write_atomic(
@@ -433,7 +448,7 @@ def write_bytes_to_output_path(
 
     return _ToolOutputWriteResult(
         receipt=_success_receipt(
-            path=validated_path.requested_path,
+            path=_receipt_path(policy, validated_path),
             byte_count=byte_count,
             output_format=output_format,
             overwritten=validated_path.overwritten,
@@ -469,7 +484,7 @@ def _redirect_result_to_file(
         return _error_receipt(write_error)
 
     return _success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         overwritten=validated_path.overwritten,
@@ -508,7 +523,7 @@ def _write_auto_saved_result(
             f"Tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte auto-save limit.",
         )
 
-    relative_path = _auto_output_relative_path(tool_name, serialized.format)
+    relative_path = _auto_output_relative_path(policy, tool_name, serialized.format)
     validated_path = _validate_output_path(policy, relative_path)
     if isinstance(validated_path, str):
         return _error_receipt(validated_path)
@@ -522,7 +537,7 @@ def _write_auto_saved_result(
         return _error_receipt(write_error)
 
     return _auto_save_success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         threshold_bytes=policy.auto_save_threshold_bytes,

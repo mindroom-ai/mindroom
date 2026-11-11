@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from pathlib import Path
@@ -72,7 +74,7 @@ from mindroom.tool_system.declarations import (
     is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
-from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.output_files import SAVED_OUTPUT_DIRNAME, ToolOutputFilePolicy
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -561,13 +563,27 @@ def _file_mode_knowledge_instruction_block(
     return "\n".join([*lines, *source_lines])
 
 
+# The directory a headless run's caller chose for the tools of its agents to work in, in place of their workspaces.
+_TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
+
+
+@contextmanager
+def tool_workdir(workdir: Path | None) -> Iterator[None]:
+    """Build the tools that take a ``base_dir`` with ``workdir`` as it for the block, or with the workspace when None."""
+    token = _TOOL_WORKDIR.set(workdir)
+    try:
+        yield
+    finally:
+        _TOOL_WORKDIR.reset(token)
+
+
 def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_path: Path) -> dict[str, object] | None:
-    """Point a registered tool that exposes a ``base_dir`` config field at the agent's workspace."""
+    """Point a registered tool that exposes a ``base_dir`` config field at the bound workdir or the agent's workspace."""
     metadata = tools.get(tool_name)
     config_fields = (metadata.config_fields if metadata is not None else None) or ()
     if not any(field.name == "base_dir" for field in config_fields):
         return None
-    return {"base_dir": str(workspace_path)}
+    return {"base_dir": str(_TOOL_WORKDIR.get() or workspace_path)}
 
 
 def _offered_entries(
@@ -653,6 +669,15 @@ def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: s
         raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
+def _tool_output_root(agent_runtime: ResolvedAgentRuntime) -> Path:
+    """Return where an agent's tools save outputs: its workspace, or only its saved-output directory beside a workdir."""
+    if _TOOL_WORKDIR.get() is None:
+        return agent_runtime.workspace.root
+    root = agent_runtime.workspace.root / SAVED_OUTPUT_DIRNAME
+    root.mkdir(exist_ok=True)
+    return root
+
+
 def _agent_tool_output_file_policy(
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
@@ -660,9 +685,10 @@ def _agent_tool_output_file_policy(
 ) -> ToolOutputFilePolicy:
     """Resolve the shared output-file policy for one agent's in-process tools."""
     return ToolOutputFilePolicy.from_runtime(
-        agent_runtime.workspace.root,
+        _tool_output_root(agent_runtime),
         runtime_paths,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        tools_use_workdir=_TOOL_WORKDIR.get() is not None,
     )
 
 
@@ -850,7 +876,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         ),
         runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
         allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
-        tool_output_workspace_root=agent_runtime.workspace.root,
+        tool_output_workspace_root=_tool_output_root(agent_runtime),
+        tools_use_workdir=_TOOL_WORKDIR.get() is not None,
         agent_state_root=agent_runtime.state_root,
         tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         workspace_in_worker=workspace_in_worker,
@@ -1959,4 +1986,5 @@ __all__ = [
     "describe_agent",
     "ensure_default_agent_workspaces",
     "team_background_jobs",
+    "tool_workdir",
 ]

@@ -523,6 +523,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     workspace_root=str(output_request.policy.workspace_root),
                     path=output_request.path.requested_path,
                     max_bytes=output_request.policy.max_bytes,
+                    tools_use_workdir=output_request.policy.tools_use_workdir,
                 )
                 if output_request is not None and output_request.path is not None
                 else None
