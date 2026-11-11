@@ -443,7 +443,7 @@ Matrix sync callback
 | `session_storage/preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
-| `delegation/activity.py` | The redacted, capped transcript and status of each running subagent, handed to a sink at most every 250 ms off the child's path |
+| `delegation/activity.py` | The redacted, capped transcript and status of each running subagent (6,000 characters of text, 20 tool rows, 300-character previews), handed to its sink, which sends `io.mindroom.subagents` frames, at most every 250 ms off the child's path |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `delegation/targets.py` | Turning a `run_subagent` or `continue_subagent` call into the child it starts or continues, for both the direct tools and the native driver |
 | `delegation/workers.py` | Whether a caller may run a subagent in a dedicated worker, which options it is offered, and the placement each attempt of such a child binds |
