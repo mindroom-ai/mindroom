@@ -167,7 +167,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        return str(client_params.get("base_url") or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
+        return str(client_params.get("base_url") or settings.base_url or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
         project, region = vertex_project_and_region(settings)
         base_url = (
@@ -182,7 +182,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
 def _route_client_kwargs(route: ClaudeRouteKind, settings: ClaudeSettings) -> dict[str, Any]:
     """Return the credentials and endpoint of one route, before ``client_params`` and the HTTP client."""
     if route == "anthropic":
-        return {"api_key": settings.api_key, "auth_token": settings.auth_token}
+        return {"api_key": settings.api_key, "auth_token": settings.auth_token, "base_url": settings.base_url}
     if route == "vertexai_claude":
         # Unset values stay unset so the SDK reads CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID, and
         # ANTHROPIC_VERTEX_BASE_URL itself.
@@ -820,10 +820,10 @@ def _claude_capabilities(
 
 
 def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_paths: RuntimePaths) -> dict[str, Any]:
-    """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
+    """Fill the direct route's key and, unless ``base_url`` or ``client_params`` sets one, its endpoint from the runtime env."""
     kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
     client_params = kwargs.get("client_params") or {}
-    if "base_url" in client_params:
+    if "base_url" in kwargs or "base_url" in client_params:
         return kwargs
     name = ENDPOINT_VARIABLES["anthropic"]
     base_url = get_secret_from_env(name, runtime_paths=runtime_paths)

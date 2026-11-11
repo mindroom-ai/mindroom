@@ -1668,6 +1668,42 @@ def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_se
     assert configured.settings.client_params == own["client_params"]
 
 
+@pytest.mark.asyncio
+async def test_base_url_sends_direct_requests_to_a_gateway_root_unless_client_params_set_one(tmp_path: Path) -> None:
+    """``base_url`` is a gateway root the SDK appends ``/v1`` to; it wins over ``ANTHROPIC_BASE_URL``, not over ``client_params``."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example"},
+    )
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    own = {"base_url": "https://gateway.example/anthropic/"}
+    both = {**own, "client_params": {"base_url": "https://params-gateway.example"}}
+    with isolated_provider_environment():
+        gateway, overridden = (
+            build_provider(
+                ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
+                runtime_paths,
+            )
+            for extra_kwargs in (own, both)
+        )
+        for provider in (gateway, overridden):
+            await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
+
+    assert [(sent.url.host, sent.url.path) for sent in wire.requests] == [
+        ("gateway.example", "/anthropic/v1/messages"),
+        ("params-gateway.example", "/v1/messages"),
+    ]
+    assert (gateway.identity.endpoint, overridden.identity.endpoint) == (
+        "https://gateway.example/anthropic",
+        "https://params-gateway.example",
+    )
+    # MindRoom adds its compaction trigger only on Anthropic's own endpoint.
+    assert gateway.capabilities.native_compaction is False
+
+
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
