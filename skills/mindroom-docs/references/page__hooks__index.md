@@ -216,13 +216,15 @@ async def keep_prices_private(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
-| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
+| `tool:environment` | Collector | `SubagentChangedContext` | `subagent`, a `SubagentSnapshot` with `delegation_id`, `subagent_id` (stable across `continue_subagent`), `parent_delegation_id` (set for a sub-agent's own sub-agent), `caller_agent_name`, `agent_name`, `source` (`"delegate"` or `"workflow"`), `task`, `room_id`, `thread_id`, `requester_id`, `model_name`, `status`, `started_at`, `updated_at`, `ended_at`, `items` (oldest first; each a `SubagentItem` with `kind` `"text"` or `"tool"`, `text`, `tool`, `tool_call_id`, `state` of `"running"`, `"done"`, or `"error"`), `items_dropped`, `result_preview` |
+| `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 | `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
 | `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
 | `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
 | `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
 | `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
+| `subagent:changed` | Observer | `SubagentChangedContext` | As each `delegate` or Dynamic Workflow child starts, writes, calls tools, and changes status, with a snapshot of its run so far | None | 500 |
 
 Custom events default to 1000 ms.
 
@@ -258,6 +260,31 @@ Custom events default to 1000 ms.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
+- **`subagent:changed`**: fires for each child of [`delegate`](https://docs.mindroom.chat/tools/agent-orchestration/#delegate) (`run_subagent` and `continue_subagent`, on every execution path) and each [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) participant: as the child starts, as it writes and calls tools, and when its status changes.
+  It runs in the primary process, and each call gets `ctx.subagent`, a `SubagentSnapshot` of the whole run so far, not a delta.
+  A plugin that uses it states `"mindroom_plugin_api": "1.30"` in its manifest.
+  `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` still do not fire for a child's turn; this event is how a plugin sees one.
+  - **Coalescing**: a child emits at most once per 250 ms, with its latest snapshot, and a status change emits at once.
+    Each child has one emission in flight at a time, and the child never waits on hooks, so a slow or failing hook drops only its own update; the next snapshot carries everything.
+  - **Scoping**: `agents=` matches the delegating agent (`ctx.subagent.caller_agent_name`), which is the agent present in the room, not the child's `agent_name`, and `rooms=` matches the run's `ctx.subagent.room_id`.
+  - **Statuses**: `running`, `awaiting_approval`, `paused`, `completed`, `failed`, `cancelled`, `denied`; the last four are final, and a final snapshot sets `ended_at` and `result_preview`.
+    `awaiting_approval` is a background sub-agent waiting for the approval cards of its gated calls, and returns to `running` once they are decided.
+    A native child waiting on a tool approval is `paused`, and resumes as `running`.
+    A gated tool call that a running child makes as its own background job still shows `running`.
+  - **Caps**: `task` and `result_preview` are cut to 2,000 characters, the child's text keeps its newest 16,000 characters, and `items` keeps the newest 50 tool items; `items_dropped` counts the items the caps removed.
+  - **Redaction**: `task`, `result_preview`, and text items are redacted.
+    A tool item carries only the public trace fields in `item.tool` (`type`, `tool_name`, `args_preview`, `result_preview`, `truncated`), as a shown reply's tool trace does, never the full arguments or result.
+
+```python
+from mindroom.plugin_api import hook
+
+
+@hook("subagent:changed", agents=["lead"])
+async def log_subagent(ctx):
+    snapshot = ctx.subagent
+    ctx.logger.info("subagent", agent=snapshot.agent_name, status=snapshot.status, items=len(snapshot.items))
+```
+
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
   Once MindRoom has created the [server emoji room](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.

@@ -35,6 +35,7 @@ Every target must be a configured agent, or the config fails to load.
 An agent may run a fresh copy of itself only when its own name is in `delegate_to`.
 For a personal agent template, see [Personal Agents](https://docs.mindroom.chat/personal-agents/#configuration).
 Subagents may delegate further through their own `delegate_to`, up to a maximum depth of 3.
+Plugins can watch each subagent live, with its text, tool calls, and status, through the [`subagent:changed`](https://docs.mindroom.chat/hooks/#event-notes) hook event.
 
 ```yaml
 agents:
