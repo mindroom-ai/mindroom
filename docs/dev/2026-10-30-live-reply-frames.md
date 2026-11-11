@@ -116,7 +116,6 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   After a crash no end is sent, because recovery runs in a new process that has no feed for the run.
   On a graceful stop the old process may still publish the run as `failed` or `cancelled`, and that frame may or may not land.
   A client should drop a `running` or `awaiting_approval` run that goes silent, and keep a `paused` or ended run for as long as it is useful.
-  A client should drop a `running` or `awaiting_approval` run that sends nothing for a while, and keep a `paused` or ended run for as long as it is useful.
 
 ## Limitations
 
