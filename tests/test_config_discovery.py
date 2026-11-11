@@ -55,6 +55,7 @@ _DETACHED_EXECUTION_IDENTITY_ALLOWLIST = {
 _DETACHED_TOOL_SCOPE_ALLOWLIST = {
     "src/mindroom/ai.py",
     "src/mindroom/api/openai_compat.py",
+    "src/mindroom/headless.py",
     "src/mindroom/mcp_gateway/tools.py",
     "src/mindroom/tool_system/runtime_context.py",
 }

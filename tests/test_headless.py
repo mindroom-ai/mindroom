@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.headless import HeadlessConfigError, run_turn, validate_config
 from mindroom.matrix.state import matrix_state_for_runtime
+from mindroom.providers import model_http_client
+from mindroom.shell.output_capture import ShellOutputDestination
 from tests.conftest import install_model_providers
 from tests.minimal_agent_fixtures import ScriptedProvider
 
@@ -86,6 +89,20 @@ async def test_run_turn_runs_tools_and_returns_text(
     assert (workdir / "out.txt").read_text() == "hi\n"
     # A headless turn makes no request of its own, such as routing or a thread title.
     assert len(provider.requests) == 2
+    # No Matrix room: the prompt neither describes one nor attributes the prompt to the requester's Matrix ID.
+    sent = str([message.content for message in provider.requests[0].messages])
+    assert "Matrix Reply Targeting" not in sent
+    assert "@alice:localhost" not in sent
+
+
+@pytest.mark.asyncio
+async def test_run_turn_closes_pooled_model_connections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The event loop's pooled model connections are closed when the turn ends, since the caller owns the loop."""
+    model_http_client._loop_client()
+    _install(monkeypatch, "hello")
+    await run_turn(_config(), agent="coder", prompt="hi", storage=tmp_path / "storage")
+
+    assert asyncio.get_running_loop() not in model_http_client._LOOP_CLIENTS
 
 
 @pytest.mark.asyncio
@@ -293,7 +310,8 @@ async def test_workdir_is_shell_cwd_and_file_base(
         "done",
     )
     storage = tmp_path / "storage"
-    await run_turn(_config(), agent="coder", prompt="go", storage=storage, workdir=workdir)
+    monkeypatch.chdir(tmp_path)
+    await run_turn(_config(), agent="coder", prompt="go", storage=storage, workdir=Path(workdir.name))
 
     shell_result = next(message for message in provider.requests[1].messages if message.role == "tool")
     assert str(shell_result.content).splitlines()[-1] == str(workdir)
@@ -369,3 +387,10 @@ async def test_shell_redirect_receipt_names_the_saved_file(
     assert receipt["path"] == str(saved.resolve())
     assert saved.read_text().endswith("1\n2\n3\n")
     assert _files(workdir) == []
+
+
+def test_shell_output_destination_keeps_the_workdir_flag_across_the_supervisor() -> None:
+    """A worker's shell supervisor receives the destination as a payload, so the flag must survive it."""
+    destination = ShellOutputDestination(workspace_root="/w", path="out.txt", max_bytes=1, tools_use_workdir=True)
+
+    assert ShellOutputDestination.from_payload(dataclasses.asdict(destination)) == destination

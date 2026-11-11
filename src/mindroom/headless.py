@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agents import tool_workdir
 from mindroom.ai import ai_response
 from mindroom.config.main import Config
 from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, memory_search
@@ -17,6 +16,7 @@ from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.response_turn import detached_turn_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.output_files import tool_workdir
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,

@@ -8,6 +8,7 @@ import json
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
@@ -101,6 +102,23 @@ class ToolOutputFileHandled:
 
 
 _active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
+# The directory a headless run's caller chose for its agents' tools to work in, in place of their workspaces.
+_TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
+
+
+@contextmanager
+def tool_workdir(workdir: Path | None) -> Iterator[None]:
+    """Build the tools of the block's turns to work in ``workdir``, or in their agents' workspaces when None."""
+    token = _TOOL_WORKDIR.set(workdir)
+    try:
+        yield
+    finally:
+        _TOOL_WORKDIR.reset(token)
+
+
+def current_tool_workdir() -> Path | None:
+    """Return the workdir bound for the tools built now, if any."""
+    return _TOOL_WORKDIR.get()
 
 
 def current_tool_output_file_request() -> ToolOutputFileRequest | None:

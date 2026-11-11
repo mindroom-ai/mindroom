@@ -765,7 +765,6 @@ def get_tool_by_name(
     runtime_overrides: dict[str, object] | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
-    tools_use_workdir: bool = False,
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
@@ -781,8 +780,7 @@ def get_tool_by_name(
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
     None follows the sandbox settings for those tools.
-    ``tools_use_workdir`` says the toolkit works in a directory other than ``tool_output_workspace_root``, which then
-    holds only its saved outputs.
+    Under a bound tool workdir, ``tool_output_workspace_root`` holds only the toolkit's saved outputs.
     """
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
@@ -810,7 +808,9 @@ def get_tool_by_name(
             configure_toolkit_functions,
             toolkit_function_names,
         )
-        from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
+
+        tools_use_workdir = current_tool_workdir() is not None
 
         settings = resolve_tool_settings(
             tool_name,

@@ -32,7 +32,7 @@ class ShellOutputDestination:
             raise TypeError(msg)
         data = cast("dict[str, object]", payload)
         workspace_root, path, max_bytes = data.get("workspace_root"), data.get("path"), data.get("max_bytes")
-        tools_use_workdir = data.get("tools_use_workdir", False)
+        tools_use_workdir = data.get("tools_use_workdir")
         if (
             not isinstance(workspace_root, str)
             or not isinstance(path, str)
