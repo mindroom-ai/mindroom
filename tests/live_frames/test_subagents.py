@@ -14,9 +14,9 @@ import pytest
 import pytest_asyncio
 
 import mindroom.live_frames.subagents as subagents_module
-from mindroom.delegation.activity import SubagentItem, SubagentSnapshot, _SubagentActivity
+from mindroom.delegation.activity import SubagentSnapshot, _SubagentActivity, _SubagentItem
 from mindroom.live_frames.frames import LiveDocs
-from mindroom.live_frames.subagents import run_docs
+from mindroom.live_frames.subagents import _run_docs
 from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from tests.subagent_activity_helpers import FRAME_ROOM_ID, FrameRoom, make_snapshot
@@ -65,30 +65,25 @@ def _forgotten() -> bool:
     return subagents_module._PUBLISHERS == {}
 
 
-def _text(text: str) -> SubagentItem:
-    return SubagentItem(kind="text", text=text)
+def _text(text: str) -> _SubagentItem:
+    return _SubagentItem(kind="text", text=text)
 
 
-def _tool(entry: ToolTraceEntry, state: Literal["running", "done", "error"], call_id: str = "call-1") -> SubagentItem:
-    return SubagentItem(kind="tool", tool=entry, tool_call_id=call_id, state=state)
+def _tool(entry: ToolTraceEntry, state: Literal["running", "done", "error"], call_id: str = "call-1") -> _SubagentItem:
+    return _SubagentItem(kind="tool", tool=entry, tool_call_id=call_id, state=state)
 
 
 def _activity(*, task: str = "Write it all down.") -> _SubagentActivity:
     return _SubagentActivity(
         delegation_id="del-1",
-        subagent_id="sub-1",
         parent_delegation_id=None,
         caller_agent_name="lead",
         root_caller_agent_name="lead",
         agent_name="researcher",
         source="delegate",
         task=task,
-        room_id=FRAME_ROOM_ID,
         thread_id=None,
-        requester_id="@user:example.org",
-        model_name="default",
         started_at=1000.0,
-        updated_at=1000.0,
     )
 
 
@@ -108,7 +103,6 @@ def _scripted_runs() -> list[SubagentSnapshot]:
         task="Find when version 2 shipped.",
         thread_id="$thread:example.org",
         started_at=1762790000.1,
-        updated_at=1762790000.1,
     )
     checking = (_text("Looking it up. Checking the tags."), _tool(listing, "running"))
     return [
@@ -133,7 +127,6 @@ def _scripted_runs() -> list[SubagentSnapshot]:
             thread_id="$thread:example.org",
             status="cancelled",
             started_at=1762790003.4,
-            updated_at=1762790004.0,
             ended_at=1762790004.0,
         ),
     ]
@@ -174,7 +167,7 @@ async def test_frames_match_the_pinned_fixture() -> None:
 
     fixture_sids = list(dict.fromkeys(case["frame"]["sid"] for case in cases))
     assert _with_sids(room.sent, fixture_sids) == [case["frame"] for case in cases]
-    assert [run_docs(snapshot, previews=True) for snapshot in snapshots] == [_docs(case["after"]) for case in cases]
+    assert [_run_docs(snapshot, previews=True) for snapshot in snapshots] == [_docs(case["after"]) for case in cases]
     first_of_run = [
         index == 0 or case["frame"]["run"] != cases[index - 1]["frame"]["run"] for index, case in enumerate(cases)
     ]
@@ -195,7 +188,7 @@ def test_markers_and_tools_line_up() -> None:
         items=(_text("Intro"), _tool(search, "done"), _text("Middle"), _tool(read, "running", "call-2")),
     )
 
-    docs = run_docs(snapshot, previews=True)
+    docs = _run_docs(snapshot, previews=True)
 
     assert docs.md == "Intro\n\n🔧 `web_search` [1]\n\nMiddle\n\n🔧 `read_file` [2] ⏳\n\n"
     assert tool_markers_match_trace(docs.md, [search, read])
@@ -208,7 +201,7 @@ def test_markers_and_tools_line_up() -> None:
 
 def test_text_left_adjacent_by_a_dropped_tool_row_stays_two_paragraphs() -> None:
     """When the tool row cap drops the call between two stretches of text, they do not run together."""
-    assert run_docs(make_snapshot(items=(_text("Before."), _text("After."))), previews=True).md == "Before.\n\nAfter."
+    assert _run_docs(make_snapshot(items=(_text("Before."), _text("After."))), previews=True).md == "Before.\n\nAfter."
 
 
 def test_a_text_cut_drops_the_oldest_text_and_keeps_every_tool_call() -> None:
@@ -216,7 +209,7 @@ def test_a_text_cut_drops_the_oldest_text_and_keeps_every_tool_call() -> None:
     entry = ToolTraceEntry(type="tool_call_completed", tool_name="read_file")
     snapshot = make_snapshot(items=(_text("abcdef"), _tool(entry, "done"), _text("ghi")))
 
-    docs = run_docs(snapshot, previews=True, text_cut=8)
+    docs = _run_docs(snapshot, previews=True, text_cut=8)
 
     assert docs.md == "\n\n🔧 `read_file` [1]\n\ni"
     assert tool_markers_match_trace(docs.md, [entry])
@@ -236,7 +229,7 @@ def test_a_text_cut_drops_the_oldest_text_and_keeps_every_tool_call() -> None:
 )
 def test_docs_stream_only_while_the_run_works(status: str, docs_status: str) -> None:
     """The reply renderer's stream status follows the run: streaming while it runs or waits for approval."""
-    assert run_docs(make_snapshot(status=status), previews=True).status == docs_status
+    assert _run_docs(make_snapshot(status=status), previews=True).status == docs_status
 
 
 @pytest.mark.asyncio
@@ -271,7 +264,7 @@ async def test_an_unchanged_snapshot_sends_nothing_and_a_status_change_sends_a_s
     await _until(lambda: len(room.sent) == 2)
 
     assert (room.sent[1]["seq"], room.sent[1]["meta"]["status"]) == (1, "awaiting_approval")
-    assert room.sent[1]["snapshot"] == run_docs(snapshot, previews=True).to_json()
+    assert room.sent[1]["snapshot"] == _run_docs(snapshot, previews=True).to_json()
 
 
 @pytest.mark.asyncio
@@ -292,10 +285,10 @@ async def test_long_text_stays_under_the_cap(
     room = FrameRoom(encrypted=encrypted)
     activity = _activity()
     if leading_tool:
-        activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})), 1000.0)
+        activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})))
     texts = []
     for index in range(500):
-        activity.add_text(f"{index:03d} Größe 日本語 {'text ' * 20}"[:100], 1000.0)
+        activity.add_text(f"{index:03d} Größe 日本語 {'text ' * 20}"[:100])
         snapshot = activity.snapshot()
         texts.append("".join(item.text for item in snapshot.items if item.kind == "text"))
         room.publish(snapshot, previews=previews)
@@ -326,10 +319,10 @@ async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) 
     activity = _activity(task=character * 1_000)
     for index in range(20):
         call = ReportedCall(f"call-{index}", "run_shell_command", {"command": character * 400}, result=character * 400)
-        activity.tool_started(ToolStarted(call=call), 1000.0)
-        activity.tool_completed(ToolCompleted(call=call), 1000.0)
+        activity.tool_started(ToolStarted(call=call))
+        activity.tool_completed(ToolCompleted(call=call))
     for index in range(12):
-        activity.add_text(character * 500, 1000.0)
+        activity.add_text(character * 500)
         room.publish(activity.snapshot())
         await _until(lambda index=index: len(room.sent) > index)
     activity.set_status("completed", 1001.0, result=character * 1_000)
@@ -430,7 +423,7 @@ async def test_retry_resends_a_snapshot() -> None:
 
     assert [frame["seq"] for frame in room.sent] == [0, 1, 2]
     assert "delta" in room.sent[1]
-    assert room.sent[2]["snapshot"] == run_docs(latest, previews=True).to_json()
+    assert room.sent[2]["snapshot"] == _run_docs(latest, previews=True).to_json()
     assert room.sent[2]["meta"]["task"] == latest.task
 
 
@@ -571,7 +564,7 @@ async def test_a_client_missing_for_longer_ends_the_publisher() -> None:
 async def test_an_error_in_the_loop_ends_the_publisher_and_a_later_run_starts_anew() -> None:
     """A bug building a frame ends the room's frames without touching the run; the next publish starts afresh."""
     room = FrameRoom()
-    room.publish(make_snapshot(items=(SubagentItem(kind="tool"),)))
+    room.publish(make_snapshot(items=(_SubagentItem(kind="tool"),)))
     await _until(_forgotten)
     room.publish(make_snapshot(delegation_id="d2", items=(_text("a"),)))
     await _until(lambda: len(room.sent) == 1)

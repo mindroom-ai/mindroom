@@ -23,9 +23,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The snapshot types are this module's interface for the sinks that take them.
-__all__ = ["ActivityFeed", "SubagentItem", "SubagentSink", "SubagentSnapshot", "SubagentStatus"]
-
 _FLUSH_INTERVAL_SECONDS = 0.25
 _MAX_TEXT_CHARACTERS = 6_000
 # Text past the cap is cut to this, so the text after a cut grows at its end until the next cut, and the frames that
@@ -38,11 +35,11 @@ _MAX_PREVIEW_CHARACTERS = 300
 # The raw text a cap keeps past its limit, so redaction sees a secret whole before the limit cuts the redacted text.
 _REDACTION_MARGIN = 4_000
 
-type SubagentStatus = Literal["running", "awaiting_approval", "paused", "completed", "failed", "cancelled", "denied"]
+type _SubagentStatus = Literal["running", "awaiting_approval", "paused", "completed", "failed", "cancelled", "denied"]
 
 
 @dataclass(frozen=True, slots=True)
-class SubagentItem:
+class _SubagentItem:
     """One step of a sub-agent's transcript: a stretch of its text or one of its tool calls."""
 
     kind: Literal["text", "tool"]
@@ -59,8 +56,6 @@ class SubagentSnapshot:
     """What one sub-agent run has done so far, redacted and capped."""
 
     delegation_id: str
-    # Stable across continue_subagent.
-    subagent_id: str
     # Set for a sub-agent's own sub-agent.
     parent_delegation_id: str | None
     caller_agent_name: str
@@ -70,16 +65,12 @@ class SubagentSnapshot:
     source: Literal["delegate", "workflow"]
     # Redacted, at most 1,000 characters.
     task: str
-    room_id: str
     thread_id: str | None
-    requester_id: str
-    model_name: str
-    status: SubagentStatus
+    status: _SubagentStatus
     started_at: float
-    updated_at: float
     ended_at: float | None
     # Oldest first.
-    items: tuple[SubagentItem, ...]
+    items: tuple[_SubagentItem, ...]
     # How many older items the transcript caps removed.
     items_dropped: int
     # Redacted, at most 1,000 characters; set only once the run ended.
@@ -102,11 +93,11 @@ def _cut_preview(preview: str | None) -> tuple[str | None, bool]:
     return redacted[:_MAX_PREVIEW_CHARACTERS], len(redacted) > _MAX_PREVIEW_CHARACTERS
 
 
-def _text_length(items: list[SubagentItem]) -> int:
+def _text_length(items: list[_SubagentItem]) -> int:
     return sum(len(item.text) for item in items if item.kind == "text")
 
 
-def _cut_oldest_text(items: list[SubagentItem], limit: int) -> int:
+def _cut_oldest_text(items: list[_SubagentItem], limit: int) -> int:
     """Cut the oldest text in place until the items' text totals at most ``limit``; return how many items it removed."""
     excess = _text_length(items) - limit
     removed = 0
@@ -143,7 +134,6 @@ class _SubagentActivity:
     """The transcript and status of one child run, turned into snapshots a sink can take."""
 
     delegation_id: str
-    subagent_id: str
     parent_delegation_id: str | None
     caller_agent_name: str
     root_caller_agent_name: str
@@ -151,17 +141,13 @@ class _SubagentActivity:
     source: Literal["delegate", "workflow"]
     # Redacted and capped once, at the start.
     task: str
-    room_id: str
     thread_id: str | None
-    requester_id: str
-    model_name: str
     started_at: float
-    updated_at: float
-    status: SubagentStatus = "running"
+    status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
     items_dropped: int = 0
-    _items: list[SubagentItem] = field(default_factory=list)
+    _items: list[_SubagentItem] = field(default_factory=list)
     # How many characters of the redacted text the cap hides, kept from one cut to the next; None after the raw text
     # was cut, so the next snapshot cuts afresh.
     _hidden: int | None = 0
@@ -180,46 +166,38 @@ class _SubagentActivity:
         is_workflow = child.persona is not None and child.persona.source_kind == "workflow"
         return cls(
             delegation_id=child.delegation_id,
-            subagent_id=child.subagent_id,
             parent_delegation_id=parent_delegation_id,
             caller_agent_name=child.caller_agent_name,
             root_caller_agent_name=root_caller_agent_name,
             agent_name=child.child_agent_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
-            room_id=identity.room_id or "",
             thread_id=identity.resolved_thread_id or identity.thread_id,
-            requester_id=identity.requester_id or "",
-            model_name=child.model_name,
             started_at=now,
-            updated_at=now,
         )
 
-    def add_text(self, text: str, now: float) -> None:
+    def add_text(self, text: str) -> None:
         """Append the child's raw words, merging into the last item when that is text, keeping the newest raw text.
 
         The raw text keeps a margin past the text cap, which snapshots apply to the redacted text.
         """
         if not text:
             return
-        self.updated_at = now
         if self._items and self._items[-1].kind == "text":
             self._items[-1] = replace(self._items[-1], text=self._items[-1].text + text)
         else:
-            self._items.append(SubagentItem(kind="text", text=text))
+            self._items.append(_SubagentItem(kind="text", text=text))
         if _text_length(self._items) > _MAX_TEXT_CHARACTERS + _REDACTION_MARGIN:
             self.items_dropped += _cut_oldest_text(self._items, _CUT_TEXT_CHARACTERS + _REDACTION_MARGIN)
             self._hidden = None
 
-    def tool_started(self, event: ToolStarted, now: float) -> None:
+    def tool_started(self, event: ToolStarted) -> None:
         """Add a running tool row; a call announced again, as a paused call is when it resumes, runs on in its row."""
-        self.updated_at = now
         _, entry = format_tool_started_event(event.call)
         self._set_tool(event.call.tool_call_id, _public_entry(entry), "running")
 
-    def tool_completed(self, event: ToolCompleted, now: float) -> None:
+    def tool_completed(self, event: ToolCompleted) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
-        self.updated_at = now
         entry = _public_entry(format_tool_completed_event(event.call))
         self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done")
 
@@ -230,16 +208,15 @@ class _SubagentActivity:
             if item.kind == "tool" and item.tool_call_id == tool_call_id:
                 self._items[index] = replace(item, tool=entry, state=state)
                 return
-        self._items.append(SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state))
+        self._items.append(_SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state))
         tools = [index for index, item in enumerate(self._items) if item.kind == "tool"]
         if len(tools) > _MAX_TOOL_ITEMS:
             del self._items[tools[0]]
             self.items_dropped += 1
 
-    def set_status(self, status: SubagentStatus, now: float, *, result: str | None = None) -> None:
+    def set_status(self, status: _SubagentStatus, now: float, *, result: str | None = None) -> None:
         """Move to a status; terminal ones set `ended_at`, `running` clears it."""
         self.status = status
-        self.updated_at = now
         self.ended_at = now if status in TERMINAL_CHILD_STATUSES else None
         if result is not None:
             self.result = result
@@ -259,20 +236,15 @@ class _SubagentActivity:
         dropped = _cut_oldest_text(items, total - self._hidden)
         return SubagentSnapshot(
             delegation_id=self.delegation_id,
-            subagent_id=self.subagent_id,
             parent_delegation_id=self.parent_delegation_id,
             caller_agent_name=self.caller_agent_name,
             root_caller_agent_name=self.root_caller_agent_name,
             agent_name=self.agent_name,
             source=self.source,
             task=self.task,
-            room_id=self.room_id,
             thread_id=self.thread_id,
-            requester_id=self.requester_id,
-            model_name=self.model_name,
             status=self.status,
             started_at=self.started_at,
-            updated_at=self.updated_at,
             ended_at=self.ended_at,
             items=tuple(items),
             items_dropped=self.items_dropped + dropped,
@@ -332,20 +304,20 @@ class ActivityFeed:
 
     def text(self, text: str) -> None:
         """Add the child's words; they go out with the next window's snapshot."""
-        self._activity.add_text(text, time.time())
+        self._activity.add_text(text)
         self._mark()
 
     def tool_started(self, event: ToolStarted) -> None:
         """Add a running tool row; it goes out with the next window's snapshot."""
-        self._activity.tool_started(event, time.time())
+        self._activity.tool_started(event)
         self._mark()
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish a tool row; it goes out with the next window's snapshot."""
-        self._activity.tool_completed(event, time.time())
+        self._activity.tool_completed(event)
         self._mark()
 
-    def status(self, status: SubagentStatus, *, result: str | None = None) -> None:
+    def status(self, status: _SubagentStatus, *, result: str | None = None) -> None:
         """Move to a status and publish it at once; a terminal status also forgets the feed."""
         self._activity.set_status(status, time.time(), result=result)
         self._mark(urgent=True)

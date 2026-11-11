@@ -40,10 +40,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The frame format and `publish` are this module's interface for the sub-agent activity feed's sink.
-__all__ = ["SUBAGENT_EVENT_TYPE", "publish", "run_docs", "run_meta", "subagent_frame"]
-
-SUBAGENT_EVENT_TYPE = "io.mindroom.subagents"
+_SUBAGENT_EVENT_TYPE = "io.mindroom.subagents"
 
 # At most 8 frames a second per account and room, which leaves at least 12 of the homeserver's 30 events a second per
 # sender and room for the account's own reply frames at 10 a second.
@@ -60,7 +57,7 @@ _RELAY_OFF_SECONDS = 60.0
 type _Frame = dict[str, object]
 
 
-def run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) -> LiveDocs:
+def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) -> LiveDocs:
     """Return a run's transcript as a reply's live documents, without its oldest ``text_cut`` characters of text.
 
     Text items are the Markdown; each tool item adds the marker line a reply shows for it, numbered by its entry in
@@ -93,7 +90,7 @@ def run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) -
     return LiveDocs(md="".join(parts), reasoning="", tools=tools, status=status, activity="")
 
 
-def run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
+def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
     """Return what every frame says about its run; ``full``, for a snapshot, adds the task and an ended run's result."""
     meta: dict[str, object] = {
         "agent": snapshot.agent_name,
@@ -111,25 +108,6 @@ def run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
         if snapshot.status in TERMINAL_CHILD_STATUSES:
             meta["result"] = snapshot.result_preview
     return meta
-
-
-def subagent_frame(
-    *,
-    run: str,
-    sid: str,
-    seq: int,
-    meta: dict[str, object],
-    snapshot: LiveDocs | None = None,
-    delta: dict[str, object] | None = None,
-) -> _Frame:
-    """Return one frame of a run's stream, carrying either a whole snapshot or a delta."""
-    frame: _Frame = {"v": FRAME_VERSION, "run": run, "sid": sid, "seq": seq, "meta": meta}
-    if snapshot is not None:
-        frame["snapshot"] = snapshot.to_json()
-    else:
-        assert delta, "a delta frame carries at least one change"
-        frame["delta"] = delta
-    return frame
 
 
 def _trimmed(before: SubagentSnapshot, after: SubagentSnapshot) -> bool:
@@ -168,17 +146,17 @@ class _Stream:
         """
         snapshot, landed = self.snapshot, self.landed
         self.dirty = False
-        fits = partial(frame_fits, client, room_id, event_type=SUBAGENT_EVENT_TYPE)
+        fits = partial(frame_fits, client, room_id, event_type=_SUBAGENT_EVENT_TYPE)
         if (
             landed is None
             or snapshot.status in TERMINAL_CHILD_STATUSES
             or now - self.snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
             or _trimmed(landed[0], snapshot)
-            or run_meta(landed[0], full=False) != run_meta(snapshot, full=False)
+            or _run_meta(landed[0], full=False) != _run_meta(snapshot, full=False)
         ):
             frame, docs = self._fitted_snapshot(snapshot, fits)
         else:
-            docs = run_docs(snapshot, previews=self.previews and self.fit[0], text_cut=self.fit[1])
+            docs = _run_docs(snapshot, previews=self.previews and self.fit[0], text_cut=self.fit[1])
             delta = live_delta(landed[1], docs)
             if not delta:
                 return None
@@ -191,7 +169,7 @@ class _Stream:
             room_id,
             frame,
             transaction_id=f"subagents.{self.sid}.{self.seq}",
-            event_type=SUBAGENT_EVENT_TYPE,
+            event_type=_SUBAGENT_EVENT_TYPE,
         )
         if outcome is LiveSendOutcome.SENT:
             self.landed = (snapshot, docs)
@@ -209,15 +187,22 @@ class _Stream:
         docs: LiveDocs | None = None,
         delta: _Frame | None = None,
     ) -> _Frame:
-        run, meta = snapshot.delegation_id, run_meta(snapshot, full=docs is not None)
-        return subagent_frame(run=run, sid=self.sid, seq=self.seq + 1, meta=meta, snapshot=docs, delta=delta)
+        """Return the next frame of the run's stream, carrying either a whole snapshot, ``docs``, or a ``delta``."""
+        frame: _Frame = {"v": FRAME_VERSION, "run": snapshot.delegation_id, "sid": self.sid, "seq": self.seq + 1}
+        frame["meta"] = _run_meta(snapshot, full=docs is not None)
+        if docs is not None:
+            frame["snapshot"] = docs.to_json()
+        else:
+            assert delta, "a delta frame carries at least one change"
+            frame["delta"] = delta
+        return frame
 
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
         """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text."""
 
         def built(previews: bool, text_cut: int) -> tuple[_Frame, LiveDocs]:
             self.fit = (previews, text_cut)
-            docs = run_docs(snapshot, previews=previews, text_cut=text_cut)
+            docs = _run_docs(snapshot, previews=previews, text_cut=text_cut)
             return self._frame(snapshot, docs=docs), docs
 
         frame, docs = built(self.previews, 0)

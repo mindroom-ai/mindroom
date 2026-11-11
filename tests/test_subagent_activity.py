@@ -25,9 +25,9 @@ from mindroom.delegation.activity import (
     _FLUSH_INTERVAL_SECONDS,
     _OPEN,
     ActivityFeed,
-    SubagentItem,
     SubagentSnapshot,
     _SubagentActivity,
+    _SubagentItem,
 )
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.activity import SubagentStatus
+    from mindroom.delegation.activity import _SubagentStatus
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_jobs.runtime import ToolJobRuntime
@@ -79,7 +79,7 @@ ALICE = "@alice:example.org"
 
 def test_snapshot_items_are_frozen() -> None:
     """Snapshots and their items are immutable values."""
-    snapshot = make_snapshot(items=(SubagentItem(kind="text", text="hi"),))
+    snapshot = make_snapshot(items=(_SubagentItem(kind="text", text="hi"),))
     with pytest.raises(AttributeError):
         snapshot.status = "failed"  # type: ignore[misc]
     assert snapshot.items[0].tool is None
@@ -144,29 +144,27 @@ def _call(
 
 
 def test_start_reads_the_child_identity() -> None:
-    """The snapshot carries the room, resolved thread, requester, model, callers, and parent link."""
+    """The snapshot carries the resolved thread, callers, and parent link."""
     snapshot = _activity().snapshot()
     assert (snapshot.caller_agent_name, snapshot.root_caller_agent_name) == ("parent", "lead")
-    assert (snapshot.room_id, snapshot.thread_id, snapshot.requester_id) == (ROOM, "$thread", ALICE)
-    assert (snapshot.model_name, snapshot.parent_delegation_id, snapshot.source) == ("fast", "p0", "delegate")
+    assert (snapshot.thread_id, snapshot.parent_delegation_id, snapshot.source) == ("$thread", "p0", "delegate")
     assert (snapshot.status, snapshot.started_at, snapshot.ended_at) == ("running", 1.0, None)
 
 
 def test_text_deltas_merge_into_one_item() -> None:
     """Consecutive text becomes one item."""
     a = _activity()
-    a.add_text("Hel", 2)
-    a.add_text("lo", 3)
+    a.add_text("Hel")
+    a.add_text("lo")
     items = a.snapshot().items
     assert [(i.kind, i.text) for i in items] == [("text", "Hello")]
-    assert a.snapshot().updated_at == 3
 
 
 def test_a_secret_split_across_deltas_is_redacted() -> None:
     """Redaction sees the whole item, so a secret split across deltas is caught."""
     a = _activity()
-    a.add_text("see https://x.sharepoint.com/a/download.aspx?UniqueId=1&temp", 1)
-    a.add_text("auth=v1.secret done", 2)
+    a.add_text("see https://x.sharepoint.com/a/download.aspx?UniqueId=1&temp")
+    a.add_text("auth=v1.secret done")
     text = a.snapshot().items[0].text
     assert "v1.secret" not in text
     assert "***redacted***" in text
@@ -176,18 +174,18 @@ def test_a_secret_stays_redacted_while_the_text_cap_cuts_through_it() -> None:
     """The cap cuts the redacted text, so a secret whose head the cut passes never shows in any snapshot."""
     a = _activity()
     link = "see https://x.sharepoint.com/a/download.aspx?UniqueId=1&tempauth=v1.secret done\n"
-    a.add_text(link, 1)
-    a.add_text("x" * (6_000 - len(link) - 100), 2)
+    a.add_text(link)
+    a.add_text("x" * (6_000 - len(link) - 100))
     snapshots = []
-    for step in range((4_200 + len(link)) // 7 + 1):
-        a.add_text("x" * 7, 3 + step)
+    for _ in range((4_200 + len(link)) // 7 + 1):
+        a.add_text("x" * 7)
         snapshots.append(a.snapshot())
     assert not [snapshot for snapshot in snapshots if "v1.secret" in _text(snapshot)]
     assert set(_text(snapshots[-1])) == {"x"}
     assert 5_000 <= len(_text(snapshots[-1])) <= 6_000
 
 
-def _checked_entry(item: SubagentItem) -> ToolTraceEntry:
+def _checked_entry(item: _SubagentItem) -> ToolTraceEntry:
     """Return the item's tool entry after checking it carries only the public trace fields."""
     entry = item.tool
     assert entry is not None
@@ -202,11 +200,11 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     a = _activity()
     origin = ToolCallOrigin(parent_bash_call_id="bash-1", toolkit_name="files")
     keyed = "api_key=example-secret"
-    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin), 2)
+    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin))
     (running,) = a.snapshot().items
     assert running.state == "running"
     assert "example-secret" not in (_checked_entry(running).args_preview or "")
-    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin), 3)
+    a.tool_completed(ToolCompleted(call=_call("c1", args={"query": keyed}, result=keyed), origin=origin))
     (item,) = a.snapshot().items
     assert item.state == "done"
     assert item.tool_call_id == "c1"
@@ -219,10 +217,10 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
 def test_a_call_announced_again_keeps_its_one_row() -> None:
     """A paused call that is announced again as it resumes runs on in its own row, which its completion finishes."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.add_text("Waiting", 3)
-    a.tool_started(ToolStarted(call=_call("c1")), 4)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), 5)
+    a.tool_started(ToolStarted(call=_call("c1")))
+    a.add_text("Waiting")
+    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
     assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
         ("tool", "c1", "done"),
         ("text", None, None),
@@ -232,24 +230,24 @@ def test_a_call_announced_again_keeps_its_one_row() -> None:
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
     """An unmatched completion still shows up."""
     a = _activity()
-    a.tool_completed(ToolCompleted(call=_call("c9", result="x")), 2)
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
     assert [(i.tool_call_id, i.state) for i in a.snapshot().items] == [("c9", "done")]
 
 
 def test_failed_tool_call_is_an_error_row() -> None:
     """A failed call ends in state error."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)), 3)
+    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
     assert a.snapshot().items[0].state == "error"
 
 
 def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
     """The oldest text loses its head first; the order of items stays."""
     a = _activity()
-    a.add_text("a" * 4_000, 1)
-    a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.add_text("b" * 4_000, 3)
+    a.add_text("a" * 4_000)
+    a.tool_started(ToolStarted(call=_call("c1")))
+    a.add_text("b" * 4_000)
     items = a.snapshot().items
     texts = [i.text for i in items if i.kind == "text"]
     assert texts == ["a" * 1_000, "b" * 4_000]
@@ -259,11 +257,11 @@ def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
 def test_text_after_a_cut_keeps_its_start_until_the_next_cut() -> None:
     """Between cuts the text only grows at its end, so the frames that carry it are appends."""
     a = _activity()
-    a.add_text("a" * 6_001, 1)
+    a.add_text("a" * 6_001)
     after_cut = _text(a.snapshot())
-    a.add_text("b" * 900, 2)
+    a.add_text("b" * 900)
     grown = _text(a.snapshot())
-    a.add_text("c" * 200, 3)
+    a.add_text("c" * 200)
     next_cut = _text(a.snapshot())
     assert (len(after_cut), len(grown), len(next_cut)) == (5_000, 5_900, 5_000)
     assert grown.startswith(after_cut)
@@ -274,17 +272,17 @@ def test_text_after_a_cut_keeps_its_start_until_the_next_cut() -> None:
 def test_raw_text_past_the_cap_and_its_margin_is_cut_and_shows_its_newest_5000() -> None:
     """Text arriving faster than snapshots stays bounded, and the next snapshot cuts afresh."""
     a = _activity()
-    a.add_text("a" * 6_000, 1)
-    a.add_text("b" * 5_000, 2)
+    a.add_text("a" * 6_000)
+    a.add_text("b" * 5_000)
     assert _text(a.snapshot()) == "b" * 5_000
 
 
 def test_an_emptied_text_item_is_removed_and_counted() -> None:
     """Text trimmed to nothing disappears and counts as dropped."""
     a = _activity()
-    a.add_text("a" * 100, 1)
-    a.tool_started(ToolStarted(call=_call("c1")), 2)
-    a.add_text("b" * 6_000, 3)
+    a.add_text("a" * 100)
+    a.tool_started(ToolStarted(call=_call("c1")))
+    a.add_text("b" * 6_000)
     snapshot = a.snapshot()
     assert [i.kind for i in snapshot.items] == ["tool", "text"]
     assert snapshot.items_dropped == 1
@@ -294,7 +292,7 @@ def test_tool_items_keep_the_newest_20_and_count_the_rest() -> None:
     """The 21st tool row removes the oldest one."""
     a = _activity()
     for n in range(23):
-        a.tool_started(ToolStarted(call=_call(f"c{n}")), n)
+        a.tool_started(ToolStarted(call=_call(f"c{n}")))
     snapshot = a.snapshot()
     assert len(snapshot.items) == 20
     assert snapshot.items[0].tool_call_id == "c3"
@@ -393,7 +391,7 @@ class _Sink:
                 await self._arrived.wait()
         return self.snapshots[count - 1]
 
-    async def wait_for_status(self, status: SubagentStatus, *, agent_name: str | None = None) -> SubagentSnapshot:
+    async def wait_for_status(self, status: _SubagentStatus, *, agent_name: str | None = None) -> SubagentSnapshot:
         """Return the first snapshot with ``status``, of ``agent_name``'s run when given, once it has arrived."""
 
         def matches(snapshot: SubagentSnapshot) -> bool:
@@ -594,7 +592,6 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.items[0].tool.tool_name, last.items[0].state) == ("add", "done")
     assert _text(last) == "Three"
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
-    assert last.room_id == _identity().room_id
     assert last.parent_delegation_id is None
     assert not _OPEN
 

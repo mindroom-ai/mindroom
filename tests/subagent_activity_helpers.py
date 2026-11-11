@@ -13,7 +13,7 @@ from nio.api import Api
 from nio.crypto.sessions import OutboundGroupSession
 
 from mindroom.delegation.activity import SubagentSnapshot
-from mindroom.live_frames.subagents import SUBAGENT_EVENT_TYPE, publish
+from mindroom.live_frames.subagents import _SUBAGENT_EVENT_TYPE, publish
 from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
@@ -28,20 +28,15 @@ def make_snapshot(**overrides: Any) -> SubagentSnapshot:  # noqa: ANN401
     """Return a running sub-agent snapshot, with any field overridden."""
     fields: dict[str, Any] = {
         "delegation_id": "d1",
-        "subagent_id": "s1",
         "parent_delegation_id": None,
         "caller_agent_name": "helper",
         "root_caller_agent_name": "helper",
         "agent_name": "researcher",
         "source": "delegate",
         "task": "Find the answer",
-        "room_id": FRAME_ROOM_ID,
         "thread_id": None,
-        "requester_id": "@alice:example.org",
-        "model_name": "default",
         "status": "running",
         "started_at": 1000.0,
-        "updated_at": 1000.0,
         "ended_at": None,
         "items": (),
         "items_dropped": 0,
@@ -103,7 +98,7 @@ class FrameRoom:
         tx_id: str,
     ) -> nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError:
         frame = self.encrypted.pop() if "encrypted" in content else content
-        assert (room_id, event_type) == (FRAME_ROOM_ID, SUBAGENT_EVENT_TYPE)
+        assert (room_id, event_type) == (FRAME_ROOM_ID, _SUBAGENT_EVENT_TYPE)
         assert tx_id == f"subagents.{frame['sid']}.{frame['seq']}"
         self.sent.append(frame)
         # The body nio sends: compact JSON with ASCII escapes.
