@@ -224,6 +224,19 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     assert "example-secret" not in (entry.args_preview or "")
 
 
+def test_a_call_announced_again_keeps_its_one_row() -> None:
+    """A paused call that is announced again as it resumes runs on in its own row, which its completion finishes."""
+    a = _activity()
+    a.tool_started(ToolStarted(call=_call("c1")), 2)
+    a.add_text("Waiting", 3)
+    a.tool_started(ToolStarted(call=_call("c1")), 4)
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")), 5)
+    assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
+        ("tool", "c1", "done"),
+        ("text", None, None),
+    ]
+
+
 def test_a_completion_without_a_start_appends_a_done_row() -> None:
     """An unmatched completion still shows up."""
     a = _activity()

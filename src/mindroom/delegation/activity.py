@@ -212,24 +212,24 @@ class _SubagentActivity:
             self._hidden = None
 
     def tool_started(self, event: ToolStarted, now: float) -> None:
-        """Add a running tool row, dropping the oldest tool row past the cap."""
+        """Add a running tool row; a call announced again, as a paused call is when it resumes, runs on in its row."""
         self.updated_at = now
         _, entry = format_tool_started_event(event.call)
-        self._add_tool(event.call.tool_call_id, _public_entry(entry), "running")
+        self._set_tool(event.call.tool_call_id, _public_entry(entry), "running")
 
     def tool_completed(self, event: ToolCompleted, now: float) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
         self.updated_at = now
         entry = _public_entry(format_tool_completed_event(event.call))
-        state: Literal["done", "error"] = "error" if event.call.is_error else "done"
+        self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done")
+
+    def _set_tool(self, tool_call_id: str, entry: ToolTraceEntry, state: Literal["running", "done", "error"]) -> None:
+        """Update the newest row of the call, else append one, dropping the oldest tool row past the cap."""
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
-            if item.kind == "tool" and item.tool_call_id == event.call.tool_call_id:
+            if item.kind == "tool" and item.tool_call_id == tool_call_id:
                 self._items[index] = replace(item, tool=entry, state=state)
                 return
-        self._add_tool(event.call.tool_call_id, entry, state)
-
-    def _add_tool(self, tool_call_id: str, entry: ToolTraceEntry, state: Literal["running", "done", "error"]) -> None:
         self._items.append(SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state))
         tools = [index for index, item in enumerate(self._items) if item.kind == "tool"]
         if len(tools) > _MAX_TOOL_ITEMS:
