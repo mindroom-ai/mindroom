@@ -34,6 +34,7 @@ EVENT_TURN_STARTED = "turn:started"
 EVENT_TURN_PAUSED = "turn:paused"
 EVENT_TURN_RESUMED = "turn:resumed"
 EVENT_TURN_ENDED = "turn:ended"
+EVENT_SUBAGENT_CHANGED = "subagent:changed"
 
 BUILTIN_EVENT_NAMES = frozenset(
     {
@@ -63,6 +64,7 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_TURN_PAUSED,
         EVENT_TURN_RESUMED,
         EVENT_TURN_ENDED,
+        EVENT_SUBAGENT_CHANGED,
     },
 )
 _RESERVED_EVENT_NAMESPACES = frozenset(
@@ -80,6 +82,7 @@ _RESERVED_EVENT_NAMESPACES = frozenset(
         "tool",
         "contact",
         "turn",
+        "subagent",
     },
 )
 _EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
@@ -110,6 +113,7 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_TURN_PAUSED: 3000,
     EVENT_TURN_RESUMED: 2000,
     EVENT_TURN_ENDED: 3000,
+    EVENT_SUBAGENT_CHANGED: 500,
 }
 _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 

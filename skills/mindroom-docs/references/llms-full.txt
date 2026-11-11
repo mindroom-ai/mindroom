@@ -18068,7 +18068,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.29",
+  "mindroom_plugin_api": "1.30",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -20018,7 +20018,7 @@ async def test_hook(plugin):
 | `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given, which works until the block ends. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
 | `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |
 | `await call_tool(tool, function, arguments, *, agent, sender, room)` | Runs one call as `agent` runs it for `sender` in `room`, through the `tool:*` hooks and with `current_plugin_context`, and returns its `status` (`ok`, `failed`, `declined`, ...), `value`, and `failure_text`. It raises `LookupError` for a tool or function the agent lacks and `PermissionError` for a function that may need approval. |
-| `await fire(event, *, agent, sender, room, body="", **fields)` | Runs the hooks of a `message:*`, `system:enrich`, or custom event for `sender`'s message `body` in `room`, and returns what they returned to MindRoom: the enrichment items, the transformed draft, the context, or `None` for a custom event. `fields` are the event context's own required fields, such as `target_entity_name` and `target_member_names` for enrichment, or for `message:before_response`, `message:final_response_transform`, `message:after_response`, and `message:cancelled` those of its draft, result, or info. A custom event takes `payload` and `source_plugin` and runs as a tool call's `emit_custom_event` emits it, so its hooks can emit further events. |
+| `await fire(event, *, agent, sender, room, body="", **fields)` | Runs the hooks of a `message:*`, `system:enrich`, `subagent:changed`, or custom event for `sender`'s message `body` in `room`, and returns what they returned to MindRoom: the enrichment items, the transformed draft, the context, or `None` for a custom event. `fields` are the event context's own required fields, such as `target_entity_name` and `target_member_names` for enrichment, or for `message:before_response`, `message:final_response_transform`, `message:after_response`, and `message:cancelled` those of its draft, result, or info. `subagent:changed` takes the `subagent` snapshot (a `SubagentSnapshot`), ignores `body`, and returns its `SubagentChangedContext`. A custom event takes `payload` and `source_plugin` and runs as a tool call's `emit_custom_event` emits it, so its hooks can emit further events. |
 
 `call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
 Each `call_tool` and `fire` starts from a new message of `sender`'s, which roots a thread as it would live: in thread mode `resolved_thread_id` is that message's ID, and in room mode it is None.

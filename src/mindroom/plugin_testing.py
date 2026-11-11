@@ -41,6 +41,7 @@ from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_SUBAGENT_CHANGED,
     EVENT_SYSTEM_ENRICH,
     AfterResponseContext,
     BeforeResponseContext,
@@ -55,6 +56,7 @@ from mindroom.hooks import (
     MessageReceivedContext,
     ResponseDraft,
     ResponseResult,
+    SubagentChangedContext,
     SystemEnrichContext,
     build_hook_room_state_querier,
     emit,
@@ -351,17 +353,20 @@ class LoadedPlugin:
 
         ``fields`` are the event's own; for ``message:before_response``, ``message:final_response_transform``,
         ``message:after_response`` and ``message:cancelled`` they are those of its draft, result or info, and for a
-        custom event its ``payload`` and ``source_plugin``. It raises ``TurnRefused`` when the agent would not answer
+        custom event its ``payload`` and ``source_plugin``. ``subagent:changed`` takes the ``subagent`` snapshot and
+        ignores ``body``; it runs as the sub-agent's caller ``agent`` in ``room``, and returns its context. It raises ``TurnRefused`` when the agent would not answer
         the sender there, and returns what the event's hooks returned to MindRoom: the enrichment items, the
         transformed draft, the context the hooks changed, or None for a custom event.
         """
         event = validate_event_name(event)
-        if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS:
-            msg = f"mindroom.plugin_testing fires message, system:enrich and custom events, not {event}"
+        if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS and event != EVENT_SUBAGENT_CHANGED:
+            msg = (
+                f"mindroom.plugin_testing fires message, system:enrich, subagent:changed and custom events, not {event}"
+            )
             raise ValueError(msg)
         event_id = f"$message{next(self._event_ids)}"
         context = await self._turn_context(agent, sender, room, event_id)
-        if event not in _TURN_EVENTS:
+        if event not in _TURN_EVENTS and event != EVENT_SUBAGENT_CHANGED:
             # A custom event comes from a tool call, so it runs as that call emits it, in the call's conversation.
             with tool_runtime_context(context):
                 return await emit_custom_event(fields["source_plugin"], event, fields["payload"])
@@ -371,6 +376,10 @@ class LoadedPlugin:
             runtime_paths=self.runtime_paths,
             correlation_id=event_id,
         )
+        if event == EVENT_SUBAGENT_CHANGED:
+            subagent_context = SubagentChangedContext(**base, subagent=fields["subagent"])
+            await emit(context.hooks.registry, event, subagent_context)
+            return subagent_context
         origin = classify_turn_origin(
             transport_sender_id=sender,
             requester_id=context.requester_id,

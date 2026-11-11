@@ -13,7 +13,7 @@ import hashlib
 import inspect
 import json
 import pkgutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args, get_origin
 
 import pytest
 import typing_extensions
@@ -44,6 +44,7 @@ _EXPORTS = [
     "EVENT_ROOM_MEMBER_LEFT",
     "EVENT_SCHEDULE_FIRED",
     "EVENT_SESSION_STARTED",
+    "EVENT_SUBAGENT_CHANGED",
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
@@ -106,6 +107,10 @@ _EXPORTS = [
     "SenderKind",
     "SessionHookContext",
     "SetupType",
+    "SubagentChangedContext",
+    "SubagentItem",
+    "SubagentSnapshot",
+    "SubagentStatus",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
@@ -274,6 +279,13 @@ _SIGNATURES = {
         f"({_HOOK}, task_id, workflow, room_id, thread_id, created_by, message_text, suppress, *, {_HOOK_HELPERS})"
     ),
     "SessionHookContext": f"({_HOOK}, agent_name, scope, session_id, room_id, thread_id, *, {_HOOK_HELPERS})",
+    "SubagentChangedContext": f"(config, runtime_paths, correlation_id, *, event_name, {_HOOK_HELPERS}, subagent)",
+    "SubagentItem": "(kind, text, tool, tool_call_id, state)",
+    "SubagentSnapshot": (
+        "(delegation_id, subagent_id, parent_delegation_id, caller_agent_name, agent_name, source, task, room_id, "
+        "thread_id, requester_id, model_name, status, started_at, updated_at, ended_at, items, items_dropped, "
+        "result_preview)"
+    ),
     "SystemEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "ToolAfterCallContext": (
         f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
@@ -360,6 +372,11 @@ _SIGNATURES = {
 
 # Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
 # pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
+# Exported type aliases over string literals, with the values they allow.
+_LITERAL_ALIASES = {
+    "SubagentStatus": ["running", "awaiting_approval", "paused", "completed", "failed", "cancelled", "denied"],
+}
+
 _ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry", "WorkerServiceError"]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
@@ -552,6 +569,7 @@ _CONSTANTS = {
     "EVENT_ROOM_MEMBER_LEFT": "room:member_left",
     "EVENT_SCHEDULE_FIRED": "schedule:fired",
     "EVENT_SESSION_STARTED": "session:started",
+    "EVENT_SUBAGENT_CHANGED": "subagent:changed",
     "EVENT_SYSTEM_ENRICH": "system:enrich",
     "EVENT_TOOL_AFTER_CALL": "tool:after_call",
     "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
@@ -644,7 +662,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 29), "2a27f954cc71341be4367c00b61358be1f8238ec9a9c98b44383a80352f2fe3f")
+_PINNED_VERSION = ((1, 30), "794aafa5f188f7df7f8b70d1b680c53f86decf2debe6432ad1c51f922c08c025")
 
 
 def _is_enum(obj: object) -> bool:
@@ -684,9 +702,13 @@ def test_each_exported_callable_keeps_its_parameter_names_and_kinds() -> None:
         and not _is_enum(obj)
         and not typing_extensions.is_protocol(obj)
         and name not in _ANNOTATION_TYPES
+        and get_origin(obj) is not Literal
     }
     assert shapes == _SIGNATURES
     assert all(isinstance(exported[name], type) for name in _ANNOTATION_TYPES)
+    assert {
+        name: list(get_args(obj)) for name, obj in exported.items() if get_origin(obj) is Literal
+    } == _LITERAL_ALIASES
 
 
 def test_each_exported_enum_keeps_its_member_names() -> None:
@@ -754,6 +776,7 @@ def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
         _EXPORTS,
         _SIGNATURES,
         _ENUM_MEMBERS,
+        _LITERAL_ALIASES,
         _MEMBERS,
         _CONSTANTS,
         _MANIFEST,
