@@ -345,12 +345,12 @@ def publish(
     """Queue a run's latest snapshot as frames from ``account`` in ``room_id``, with tool previews only when ``previews``.
 
     ``client`` returns the account's live client at each send. For a minute after the homeserver's relay check failed or
-    said no, the snapshot is dropped.
+    said no, a snapshot that would start a publisher is dropped; publishers already sending keep going.
     """
-    if monotonic() < _RELAY_OFF_UNTIL.get(homeserver_url, -math.inf):
-        return
     publisher = _PUBLISHERS.get((account, room_id))
     if publisher is None:
+        if monotonic() < _RELAY_OFF_UNTIL.get(homeserver_url, -math.inf):
+            return
         publisher = _Publisher((account, room_id), client=client, homeserver_url=homeserver_url)
         _PUBLISHERS[(account, room_id)] = publisher
     publisher.update(snapshot, previews=previews)

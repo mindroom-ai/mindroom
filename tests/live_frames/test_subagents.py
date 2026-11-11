@@ -540,6 +540,27 @@ async def test_a_homeserver_that_does_not_relay_is_asked_again_only_after_a_minu
 
 
 @pytest.mark.asyncio
+async def test_a_failed_relay_check_leaves_a_sending_publisher_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that fails for another account's new publisher stops no publisher already sending: its run's end goes out."""
+    answers = iter([True, False])
+
+    async def relays(_homeserver_url: str) -> bool:
+        return next(answers)
+
+    monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
+    room, other = FrameRoom(), FrameRoom()
+    room.publish(make_snapshot(items=(_text("a"),)))
+    await _until(lambda: len(room.sent) == 1)
+    other.publish(make_snapshot(delegation_id="d2"), account="@mindroom_other:example.org")
+    await _until(lambda: len(subagents_module._PUBLISHERS) == 1)
+    room.publish(make_snapshot(status="completed", ended_at=1001.0, items=(_text("a"),), result_preview="Done."))
+    await _until(_forgotten)
+
+    assert [frame["meta"]["status"] for frame in room.sent] == ["running", "completed"]
+    other.client.room_send_ephemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_client_missing_for_one_retry_is_waited_for() -> None:
     """An account between clients, as while it signs in again, sends its frames once its client is back."""
     room = FrameRoom()

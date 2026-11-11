@@ -113,10 +113,11 @@ class FrameRoom:
         *,
         previews: bool = True,
         client: Callable[[], nio.AsyncClient | None] | None = None,
+        account: str = _ACCOUNT,
     ) -> None:
-        """Queue ``snapshot`` as frames from the room's account, sent through this client unless ``client`` is given."""
+        """Queue ``snapshot`` as frames from ``account``, sent through this client unless ``client`` is given."""
         publish(
-            _ACCOUNT,
+            account,
             FRAME_ROOM_ID,
             snapshot,
             previews=previews,
