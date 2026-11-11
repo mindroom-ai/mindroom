@@ -24,6 +24,7 @@ from mindroom.api.connections_session_cookie import (
     connections_session_cookie,
     issue_connections_session,
 )
+from mindroom.api.report_publishing import sign_in_landing
 from mindroom.constants import RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix_openid import (
@@ -189,6 +190,8 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
 async def hand_off(request: Request, openid_token: Annotated[str, Form()]) -> RedirectResponse:
     """Start a portal session from the form MindRoom Chat's /connections page submits, then open the portal.
 
+    A published report that sent the browser to sign in is opened instead.
+
     The browser sets Origin on this cross-origin post, so the Chat allowlist decides which page may submit it.
     """
     paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
@@ -198,7 +201,7 @@ async def hand_off(request: Request, openid_token: Annotated[str, Form()]) -> Re
     except ValidationError:
         # The validation error would carry the submitted token.
         raise HTTPException(401, "Invalid sign-in request", headers=CONNECTIONS_HEADERS) from None
-    redirect = RedirectResponse("/connections/", status_code=303)
+    redirect = sign_in_landing(request)
     await _start_session(token, request.headers.get("origin", ""), request, redirect, paths)
     return redirect
 

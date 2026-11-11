@@ -23507,7 +23507,7 @@
     "functions": [
       {
         "name": "publish_report",
-        "description": "Publish an authorized report source through a revocable public link.",
+        "description": "Publish an authorized report source through a revocable link.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -23525,7 +23525,7 @@
             },
             "confirm_public": {
               "type": "boolean",
-              "description": "Must be true; anyone with the link can open the report until it is revoked."
+              "description": "Must be true; until it is revoked, anyone with the link can open the report, or only\npeople signed in to this deployment where it requires sign-in (the result's who_can_open says which)."
             },
             "mindroom_output_path": {
               "anyOf": [

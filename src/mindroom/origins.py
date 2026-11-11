@@ -21,6 +21,7 @@ _PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
 )
 _HOSTED_CHAT_ORIGIN = "https://chat.mindroom.chat"
+_PUBLISHED_REPORTS_ACCESS_ENV = "MINDROOM_PUBLISHED_REPORTS_ACCESS"
 
 
 def normalized_origin(url: str | None) -> str | None:
@@ -168,3 +169,15 @@ def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
     return not connections_origins_configured(paths) or bool(
         allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV),
     )
+
+
+def published_reports_require_sign_in(paths: RuntimePaths) -> bool:
+    """Return whether `MINDROOM_PUBLISHED_REPORTS_ACCESS` opens published reports only to signed-in people.
+
+    The default, `anyone_with_link`, opens them to anyone who holds the link; any other value raises, never opening them.
+    """
+    value = (paths.env_value(_PUBLISHED_REPORTS_ACCESS_ENV) or "").strip()
+    if value not in {"", "anyone_with_link", "signed_in"}:
+        msg = f"{_PUBLISHED_REPORTS_ACCESS_ENV} must be anyone_with_link or signed_in, not {value!r}"
+        raise ValueError(msg)
+    return value == "signed_in"

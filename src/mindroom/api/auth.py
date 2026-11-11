@@ -34,7 +34,13 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import connections_chat_origin, dashboard_origin, deployment_origin, normalized_origin
+from mindroom.origins import (
+    connections_chat_origin,
+    dashboard_origin,
+    deployment_origin,
+    normalized_origin,
+    published_reports_require_sign_in,
+)
 from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
@@ -175,6 +181,8 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
             "and remove MINDROOM_BASE_URL"
         )
         raise ValueError(msg)
+    # Refuse to start with an access value for published reports that MindRoom does not know.
+    published_reports_require_sign_in(runtime_paths)
     trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
     dashboard = dashboard_origin(runtime_paths)
     # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
@@ -816,11 +824,13 @@ def allow_connections_session_for_oauth_flow(request: Request) -> None:
 
 
 def _connections_session_path_honored(request: Request) -> bool:
-    """Honor sessions on portal paths and OAuth success pages, and on other OAuth browser routes only when granted."""
+    """Honor sessions on portal paths, OAuth success pages, and published reports; on other OAuth routes only when granted."""
     path = request.scope["path"]
     if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
         return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
-    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
+    # Only GET: the dashboard shell answers HEAD on every path.
+    published_report = request.method == "GET" and path.startswith("/reports/public/pub_")
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"})) or published_report
 
 
 def _read_request_connections_session(request: Request) -> ConnectionsSession | None:
