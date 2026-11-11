@@ -39,7 +39,7 @@ print(result.text)
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
-| `workdir` | The existing directory where the `file`, `shell`, `coding`, and `python` tools of the agent and its subagents work; without it they work in the agent's workspace under `storage`. |
+| `workdir` | The existing directory where `shell` runs and `file`, `coding`, and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 
 Provider API keys come from the process environment, or from a `.env` file in `storage`.
@@ -83,14 +83,16 @@ As in the [OpenAI-compatible API](openai-api.md#limitations), tools that need a 
 ## Subagents
 
 An agent's `run_subagent` and `continue_subagent` work as in Matrix: the target must be in the agent's `delegate_to`, which may name the agent itself to run copies of it.
-Subagents run one at a time inside the turn, in the same `workdir`, and nesting stops at depth 3.
+Subagents run inside the turn and share its `workdir`; several `run_subagent` calls in one model response run at the same time, and nesting stops at depth 3.
 They run in standard mode; [minimal mode](tools/agent-cli.md) needs `mindroom run`.
 
 ## Files
 
-With a `workdir`, the files the tools write land there, and MindRoom's own files stay under `storage`.
+With a `workdir`, the files that `shell`, `file`, and `coding` write land there, and MindRoom's own files stay under `storage`.
+Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `file` and `coding` can read that directory under `file_access: workspace`, but not write it.
+Tools that save files of their own, such as `file_generation`, `visualization`, and the downloads of `gmail` or `google_drive`, also save them there.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](architecture/security-posture.md).

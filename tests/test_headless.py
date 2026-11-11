@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from aiohttp import web
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.entity_resolution import persist_offline_entity_accounts
@@ -396,8 +397,78 @@ def test_shell_output_destination_keeps_the_workdir_flag_across_the_supervisor()
     assert ShellOutputDestination.from_payload(dataclasses.asdict(destination)) == destination
 
 
-def test_validate_config_returns_the_config_or_names_an_unknown_agent(tmp_path: Path) -> None:
-    """A config headless runs can serve validates to its `Config`; an agent it does not configure is refused."""
+def test_validate_config_returns_the_config_or_names_every_problem(tmp_path: Path) -> None:
+    """A config headless runs can serve validates to its `Config`; a refusal lists each problem, not only the first."""
     assert set(validate_config(_config(), agent="coder", storage=tmp_path / "storage").agents) == {"coder"}
-    with pytest.raises(HeadlessConfigError, match="no agent named 'ghost' is configured"):
-        validate_config(_config(), agent="ghost", storage=tmp_path / "storage")
+    with pytest.raises(HeadlessConfigError) as raised:
+        validate_config(_config(), agent="ghost", storage=tmp_path / "storage", requester_id="@bob:localhost")
+
+    assert raised.value.problems == [
+        "no agent named 'ghost' is configured",
+        "requester '@bob:localhost' is not in administrators",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workdir_may_be_a_link_under_home(tmp_path: Path, workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workdir given as `~/<link to a directory>` is that directory, for `file` as for `shell`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "link").symlink_to(workdir)
+    provider = _install(
+        monkeypatch,
+        [("save_file", {"contents": "a", "file_name": "a.txt"}), ("run_shell_command", {"args": "pwd"})],
+        "done",
+    )
+    await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=Path("~/link"))
+
+    assert _files(workdir) == ["a.txt"]
+    assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(workdir.resolve())
+
+
+def _chat_chunk(delta: dict[str, object], finish: str | None = None) -> bytes:
+    choice = {"index": 0, "delta": delta, "finish_reason": finish}
+    body = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [choice]}
+    return f"data: {json.dumps(body)}\n\n".encode()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_path: Path) -> None:
+    """A turn that ends while another still streams from its model leaves the other's connection open."""
+
+    async def completions(request: web.Request) -> web.StreamResponse:
+        body = await request.json()
+        slow = "slow" in json.dumps(body["messages"])
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        for part in ("one ", "two ", "three"):
+            await response.write(_chat_chunk({"content": part}))
+            if slow:
+                await asyncio.sleep(0.3)
+        await response.write(_chat_chunk({}, "stop"))
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", completions)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    config = _config()
+    config["models"]["default"] = {
+        "provider": "openai",
+        "id": "m",
+        "api": "chat_completions",
+        "extra_kwargs": {"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "unused"},
+    }
+    try:
+        fast, slow = await asyncio.gather(
+            run_turn(config, agent="coder", prompt="fast", storage=tmp_path / "fast"),
+            run_turn(config, agent="coder", prompt="slow", storage=tmp_path / "slow"),
+        )
+    finally:
+        await runner.cleanup()
+
+    assert (fast.text, fast.completed) == ("one two three", True)
+    assert (slow.text, slow.completed) == ("one two three", True)

@@ -12,6 +12,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 
 1. The API is a coroutine awaited on the caller's event loop, with no thread or subprocess, so the caller's cancellation reaches the turn and its shell commands.
    The turn seam `ai_response` needs no Matrix; `mindroom run` first waits for a homeserver.
+   The loop's pooled model connections close when the last headless turn running on that loop ends, because concurrent turns share the pool and closing it ends their streams.
 2. Headless turns have their own execution channel, `headless`, beside `openai_compat`.
    Delegation outside Matrix needs a bound detached requester on a non-Matrix channel, and the prompt drops Matrix identity and sender attribution for both channels.
    Reusing `openai_compat` would have needed no new sites but would label headless tool calls, logs, and subagent records as API traffic.
