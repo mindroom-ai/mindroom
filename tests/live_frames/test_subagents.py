@@ -42,7 +42,8 @@ _MAX_FRAME_BYTES = 60_000
 class _Room:
     """A fake client's room, recording each frame, its size as sent, and when; replies are scripted, ok by default.
 
-    An encrypted room encrypts with a real Megolm session, as nio does, so frame sizes are the real ones.
+    ``arrived`` is set after each frame. An encrypted room encrypts with a real Megolm session, as nio does, so frame
+    sizes are the real ones.
     """
 
     def __init__(
@@ -57,6 +58,7 @@ class _Room:
         self.sent: list[dict[str, Any]] = []
         self.sent_bytes: list[int] = []
         self.sent_at: list[float] = []
+        self.arrived = asyncio.Event()
         self.responses = list(responses)
         # The frame encrypted for the send in flight.
         self.encrypted: list[dict[str, Any]] = []
@@ -95,6 +97,7 @@ class _Room:
         # The body nio sends: compact JSON with ASCII escapes.
         self.sent_bytes.append(len(Api.to_json(content)))
         self.sent_at.append(time.monotonic())
+        self.arrived.set()
         return self.responses.pop(0) if self.responses else nio.RoomSendEphemeralResponse(room_id)
 
     def publish(

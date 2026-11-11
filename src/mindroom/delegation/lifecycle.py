@@ -12,6 +12,7 @@ from uuid import uuid4
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.constants import runtime_matrix_homeserver
 from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.audit import (
     ChildAudit,
@@ -30,6 +31,7 @@ from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, 
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.workers import child_placement
 from mindroom.failure_text import failure_text
+from mindroom.live_frames import subagents as subagent_frames
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
@@ -45,6 +47,8 @@ from mindroom.workers.placements import dedicated_worker_placement
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
     from typing import TypeGuard
+
+    import nio
 
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
@@ -86,6 +90,9 @@ class ChildRunObservation:
     turn_id: str = field(default_factory=lambda: uuid4().hex)
     # What hands the child's run to its sink, None when nothing publishes it.
     feed: ActivityFeed | None = None
+    # Whether the child's published tool rows carry previews: whether the turn in the room that started its chain shows
+    # its tool calls.
+    previews: bool = False
 
     def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
         """Return whether a terminal record is of the child's current run and session, the run this context streams."""
@@ -285,9 +292,30 @@ def _publish(feed: ActivityFeed | None, update: Callable[[ActivityFeed], object]
 
 
 def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
-    """Return where the child's snapshots go, or None when nothing publishes them."""
-    del context, observation
-    return None
+    """Return the sink that streams the child's snapshots as frames to its caller's room.
+
+    None outside a Matrix room or a managed runtime, or while the operator has live frames off. The account answering
+    the caller's turn sends the frames, through its bot's client at each send: a bot that logs in again has a new
+    client, and a stopped bot none.
+    """
+    orchestrator = context.orchestrator
+    if orchestrator is None or not context.room_id or not context.current_config.defaults.streaming.live_frames:
+        return None
+    account, room_id, previews = context.recipient, context.room_id, observation.previews
+    homeserver_url = runtime_matrix_homeserver(context.runtime_paths)
+
+    def client() -> nio.AsyncClient | None:
+        bot = orchestrator.agent_bots.get(account)
+        return None if bot is None else bot.client
+
+    return lambda snapshot: subagent_frames.publish(
+        account,
+        room_id,
+        snapshot,
+        previews=previews,
+        client=client,
+        homeserver_url=homeserver_url,
+    )
 
 
 def _open_feed(observation: ChildRunObservation) -> ActivityFeed | None:
@@ -336,7 +364,11 @@ async def child_run_context(
     """
     audit = await open_child_audit(child, config=config, runtime_paths=runtime_paths)
     parent = _CHILD_RUN.get()
-    observation = ChildRunObservation(child, audit, parent=parent)
+    # The caller's context is current until the child's run rebinds it. A nested child's caller is a child, whose context
+    # always hides its calls, so the nested child takes its parent's previews instead.
+    context = get_tool_runtime_context()
+    previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
+    observation = ChildRunObservation(child, audit, parent=parent, previews=previews)
     observation.feed = _open_feed(observation)
     token = _CHILD_RUN.set(observation)
     # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.

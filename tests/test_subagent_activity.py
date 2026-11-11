@@ -1,4 +1,4 @@
-"""Sub-agent activity: the snapshot a child run keeps, its caps, and its hand-off to a sink."""
+"""Sub-agent activity: the snapshot a child run keeps, its caps, its hand-off to a sink, and its frames in the room."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import asyncio
 import json
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 
+import mindroom.live_frames.subagents as subagents_module
 from mindroom import plugin_api
 from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
@@ -27,7 +30,7 @@ from mindroom.delegation.activity import (
     SubagentSnapshot,
     _SubagentActivity,
 )
-from mindroom.delegation.state import DelegationChild, SubagentPersona
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, SubagentPersona
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.hooks.types import BUILTIN_EVENT_NAMES, validate_event_name
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCallOrigin, ToolCompleted, ToolStarted
@@ -42,6 +45,7 @@ from tests.conftest import make_turn_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
+from tests.live_frames.test_subagents import _Room
 from tests.subagent_activity_helpers import make_snapshot
 from tests.test_background_delegation import _identity as _background_identity
 from tests.test_background_delegation import _registered_reports
@@ -60,7 +64,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -551,7 +555,7 @@ def _delegating_turn(
     models = {"child": ScriptedModel(child_turns)}
     if grandchild_turns is not None:
         agents["child"].delegate_to = ["grandchild"]
-        agents["grandchild"] = AgentConfig(display_name="Grandchild")
+        agents["grandchild"] = AgentConfig(display_name="Grandchild", tools=["calculator"])
         models["grandchild"] = ScriptedModel(grandchild_turns)
     config = native_delegation_config(agents=agents)
     paths = _runtime_paths(tmp_path)
@@ -667,6 +671,189 @@ async def test_a_child_without_a_sink_opens_no_feed(tmp_path: Path, monkeypatch:
         result = await ai_response(turn, paths, config)
 
     assert result.text.endswith("Done")
+    assert not _OPEN
+
+
+@pytest_asyncio.fixture
+async def relaying(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Relay sub-agent frames and send them 10 ms apart; fail a test whose room's publisher does not stop."""
+
+    async def relays(_homeserver_url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(subagents_module, "_SEND_INTERVAL_SECONDS", 0.01)
+    yield
+    tasks = [publisher._task for publisher in subagents_module._PUBLISHERS.values() if publisher._task is not None]
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), 2)
+    finally:
+        subagents_module._PUBLISHERS.clear()
+
+
+def _in_room(
+    runtime: ToolRuntimeContext,
+    room: _Room,
+    *,
+    shown: bool = False,
+) -> tuple[ToolRuntimeContext, SimpleNamespace]:
+    """Return the leader's turn context as its bot builds it, the bot answering in ``room`` through its client.
+
+    ``shown`` is whether the leader's reply shows its tool calls. The bot is returned so a test can log it in again.
+    """
+    bot = SimpleNamespace(client=room.client)
+    # A runtime without spend limits.
+    orchestrator = SimpleNamespace(agent_bots={"leader": bot}, budgets=None)
+    context = replace(runtime, transport_agent_name="leader", orchestrator=orchestrator, tool_calls_shown=shown)
+    return context, bot
+
+
+async def _run_frames(room: _Room, *, agent_name: str = "child") -> list[dict[str, Any]]:
+    """Return the frames of ``agent_name``'s run that went out through ``room``'s client, once its end did."""
+
+    def frames() -> list[dict[str, Any]]:
+        return [frame for frame in room.sent if frame["meta"]["agent"] == agent_name]
+
+    async with asyncio.timeout(2):
+        while not frames() or frames()[-1]["meta"]["status"] not in TERMINAL_CHILD_STATUSES:
+            room.arrived.clear()
+            await room.arrived.wait()
+    return frames()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plain", "encrypted"])
+@pytest.mark.usefixtures("relaying")
+async def test_a_delegated_child_streams_frames_to_its_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encrypted: bool,
+) -> None:
+    """The leader's account streams its child's run to the room: a running snapshot first, its end with its result last.
+
+    In an encrypted room every frame goes out encrypted.
+    """
+    room = _Room(encrypted=encrypted)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+    context, _bot = _in_room(runtime, room)
+
+    with tool_runtime_context(context):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    frames = await _run_frames(room)
+    first, last = frames[0], frames[-1]
+    assert {frame["run"] for frame in frames} == {first["run"]}
+    assert "snapshot" in first
+    assert (first["meta"]["status"], first["meta"]["caller"], first["meta"]["root"]) == ("running", "leader", "leader")
+    assert "snapshot" in last
+    assert (last["meta"]["status"], last["meta"]["result"]) == ("completed", "Three")
+    assert last["snapshot"]["md"].endswith("Three")
+    [add] = last["snapshot"]["tools"]
+    assert add["tool_name"] == "add"
+    sent = [call.args[2] for call in room.client.room_send_ephemeral.await_args_list]
+    assert len(sent) == len(frames)
+    assert all(("encrypted" in content) is encrypted for content in sent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("relaying")
+async def test_nested_child_keeps_previews_when_the_root_turn_shows_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's own turn hides its calls, yet its sub-agent's tool rows carry previews: the turn in the room shows them."""
+    room = _Room()
+    child_turns = [
+        calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Add one and two")),
+        answer("Child done"),
+    ]
+    grandchild_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        child_turns,
+        grandchild_turns=grandchild_turns,
+    )
+    context, _bot = _in_room(runtime, room, shown=True)
+
+    with tool_runtime_context(context):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    grandchild = await _run_frames(room, agent_name="grandchild")
+    child = await _run_frames(room, agent_name="child")
+    assert (grandchild[-1]["meta"]["parent"], grandchild[-1]["meta"]["root"]) == (child[-1]["run"], "leader")
+    [delegated] = child[-1]["snapshot"]["tools"]
+    [add] = grandchild[-1]["snapshot"]["tools"]
+    assert (delegated["tool_name"], add["tool_name"]) == ("run_subagent", "add")
+    assert delegated["args_preview"]
+    assert add["args_preview"]
+    assert add["result_preview"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("relaying")
+async def test_root_turn_hiding_tools_hides_child_previews(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn in the room that hides its tool calls streams its child's tool rows by name only."""
+    room = _Room()
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+    context, _bot = _in_room(runtime, room, shown=False)
+
+    with tool_runtime_context(context):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    frames = await _run_frames(room)
+    assert [tool["tool_name"] for tool in frames[-1]["snapshot"]["tools"]] == ["add"]
+    assert "_preview" not in json.dumps(frames)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("relaying")
+async def test_frames_follow_a_relogged_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bot that logs in again while its child runs sends the run's later frames through its new client."""
+    first, second = _Room(), _Room()
+    sent_before: list[int] = []
+
+    async def log_in_again() -> None:
+        async with asyncio.timeout(2):
+            await first.arrived.wait()
+        sent_before.append(len(first.sent))
+        bot.client = second.client
+
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, [[Await(log_in_again), *answer("Three")]])
+    context, bot = _in_room(runtime, first)
+
+    with tool_runtime_context(context):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    later = await _run_frames(second)
+    assert [len(first.sent)] == sent_before
+    assert first.sent[0]["meta"]["status"] == "running"
+    assert later[-1]["meta"]["result"] == "Three"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("relaying")
+async def test_no_frames_when_live_frames_are_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator who switched live frames off gets no sub-agent frames, though the turn's own config had them on."""
+    room = _Room()
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, [answer("Three")])
+    current = config.model_copy(deep=True)
+    current.defaults.streaming.live_frames = False
+    context, _bot = _in_room(runtime, room)
+
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        result = await ai_response(turn, paths, config)
+
+    assert result.text.endswith("Done")
+    assert config.defaults.streaming.live_frames
+    assert room.sent == []
+    assert subagents_module._PUBLISHERS == {}
     assert not _OPEN
 
 
