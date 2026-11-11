@@ -37,7 +37,7 @@ from mindroom.tool_jobs.background_after import (
     read_background_after,
 )
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, session_state_delta
-from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
+from mindroom.tool_jobs.control import counted_tool_call, job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
     JobCall,
@@ -254,7 +254,9 @@ def with_job_admission(actor: JobActor | None, inner: Sequence[ToolMiddleware]) 
         return rest
 
     async def admit(call: ToolCall, call_next: ToolNext) -> object:
-        return await _admit(actor, rest, call, call_next)
+        # Every call of a reply passes here, so the reply knows when it does nothing but wait on jobs.
+        with counted_tool_call():
+            return await _admit(actor, rest, call, call_next)
 
     return (admit, *rest)
 

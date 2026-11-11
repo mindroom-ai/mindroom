@@ -8888,6 +8888,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.custom_tools.job",
 ]
 
 [[modules]]
@@ -9180,6 +9181,7 @@ depends_on = [
 path = "mindroom.custom_tools.job"
 depends_on = [
     "mindroom.tool_jobs.consumption",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.agno_toolkits",
