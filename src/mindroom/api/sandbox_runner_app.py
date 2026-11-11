@@ -67,8 +67,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             msg = "Worker computer requires a dedicated worker."
             raise RuntimeError(msg)
-        # Only one requester's worker for one agent can be a Computer (computer_runtime, execute), so the flag, which
-        # reaches every worker, leaves the others their persistent browser.
+        # The primary opens a Computer only on a user_agent worker (computer_runtime), and execution refuses a Computer
+        # browser call from any other scope, so the flag, which reaches every worker, leaves shared and user workers
+        # their persistent browser.
         if dedicated_scope == "user_agent":
             if os.name == "posix" and os.geteuid() == 0:
                 msg = "Worker computer requires a non-root effective user."
