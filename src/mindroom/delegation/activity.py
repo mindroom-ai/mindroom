@@ -252,7 +252,8 @@ class _SubagentActivity:
         )
 
 
-# The feed of each child that may still resume, such as one paused for an approval; a terminal status drops it.
+# The feed of each child that runs or may still resume, such as one paused for an approval, which the child's updates
+# look up; a terminal status drops it.
 _OPEN: dict[str, ActivityFeed] = {}
 
 
