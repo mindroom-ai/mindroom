@@ -508,6 +508,33 @@ async def test_unrelayed_homeserver_sends_nothing(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_a_homeserver_that_does_not_relay_is_asked_again_only_after_a_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a check that failed or said no, updates for the next minute send nothing and ask the homeserver nothing."""
+    checks: list[str] = []
+    clock = [1000.0]
+
+    async def relays(homeserver_url: str) -> bool:
+        checks.append(homeserver_url)
+        return False
+
+    monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(subagents_module, "monotonic", lambda: clock[0])
+    room = FrameRoom()
+    for count in range(1, 21):
+        room.publish(make_snapshot(items=(_text("x" * count),)))
+        await _until(_forgotten)
+    assert len(checks) == 1
+    clock[0] += 60.0
+    room.publish(make_snapshot(items=(_text("later"),)))
+    await _until(_forgotten)
+
+    assert len(checks) == 2
+    room.client.room_send_ephemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_client_missing_for_one_retry_is_waited_for() -> None:
     """An account between clients, as while it signs in again, sends its frames once its client is back."""
     room = FrameRoom()

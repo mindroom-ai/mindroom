@@ -3807,6 +3807,8 @@ def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", no_live_frames)
     monkeypatch.setattr(subagent_frames_module, "homeserver_relays_live_frames", no_live_frames)
+    # The refused check above turns sub-agent frames off for a minute; each test starts with them on.
+    monkeypatch.setattr(subagent_frames_module, "_RELAY_OFF_UNTIL", {})
 
 
 @pytest.fixture(autouse=True)

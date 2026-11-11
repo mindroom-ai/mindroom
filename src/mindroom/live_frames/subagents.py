@@ -53,6 +53,9 @@ _SEND_INTERVAL_SECONDS = 0.125
 # still live; a paused run, which can wait for hours, goes quiet instead.
 _SNAPSHOT_INTERVAL_SECONDS = 10.0
 _WORKING_STATUSES = frozenset({"running", "awaiting_approval"})
+# How long a homeserver whose relay check failed or said no gets no frames, so its runs' updates neither start a
+# publisher nor ask it again.
+_RELAY_OFF_SECONDS = 60.0
 
 type _Frame = dict[str, object]
 
@@ -278,6 +281,7 @@ class _Publisher:
             if await homeserver_relays_live_frames(self._homeserver_url):
                 await self._send_frames()
             else:
+                _RELAY_OFF_UNTIL[self._homeserver_url] = monotonic() + _RELAY_OFF_SECONDS
                 self._refused.clear()
         except Exception:
             # Frames are best effort: a bug building or sending one ends the room's frames, never a run.
@@ -340,6 +344,8 @@ class _Publisher:
 
 # The publisher of each sending account and room with runs to send.
 _PUBLISHERS: dict[tuple[str, str], _Publisher] = {}
+# Until when each homeserver that does not relay frames gets none.
+_RELAY_OFF_UNTIL: dict[str, float] = {}
 
 
 def publish(
@@ -353,8 +359,11 @@ def publish(
 ) -> None:
     """Queue a run's latest snapshot as frames from ``account`` in ``room_id``, with tool previews only when ``previews``.
 
-    ``client`` returns the account's live client at each send.
+    ``client`` returns the account's live client at each send. For a minute after the homeserver's relay check failed or
+    said no, the snapshot is dropped.
     """
+    if monotonic() < _RELAY_OFF_UNTIL.get(homeserver_url, -math.inf):
+        return
     publisher = _PUBLISHERS.get((account, room_id))
     if publisher is None:
         publisher = _Publisher((account, room_id), client=client, homeserver_url=homeserver_url)
