@@ -40,6 +40,8 @@ from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.follow_ups import follow_up_jobs
@@ -71,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -1319,6 +1322,7 @@ class _JobReply:
             background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
             agents={"leader": AgentConfig(display_name="Leader")},
         )
+        self.config = config
         self.paths = _runtime_paths(tmp_path)
         self.context = _delegate_runtime_context(config, self.paths)
         self.owner = self.context.execution_identity
@@ -1348,14 +1352,33 @@ class _JobReply:
             operation=operation,
         )
 
-    def run(self, model: ScriptedModel, gate: MidTurnGate | None, *tools: JobTool) -> asyncio.Task[RunRecord]:
-        """Start the reply to "Do the task", offering ``tools`` beside the job controls."""
+    def run(
+        self,
+        model: ScriptedModel,
+        gate: MidTurnGate | None,
+        *tools: JobTool,
+        run_id: str = "run",
+    ) -> asyncio.Task[RunRecord]:
+        """Start the reply ``run_id`` to "Do the task", offering ``tools`` beside the job controls."""
         controls = toolkit_job_tools(JobTools(self.paths), authored_name="job").values()
         actor = job_actor(*tools, *controls)
 
+        def storage() -> ConversationStore:
+            return create_session_storage("leader", self.config, self.paths, self.owner)
+
         @owned_tool_execution(enabled=always_owned)
         async def turn(_target: MessageTarget) -> RunRecord:
-            return await run_job_turn(actor, model, "Do the task", session_id="session", queued_notice=_NOTICE)
+            # The reply saves its run, so a result it read stays read.
+            set_consumption_storage(storage)
+            return await run_job_turn(
+                actor,
+                model,
+                "Do the task",
+                run_id=run_id,
+                session_id=self.context.session_id,
+                store=storage(),
+                queued_notice=_NOTICE,
+            )
 
         with tool_runtime_context(self.context):
             return asyncio.create_task(
@@ -1454,7 +1477,7 @@ async def test_a_released_jobs_result_arrives_once_after_the_reply(tmp_path: Pat
         # The follow-up's reply reads the result; nothing is left to deliver again.
         reply.queue.consume_waiting_human_message("$question")
         follow_up = ScriptedModel([calls(_job_wait("read")), answer("Here is the result.")])
-        record = await asyncio.wait_for(reply.run(follow_up, None), JOB_TEST_TIMEOUT)
+        record = await asyncio.wait_for(reply.run(follow_up, None, run_id="follow-up"), JOB_TEST_TIMEOUT)
         assert record.tools is not None
         assert record.tools[0].result == "job result"
         assert await runtime.ended_jobs(reply.key()) == ()
@@ -1473,7 +1496,54 @@ async def test_a_reply_running_a_tool_leaves_a_newer_message_to_the_judge(
     verdict: bool,
     batch: str,
 ) -> None:
-    """A foreground tool still running, alone or beside a job wait, keeps today's rule: the judge decides."""
+    """A foreground tool still running, alone or beside a job wait, keeps today's rule: the judge decides.
+
+    A wait beside it that the judge let go on is released, unjudged, once the tool ends and the reply only waits.
+    """
+    runtime = await tool_job_runtime(tmp_path)
+    reply = _JobReply(tmp_path, runtime)
+    judged: list[JudgmentRequest] = []
+    started, finish = asyncio.Event(), asyncio.Event()
+    beside_wait = batch == "tool_beside_wait"
+
+    async def fetch_report() -> str:
+        started.set()
+        await finish.wait()
+        return "report"
+
+    fetch = tool_call("fetch_report", "fetch", background_after=None)
+    model = ScriptedModel([calls(fetch, *([_job_wait()] if beside_wait else [])), answer("Done.")])
+    try:
+        await reply.start_job()
+        pending = reply.run(model, _judge(verdict, judged), job_tool(fetch_report))
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+        await _until(_message_waiting)
+        reply.send()
+        await _until(lambda: bool(judged))
+        if verdict:
+            # The message can wait, so the reply works on until its tool ends.
+            for _ in range(100):
+                await asyncio.sleep(0)
+            assert not pending.done()
+            finish.set()
+        record = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
+        assert len(judged) == 1
+        assert record.tools is not None
+        results = {tool.tool_call_id: str(tool.result) for tool in record.tools}
+        assert (results["fetch"] == "report") is verdict
+        if beside_wait:
+            assert json.loads(results["wait"])["status"] == "running"
+        assert _has_notice(model.requests[-1].messages) is (not verdict or beside_wait)
+        assert (await lookup(runtime, "work", owner=reply.owner, depth=0)).status == "running"
+    finally:
+        finish.set()
+        reply.job_done.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_left_only_waiting_after_judged_work_answers_the_waiting_message(tmp_path: Path) -> None:
+    """A message the judge let wait during a tool releases the job wait that follows; a second wait returns at once."""
     runtime = await tool_job_runtime(tmp_path)
     reply = _JobReply(tmp_path, runtime)
     judged: list[JudgmentRequest] = []
@@ -1484,32 +1554,33 @@ async def test_a_reply_running_a_tool_leaves_a_newer_message_to_the_judge(
         await finish.wait()
         return "report"
 
-    fetch = tool_call("fetch_report", "fetch", background_after=None)
-    model = ScriptedModel([calls(fetch, *([_job_wait()] if batch == "tool_beside_wait" else [])), answer("Done.")])
+    model = ScriptedModel(
+        [
+            calls(tool_call("fetch_report", "fetch", background_after=None)),
+            calls(_job_wait("wait")),
+            calls(_job_wait("again")),
+            answer("Wrapping up."),
+        ],
+    )
     try:
         await reply.start_job()
-        pending = reply.run(model, _judge(verdict, judged), job_tool(fetch_report))
+        pending = reply.run(model, _judge(True, judged), job_tool(fetch_report))
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         await _until(_message_waiting)
         reply.send()
         await _until(lambda: bool(judged))
-        if verdict:
-            # The message can wait, so the reply works on until its tool and its wait end.
-            for _ in range(100):
-                await asyncio.sleep(0)
-            assert not pending.done()
-            finish.set()
-            reply.job_done.set()
+        finish.set()
         record = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
         assert len(judged) == 1
         assert record.tools is not None
         results = {tool.tool_call_id: str(tool.result) for tool in record.tools}
-        if verdict:
-            assert results["fetch"] == "report"
-            assert results.get("wait", "job result") == "job result"
-        else:
-            assert json.loads(results["fetch"])["status"] == "running"
-        assert _has_notice(model.requests[-1].messages) is not verdict
+        assert results["fetch"] == "report"
+        assert json.loads(results["wait"])["status"] == "running"
+        assert json.loads(results["again"])["status"] == "running"
+        # The judged work's batch gave no notice; each wait's batch gave the one wrap-up notice.
+        assert [_has_notice(request.messages) for request in model.requests] == [False, False, True, True]
+        assert sum(message.content == _NOTICE for message in model.requests[-1].messages) == 1
+        assert (await lookup(runtime, "work", owner=reply.owner, depth=0)).status == "running"
     finally:
         finish.set()
         reply.job_done.set()

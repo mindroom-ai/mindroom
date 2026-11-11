@@ -54,7 +54,7 @@ from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
-from mindroom.tool_jobs.control import pending_human_messages_context
+from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
@@ -188,9 +188,16 @@ class _QueuedMessageState:
     # Replaced on every change of the queue, so each waiter wakes once per change.
     _changed: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+    calls: ReplyToolCalls = field(init=False)
 
     def __post_init__(self) -> None:
         self._idle_event.set()
+        self.calls = ReplyToolCalls(on_change=self._calls_changed)
+
+    def _calls_changed(self) -> None:
+        # A call that ends can leave the reply only waiting, which releases its waits for a message already queued.
+        if self._pending_messages:
+            self._notify_changed()
 
     def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
         """Snapshot queued text in admission order without consuming any event."""
@@ -268,8 +275,9 @@ class _QueuedMessageState:
         def still_queued() -> bool:
             return pending == self.pending_message_snapshot()
 
-        # A decision counts only for the queue it judged.
-        return not await gate.defers(pending, current=still_queued) and still_queued()
+        # A decision counts only for the queue it judged. A reply that does nothing but wait on jobs answers at once.
+        defers = await gate.defers(pending, current=still_queued, judge=not self.calls.only_waiting())
+        return not defers and still_queued()
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
@@ -628,7 +636,7 @@ class ResponseLifecycleCoordinator:
                 queued_signal.mid_turn_gate = mid_turn_gate
                 with (
                     # A newer human message also releases the reply's tool waits; other queued turns wait for it.
-                    pending_human_messages_context(queued_signal),
+                    pending_human_messages_context(queued_signal, calls=queued_signal.calls),
                     queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate),
                 ):
                     try:
