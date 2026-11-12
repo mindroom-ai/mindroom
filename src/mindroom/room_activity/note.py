@@ -16,7 +16,7 @@ from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import message_preview, trusted_visible_sender_ids
 from mindroom.matrix.conversation_reads import projected_visible_message
-from mindroom.thread_summary.state import human_summary_authorizer, summary_state, trusted_summary_metadata
+from mindroom.thread_summary.state import human_summary_authorizer, summary_state
 from mindroom.tool_system.agent_tools import room_turn_offers
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ _ROW_LIMIT = 1_000
 _SUMMARY_TAIL = 50
 _MAX_NAMES = 3
 _TITLE_LENGTH = 80
+_NAME_LENGTH = 40
 _READ_TOOL = "matrix_message"
 _FOOTER = f'Read one with {_READ_TOOL}(action="read", thread_id="...") if it bears on this request.'
 
@@ -68,8 +69,10 @@ async def with_room_activity_note(
     config = runtime.config
     settings = room_activity(config, ctx.entity_label)
     client = runtime.client
+    # A minimal turn shows its model turn context only as a context document, so the note would go unread there.
     if (
         not settings.enabled
+        or ctx.agent_mode == "minimal"
         or ctx.room_id is None
         or ctx.thread_id is None
         or client is None
@@ -113,7 +116,15 @@ async def _room_activity_note(
 ) -> str | None:
     """Return the note for a reply in ``thread_id``, or None when no other thread of the room had new messages."""
     window_start = now_ms - settings.window_minutes * _MINUTE_MS
-    last_reply = max((message.timestamp for message in thread_history if message.sender == agent_user_id), default=0)
+    # The agent's own summary notice of this thread is no reply, and the activity since its reply stays new.
+    last_reply = max(
+        (
+            message.timestamp
+            for message in thread_history
+            if message.sender == agent_user_id and THREAD_SUMMARY_CONTENT_KEY not in message.content
+        ),
+        default=0,
+    )
     activity = await reader.room_thread_activity(
         room_id=room_id,
         since_ts=max(window_start, last_reply),
@@ -124,23 +135,19 @@ async def _room_activity_note(
         summary_tail=_SUMMARY_TAIL,
         summary_key=THREAD_SUMMARY_CONTENT_KEY,
     )
-    lines = [
-        line
-        for thread in activity
-        if (
-            line := _thread_line(
-                thread,
-                agent_user_id=agent_user_id,
-                member_display_names=member_display_names,
-                trusted_sender_ids=trusted_sender_ids,
-                authorize_human=authorize_human,
-                now_ms=now_ms,
-            )
-        )
-        is not None
-    ]
-    if not lines:
+    if not activity:
         return None
+    lines = [
+        _thread_line(
+            thread,
+            agent_user_id=agent_user_id,
+            member_display_names=member_display_names,
+            trusted_sender_ids=trusted_sender_ids,
+            authorize_human=authorize_human,
+            now_ms=now_ms,
+        )
+        for thread in activity
+    ]
     since = (
         "since your last reply here" if last_reply > window_start else f"in the last {settings.window_minutes} minutes"
     )
@@ -155,24 +162,19 @@ def _thread_line(
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     now_ms: int,
-) -> str | None:
-    """Describe one thread's new messages in one line, or None when its only new messages are summary notices."""
-    summaries = [projected_visible_message(message) for message in thread.summaries]
-    notices = {
-        message.event_id
-        for message in summaries
-        if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is not None
-    }
-    new = [message for message in thread.recent if message.logical_event_id not in notices]
-    if not new:
-        return None
+) -> str:
+    """Describe one thread's new messages in one line."""
+    new = thread.recent
     names: list[str] = []
     own_reply: int | None = None
     for message in new:
         if message.sender == agent_user_id:
             own_reply = own_reply or message.created_ts
             continue
-        name = member_display_names.get(message.sender) or message.sender.removeprefix("@").partition(":")[0]
+        name = message_preview(
+            member_display_names.get(message.sender) or message.sender.removeprefix("@").partition(":")[0],
+            _NAME_LENGTH,
+        )
         if name not in names:
             names.append(name)
     parts = [_people(names)] if names else []
@@ -180,7 +182,7 @@ def _thread_line(
     if own_reply is not None:
         parts.append(f"you replied there {_ago(own_reply, now_ms)}")
     state = summary_state(
-        summaries,
+        [projected_visible_message(message) for message in thread.summaries],
         thread_id=thread.thread_id,
         trusted_sender_ids=trusted_sender_ids,
         authorize_human=authorize_human,

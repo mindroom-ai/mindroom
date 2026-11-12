@@ -2284,14 +2284,14 @@ class ResponseRunner:
                 ),
                 compaction_lifecycle=compaction_lifecycle,
             )
-            room_activity = await with_room_activity_note(
+            transient_items = await with_room_activity_note(
                 ctx,
                 runtime=self.deps.runtime,
                 runtime_paths=self.deps.runtime_paths,
                 reader=self.deps.resolver.deps.conversation_reader,
                 agent_user_id=self.deps.matrix_full_id,
             )
-            ctx = replace(ctx, transient_enrichment_items=room_activity)
+            ctx = replace(ctx, transient_enrichment_items=transient_items)
             response_stream = stream_agent_response(ctx, self.deps.runtime_paths, self.deps.runtime.config, sinks=sinks)
             async with closing_async_stream(response_stream):
                 async for chunk in response_stream:

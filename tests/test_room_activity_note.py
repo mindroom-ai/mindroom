@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -79,6 +80,7 @@ async def _note(
     store: PrincipalStore,
     history: list[ResolvedVisibleMessage],
     settings: RoomActivityConfig | None = None,
+    names: dict[str, str] = NAMES,
 ) -> str | None:
     return await _room_activity_note(
         _reader(store),
@@ -87,7 +89,7 @@ async def _note(
         thread_id="$current",
         agent_user_id=AGENT,
         thread_history=history,
-        member_display_names=NAMES,
+        member_display_names=names,
         trusted_sender_ids=frozenset({AGENT}),
         authorize_human=lambda _sender: False,
         now_ms=NOW,
@@ -215,6 +217,39 @@ async def test_a_long_root_and_many_writers_stay_short(principal: PrincipalStore
     assert ": person4, person3, person2 and 2 others; 5 new messages, last 6 min ago" in line
 
 
+@pytest.mark.asyncio
+async def test_the_agent_s_own_summary_notice_is_not_its_last_reply(principal: PrincipalStore) -> None:
+    """A title the agent posts in this thread after replying does not hide activity elsewhere since that reply."""
+    await admit(principal, "$other-1", ts=_ago(20), sender=MAX, thread_id="$other")
+    history = _history((AGENT, 30))
+    history.append(
+        make_visible_message(
+            sender=AGENT,
+            body="Current title",
+            event_id="$current-title",
+            timestamp=_ago(10),
+            content=summary_notice("Current title"),
+        ),
+    )
+
+    note = await _note(principal, history)
+
+    assert note is not None
+    assert "- (thread $other): Max; 1 new message, last 20 min ago" in note.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_a_long_display_name_is_cut(principal: PrincipalStore) -> None:
+    """A writer's display name is shortened, so one line stays short."""
+    await admit(principal, "$other-1", ts=_ago(5), sender="@long:localhost", thread_id="$other")
+
+    note = await _note(principal, _history((AGENT, 30)), names={"@long:localhost": "L" * 300})
+
+    assert note is not None
+    line = next(line for line in note.splitlines() if line.startswith("- "))
+    assert len(line) < 120
+
+
 @dataclass
 class _Runtime:
     config: Config
@@ -239,11 +274,13 @@ async def _turn_items(
     runtime_paths: RuntimePaths,
     *,
     thread_id: str | None = "$current",
+    agent_mode: AgentMode = "standard",
 ) -> tuple[EnrichmentItem, ...]:
     ctx = replace(
         make_turn_context("test_agent", room_id=ROOM, thread_id=thread_id),
         thread_history=_history((AGENT, 30)),
         member_display_names=NAMES,
+        agent_mode=agent_mode,
     )
     with patch("mindroom.room_activity.note.time.time", return_value=NOW / 1000):
         return await with_room_activity_note(
@@ -257,7 +294,7 @@ async def _turn_items(
 
 @pytest.mark.asyncio
 async def test_the_turn_gets_the_note_only_when_the_setting_is_on(tmp_path: Path, principal: PrincipalStore) -> None:
-    """The note is opt-in, needs ``matrix_message`` to read a thread, and only a thread reply gets one."""
+    """The note is opt-in, needs ``matrix_message`` to read a thread, and only a standard thread reply gets one."""
     await _busy_room(principal)
 
     config, runtime_paths = _config(tmp_path, None, tools=["matrix_message"])
@@ -270,6 +307,7 @@ async def test_the_turn_gets_the_note_only_when_the_setting_is_on(tmp_path: Path
     assert item.cache_policy == "volatile"
     assert item.text.startswith("Other threads in this room with activity since your last reply here:")
     assert await _turn_items(principal, config, runtime_paths, thread_id=None) == ()
+    assert await _turn_items(principal, config, runtime_paths, agent_mode="minimal") == ()
 
     config, runtime_paths = _config(tmp_path, AgentRoomActivityConfig(enabled=True), tools=[])
     assert await _turn_items(principal, config, runtime_paths) == ()

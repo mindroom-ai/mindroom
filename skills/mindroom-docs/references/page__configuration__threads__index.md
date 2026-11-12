@@ -315,10 +315,10 @@ agents:
 | `max_threads` | int, 1-20 | `5` | Most threads one note lists, the most recently active first |
 
 `defaults.room_activity` applies to every agent, and `agents.<name>.room_activity` overrides it field by field, so the example above gives `helper` a 60-minute window.
-Only an agent's thread replies get the note: replies outside a thread, team replies, and subagents do not.
+Only an agent's thread replies get the note: replies outside a thread, team replies, subagents, and agents in minimal mode do not.
 A turn with nothing new in the room's other threads gets no note, so a quiet room costs nothing.
 Otherwise the note adds about 70 tokens per listed thread, most of them the thread ID the agent needs to read it, plus about 35 for its first and last lines, to that turn's requests.
-It goes after the current message and stays there in the thread's later requests, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
+It goes after the current message, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
 
 ## Message Edits
 

@@ -2343,11 +2343,10 @@ class TestRoomThreadActivity:
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A root or summary whose body was removed, or that is too large for a title, has no content to read."""
+        """A root whose body was removed or that is too large for a title has no content, nor does an oversized summary."""
         monkeypatch.setattr(reads, "_ROOM_ACTIVITY_TITLE_BYTES", 2_000)
         await admit(alice, "$big-root", ts=100, content=text("x" * 3_000))
-        await admit(alice, "$big-summary", ts=1_500, thread_id="$big-root", content=summary_notice("y" * 3_000))
-        await admit(alice, "$big-reply", ts=2_000, thread_id="$big-root")
+        await admit(alice, "$big-summary", ts=1_500, thread_id="$big-root", content=summary_notice("y" * 5_000))
         await admit(alice, "$gone", ts=100, content=text("first"))
         await admit(alice, "$gone-edit", ts=150, content=edit("$gone", "deleted"))
         await admit(alice, "$gone-redaction", ts=160, redacts="$gone-edit", kind=EventKind.REDACTION)
@@ -2359,6 +2358,20 @@ class TestRoomThreadActivity:
             ("$gone", None, ()),
             ("$big-root", None, ()),
         ]
+        # Too large to be a summary notice, so it is ordinary activity.
+        assert [m.logical_event_id for m in activity[1].recent] == ["$big-summary"]
+
+    async def test_summary_notices_are_no_activity_and_take_no_thread_slot(self, alice: PrincipalStore) -> None:
+        """A thread whose only new message is a summary notice is left out before the thread limit applies."""
+        await admit(alice, "$b-reply", ts=2_000, thread_id="$b")
+        await admit(alice, "$a-title", ts=3_000, thread_id="$a", content=summary_notice("A title"))
+        await admit(alice, "$b-title", ts=4_000, thread_id="$b", content=summary_notice("B title"))
+
+        (thread,) = await self._activity(alice, thread_limit=1)
+
+        assert thread.thread_id == "$b"
+        assert [m.logical_event_id for m in thread.recent] == ["$b-reply"]
+        assert [m.logical_event_id for m in thread.summaries] == ["$b-title"]
 
     async def test_another_principal_sees_nothing(
         self,
@@ -9724,7 +9737,7 @@ class TestHotQueriesAreIndexCovered:
             f"{_ROOM_CURSOR_CLAUSE}{_ROOM_UNTIL_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
         ),
         "room activity window": reads._ROOM_ACTIVITY_ROWS_SQL,
-        "room activity summary tail": reads._ROOM_ACTIVITY_SUMMARIES_SQL,
+        "room activity thread tail": reads._ROOM_ACTIVITY_TAIL_SQL,
         "room's newest message": (
             "SELECT created_ts, logical_event_id FROM visible_messages WHERE principal_id=? AND room_id=? "
             "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 1"
@@ -9840,6 +9853,17 @@ class TestHotQueriesAreIndexCovered:
         column_reads = {row[6] for row in database.execute("EXPLAIN " + sql, ("x", "x", "x")) if row[1] == "Column"}
 
         assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
+
+    async def test_room_activity_summaries_load_by_primary_key(self, tmp_path: Path) -> None:
+        """A thread's summary candidates are loaded by their IDs, not by walking the room's index to find them."""
+        database = sqlite3.connect(tmp_path / "summary-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = reads._room_activity_summaries_sql(3)
+
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
+
+        assert "logical_event_id=?" in plan, plan
 
     async def test_a_redaction_seeks_the_held_edit_it_names(self, tmp_path: Path) -> None:
         """A redaction finds the held edit it blanks by ID instead of walking every held edit in the room.
