@@ -281,9 +281,10 @@ _ROOM_ACTIVITY_ROWS_SQL = f"""
     ORDER BY created_ts DESC, logical_event_id DESC
     LIMIT ?
 """  # noqa: S608 - a fixed clause, not input
-# One thread's newest messages in the thread index's order, and which are summary notices.
+# One thread's newest messages in the thread index's order, which are summary
+# notices, and when each was last revised.
 _ROOM_ACTIVITY_TAIL_SQL = f"""
-    SELECT logical_event_id, {_SUMMARY_ROW} AS is_summary FROM visible_messages
+    SELECT logical_event_id, revision_ts, {_SUMMARY_ROW} AS is_summary FROM visible_messages
     WHERE principal_id = ? AND room_id = ? AND thread_id = ?
     ORDER BY created_ts DESC, logical_event_id DESC
     LIMIT ?
@@ -309,15 +310,21 @@ def _thread_summaries(
     summary_tail: int,
     summary: tuple[int, str],
 ) -> tuple[VisibleMessage, ...]:
-    """Return the newest summary notices among one thread's newest ``summary_tail`` messages, oldest first."""
-    newest = [
-        row["logical_event_id"]
+    """Return the most recently revised summary notices among one thread's newest ``summary_tail`` messages.
+
+    They are ordered by when they were last revised, oldest first, as the title
+    rules order them, so an old notice edited into the current title is kept.
+    """
+    flagged = [
+        row
         for row in transaction.fetchall(
             _ROOM_ACTIVITY_TAIL_SQL,
             (*summary, principal_id, room_id, thread_id, summary_tail),
         )
         if row["is_summary"]
-    ][:_ROOM_ACTIVITY_SUMMARY_LIMIT]
+    ]
+    flagged.sort(key=lambda row: (int(row["revision_ts"]), row["logical_event_id"]), reverse=True)
+    newest = [row["logical_event_id"] for row in flagged[:_ROOM_ACTIVITY_SUMMARY_LIMIT]]
     if not newest:
         return ()
     rows = transaction.fetchall(
@@ -327,7 +334,7 @@ def _thread_summaries(
     return tuple(
         sorted(
             (_visible_message(row) for row in rows),
-            key=lambda message: (message.created_ts, message.logical_event_id),
+            key=lambda message: (message.revision_ts, message.logical_event_id),
         ),
     )
 
@@ -350,7 +357,7 @@ class ThreadActivity:
     recent: tuple[_RecentMessage, ...]
     # The thread's root, unless it was redacted, awaits a refetch, or is too large for a title.
     root: VisibleMessage | None
-    # The newest summary notices among the thread's newest messages, oldest first.
+    # The most recently revised summary notices among the thread's newest messages, oldest first.
     summaries: tuple[VisibleMessage, ...]
 
 
@@ -375,9 +382,9 @@ def room_thread_activity(
     and summary notices, the messages of at most ``_ROOM_ACTIVITY_SUMMARY_BYTES``
     whose content names ``summary_key``, are left out, and at most
     ``thread_limit`` threads are returned. For each, the root, at most
-    ``_ROOM_ACTIVITY_TITLE_BYTES``, and the newest ``_ROOM_ACTIVITY_SUMMARY_LIMIT``
-    summary notices among its newest ``summary_tail`` messages are loaded with
-    their content; no other message's content is.
+    ``_ROOM_ACTIVITY_TITLE_BYTES``, and the ``_ROOM_ACTIVITY_SUMMARY_LIMIT`` most
+    recently revised summary notices among its newest ``summary_tail`` messages
+    are loaded with their content; no other message's content is.
     """
     if min(thread_limit, row_limit, summary_tail) <= 0:
         msg = "A room activity read requires positive limits"

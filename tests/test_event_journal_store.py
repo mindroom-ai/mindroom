@@ -2371,6 +2371,30 @@ class TestRoomThreadActivity:
 
         assert [m.logical_event_id for m in thread.summaries] == [f"$title-{index}" for index in range(2, 7)]
 
+    async def test_a_summary_notice_edited_later_counts_as_newer(self, alice: PrincipalStore) -> None:
+        """An old summary notice edited into the current title is among the newest, by the time of its edit."""
+        for index in range(6):
+            await admit(alice, f"$title-{index}", ts=1_100 + index, thread_id="$t", content=summary_notice(f"T{index}"))
+        edited = {
+            "msgtype": "m.notice",
+            "body": "* Pinned",
+            "m.new_content": summary_notice("Pinned"),
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$title-0"},
+        }
+        await admit(alice, "$title-0-edit", ts=1_900, thread_id="$t", content=edited)
+        await admit(alice, "$reply", ts=2_000, thread_id="$t")
+
+        (thread,) = await self._activity(alice)
+
+        assert [m.logical_event_id for m in thread.summaries] == [
+            "$title-2",
+            "$title-3",
+            "$title-4",
+            "$title-5",
+            "$title-0",
+        ]
+        assert thread.summaries[-1].content["body"] == "Pinned"
+
     async def test_summary_notices_are_no_activity_and_take_no_thread_slot(self, alice: PrincipalStore) -> None:
         """A thread whose only new message is a summary notice is left out before the thread limit applies."""
         await admit(alice, "$b-reply", ts=2_000, thread_id="$b")
