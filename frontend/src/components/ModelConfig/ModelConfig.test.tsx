@@ -360,9 +360,7 @@ describe("ModelConfig", () => {
     };
     addModels({ gateway });
     render(<ModelConfig />);
-    fireEvent.click(screen.getByText("gateway"));
-    const row = screen.getByDisplayValue("gateway").closest("tr");
-    if (!row) throw new Error("row not found");
+    const row = editRow("gateway");
 
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
@@ -388,9 +386,9 @@ describe("ModelConfig", () => {
     addModels({ keyed: { provider: "openai", id: "gpt-6-astra", ...fields } });
   }
 
-  function editKeyedRow(): HTMLElement {
-    fireEvent.click(screen.getByText("keyed"));
-    const row = screen.getByDisplayValue("keyed").closest("tr");
+  function editRow(modelName: string): HTMLElement {
+    fireEvent.click(screen.getByText(modelName));
+    const row = screen.getByDisplayValue(modelName).closest("tr");
     if (!row) throw new Error("row not found");
     return row;
   }
@@ -429,7 +427,7 @@ describe("ModelConfig", () => {
     async (keyFields) => {
       addKeyedOpenAIModel(keyFields);
       render(<ModelConfig />);
-      const row = editKeyedRow();
+      const row = editRow("keyed");
       chooseProvider(row, /DeepSeek/i);
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
@@ -450,7 +448,7 @@ describe("ModelConfig", () => {
     addKeyedOpenAIModel({});
     await renderWithSavedKeyedModelKey();
 
-    const row = editKeyedRow();
+    const row = editRow("keyed");
     chooseProvider(row, /DeepSeek/i);
     expect(
       within(row).getByText(
@@ -482,7 +480,7 @@ describe("ModelConfig", () => {
       };
       await renderWithSavedKeyedModelKey();
 
-      const row = editKeyedRow();
+      const row = editRow("keyed");
       fireEvent.change(within(row).getByDisplayValue("keyed"), {
         target: { value: "keyed2" },
       });
@@ -517,7 +515,7 @@ describe("ModelConfig", () => {
     addKeyedOpenAIModel({ api_key: "sk-openai-config" });
     await renderWithSavedKeyedModelKey();
 
-    const row = editKeyedRow();
+    const row = editRow("keyed");
     chooseProvider(row, /DeepSeek/i);
     chooseProvider(row, /OpenAI/i);
     expect(
