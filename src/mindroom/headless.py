@@ -104,7 +104,7 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
             problems.append(
                 f"agent {name!r} runs {', '.join(routed)} in a worker; set its worker_tools: [] to run them here",
             )
-        if "shell" in agent_tools.tool_names and "shell" not in routed and not allow_shell:
+        if "shell" in agent_tools.tool_names and not allow_shell:
             problems.append(
                 f"agent {name!r}: shell runs in this process; set defaults.allow_shell_without_worker: true",
             )

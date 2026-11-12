@@ -240,6 +240,11 @@ def _credentialed_storage(tmp_path: Path, config: dict[str, Any]) -> None:
             id="shell-without-worker",
         ),
         pytest.param(
+            lambda c, _p: c.pop("defaults") and c["agents"]["coder"].update(worker_tools=["shell"]),
+            "shell runs in this process; set defaults.allow_shell_without_worker: true",
+            id="worker-shell-without-worker",
+        ),
+        pytest.param(
             lambda c, _p: (
                 c.update(mcp_servers={"docs": {"transport": "stdio", "command": "true"}})
                 or c["agents"]["coder"]["tools"].append("mcp_docs")
@@ -558,8 +563,8 @@ async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_pat
     assert (slow.text, slow.completed) == ("one two three", True)
 
 
-def test_a_refusal_keeps_its_problems_across_processes() -> None:
-    """A refusal raised in a worker process, such as a process pool's, arrives with its message and problems."""
+def test_a_refusal_survives_pickling() -> None:
+    """A refusal pickled, as a process pool sends it from its worker, keeps its message and problems."""
     error = pickle.loads(pickle.dumps(HeadlessConfigError(["first problem", "second problem"])))  # noqa: S301
 
     assert (str(error), error.problems) == ("first problem; second problem", ["first problem", "second problem"])
