@@ -46,6 +46,10 @@ class HeadlessConfigError(ValueError):
         self.problems = problems
         super().__init__("; ".join(problems))
 
+    def __reduce__(self) -> tuple[type[HeadlessConfigError], tuple[list[str]]]:
+        """Pickle by the problems, so the error keeps its message in another process, such as a process pool's."""
+        return type(self), (self.problems,)
+
 
 @dataclass(frozen=True)
 class HeadlessResult:

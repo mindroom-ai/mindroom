@@ -6,6 +6,7 @@ import ast
 import asyncio
 import dataclasses
 import json
+import pickle
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -553,3 +554,26 @@ async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_pat
 
     assert (fast.text, fast.completed) == ("one two three", True)
     assert (slow.text, slow.completed) == ("one two three", True)
+
+
+def test_a_refusal_keeps_its_problems_across_processes() -> None:
+    """A refusal raised in a worker process, such as a process pool's, arrives with its message and problems."""
+    error = pickle.loads(pickle.dumps(HeadlessConfigError(["first problem", "second problem"])))  # noqa: S301
+
+    assert (str(error), error.problems) == ("first problem; second problem", ["first problem", "second problem"])
+
+
+@pytest.mark.asyncio
+async def test_file_memory_runs_headless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent's file memory reaches its prompt as it does in Matrix."""
+    provider = _install(monkeypatch, "noted")
+    storage = tmp_path / "storage"
+    memory = storage / "agents" / "coder" / "workspace" / "MEMORY.md"
+    memory.parent.mkdir(parents=True)
+    memory.write_text("The user likes PINEAPPLE.\n")
+    config = _config(memory_backend="file")
+    config.pop("memory")
+    result = await run_turn(config, agent="coder", prompt="what do I like?", storage=storage)
+
+    assert result.completed
+    assert "PINEAPPLE" in _sent(provider.requests[0])
