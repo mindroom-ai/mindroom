@@ -14,6 +14,7 @@ __all__ = (
     "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
+    "CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES",
     "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
@@ -205,6 +206,10 @@ CLAUDE_PREFIX_CHECKED_THINKING_MODELS = (
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
 )
+# The checked models whose replayed thinking Bedrock does not check
+# (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#feature-availability), so their earlier
+# turns keep their thinking there.
+CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS = ("claude-mythos-5-1",)
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:

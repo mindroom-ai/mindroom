@@ -21,7 +21,11 @@ from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_
 from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
+from mindroom.model_defaults import (
+    CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS,
+    CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES,
+    CLAUDE_PREFIX_CHECKED_THINKING_MODELS,
+)
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import File, Image
     from mindroom.llm.provider import StopReason, ToolSpec
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
 logger = get_logger(__name__)
 
@@ -128,9 +133,12 @@ def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
     return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
 
 
-def checks_thinking_prefix(model_id: str) -> bool:
-    """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
-    return _core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
+def checks_thinking_prefix(model_id: str, route: ClaudeRouteKind) -> bool:
+    """Return whether the route rejects or drops this model's replayed thinking once the context before it changed."""
+    core_id = _core_model_id(model_id)
+    if route == "bedrock_claude" and core_id.startswith(CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS):
+        return False
+    return core_id.startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:

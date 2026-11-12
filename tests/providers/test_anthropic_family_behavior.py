@@ -76,6 +76,8 @@ from tests.providers.golden_support import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
+
 # Sonnet 5.5, the model these tests default to, asks the Anthropic and Vertex routes to drop stale replayed thinking.
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _DROP_STALE = {"prefix_mismatch_behavior": "drop_block"}
@@ -796,7 +798,7 @@ async def test_a_route_without_native_structured_output_forces_the_answer_tool(
         ("vertexai_claude", "claude-mythos-5-2", {}),
         ("bedrock_claude", "anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
     ],
-    ids=["sonnet-5-5", "opus-5-5", "vertex-fable-5-2", "vertex-mythos-5-2", "manual-thinking"],
+    ids=["sonnet-5-5", "opus-5-5", "fable-5-2", "mythos-5-2", "manual-thinking"],
 )
 def test_a_model_that_rejects_forced_tool_use_answers_in_json_mode(
     tmp_path: Path,
@@ -994,6 +996,7 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
             id="haiku-disabled",
         ),
         pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, False, id="bedrock"),
+        pytest.param("bedrock_claude", "anthropic.claude-mythos-5-1", {}, False, True, id="bedrock-mythos-5-1"),
         pytest.param(
             "bedrock_claude",
             "anthropic.claude-sonnet-5-5",
@@ -1025,8 +1028,8 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
     """Where no binding is sent, a stale earlier block would fail the request, so earlier turns lose thinking.
 
     The API requires the current tool loop's thinking exactly as received and allows leaving out earlier turns'.
-    An authored binding is the operator's choice and gets the beta it needs on every route, and a model without
-    the check keeps every block.
+    An authored binding is the operator's choice and gets the beta it needs on every route, and a model the route
+    does not check keeps every block.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
     provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
@@ -1190,25 +1193,32 @@ async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("model_id", "checked"),
+    ("route", "model_id", "checked"),
     [
-        ("claude-fable-5-1", True),
-        ("claude-fable-5-2", True),
-        ("claude-mythos-5-1", True),
-        ("claude-mythos-5-2", True),
-        ("anthropic.claude-opus-5-5", True),
-        ("claude-sonnet-5-5@20261001", True),
-        ("anthropic/claude-haiku-5-5", True),
-        ("claude-fable-5", False),
-        ("claude-sonnet-4-5", False),
+        ("anthropic", "claude-fable-5-1", True),
+        ("anthropic", "claude-fable-5-2", True),
+        ("anthropic", "claude-mythos-5-1", True),
+        ("vertexai_claude", "claude-mythos-5-1", True),
+        ("anthropic", "claude-mythos-5-2", True),
+        ("bedrock_claude", "anthropic.claude-opus-5-5", True),
+        ("vertexai_claude", "claude-sonnet-5-5@20261001", True),
+        ("anthropic", "anthropic/claude-haiku-5-5", True),
+        ("bedrock_claude", "anthropic.claude-mythos-5-1", False),
+        ("anthropic", "claude-fable-5", False),
+        ("anthropic", "claude-sonnet-4-5", False),
     ],
 )
-def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(model_id: str, *, checked: bool) -> None:
+def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(
+    route: ClaudeRouteKind,
+    model_id: str,
+    *,
+    checked: bool,
+) -> None:
     """Fable and Mythos 5.1 and 5.2 and the 5.5 models check replayed thinking under every route's spelling.
 
-    Fable 5 and older models do not.
+    Bedrock does not check Mythos 5.1, and Fable 5 and older models are checked nowhere.
     """
-    assert checks_thinking_prefix(model_id) is checked
+    assert checks_thinking_prefix(model_id, route) is checked
 
 
 @pytest.mark.parametrize(
