@@ -7742,6 +7742,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
 - When it onboards someone, MindRoom invites the router into the personal room it created, so [approval cards](https://docs.mindroom.chat/tool-approval/) work there without the agent inviting it first, unless [`router.accept_invites`](https://docs.mindroom.chat/configuration/router/) leaves out the agent; once the router has left, MindRoom does not invite it again.
+- The router gets power level 50 in the personal room, so it can publish the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) there; other members keep their power level.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
@@ -7806,6 +7807,7 @@ If the room's history setting stops matching the record, or anyone other than a 
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
 Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
+The router gets power level 50 only in an adopted room whose record lists it in `router_user_id`.
 
 # Personal Agents
 
@@ -16994,7 +16996,7 @@ The steps are described in [Connections portal sign-in](https://docs.mindroom.ch
 ## Published Reports
 
 With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent or manage its credentials, or a [trusted upstream](#trusted-upstream-sign-in) identity.
-A signed-out browser goes to Chat's sign-in page described above and comes back to the report; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
+A signed-out browser goes to Chat's sign-in page described above and comes back to the page of the report it opened, with its query; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
 Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
 A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
 Anyone given the view address can open that report until its key expires, the report is revoked, or MindRoom restarts, so share the report's link instead.
@@ -17546,7 +17548,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal never sends the same tab there twice in a row, and links to it the second time instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
-When a [published report that requires sign-in](https://docs.mindroom.chat/connections-portal/#published-reports) sent the browser to Chat, the hand-off redirects to `/reports/public/<slug>` instead, read from the ten-minute `__Host-mindroom_report_return` cookie (`mindroom_report_return` over plain HTTP), which holds only a slug; it is `SameSite=None` over HTTPS because the hand-off is a cross-site post, and any other value lands on the portal.
+When a [published report that requires sign-in](https://docs.mindroom.chat/connections-portal/#published-reports) sent the browser to Chat, the hand-off redirects to the page of that report the browser asked for, `/reports/public/<slug>` plus the requested path and query, instead, read from the ten-minute `__Host-mindroom_report_return` cookie (`mindroom_report_return` over plain HTTP), which holds only that slug, path, and query, percent-encoded; it is `SameSite=None` over HTTPS because the hand-off is a cross-site post, and a value whose slug is malformed or whose path has a `.` or `..` segment or a backslash, before or after one more percent-decoding, lands on the portal.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
 MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.

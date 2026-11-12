@@ -70,7 +70,10 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                     return False
                 response = await client.room_put_state(room_id, _THREAD_MODE_EVENT_TYPE, content, state_key="")
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
+                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                    log = logger.debug if forbidden else logger.warning
+                    log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
                     return False
                 return True
     except Exception:

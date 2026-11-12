@@ -1693,6 +1693,58 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_an_agents_reply_for_someone_else_is_not_queued_behind_a_running_response(tmp_path: Path) -> None:
+    """In a thread where this agent is answering, another agent's message for someone else dispatches at once.
+
+    Its turn settles it as chatter; only the message that mentions this agent waits for the running response.
+    """
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    router = "@mindroom_router:localhost"
+    for_someone_else = _text_event(event_id="$other", body="Done.", sender=router, thread_id="$thread")
+    for_this_agent = _text_event(event_id="$mine", body="@mindroom_test_agent next", sender=router, thread_id="$thread")
+    for_this_agent.source["content"]["m.mentions"] = {"user_ids": ["@mindroom_test_agent:localhost"]}
+    idle = asyncio.Event()
+    calls: list[PreparedTurn] = []
+
+    async def record_dispatch(batch: PreparedTurn) -> bool:
+        calls.append(batch)
+        return True
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    with (
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=record_dispatch)),
+        # The gate reads which conversations have a response running from the runner it was built with.
+        patch.object(
+            bot._coalescing_gate,
+            "_wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+        patch.object(bot._coalescing_gate, "_active_thread_ids_for_room", new=lambda _room_id: frozenset({"$thread"})),
+    ):
+        for event in (for_someone_else, for_this_agent):
+            await _enqueue_for_dispatch(
+                bot,
+                event,
+                room,
+                source_kind="message",
+                requester_user_id=router,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner(router)),
+            )
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$other"]])
+        assert not calls[0].active_follow_up
+
+        idle.set()
+        await _wait_for(
+            lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$other"], ["$mine"]],
+        )
+
+    assert calls[1].active_follow_up
+
+
+@pytest.mark.asyncio
 async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(tmp_path: Path) -> None:
     """A follow-up queued behind an active response never runs tools as a co-participant.
 
