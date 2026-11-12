@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import fields
+from typing import Literal, get_type_hints
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from mindroom.tool_system import worker_routing
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.workers import protocol
 
@@ -18,9 +19,7 @@ from mindroom.workers import protocol
 # fields it does not know. Record a new digest for the same version only when nothing a request or response carries
 # changed, such as a pydantic upgrade that renders the same schema differently.
 _SCHEMA_DIGESTS = {
-    6: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce",
-    7: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce",
-    8: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce",
+    8: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
 }
 
 
@@ -54,8 +53,9 @@ def _wire_schema_digest() -> str:
     schemas: dict[str, object] = {
         name: _without_prose(model.model_json_schema()) for name, model in sorted(models.items())
     }
-    # The execution identity crosses as its serialized dataclass, which the models' schemas show only as an object.
-    schemas["execution_identity"] = [(field.name, str(field.type)) for field in fields(ToolExecutionIdentity)]
+    # The execution identity crosses as its serialized dataclass, which the models' schemas show only as an object, so
+    # its fields' resolved types count, such as every value its channel takes.
+    schemas["execution_identity"] = [(name, str(hint)) for name, hint in get_type_hints(ToolExecutionIdentity).items()]
     return hashlib.sha256(json.dumps(schemas, sort_keys=True).encode()).hexdigest()
 
 
@@ -70,6 +70,15 @@ def test_a_field_named_like_a_schema_keyword_still_changes_the_schema() -> None:
         description: str | None = None
 
     assert _without_prose(Plain.model_json_schema()) != _without_prose(WithDescription.model_json_schema())
+
+
+def test_a_new_execution_channel_changes_the_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker refuses an identity whose channel it does not know, so a new channel value is a wire change."""
+    digest = _wire_schema_digest()
+    channels = Literal["matrix", "openai_compat", "headless", "mcp", "new"]
+    monkeypatch.setattr(worker_routing, "_ExecutionChannel", channels)
+
+    assert _wire_schema_digest() != digest
 
 
 def test_an_execution_identity_field_this_release_does_not_know_is_refused() -> None:
