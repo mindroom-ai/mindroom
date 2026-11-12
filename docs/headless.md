@@ -59,8 +59,9 @@ Each call is a new conversation, so the agent sees no history from earlier calls
 
 Cancelling the call, directly or through `asyncio.timeout`, stops the turn, its subagents, and any shell command still running before the cancellation reaches the caller.
 
-Importing `mindroom.headless` sends MindRoom's logs through Python's `logging`, so a program that configures no logging sees only warnings and errors, on stderr, and nothing on stdout.
-Configure `logging` to see more, such as `logging.basicConfig(level=logging.INFO)`; MindRoom's records come from the `mindroom` logger, and a program that configures `structlog` itself, before or after the import, keeps its own setup.
+Importing `mindroom.headless` sends MindRoom's logs through Python's `logging`, from loggers named under `mindroom`, so a program that configures no logging sees only MindRoom's warnings and errors, on stderr, and nothing from MindRoom on stdout.
+Configure `logging` to see more, such as `logging.basicConfig(level=logging.INFO)`.
+The program's own `structlog` loggers print as they would without MindRoom, and a program that configures `structlog` before the import, or sets its `logger_factory` after it, gets MindRoom's records through its own setup instead.
 
 `mindroom.headless.validate_config(config, *, agent, storage, workdir=None, requester_id=None)` checks the same things without running a turn and returns the validated config.
 

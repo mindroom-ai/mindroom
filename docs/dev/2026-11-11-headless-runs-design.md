@@ -38,6 +38,8 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 8. Importing `mindroom.headless` routes MindRoom's logs, Agno's included, through the program's stdlib `logging` unless the program configured `structlog` first.
    The import-time default, which subprocess entrypoints and the sandbox runner rely on, prints every level to stdout, so in another program it mixed MindRoom's debug lines, full prompts among them, into that program's output.
    Changing that default would change what those processes log, and only importing the headless API tells library use apart from them.
+   Library logging changes only the logger factory, so that only MindRoom's loggers, which `get_logger` names under `mindroom`, become stdlib loggers.
+   structlog's settings are process-wide, and a later `structlog.configure` keeps every setting it leaves out, so processors that routed records would also have caught the program's own loggers, before and after its partial setup.
 9. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 

@@ -182,68 +182,55 @@ _DEFAULT_PROCESSORS: list[Processor] = [
 ]
 
 
+# The structlog settings `configure_default_logging` installed last.
+_DEFAULT_CONFIG: dict[str, object] = {}
+
+
 def configure_default_logging() -> None:
     """Restore the logging a process uses until it calls `setup_logging`."""
     structlog.reset_defaults()
     structlog.configure(processors=_DEFAULT_PROCESSORS)
+    _DEFAULT_CONFIG.update(structlog.get_config())
 
 
 def uses_default_logging() -> bool:
-    """Return whether the processors are still the ones `configure_default_logging` installed."""
-    return structlog.get_config()["processors"] is _DEFAULT_PROCESSORS
+    """Return whether every structlog setting is still the one `configure_default_logging` installed."""
+    return structlog.get_config() == _DEFAULT_CONFIG
 
 
-# The stdlib logger through which a program that runs MindRoom as a library gets MindRoom's records.
-_LIBRARY_LOGGER = logging.getLogger("mindroom")
-# The structlog config that `configure_library_logging` set; a program that configures structlog since changes it.
-_LIBRARY_CONFIG: dict[str, object] = {}
+# structlog's own printer, which the loggers of a program that runs MindRoom as a library keep.
+_PRINT_LOGGER_FACTORY = structlog.PrintLoggerFactory()
 
 
-def _library_logging_in_charge() -> bool:
-    """Return whether structlog still runs as `configure_library_logging` set it, so its processors route records.
-
-    structlog keeps every setting a later `structlog.configure` call leaves out, such as these processors beside a
-    program's own logger factory, so the processors step aside once the program changed any setting.
-    """
-    return structlog.get_config() == _LIBRARY_CONFIG
-
-
-def _library_level(method_name: str) -> int:
-    # A record is named by its level, except that a stdlib wrapper names an error with a traceback `exception`.
-    return logging.ERROR if method_name == "exception" else logging.getLevelNamesMapping()[method_name.upper()]
+def _library_logger_factory(*args: object) -> object:
+    """Wrap each MindRoom logger, which `get_logger` names after its module, around the stdlib logger of that name."""
+    name = args[0] if args else None
+    if isinstance(name, str) and (name == "mindroom" or name.startswith("mindroom.")):
+        return logging.getLogger(name)
+    return _PRINT_LOGGER_FACTORY(*args)
 
 
-def _drop_below_library_level(_logger: object, method_name: str, event_dict: EventDict) -> EventDict:
-    """Drop a record the program's `logging` would not show, before it is rendered."""
-    if _library_logging_in_charge() and not _LIBRARY_LOGGER.isEnabledFor(_library_level(method_name)):
+def _drop_below_library_level(logger: object, method_name: str, event_dict: EventDict) -> EventDict:
+    """Drop a MindRoom record that the program's `logging` would not show, before it is rendered."""
+    # A stdlib wrapper names an error with a traceback `exception`; every other record is named by its level.
+    level = logging.ERROR if method_name == "exception" else logging.getLevelNamesMapping()[method_name.upper()]
+    if isinstance(logger, logging.Logger) and not logger.isEnabledFor(level):
         raise structlog.DropEvent
     return event_dict
-
-
-def _emit_to_library_logger(_logger: object, method_name: str, rendered: str) -> str:
-    """Hand the rendered record to the program's `logging` instead of printing it, unless the program took over."""
-    if not _library_logging_in_charge():
-        return rendered
-    _LIBRARY_LOGGER.log(_library_level(method_name), rendered)
-    raise structlog.DropEvent
 
 
 def configure_library_logging() -> None:
     """Log through the stdlib `logging` of a program that runs MindRoom as a library, unless it configured structlog.
 
-    Until that program configures `logging`, Python shows only warnings and errors, on stderr. Once the program
-    configures structlog, its own setup decides, as if MindRoom had not set any of this.
+    Until that program configures `logging`, Python shows only MindRoom's warnings and errors, on stderr. Only
+    MindRoom's loggers change: the program's own structlog loggers print as they did.
     """
     if not uses_default_logging():
         return
     structlog.configure(
-        processors=[
-            cast("Processor", _drop_below_library_level),
-            *_DEFAULT_PROCESSORS,
-            cast("Processor", _emit_to_library_logger),
-        ],
+        processors=[cast("Processor", _drop_below_library_level), *_DEFAULT_PROCESSORS],
+        logger_factory=_library_logger_factory,
     )
-    _LIBRARY_CONFIG.update(structlog.get_config())
     # MindRoom's tools also log through Agno's loggers, which would otherwise print to stdout at INFO.
     _route_agno_loggers_to_root(None)
 
