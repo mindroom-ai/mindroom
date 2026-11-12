@@ -191,7 +191,12 @@ class RouterDuties:
             runtime.runtime_paths,
         ):
             await self._publish_room_state(room.room_id)
-            await self.deps.room_lifecycle.refresh_welcome(room.room_id)
+            # An edit can wait on a slow homeserver, so it holds none of the room's later events.
+            create_background_task(
+                self.deps.room_lifecycle.refresh_welcome(room.room_id),
+                name="router_welcome_refresh",
+                owner=self.deps.runtime,
+            )
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:

@@ -112,6 +112,7 @@ Router judgments share the process-wide limit and logging described in [Judgment
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
 It posts none when that room's canonical `m.space.parent` is a chat room it can read, such as one it is in, rather than a Space, since the room continues the conversation of the [room above](../rooms.md#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
+When agents or teams join or leave the room later, such as ones invited after the router, the router edits its welcome to list the ones there now; a welcome sent before the router restarted stays as it was.
 Send [`!hi`](../chat-commands.md#hi) to see the welcome again, limited to responders visible to you.
 
 The router's other duties are documented on their own pages: [command handling](../chat-commands.md#command-handling), [room management](../rooms.md#room-management), [voice message processing](../voice.md#voice-message-processing), [configuration confirmations](../chat-commands.md#configuration-confirmations), and [running scheduled tasks](../scheduling.md#scheduled-task-restoration).

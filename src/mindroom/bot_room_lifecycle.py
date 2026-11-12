@@ -714,9 +714,10 @@ class BotRoomLifecycle:
     async def refresh_welcome(self, room_id: str) -> None:
         """Edit the welcome this process sent in a room to list the agents there now, such as ones that joined after it.
 
+        It lists whom the welcome's requester may address now, so an access reload waits for it, as for the welcome.
         A welcome sent before a restart stays as it was.
         """
-        async with self._lock_for_room(self._welcome_locks, room_id):
+        async with self.deps.admit_response(), self._lock_for_room(self._welcome_locks, room_id):
             sent = self._sent_welcomes.get(room_id)
             if sent is None:
                 return
