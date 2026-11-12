@@ -28,7 +28,7 @@ personal_rooms:
 ```
 
 `mind` is the template key, never an agent itself, and `personal_rooms.agent: mind` gives each user's personal room that user's own agent.
-Because `access` is omitted, only the owner and platform administrators may use each generated agent.
+Because `access` is omitted, only the owner may use each generated agent; to admit anyone else, platform administrators included, set `access` under the template's `agent:`.
 
 ## Configuration
 
@@ -94,7 +94,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 ## Letting Agents Talk to Each Other
 
-By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
+By default nobody except the owner can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
 To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) instead.
@@ -216,7 +216,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
-- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+- Only the person who asked and any co-owners they add may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
 
