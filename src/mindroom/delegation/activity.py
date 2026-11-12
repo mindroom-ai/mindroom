@@ -56,6 +56,8 @@ class SubagentSnapshot:
     """What one sub-agent run has done so far, redacted and capped."""
 
     delegation_id: str
+    # The sub-agent this run is a turn of: the delegation ID of its first turn, which its later turns share.
+    subagent_id: str
     # Set for a sub-agent's own sub-agent.
     parent_delegation_id: str | None
     caller_agent_name: str
@@ -134,6 +136,7 @@ class _SubagentActivity:
     """The transcript and status of one child run, turned into snapshots a sink can take."""
 
     delegation_id: str
+    subagent_id: str
     parent_delegation_id: str | None
     caller_agent_name: str
     root_caller_agent_name: str
@@ -166,6 +169,7 @@ class _SubagentActivity:
         is_workflow = child.persona is not None and child.persona.source_kind == "workflow"
         return cls(
             delegation_id=child.delegation_id,
+            subagent_id=child.subagent_id,
             parent_delegation_id=parent_delegation_id,
             caller_agent_name=child.caller_agent_name,
             root_caller_agent_name=root_caller_agent_name,
@@ -236,6 +240,7 @@ class _SubagentActivity:
         dropped = _cut_oldest_text(items, total - self._hidden)
         return SubagentSnapshot(
             delegation_id=self.delegation_id,
+            subagent_id=self.subagent_id,
             parent_delegation_id=self.parent_delegation_id,
             caller_agent_name=self.caller_agent_name,
             root_caller_agent_name=self.root_caller_agent_name,

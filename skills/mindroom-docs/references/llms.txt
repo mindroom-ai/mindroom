@@ -83,6 +83,7 @@
 - [Hooks](https://docs.mindroom.chat/hooks/)
 - [External Triggers](https://docs.mindroom.chat/external-triggers/)
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
+- [Headless Runs](https://docs.mindroom.chat/headless/)
 - [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/)
 - [Deployment Overview](https://docs.mindroom.chat/deployment/)
 - [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/)

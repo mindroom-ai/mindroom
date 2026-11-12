@@ -72,7 +72,7 @@ from mindroom.tool_system.declarations import (
     is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
-from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -562,12 +562,12 @@ def _file_mode_knowledge_instruction_block(
 
 
 def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_path: Path) -> dict[str, object] | None:
-    """Point a registered tool that exposes a ``base_dir`` config field at the agent's workspace."""
+    """Point a registered tool that exposes a ``base_dir`` config field at the bound workdir or the agent's workspace."""
     metadata = tools.get(tool_name)
     config_fields = (metadata.config_fields if metadata is not None else None) or ()
     if not any(field.name == "base_dir" for field in config_fields):
         return None
-    return {"base_dir": str(workspace_path)}
+    return {"base_dir": str(current_tool_workdir() or workspace_path)}
 
 
 def _offered_entries(
@@ -663,6 +663,7 @@ def _agent_tool_output_file_policy(
         agent_runtime.workspace.root,
         runtime_paths,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        tools_use_workdir=current_tool_workdir() is not None,
     )
 
 
@@ -1517,7 +1518,8 @@ def _build_agent_instructions(
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if not disable_runtime_capabilities:
+    # Beside a workdir the tools resolve relative paths there, so notes on writing into the workspace would misdirect.
+    if not disable_runtime_capabilities and current_tool_workdir() is None:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
         # A conditional expression keeps this builder within the complexity limit.
         instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())

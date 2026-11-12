@@ -41,7 +41,7 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
 It is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; a [headless run](https://docs.mindroom.chat/headless/#files) can point it at a directory the caller chooses.
 
 Supported tools also take an optional `mindroom_output_path` argument.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
