@@ -12,6 +12,7 @@ import nio
 import pytest
 
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.coalescing import gate as gate_module
 from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
@@ -39,7 +40,9 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
     source_kind_bypasses_coalescing,
 )
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.execution_preparation import _messages_with_current_prompt
+from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -1423,6 +1426,152 @@ async def test_an_agents_unmentioned_continuation_waits_with_its_mentioned_messa
     idle.set()
     await _wait_for(lambda: dispatched == [(["$first:localhost", "$next:localhost"], True)])
     await gate.drain_all()
+
+
+def _split_reply_segment(
+    event_id: str,
+    *,
+    delivery: str = "turn-1",
+    count: int | None = None,
+    thread_id: str | None = "$thread:localhost",
+    sender_entity_name: str | None = "research",
+    origin_server_ts: int = 1_000_000,
+) -> PendingEvent:
+    """Return one segment of a split reply that research wrote, the first one carrying the segment count."""
+    sender = "@mindroom_research:localhost"
+    content: dict[str, object] = {
+        "body": f"part {event_id}",
+        "msgtype": "m.text",
+        DURABLE_DELIVERY_ID_KEY: {"principal": sender, "delivery_id": delivery, "stage": "final"},
+    }
+    if count is not None:
+        content[SEGMENT_COUNT_KEY] = count
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    return make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+        facts=make_ingress_facts(
+            sender,
+            sender_entity_name=sender_entity_name,
+            requester_entity_name=sender_entity_name,
+        ),
+    )
+
+
+def _split_reply_gate(batches: list[PreparedTurn]) -> CoalescingGate:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    return CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0.0, is_shutting_down=lambda: False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", ["$thread:localhost", None])
+async def test_a_split_reply_waits_for_all_its_segments_and_answers_as_its_first(thread_id: str | None) -> None:
+    """The first segment of a split reply waits for its continuations and leads the one turn they make together.
+
+    At room level, where each top-level message is otherwise its own turn, the segments still share one.
+    """
+    batches: list[PreparedTurn] = []
+    gate = _split_reply_gate(batches)
+    key = CoalescingKey("!room:localhost", thread_id, RequesterCoalescingOwner("@mindroom_research:localhost"))
+
+    await _admit_ready(gate, key, _split_reply_segment("$one:localhost", count=3, thread_id=thread_id))
+    await _admit_ready(gate, key, _split_reply_segment("$two:localhost", thread_id=thread_id))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert batches == []
+    await _admit_ready(gate, key, _split_reply_segment("$three:localhost", thread_id=thread_id))
+
+    await _wait_for(lambda: len(batches) == 1)
+    assert list(batches[0].handled_turn.source_event_ids) == ["$one:localhost", "$two:localhost", "$three:localhost"]
+    assert batches[0].event.event_id == "$one:localhost"
+    assert all(f"part ${name}:localhost" in batches[0].event.body for name in ("one", "two", "three"))
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_a_split_reply_missing_a_segment_dispatches_what_arrived_at_its_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation that never arrives holds the reply only until the bound, then the segments that came answer."""
+    monkeypatch.setattr(gate_module, "_SPLIT_REPLY_WAIT_SECONDS", 0.05)
+    batches: list[PreparedTurn] = []
+    gate = _split_reply_gate(batches)
+    key = CoalescingKey(
+        "!room:localhost",
+        "$thread:localhost",
+        RequesterCoalescingOwner("@mindroom_research:localhost"),
+    )
+
+    await _admit_ready(gate, key, _split_reply_segment("$one:localhost", count=3))
+    await _admit_ready(gate, key, _split_reply_segment("$two:localhost"))
+
+    await _wait_for(lambda: len(batches) == 1)
+    assert list(batches[0].handled_turn.source_event_ids) == ["$one:localhost", "$two:localhost"]
+    assert batches[0].event.event_id == "$one:localhost"
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_wait_for_a_split_replys_missing_segments() -> None:
+    """Draining for shutdown dispatches a held split reply at once instead of waiting out its bound."""
+    batches: list[PreparedTurn] = []
+    gate = _split_reply_gate(batches)
+    key = CoalescingKey(
+        "!room:localhost",
+        "$thread:localhost",
+        RequesterCoalescingOwner("@mindroom_research:localhost"),
+    )
+    await _admit_ready(gate, key, _split_reply_segment("$one:localhost", count=3))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert batches == []
+
+    async with asyncio.timeout(2):
+        await gate.drain_all()
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sender_entity_name", "delivery"), [(None, "turn-1"), ("research", "turn-2")])
+async def test_only_a_managed_senders_own_continuations_join_its_split_reply(
+    sender_entity_name: str | None,
+    delivery: str,
+) -> None:
+    """A person's message claiming a segment count is not held, and another delivery's text does not complete the reply."""
+    batches: list[PreparedTurn] = []
+    gate = _split_reply_gate(batches)
+    key = CoalescingKey(
+        "!room:localhost",
+        "$thread:localhost",
+        RequesterCoalescingOwner("@mindroom_research:localhost"),
+    )
+
+    first = _split_reply_segment("$one:localhost", count=2, sender_entity_name=sender_entity_name)
+    await _admit_ready(gate, key, first)
+    if sender_entity_name is None:
+        await _wait_for(lambda: len(batches) == 1)
+    else:
+        await _admit_ready(gate, key, _split_reply_segment("$other:localhost", delivery=delivery))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert batches == []
+    await gate.drain_all()
+    assert batches[0].handled_turn.source_event_ids[0] == "$one:localhost"
 
 
 @pytest.mark.asyncio

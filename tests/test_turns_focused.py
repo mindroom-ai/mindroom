@@ -84,6 +84,7 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.identity import journal_principal_id
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.opening import open_event_journal
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
@@ -106,6 +107,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.journal_ingress import _inbound_event
 from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
@@ -3108,6 +3110,105 @@ class _NoEditRegeneration:
     ) -> None:
         self.edit_event_ids.append(event.event_id)
         self.edit_facts.append(facts)
+
+
+def _split_reply_events(
+    config: Config,
+    *,
+    placeholder_id: str,
+    thread_id: str | None,
+    delivery_id: str,
+    event_prefix: str,
+) -> list[nio.RoomMessageText]:
+    """Return research's long reply for the owner as delivery splits it: its final edit, then its continuations."""
+    sections = "\n\n".join(f"## Part {index}\n\nDetail {index} of the plan." for index in range(2500))
+    body = f"@general please take this over.\n\n{sections}\n\nEND-MARKER"
+    identity = {"principal": _entity_user_id(config, "research"), "delivery_id": delivery_id, "stage": "final"}
+    content = build_edit_event_content(
+        event_id=placeholder_id,
+        new_content={
+            "body": body,
+            "msgtype": "m.text",
+            "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+            DURABLE_DELIVERY_ID_KEY: identity,
+        },
+        new_text=body,
+        extra_content={
+            constants.ACTING_REQUESTER_KEY: _OWNER,
+            constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED,
+            DURABLE_DELIVERY_ID_KEY: identity,
+        },
+    )
+    segmented = segment_matrix_content(
+        content,
+        room_encrypted=False,
+        continuation_thread_id=thread_id,
+        continuation_reply_to_event_id=placeholder_id,
+    )
+    assert segmented is not None
+    assert len(segmented.continuations) >= 2
+    return [
+        _final_reply_edit_event(config, part, event_id=f"${event_prefix}-{index}:localhost")
+        for index, part in enumerate((segmented.first, *segmented.continuations))
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("placeholder_thread", [_THREAD_ROOT, None])
+async def test_an_agents_split_reply_wakes_the_mentioned_agent_once_with_all_of_it(
+    tmp_path: Path,
+    placeholder_thread: str | None,
+) -> None:
+    """A reply delivered in several messages answers as one turn on all of them, and its regeneration wakes no one.
+
+    At room level a thread-mode agent still reads every segment, which then has no thread relation.
+    """
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    research = _entity_user_id(config, "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id, placeholder_thread)
+    placeholder = _entity_reply_event(config, sender=research, acting_requester=_OWNER, event_id=placeholder_id)
+    placeholder.source["content"]["body"] = "Thinking..."
+    placeholder.source["content"][constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_PENDING
+    if placeholder_thread is not None:
+        placeholder.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": placeholder_thread}
+    await harness.deliver(room, placeholder)
+
+    segments = _split_reply_events(
+        config,
+        placeholder_id=placeholder_id,
+        thread_id=placeholder_thread,
+        delivery_id="turn-1",
+        event_prefix="split",
+    )
+    for segment in segments:
+        await harness.ingress.handle_text_event(room, segment)
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.sources.logical_source_event_ids == tuple(segment.event_id for segment in segments)
+    assert request.reply_to_event_id == placeholder_id
+    assert request.response_envelope.target.resolved_thread_id == (placeholder_thread or placeholder_id)
+    assert "please take this over" in request.prompt
+    assert "END-MARKER" in request.prompt
+
+    regenerated = _split_reply_events(
+        config,
+        placeholder_id=placeholder_id,
+        thread_id=placeholder_thread,
+        delivery_id="turn-2",
+        event_prefix="regenerated",
+    )
+    for segment in regenerated:
+        await harness.ingress.handle_text_event(room, segment)
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio

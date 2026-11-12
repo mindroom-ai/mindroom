@@ -34,6 +34,8 @@ _SEGMENT_TARGET_EDIT_BYTES = 22_000
 _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
+# The first segment of a split reply says how many segments the reply has, so a receiver can answer them as one turn.
+SEGMENT_COUNT_KEY = "io.mindroom.segment_count"
 # Rebuilt per segment after sizing (the tool trace) or not part of the visible
 # answer, so metadata can never split an answer or push it into a sidecar. A split
 # reply keeps no reasoning, which would otherwise repeat on every segment.
@@ -411,6 +413,8 @@ def segment_matrix_content(
     else:
         first = first_build(chunks[0])
         continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
+    if continuations:
+        (first["m.new_content"] if is_edit else first)[SEGMENT_COUNT_KEY] = 1 + len(continuations)
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):
@@ -418,4 +422,4 @@ def segment_matrix_content(
     return SegmentedMatrixContent(first=first, continuations=continuations)
 
 
-__all__ = ["SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]
+__all__ = ["SEGMENT_COUNT_KEY", "SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]

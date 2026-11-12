@@ -1,11 +1,16 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
+import pytest
+
+from mindroom.constants import REASONING_CONTENT_KEY
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
+    SEGMENT_COUNT_KEY,
     _chunk_mentions,
     _render_segment_html,
     _unclosed_fence_start,
@@ -264,6 +269,34 @@ def test_mention_pills_survive_segmentation() -> None:
     # m.mentions belongs to the event whose body carries the mention.
     assert mentioned[0]["m.mentions"] == {"user_ids": ["@alice:localhost"]}
     assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -> None:
+    """The first segment's visible content carries the segment count, and continuations keep the delivery identity."""
+    message = {**build_message_content(_body()), DURABLE_DELIVERY_ID_KEY: {"delivery_id": "turn-1"}}
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert segmented.continuations
+    first = segmented.first["m.new_content"] if edit else segmented.first
+    assert first[SEGMENT_COUNT_KEY] == 1 + len(segmented.continuations)
+    assert all(SEGMENT_COUNT_KEY not in part for part in segmented.continuations)
+    assert all(part[DURABLE_DELIVERY_ID_KEY] == first[DURABLE_DELIVERY_ID_KEY] for part in segmented.continuations)
+
+
+def test_a_reply_that_stays_one_segment_has_no_segment_count() -> None:
+    """Dropping internal metadata can leave one segment, which has nothing to wait for."""
+    message = build_message_content("Short answer.", extra_content={REASONING_CONTENT_KEY: "x" * 60_000})
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message)
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations == ()
+    assert SEGMENT_COUNT_KEY not in segmented.first["m.new_content"]
 
 
 def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:

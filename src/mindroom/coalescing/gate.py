@@ -34,6 +34,7 @@ from .batch import (
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
     pending_event_addressing,
+    split_reply_segment,
 )
 from .cleanup import (
     ClaimedSegmentOwner,
@@ -69,6 +70,8 @@ __all__ = [
 
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _MAX_ROOT_PREPARATIONS = 8
+# A split reply's first segment waits at most this long for its continuations, so a lost one cannot hold the sender.
+_SPLIT_REPLY_WAIT_SECONDS = 10.0
 # How long a flush may wait on the rest of a sender's burst before the wait is
 # reported. Voice readiness legitimately takes seconds, so this is set well
 # past any real burst: reaching it means the lane is not going to settle, and
@@ -180,6 +183,15 @@ class _FlushDiagnostics:
     pending_count: int
     timing_scope: str
     log_context: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _FrontSplitReply:
+    """A split reply led by the queue's front: its queued segments, whether it still waits, and until when."""
+
+    length: int
+    waits: bool
+    until: float
 
 
 @dataclass(frozen=True)
@@ -938,10 +950,12 @@ class CoalescingGate:
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
+        split_reply_led = await self._wait_for_front_split_reply(gate)
         limit = run_limit()
         debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
         if (
-            debounce_seconds <= 0
+            split_reply_led
+            or debounce_seconds <= 0
             or self._is_shutting_down()
             or gate.drain_all_requested
             or self._front_normal_run_ends_with_text(gate, run_limit=limit)
@@ -985,14 +999,41 @@ class CoalescingGate:
             )
             gate.deadline = quiet_deadline
 
+    async def _wait_for_front_split_reply(self, gate: _GateEntry) -> bool:
+        """Wait while the split reply leading the queue misses segments, and return whether one leads it."""
+        split = self._front_split_reply(gate)
+        if split is None:
+            return False
+        while split is not None and split.waits and not (self._is_shutting_down() or gate.drain_all_requested):
+            gate.deadline = split.until
+            await self._wait_for_deadline(gate, split.until)
+            split = self._front_split_reply(gate)
+        return True
+
+    def _front_split_reply(self, gate: _GateEntry) -> _FrontSplitReply | None:
+        """Return the split reply whose first segment leads the queue, with the continuations queued behind it."""
+        first = split_reply_segment(gate.queue[0].pending_event) if gate.queue else None
+        if first is None or first.count is None:
+            return None
+        length = 1
+        for queued in islice(gate.queue, 1, None):
+            if split_reply_segment(queued.pending_event) != (first.delivery, None):
+                break
+            length += 1
+        until = gate.queue[0].receipt_time + _SPLIT_REPLY_WAIT_SECONDS
+        return _FrontSplitReply(length=length, waits=length < first.count and time.monotonic() < until, until=until)
+
     def _front_run_limit(self, key: CoalescingKey, gate: _GateEntry) -> int | None:
         """Return how many front admissions may share one turn, or None for the whole front run.
 
+        A split reply's segments share one turn, wherever it was sent.
         A thread, or a room treated as one conversation, batches its whole front run.
         Otherwise each room-level message starts its own conversation, so only a
         burst whose messages were each sent within the debounce window of the
         previous one, and that holds voice or media, shares a turn.
         """
+        if (split := self._front_split_reply(gate)) is not None:
+            return split.length
         if key.thread_id is not None or (
             self._room_scope_is_single_conversation is not None and self._room_scope_is_single_conversation(key.room_id)
         ):

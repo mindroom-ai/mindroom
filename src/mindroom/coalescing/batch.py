@@ -20,7 +20,9 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
@@ -358,6 +360,27 @@ def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
     return event.for_another_participant
 
 
+class _SplitReplySegment(NamedTuple):
+    """One segment of a managed sender's reply: the reply's delivery identity, and the count its first segment declares."""
+
+    delivery: Mapping[str, object]
+    count: int | None
+
+
+def split_reply_segment(pending_event: PendingEvent) -> _SplitReplySegment | None:
+    """Return a managed sender's text as a segment of its reply, or None for anyone else's message or an upload."""
+    content = pending_event.event.source.get("content")
+    if (
+        pending_event.facts.sender_entity_name is None
+        or pending_event.event.raw_event is not None
+        or not isinstance(content, Mapping)
+        or not isinstance(delivery := content.get(DURABLE_DELIVERY_ID_KEY), Mapping)
+    ):
+        return None
+    count = content.get(SEGMENT_COUNT_KEY)
+    return _SplitReplySegment(delivery, count if type(count) is int and count > 1 else None)
+
+
 def _batch_facts(ordered_pending_events: list[PendingEvent]) -> IngressFacts:
     """Reduce the batch's per-event facts to the facts the whole turn dispatches with.
 
@@ -417,7 +440,11 @@ def build_prepared_turn(
 ) -> PreparedTurn:
     """Build the logical turn represented by one coalescing-gate flush."""
     ordered_pending_events = list(pending_events)
-    primary_pending_event = ordered_pending_events[-1]
+    # A split reply's first segment carries its mentions and the reply it finishes, so it addresses the whole turn.
+    primary_pending_event = next(
+        (event for event in ordered_pending_events if (segment := split_reply_segment(event)) and segment.count),
+        ordered_pending_events[-1],
+    )
     active_follow_up = any(pending_event.event.active_follow_up for pending_event in ordered_pending_events)
     prompt_rendering = _render_coalesced_prompt(
         ordered_pending_events,
