@@ -114,7 +114,15 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
 )
 # Claude models that reject forced tool use on every request
 # (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
-CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (_ANTHROPIC_OPUS, _ANTHROPIC_SONNET, _ANTHROPIC_FABLE, "claude-mythos-5-1")
+# Literal ids, because a model keeps the rule after the preferred defaults move on from it.
+CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5-1",
+    "claude-mythos-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+)
 # Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
 # earlier — a closed set, so new releases take the native tool-search path
 # without a list update). Prefixes cover the aliases plus the dated
@@ -188,7 +196,14 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
 # The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent
 # before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
 # Literal ids, because a model keeps the check after the preferred defaults move on from it.
-CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
+CLAUDE_PREFIX_CHECKED_THINKING_MODELS = (
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+)
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:

@@ -46,7 +46,12 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
+from mindroom.providers.anthropic.wire import (
+    checks_thinking_prefix,
+    supports_forced_tool_use,
+    supports_prefill,
+    supports_structured_outputs,
+)
 from mindroom.providers.pipeline import retry as retry_stage
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -787,9 +792,11 @@ async def test_a_route_without_native_structured_output_forces_the_answer_tool(
     [
         ("anthropic.claude-sonnet-5-5", {}),
         ("anthropic.claude-opus-5-5", {}),
+        ("anthropic.claude-fable-5-2", {}),
+        ("anthropic.claude-mythos-5-2", {}),
         ("anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
     ],
-    ids=["sonnet-5-5", "opus-5-5", "manual-thinking"],
+    ids=["sonnet-5-5", "opus-5-5", "fable-5-2", "mythos-5-2", "manual-thinking"],
 )
 def test_a_model_that_rejects_forced_tool_use_answers_in_json_mode(
     tmp_path: Path,
@@ -986,6 +993,7 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
             id="haiku-disabled",
         ),
         pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, False, id="bedrock"),
+        pytest.param("bedrock_claude", "anthropic.claude-fable-5-2", {}, False, False, id="bedrock-fable-5-2"),
         pytest.param(
             "bedrock_claude",
             "anthropic.claude-sonnet-5-5",
@@ -1059,6 +1067,20 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             RequestOverrides(),
             {"type": "adaptive", "display": "summarized", "block_binding": _DROP_STALE},
             id="authored-adaptive",
+        ),
+        pytest.param(
+            "claude-fable-5-2",
+            {"thinking": {"type": "adaptive", "display": "summarized"}},
+            RequestOverrides(),
+            {"type": "adaptive", "display": "summarized", "block_binding": _DROP_STALE},
+            id="authored-adaptive-fable-5-2",
+        ),
+        pytest.param(
+            "claude-mythos-5-2",
+            {},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="checked-mythos-5-2",
         ),
         pytest.param(
             "claude-opus-5-5",
@@ -1165,6 +1187,12 @@ async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_pat
     ("model_id", "checked"),
     [
         ("claude-fable-5-1", True),
+        ("claude-fable-5-2", True),
+        ("anthropic.claude-fable-5-2", True),
+        ("us.anthropic.claude-fable-5-2-v1:0", True),
+        ("claude-fable-5-2@20261101", True),
+        ("anthropic/claude-fable-5-2", True),
+        ("claude-mythos-5-2", True),
         ("anthropic.claude-opus-5-5", True),
         ("claude-sonnet-5-5@20261001", True),
         ("anthropic/claude-haiku-5-5", True),
@@ -1174,8 +1202,32 @@ async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_pat
     ],
 )
 def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(model_id: str, *, checked: bool) -> None:
-    """Fable 5.1 and the 5.5 models check replayed thinking under every route's spelling; older models and Mythos 5.1 do not."""
+    """Fable 5.1 and 5.2, Mythos 5.2 and the 5.5 models check replayed thinking under every route's spelling.
+
+    Older models and Mythos 5.1 do not.
+    """
     assert checks_thinking_prefix(model_id) is checked
+
+
+@pytest.mark.parametrize(
+    ("model_id", "forced"),
+    [
+        ("claude-fable-5-1", False),
+        ("claude-fable-5-2", False),
+        ("anthropic.claude-fable-5-2", False),
+        ("claude-fable-5-2@20261101", False),
+        ("claude-mythos-5-1", False),
+        ("claude-mythos-5-2", False),
+        ("claude-opus-5-5", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-fable-5", True),
+        ("claude-opus-5", True),
+        ("claude-haiku-5-5", True),
+    ],
+)
+def test_forced_tool_use_is_left_out_for_models_that_reject_it(model_id: str, *, forced: bool) -> None:
+    """Fable and Mythos 5.1 and 5.2 and the 5.5 Opus and Sonnet reject a forced tool call under every route's spelling."""
+    assert supports_forced_tool_use(model_id, manual_thinking=False) is forced
 
 
 @pytest.mark.asyncio
