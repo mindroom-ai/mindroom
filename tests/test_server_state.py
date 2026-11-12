@@ -96,9 +96,10 @@ def test_nothing_is_published_without_the_api(tmp_path: Path) -> None:
         ("helper", True, {"api_origin": "http://localhost:8765", "computer": False, "role": ROLE}),
         ("crew", True, {"api_origin": "http://localhost:8765", "computer": False, "role": "Plans releases"}),
         ("helper", False, {"role": ROLE}),
+        ("quiet", True, {"api_origin": "http://localhost:8765", "computer": False}),
         ("router", True, {"api_origin": "http://localhost:8765", "computer": False}),
     ],
-    ids=["agent", "team", "agent-without-the-api", "router"],
+    ids=["agent", "team", "agent-without-the-api", "blank-role", "router"],
 )
 def test_content_says_what_the_entity_does(
     tmp_path: Path,
@@ -106,9 +107,9 @@ def test_content_says_what_the_entity_does(
     api_enabled: bool,
     content: dict[str, object],
 ) -> None:
-    """Chat shows an agent's or team's role under its name, also without the API; the router has none."""
+    """Chat shows an agent's or team's role under its name, also without the API; the router and a blank role show none."""
     config = Config(
-        agents={"helper": {"display_name": "Helper", "role": ROLE}},
+        agents={"helper": {"display_name": "Helper", "role": ROLE}, "quiet": {"display_name": "Quiet", "role": " \n"}},
         teams={"crew": {"display_name": "Crew", "role": "Plans releases", "agents": ["helper"]}},
     )
     assert server_state_content(entity, config, _paths(tmp_path), api_enabled=api_enabled) == content
