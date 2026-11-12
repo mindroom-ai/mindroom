@@ -481,8 +481,20 @@ describe("ModelConfig", () => {
       },
       saved: { provider: "openai" },
     },
+    {
+      provider: /OpenAI/i,
+      extraKwargs: {
+        default_headers: { "x-gateway": "old" },
+        auth_token: "old-token",
+        client_params: { default_headers: { "x-gateway": "old" }, timeout: 30 },
+      },
+      saved: {
+        provider: "openai",
+        extra_kwargs: { client_params: { timeout: 30 } },
+      },
+    },
   ])(
-    "drops the old provider's endpoint when changing provider (%o)",
+    "drops the old provider's endpoint, headers, and auth token when changing provider (%o)",
     async ({ provider, extraKwargs, saved }) => {
       addModels({
         gateway: {
@@ -1309,6 +1321,22 @@ describe("ModelConfig", () => {
             api_key: "sk-gateway",
           },
         },
+      },
+      {
+        outcome: "keeps the headers it changes and drops the old ones",
+        start: {
+          default_headers: { "x-gateway": "old" },
+          auth_token: "old-token",
+          client_params: { default_headers: { "x-gateway": "old" } },
+        },
+        edits: [
+          {
+            default_headers: { "x-gateway": "old" },
+            auth_token: "old-token",
+            client_params: { default_headers: { "x-gateway": "new" } },
+          },
+        ],
+        saved: { client_params: { default_headers: { "x-gateway": "new" } } },
       },
       {
         outcome: "drops the old endpoints when it sets only other keys",

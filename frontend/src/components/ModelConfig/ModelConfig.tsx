@@ -187,11 +187,14 @@ function getOpenAIBaseUrl(modelConfig: {
   return trimmed || null;
 }
 
-/** The `extra_kwargs` keys that set a model's endpoint and the key sent to it. */
+/** The `extra_kwargs` keys that set a model's endpoint and the key, headers, and auth token sent to it. */
 const PROVIDER_KEY_PATHS: Record<string, ConfigPath> = {
   base_url: ["base_url"],
   "client_params.base_url": ["client_params", "base_url"],
   "client_params.api_key": ["client_params", "api_key"],
+  default_headers: ["default_headers"],
+  "client_params.default_headers": ["client_params", "default_headers"],
+  auth_token: ["auth_token"],
 };
 
 function isValidHttpUrl(value: string): boolean {
@@ -1906,8 +1909,8 @@ export function ModelConfig() {
                   const changed = Object.entries(PROVIDER_KEY_PATHS)
                     .filter(
                       ([, keyPath]) =>
-                        getPathValue(previous, keyPath) !==
-                        getPathValue(next, keyPath),
+                        JSON.stringify(getPathValue(previous, keyPath)) !==
+                        JSON.stringify(getPathValue(next, keyPath)),
                     )
                     .map(([providerKey]) => providerKey);
                   setKeysSetInEdit((current) => [...current, ...changed]);
