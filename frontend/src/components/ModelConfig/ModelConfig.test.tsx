@@ -1293,6 +1293,24 @@ describe("ModelConfig", () => {
         saved: { client_params: { base_url: "https://gateway.example/v1" } },
       },
       {
+        outcome: "keeps a gateway and its client_params key",
+        start: {},
+        edits: [
+          {
+            client_params: {
+              base_url: "https://gateway.example/v1",
+              api_key: "sk-gateway",
+            },
+          },
+        ],
+        saved: {
+          client_params: {
+            base_url: "https://gateway.example/v1",
+            api_key: "sk-gateway",
+          },
+        },
+      },
+      {
         outcome: "drops the old endpoints when it sets only other keys",
         start: endpoints,
         edits: [{ ...endpoints, temperature: 0.2 }],
