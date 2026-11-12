@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -11,6 +12,9 @@ import yaml
 from mindroom import model_defaults
 from mindroom.config.main import Config
 from mindroom.providers.anthropic.wire import checks_thinking_prefix
+
+if TYPE_CHECKING:
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
 
 def test_default_model_strings_are_not_redeclared_in_source() -> None:
@@ -195,13 +199,12 @@ def _current_presets() -> list[model_defaults.ModelPreset]:
 
 def test_thinking_prefix_check_covers_current_claude_models() -> None:
     """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
-    claude_ids = {
-        preset.id
-        for preset in _current_presets()
-        if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+    routes: tuple[ClaudeRouteKind, ...] = ("anthropic", "vertexai_claude", "bedrock_claude")
+    claude_presets = {
+        (preset.id, route) for preset in _current_presets() for route in routes if preset.provider == route
     }
-    assert len(claude_ids) >= 6
-    assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
+    assert len(claude_presets) >= 6
+    assert [preset for preset in sorted(claude_presets) if not checks_thinking_prefix(*preset)] == []
 
 
 def test_sampling_rule_covers_current_claude_models() -> None:

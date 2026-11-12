@@ -405,7 +405,7 @@ class ClaudeProvider:
         if (
             self.route not in _THINKING_BINDING_ROUTES
             or request.overrides.omit_thinking_setting
-            or not checks_thinking_prefix(self.identity.id)
+            or not checks_thinking_prefix(self.identity.id, self.route)
         ):
             return params
         owner = _thinking_owner(params)
@@ -422,7 +422,7 @@ class ClaudeProvider:
         fails the request, so earlier turns replay without thinking, which is always valid. An authored binding,
         ``"error"`` included, is the operator's choice and keeps every block.
         """
-        return not checks_thinking_prefix(self.identity.id) or _sends_thinking_binding(params)
+        return not checks_thinking_prefix(self.identity.id, self.route) or _sends_thinking_binding(params)
 
     def _request_params(
         self,
