@@ -40,7 +40,7 @@ print(result.text)
 
 Provider API keys come from the process environment, or from a `.env` file in `storage`.
 Give headless runs a storage of their own: `mindroom run` with its default password accounts cannot start on a storage a headless run used.
-[Budgets](https://docs.mindroom.chat/budgets/) do not count a headless run's spend, so only a `monthly_limit_usd` of `0` switches it to the `fallback_model`.
+[Budgets](https://docs.mindroom.chat/budgets/) do not count a headless run's spend, so only a `monthly_limit_usd` of `0` switches a priced model to the `fallback_model`.
 Each call is a new conversation, so the agent sees no history from earlier calls, and it does not write memories on its own after the turn.
 
 `HeadlessResult` has these fields:
