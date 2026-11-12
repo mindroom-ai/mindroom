@@ -39,7 +39,7 @@ print(result.text)
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 
 Provider API keys come from the process environment, or from a `.env` file in `storage`.
-Give headless runs a storage of their own: a storage holding a MindRoom instance's Matrix accounts is refused, and `mindroom run` with its default password accounts cannot start on a storage a headless run used.
+Give headless runs a storage of their own: a storage holding Matrix account credentials, such as one `mindroom run` set up, is refused, and `mindroom run` with its default password accounts cannot start on a storage a headless run used.
 [Budgets](https://docs.mindroom.chat/budgets/) never limit a headless run.
 Each call is a new conversation, so the agent sees no history from earlier calls, and it does not write memories on its own after the turn.
 
@@ -72,7 +72,7 @@ The checks cover the agent and every agent it can reach through `delegate_to`.
 | [`knowledge_bases`](https://docs.mindroom.chat/knowledge/), semantic file `memory_search`, and the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) | A running MindRoom indexes them. |
 | Enabled [`plugins`](https://docs.mindroom.chat/plugins/) | A running MindRoom loads them. |
 | A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every agent's responder access, which delegation checks. |
-| A `storage` holding Matrix accounts of a MindRoom instance | Headless runs record accounts without credentials, which would stop that instance from starting. |
+| A `storage` holding Matrix account credentials, such as one `mindroom run` set up | Headless runs record accounts without credentials, which would stop that instance from starting. |
 
 Memory runs headless: [Mem0](https://docs.mindroom.chat/memory/) memories are recalled into the turn, and file memory is read as in Matrix; set `memory: none` to run without memory.
 As in the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/#limitations), tools that need a Matrix room, such as `scheduler`, and tool functions that a [tool approval](https://docs.mindroom.chat/tool-approval/) rule gates are hidden from the agent.
