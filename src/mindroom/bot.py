@@ -1096,7 +1096,7 @@ class AgentBot:
         """Serialize one local membership command while ingestion keeps draining.
 
         Every join, including configured, invited, and personal rooms and the rejoin at startup, publishes the entity's
-        MindRoom server in the room, so MindRoom Chat can find it.
+        MindRoom server and role in the room, so MindRoom Chat can find it and show what the entity does.
         """
         session = self._ingestion_session
         if session is None:
@@ -1129,7 +1129,7 @@ class AgentBot:
     async def refresh_server_state(self, previous_config: Config) -> None:
         """Publish the server state again in every joined room when a reload changed it, as a role edit does live.
 
-        The rooms write at once, so a homeserver that does not answer holds the reload for one publish timeout.
+        The rooms write at once, so a homeserver that does not answer holds the reload for one publish timeout per entity.
         """
         client = self.client
         content = self._server_state_content(self.config)

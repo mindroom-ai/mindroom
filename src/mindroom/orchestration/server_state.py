@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# nio retries a homeserver it cannot reach without limit, and the join that triggers a write waits for it.
+# nio retries a homeserver it cannot reach without limit, and the join or reload that triggers a write waits for it.
 _PUBLISH_TIMEOUT_SECONDS = 10
 
 
@@ -52,8 +52,8 @@ def server_state_content(
 async def publish_server_state(client: nio.AsyncClient, room_id: str, content: dict[str, object]) -> None:
     """Write the entity's server state in one room unless the room already holds it.
 
-    Room state is not encrypted, so every room member and the homeserver can read the origin.
-    A failure only leaves Chat without the address, so it is logged and never stops or long delays the join.
+    Room state is not encrypted, so every room member and the homeserver can read the origin and the role.
+    A failure only leaves Chat without the address or role, so it is logged and never stops or long delays the join or reload.
     """
     user_id = client.user_id
     try:
