@@ -13,5 +13,3 @@ AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
 # The router publishes the room's joined MindRoom accounts as state keyed by its own user ID, so a client recognizes
 # agents whatever their user names.
 MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
-# The router publishes the room's effective thread mode under an empty state key, so a client chooses the room's view.
-THREAD_MODE_EVENT_TYPE = "io.mindroom.thread_mode"

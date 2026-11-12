@@ -97,8 +97,7 @@ def room(tmp_path: Path) -> _Room:
     bots = [ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2")]
     events: dict[tuple[str, str], dict[str, Any]] = {
         ("m.room.create", ""): {"room_version": "10"},
-        # The router may send room state, as in a room it created.
-        ("m.room.power_levels", ""): {"users": {ALICE: 100, bots[0]: 100}},
+        ("m.room.power_levels", ""): {"users": {ALICE: 100}},
         **{("m.room.member", user_id): {"membership": "join"} for user_id in (*bots, ALICE, BOB)},
     }
     client = AsyncMock(spec=nio.AsyncClient)

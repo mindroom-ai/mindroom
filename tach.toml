@@ -4113,7 +4113,6 @@ visibility = [
     "mindroom.contacts.federation",
     "mindroom.contacts.flow",
     "mindroom.matrix.room_accounts",
-    "mindroom.matrix.room_thread_mode",
 ]
 
 [[modules]]
@@ -6817,7 +6816,6 @@ expose = [
     "join_room",
     "kick_from_room",
     "leave_room",
-    "may_send_state",
     "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",
@@ -10100,7 +10098,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.room_thread_mode"
 depends_on = [
-    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.room_membership",
     "mindroom.constants",
     "mindroom.entity_resolution",

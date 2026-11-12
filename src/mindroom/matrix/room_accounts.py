@@ -10,7 +10,7 @@ import nio
 
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_room_members, may_send_state
+from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -48,9 +48,6 @@ async def reconcile_room_accounts(
                 current = await client.room_get_state_event(room_id, MINDROOM_ACCOUNTS_EVENT_TYPE, client.user_id)
                 if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                     return True
-                if not await may_send_state(client, room_id, MINDROOM_ACCOUNTS_EVENT_TYPE):
-                    logger.debug("room_accounts_publish_skipped", room_id=room_id, reason="insufficient_power_level")
-                    return False
                 response = await client.room_put_state(
                     room_id,
                     MINDROOM_ACCOUNTS_EVENT_TYPE,
@@ -58,7 +55,10 @@ async def reconcile_room_accounts(
                     state_key=client.user_id,
                 )
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    logger.warning("room_accounts_publish_failed", room_id=room_id, error=str(response))
+                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                    log = logger.debug if forbidden else logger.warning
+                    log("room_accounts_publish_failed", room_id=room_id, error=str(response))
                     return False
                 return True
     except Exception:

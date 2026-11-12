@@ -19,15 +19,9 @@ from mindroom.matrix.event_types import (
     CALL_MEMBER_EVENT_TYPE,
     MINDROOM_ACCOUNTS_EVENT_TYPE,
     MINDROOM_SERVER_EVENT_TYPE,
-    THREAD_MODE_EVENT_TYPE,
 )
 from mindroom.matrix.joined_members import read_joined_members
-from mindroom.matrix.room_power import (
-    ROOM_ADMIN_POWER_LEVEL,
-    has_privileged_creators,
-    state_power_level,
-    user_power_level,
-)
+from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
@@ -51,11 +45,10 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
     MINDROOM_SERVER_EVENT_TYPE: 0,
-    # The router publishes the room's !auto_approve windows, MindRoom accounts, and thread mode; in a personal room an
-    # agent created it has no power.
+    # The router publishes the room's !auto_approve windows and MindRoom accounts; in a personal room an agent created
+    # it has no power.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,
     MINDROOM_ACCOUNTS_EVENT_TYPE: 0,
-    THREAD_MODE_EVENT_TYPE: 0,
 }
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {
@@ -391,21 +384,6 @@ def _with_room_admin_power_levels(
             next_users[user_id] = ROOM_ADMIN_POWER_LEVEL
     next_content["users"] = next_users
     return next_content
-
-
-async def may_send_state(client: nio.AsyncClient, room_id: str, event_type: str) -> bool:
-    """Return whether this client's power level lets it send state events of ``event_type`` in the room.
-
-    Power levels it cannot read leave the answer to the write itself.
-    """
-    response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
-    if not isinstance(response, nio.RoomGetStateEventResponse) or not isinstance(response.content, dict):
-        return True
-    if user_power_level(response.content, client.user_id) >= state_power_level(response.content, event_type):
-        return True
-    # Room version 12 never lists its creators, whose power is unlimited, so they matter only on a shortfall.
-    creators = await read_room_creators(client, room_id)
-    return creators is None or client.user_id in creators
 
 
 async def room_admin_power_user(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
@@ -923,7 +901,6 @@ __all__ = [
     "join_room",
     "kick_from_room",
     "leave_room",
-    "may_send_state",
     "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",

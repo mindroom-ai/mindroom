@@ -97,8 +97,7 @@ def room_state(tmp_path: Path) -> RoomState:
     async def read_event(room_id: str, event_type: str, state_key: str = "") -> object:
         await asyncio.sleep(0)
         if event_type == "m.room.power_levels":
-            users = {"@admin:localhost": 100, ids[ROUTER_AGENT_NAME].full_id: 100}
-            return nio.RoomGetStateEventResponse({"users": users}, event_type, state_key, room_id)
+            return nio.RoomGetStateEventResponse({"users": {"@admin:localhost": 100}}, event_type, state_key, room_id)
         content = events.get((event_type, state_key))
         if content is None:
             return nio.RoomGetStateEventError("Absent", "M_NOT_FOUND", room_id=room_id)
@@ -244,7 +243,7 @@ async def test_joined_team_uses_team_resolution(room_state: RoomState) -> None:
 @pytest.mark.parametrize(
     "failure",
     [
-        nio.RoomPutStateError("forbidden", "M_FORBIDDEN"),
+        nio.RoomPutStateError("unavailable", "M_UNKNOWN"),
         aiohttp.ClientConnectionError("offline"),
         TimeoutError(),
     ],
@@ -266,73 +265,23 @@ async def test_write_failure_is_nonfatal_and_retried(
 
 
 @pytest.mark.asyncio
-async def test_router_without_the_power_skips_the_writes_until_it_gains_it(room_state: RoomState) -> None:
-    """Below the level a state type needs, a start writes nothing and warns of nothing; once raised, the next one publishes."""
-    config, paths, ids, events, client = room_state
-    router = ids[ROUTER_AGENT_NAME].full_id
-    power_levels: dict[str, Any] = {"users": {"@admin:localhost": 100}, "state_default": 50}
-    events["m.room.create", ""] = {"room_version": "11"}
-    read_event = client.room_get_state_event.side_effect
-
-    async def read_power(room_id: str, event_type: str, state_key: str = "") -> object:
-        if event_type == "m.room.power_levels":
-            return nio.RoomGetStateEventResponse(dict(power_levels), event_type, state_key, room_id)
-        return await read_event(room_id, event_type, state_key)
-
-    client.room_get_state_event.side_effect = read_power
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
-    with capture_logs() as logs:
-        await setup.publish_room_state()
-    client.room_put_state.assert_not_awaited()
-    assert sorted((log["event"], log["log_level"]) for log in logs) == [
-        ("room_accounts_publish_skipped", "debug"),
-        ("room_thread_mode_publish_skipped", "debug"),
-    ]
-
-    power_levels["users"][router] = 50
-    await setup.publish_room_state()
-    assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
-    assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("power_levels", "create", "writes"),
-    [
-        # A power-levels event without `state_default` asks 50 for state.
-        ({"users": {}}, {"room_version": "11"}, False),
-        ({"users": {}, "events": {EVENT_TYPE: 0, ACCOUNTS_EVENT_TYPE: 0}}, {"room_version": "11"}, True),
-        ({"users": {}, "state_default": 0}, {"room_version": "11"}, True),
-        # Levels or creators the router cannot read leave the answer to the write.
-        (None, {"room_version": "11"}, True),
-        ({"users": {}}, None, True),
-    ],
-)
-async def test_router_writes_every_state_its_level_or_unreadable_levels_may_allow(
+@pytest.mark.parametrize(("status_code", "level"), [("M_FORBIDDEN", "debug"), ("M_UNKNOWN", "warning")])
+async def test_a_room_that_refuses_the_routers_state_is_no_warning(
     room_state: RoomState,
-    power_levels: dict[str, Any] | None,
-    create: dict[str, str] | None,
-    *,
-    writes: bool,
+    status_code: str,
+    level: str,
 ) -> None:
-    """A type whose own level or the state default the router meets, or whose levels it cannot read, is written."""
-    config, paths, _, events, client = room_state
-    if create is not None:
-        events["m.room.create", ""] = create
-    read_event = client.room_get_state_event.side_effect
-
-    async def read_power(room_id: str, event_type: str, state_key: str = "") -> object:
-        if event_type == "m.room.power_levels":
-            if power_levels is None:
-                return nio.RoomGetStateEventError("unavailable", "M_UNKNOWN", room_id=room_id)
-            return nio.RoomGetStateEventResponse(dict(power_levels), event_type, state_key, room_id)
-        return await read_event(room_id, event_type, state_key)
-
-    client.room_get_state_event.side_effect = read_power
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is writes
-    assert await reconcile_room_accounts(client, config, paths, ROOM_ID) is writes
-    assert ((EVENT_TYPE, "") in events) is writes
-    assert (_accounts(room_state) is not None) is writes
+    """Where the room's power levels refuse the router's state, a start logs the refusal at debug and still tries it."""
+    config, paths, _, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("user_level (0) < send_level (50)", status_code)
+    with capture_logs() as logs:
+        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    assert {write.args[1] for write in client.room_put_state.await_args_list} == {EVENT_TYPE, ACCOUNTS_EVENT_TYPE}
+    assert sorted((log["event"], log["log_level"]) for log in logs) == [
+        ("room_accounts_publish_failed", level),
+        ("room_thread_mode_reconcile_failed", level),
+    ]
 
 
 @pytest.mark.asyncio

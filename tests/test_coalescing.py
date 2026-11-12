@@ -1383,6 +1383,49 @@ async def test_an_agents_message_not_for_this_agent_skips_the_busy_conversations
 
 
 @pytest.mark.asyncio
+async def test_an_agents_unmentioned_continuation_waits_with_its_mentioned_message() -> None:
+    """The next segment of an agent's split message for this agent, which repeats no mention, waits in the same turn."""
+    dispatched: list[tuple[list[str], bool]] = []
+    idle = asyncio.Event()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        dispatched.append((list(batch.handled_turn.source_event_ids), batch.active_follow_up))
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
+        active_thread_ids_for_room=lambda _room_id: frozenset({"$thread:localhost"}),
+    )
+    agent = "@mindroom_writer:localhost"
+    for event_id, for_another_participant in (("$first:localhost", False), ("$next:localhost", None)):
+        event = _text_event(event_id, "part", 1_000_000)
+        event.sender = agent
+        pending = make_pending_event(
+            event,
+            nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            facts=make_ingress_facts(agent, sender_entity_name="writer", requester_entity_name="writer"),
+        )
+        pending.event = replace(pending.event, for_another_participant=for_another_participant)
+        await _admit_ready(
+            gate,
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent)),
+            pending,
+        )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert dispatched == []
+    idle.set()
+    await _wait_for(lambda: dispatched == [(["$first:localhost", "$next:localhost"], True)])
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
     """Same-target follow-ups flush in order as one turn per consecutive requester run."""
     calls: list[tuple[list[str], str, str]] = []

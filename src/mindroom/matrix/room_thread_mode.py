@@ -12,8 +12,6 @@ from mindroom.authorization import configured_responder_entities_for_room, get_a
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import may_send_state
-from mindroom.matrix.event_types import THREAD_MODE_EVENT_TYPE
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 
@@ -24,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_THREAD_MODE_EVENT_TYPE = "io.mindroom.thread_mode"
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
@@ -63,18 +62,18 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
                     "mixed" if len(modes) > 1 else next(iter(modes))
                 )
                 content = {"mode": mode}
-                current = await client.room_get_state_event(room_id, THREAD_MODE_EVENT_TYPE, state_key="")
+                current = await client.room_get_state_event(room_id, _THREAD_MODE_EVENT_TYPE, state_key="")
                 if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
                     return True
                 if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
                     logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
                     return False
-                if not await may_send_state(client, room_id, THREAD_MODE_EVENT_TYPE):
-                    logger.debug("room_thread_mode_publish_skipped", room_id=room_id, reason="insufficient_power_level")
-                    return False
-                response = await client.room_put_state(room_id, THREAD_MODE_EVENT_TYPE, content, state_key="")
+                response = await client.room_put_state(room_id, _THREAD_MODE_EVENT_TYPE, content, state_key="")
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    logger.warning("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
+                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                    log = logger.debug if forbidden else logger.warning
+                    log("room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
                     return False
                 return True
     except Exception:
