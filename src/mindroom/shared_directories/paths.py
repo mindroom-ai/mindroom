@@ -104,10 +104,10 @@ def describe_agent_pending_invitations(
     runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> tuple[str, ...]:
-    """Describe each invitation waiting for one agent by its directory and requester, never by path."""
+    """Name each invitation waiting for one agent by its owner and directory only, never by path."""
     return tuple(
-        f"`{directory.owner}/{directory.name}` from {invitation.requester}"
-        for directory, invitation in pending_shared_directory_invitations(config, runtime_paths, agent_name)
+        f"`{directory.owner}/{directory.name}`"
+        for directory, _invitation in pending_shared_directory_invitations(config, runtime_paths, agent_name)
     )
 
 

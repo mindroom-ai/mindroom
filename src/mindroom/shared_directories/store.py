@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 _LEDGER_FILENAME = "shared_directories.json"
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _ledger_lock = threading.Lock()
+_MAX_PENDING_INVITATIONS_PER_AGENT = 10
 logger = get_logger(__name__)
 
 
@@ -291,15 +292,28 @@ def invite_pending_shared_directory_member(
     name: str,
     invitation: PendingInvitation,
 ) -> tuple[SharedDirectory, SharedDirectory]:
-    """Record an invitation unless the agent is already a member or invited; return the directory before and after."""
+    """Record an invitation unless the agent is already a member or invited; return the directory before and after.
 
-    def invite(directory: SharedDirectory) -> SharedDirectory:
-        if invitation.agent in directory.members or directory.pending_for(invitation.agent) is not None:
-            return directory
+    Refuse it when the agent already holds the most pending invitations, which keeps the agent's prompt short.
+    """
+    agent_name = invitation.agent
+    with _ledger_lock:
+        directories = _read_ledger(runtime_paths, for_update=True)
+        directory = _existing(directories, owner, name)
+        if agent_name in directory.members or directory.pending_for(agent_name) is not None:
+            return directory, directory
+        held = sum(1 for existing in directories.values() if existing.pending_for(agent_name) is not None)
+        if held >= _MAX_PENDING_INVITATIONS_PER_AGENT:
+            msg = (
+                f"{agent_name} already has {_MAX_PENDING_INVITATIONS_PER_AGENT} pending invitations, so it cannot be "
+                "invited until it accepts or declines one, or an owner cancels one."
+            )
+            raise SharedDirectoryError(msg)
         pending = sorted((*directory.pending, invitation), key=lambda existing: existing.agent)
-        return replace(directory, pending=tuple(pending))
-
-    return _update_directory(runtime_paths, owner=owner, name=name, update=invite)
+        updated = replace(directory, pending=tuple(pending))
+        directories[f"{owner}/{name}"] = updated
+        _write_ledger(runtime_paths, directories)
+        return directory, updated
 
 
 def _answer_invitation(

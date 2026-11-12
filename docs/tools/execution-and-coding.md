@@ -329,7 +329,7 @@ agents:
 ```
 
 Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
-Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name and who asked, never its path or files.
+Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `list_shared_directories()` also shows who asked and when.
 When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `accept_shared_directory("ann_assistant", "notes")` and reads the files from then on.
 The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 
@@ -344,6 +344,7 @@ An invitation applies at once when the user who asks for it may use the invited 
 Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](../authorization.md#responder-access).
 Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `accept_shared_directory(owner, name)` or declines it with `decline_shared_directory(owner, name)`.
 A pending agent sees no path or file of the directory and its worker mounts nothing until the accept; inviting it again while pending changes nothing.
+An agent holds at most 10 pending invitations; a further invitation fails until it accepts or declines one, or an owner cancels one.
 The owner's `remove_from_shared_directory` and `delete_shared_directory` also cancel a pending invitation.
 
 Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.

@@ -16,7 +16,8 @@ The worker boundary between agents must not weaken for anything else.
 - An invitation from a requester with access to the invited agent applies at once, matching the rule that a mentioned entity acts for the requesting human.
   Any other invitation waits until a user who may use the invited agent accepts it through that agent, so people whose agents only they may use can still share with each other.
   A pending invitation is recorded beside the record's `members`, which is all an older image reads, so an older image ignores it instead of granting access; its next change to the ledger drops it.
-  The invited agent's prompt names a pending invitation without its path, so the agent can ask its user, and nothing is mounted before the accept.
+  The invited agent's prompt names a pending invitation by owner and directory name only, so the agent can ask its user, and nothing is mounted before the accept.
+  An agent holds at most 10 pending invitations, which keeps that prompt line short; who asked and when stay in `list_shared_directories`.
 - Membership changes recreate the affected workers, because neither Docker nor Kubernetes adds a mount to a running container.
 - The tool reports the path the agent's code tools see, which differs between the primary and a dedicated worker because workers mount storage at their own mount path.
 - Deleting a directory empties it instead of removing it.

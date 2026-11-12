@@ -185,9 +185,7 @@ def test_invite_to_an_agent_the_requester_cannot_use_waits_for_acceptance(tmp_pa
     assert [(invitation.agent, invitation.requester) for invitation in directory.pending] == [("bob", _USER)]
     assert agent_shared_directory_views(config, runtime_paths_for(config), "bob") == ()
     assert describe_agent_shared_directories(config, runtime_paths_for(config), "bob") == ()
-    assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == (
-        f"`alice/report` from {_USER}",
-    )
+    assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ("`alice/report`",)
     assert _bob_mounts(config) == ()
     bob_listing = _call(_context(config, "bob", _BOBS_USER), "list_shared_directories")
     assert bob_listing["directories"] == []
@@ -324,6 +322,30 @@ def test_repeated_invitation_while_pending_is_idempotent(tmp_path: Path) -> None
     assert again["status"] == "pending"
     assert "already waiting to be accepted" in str(again["message"])
     assert load_shared_directories(runtime_paths_for(config))[0].pending == first
+
+
+def test_an_agent_holds_at_most_ten_pending_invitations(tmp_path: Path) -> None:
+    """The eleventh pending invitation for one agent is refused, while members and other agents are unaffected."""
+    config = _bobs_own_config(tmp_path)
+    context = _context(config)
+    for index in range(11):
+        _call(context, "create_shared_directory", f"report{index}")
+    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report10", "bob")
+    for index in range(10):
+        assert _call(context, "invite_to_shared_directory", f"report{index}", "bob")["status"] == "pending"
+    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report0", "bob")
+    assert _call(context, "invite_to_shared_directory", "report9", "bob")["status"] == "pending"
+
+    _call(context, "create_shared_directory", "extra")
+    _call(context, "create_shared_directory", "again")
+    accepted_one = _call(context, "invite_to_shared_directory", "extra", "bob")
+    refused = _call(context, "invite_to_shared_directory", "again", "bob")
+
+    assert accepted_one["status"] == "pending"
+    assert refused["status"] == "error"
+    assert "bob already has 10 pending invitations" in str(refused["message"])
+    assert load_shared_directories(runtime_paths_for(config))[0].pending == ()
+    assert len(describe_agent_pending_invitations(config, runtime_paths_for(config), "bob")) == 10
 
 
 def test_invitation_by_a_user_of_the_invited_agent_replaces_the_pending_one(tmp_path: Path) -> None:

@@ -673,7 +673,7 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
 
 
 def test_agent_role_names_pending_invitations_without_their_path(tmp_path: Path) -> None:
-    """An invited agent that has not accepted learns of the invitation, but not the directory's path."""
+    """An invited agent that has not accepted learns of the invitation, but not the directory's path or who asked."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     create_shared_directory(runtime_paths, owner="general", name="report")
@@ -687,9 +687,9 @@ def test_agent_role_names_pending_invitations_without_their_path(tmp_path: Path)
     role = _role(_create_agent_for_test("calculator", config=config))
 
     assert (
-        "- Pending shared directory invitations; ask your user before accepting or declining: "
-        "`general/report` from @a:localhost."
+        "- Pending shared directory invitations; ask your user before accepting or declining: `general/report`."
     ) in role
+    assert "@a:localhost" not in role
     assert "shared_directories/general" not in role
     assert "- Shared directories:" not in role
 
