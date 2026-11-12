@@ -439,7 +439,7 @@ def test_sign_in_check_that_fails_on_the_server_is_not_a_sign_in_page(
 
 @pytest.mark.parametrize(
     "path",
-    ["%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/config", "app.js/%2E%2E/%2e%2e/x", "./app.js", "a%5C..%5C..%5Capi"],
+    ["%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/config", "app.js/%2E%2E/%2e%2e/x", "%2e/app.js", "a%5C..%5C..%5Capi"],
 )
 def test_signed_in_request_with_a_dot_segment_stays_inside_the_report(signin: dict[str, Any], path: str) -> None:
     """A path that a browser would resolve outside the report gets the report's not-found answer, not a redirect."""
