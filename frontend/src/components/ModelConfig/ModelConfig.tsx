@@ -885,7 +885,12 @@ export function ModelConfig() {
         }
       }
     } else {
-      if (providerChanged) {
+      // A provider change drops the old provider's endpoint but keeps one More
+      // settings set during this edit.
+      if (
+        providerChanged &&
+        nextExtraKwargs.base_url === editingStart?.config.extra_kwargs?.base_url
+      ) {
         delete nextExtraKwargs.base_url;
       }
       delete nextModelConfig.api;

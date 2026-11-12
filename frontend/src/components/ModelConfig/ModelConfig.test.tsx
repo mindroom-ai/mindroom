@@ -1174,6 +1174,32 @@ describe("ModelConfig", () => {
       });
     });
 
+    it("keeps a base URL More settings set after the row's provider changed", async () => {
+      const { rerender } = render(<ModelConfig />);
+      chooseProvider(editRow("openai_local"), /Anthropic/i);
+      vi.mocked(useConfigStore).mockReturnValue(
+        withEditedExtraKwargs() as never,
+      );
+      rerender(<ModelConfig />);
+
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "openai_local"],
+          expect.objectContaining({
+            provider: "anthropic",
+            extra_kwargs: {
+              base_url: "http://proxy:8080/v1",
+              temperature: 0.2,
+            },
+          }),
+        );
+      });
+    });
+
     it("reverts only the More settings edits made since the last save", () => {
       const updateConfigValue = vi.fn();
       const { rerender } = render(<ModelConfig />);
