@@ -21,7 +21,7 @@ from mindroom.headless import HeadlessConfigError, run_turn, validate_config
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers import model_http_client
 from mindroom.shell.output_capture import ShellOutputDestination
-from tests.conftest import install_model_providers
+from tests.conftest import install_model_providers, requires_linux
 from tests.minimal_agent_fixtures import ScriptedProvider
 
 if TYPE_CHECKING:
@@ -166,6 +166,7 @@ async def test_delegation_stops_at_depth_three(tmp_path: Path, monkeypatch: pyte
     assert _last_tool_result(provider.requests[4]) == "Error: The requested tool does not exist or is not available."
 
 
+@requires_linux(reason="finds the shell's child process through /proc")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("in_subagent", [False, True])
 async def test_cancellation_stops_shell_children(
@@ -333,11 +334,20 @@ async def test_workdir_is_shell_cwd_and_file_base(
 
 @pytest.mark.asyncio
 async def test_run_turn_refuses_a_missing_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A workdir that is not an existing directory is refused before the model is called."""
+    """A workdir that is not an existing directory is refused with the config's own problems, also by validation."""
     provider = _install(monkeypatch)
-    with pytest.raises(HeadlessConfigError, match="is not an existing directory"):
-        await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=tmp_path / "nope")
+    config = _config()
+    config.pop("defaults")
+    with pytest.raises(HeadlessConfigError) as raised:
+        await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage", workdir=tmp_path / "nope")
+
+    assert raised.value.problems == [
+        "agent 'coder': shell runs in this process; set defaults.allow_shell_without_worker: true",
+        f"workdir {tmp_path / 'nope'} is not an existing directory",
+    ]
     assert provider.requests == []
+    with pytest.raises(HeadlessConfigError, match="is not an existing directory"):
+        validate_config(_config(), agent="coder", storage=tmp_path / "storage", workdir=tmp_path / "nope")
 
 
 @pytest.mark.asyncio

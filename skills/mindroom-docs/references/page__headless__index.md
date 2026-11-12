@@ -55,7 +55,7 @@ Each call is a new conversation, so the agent sees no history from earlier calls
 
 Cancelling the call, directly or through `asyncio.timeout`, stops the turn, its subagents, and any shell command still running before the cancellation reaches the caller.
 
-`mindroom.headless.validate_config(config, *, agent, storage, requester_id=None)` checks the same things without running a turn and returns the validated config.
+`mindroom.headless.validate_config(config, *, agent, storage, workdir=None, requester_id=None)` checks the same things without running a turn and returns the validated config.
 
 ## What headless runs refuse
 
@@ -89,7 +89,7 @@ With a `workdir`, the files that `shell`, `file`, and `coding` write land there,
 Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
-`file` and `coding` can read that directory under `file_access: workspace`, but not write it.
+`file` and `coding` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, and `gmail` or `google_drive` downloads and attachments, use that directory as their workspace, so under `file_access: workspace` they cannot reach files in the `workdir`.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).

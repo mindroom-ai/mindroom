@@ -107,7 +107,13 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
     return problems
 
 
-def _problems(config: Config, runtime_paths: RuntimePaths, agent: str, requester_id: str | None) -> list[str]:
+def _problems(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent: str,
+    requester_id: str | None,
+    workdir: Path | None,
+) -> list[str]:
     problems = []
     if agent in config.teams:
         problems.append(f"{agent!r} is a team; headless runs serve agents only")
@@ -129,6 +135,8 @@ def _problems(config: Config, runtime_paths: RuntimePaths, agent: str, requester
             f"storage {runtime_paths.storage_root} holds a MindRoom instance's Matrix accounts; "
             "give headless runs a storage of their own",
         )
+    if workdir is not None and not workdir.is_dir():
+        problems.append(f"workdir {workdir} is not an existing directory")
     return problems
 
 
@@ -137,17 +145,22 @@ def _validated(
     *,
     agent: str,
     storage: Path,
+    workdir: Path | None,
     requester_id: str | None,
-) -> tuple[Config, RuntimePaths, str]:
-    """Return the validated config, its runtime paths, and the requester, or raise ``HeadlessConfigError``."""
+) -> tuple[Config, RuntimePaths, Path | None, str]:
+    """Return the validated config, its runtime paths, the workdir, and the requester, or raise ``HeadlessConfigError``.
+
+    The path tools open their base directory without following a link, so the workdir is the directory itself.
+    """
     storage = storage.expanduser().resolve()
     runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
     validated = Config.validate_with_runtime(dict(config), runtime_paths)
+    workdir = workdir.expanduser().resolve() if workdir is not None else None
     requester = requester_id or next(iter(validated.administrators), None)
-    if problems := _problems(validated, runtime_paths, agent, requester):
+    if problems := _problems(validated, runtime_paths, agent, requester, workdir):
         raise HeadlessConfigError(problems)
     assert requester is not None, "a missing requester is one of the problems"
-    return validated, runtime_paths, requester
+    return validated, runtime_paths, workdir, requester
 
 
 def validate_config(
@@ -155,10 +168,11 @@ def validate_config(
     *,
     agent: str,
     storage: Path,
+    workdir: Path | None = None,
     requester_id: str | None = None,
 ) -> Config:
     """Validate ``config`` as ``run_turn`` would run it, raising ``HeadlessConfigError`` for what it cannot serve."""
-    return _validated(config, agent=agent, storage=storage, requester_id=requester_id)[0]
+    return _validated(config, agent=agent, storage=storage, workdir=workdir, requester_id=requester_id)[0]
 
 
 async def run_turn(
@@ -175,11 +189,13 @@ async def run_turn(
     MindRoom keeps its state under ``storage``. ``workdir``, when set, is where the file and shell tools of the agent
     and its subagents work. Cancelling the call cancels the turn and its running tool calls.
     """
-    validated, runtime_paths, requester = _validated(config, agent=agent, storage=storage, requester_id=requester_id)
-    # The path tools open their base directory without following a link, so they get the directory itself.
-    workdir = workdir.expanduser().resolve() if workdir is not None else None
-    if workdir is not None and not workdir.is_dir():
-        raise HeadlessConfigError([f"workdir {workdir} is not an existing directory"])
+    validated, runtime_paths, workdir, requester = _validated(
+        config,
+        agent=agent,
+        storage=storage,
+        workdir=workdir,
+        requester_id=requester_id,
+    )
     persist_offline_entity_accounts(validated, runtime_paths)
     identity = build_tool_execution_identity(
         channel="headless",
