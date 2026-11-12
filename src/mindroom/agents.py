@@ -1064,13 +1064,13 @@ def _render_agent_identity_context(
     *,
     model_provider: str,
     model_id: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
     headless: bool,
 ) -> str:
     """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
     # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
     openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
-    if include_openai_compat_guidance:
+    if outside_matrix:
         prompt_name = (
             "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
         )
@@ -1102,7 +1102,7 @@ def _render_agent_identity_context(
         matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
-        include_openai_compat_guidance=False,
+        outside_matrix=False,
         identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
         openai_compat_history_guidance=openai_compat_history_guidance,
     )
@@ -1410,7 +1410,7 @@ def _build_agent_role_context(
     agent_runtime: ResolvedAgentRuntime,
     *,
     model_name: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
     headless: bool,
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
@@ -1470,7 +1470,7 @@ def _build_agent_role_context(
             runtime_paths,
             model_provider=model_provider,
             model_id=model_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
+            outside_matrix=outside_matrix,
             headless=headless,
         )
 
@@ -1672,7 +1672,7 @@ def create_agent(
     model: TurnModel,
     plugins: ConfigPlugins,
     include_interactive_questions: bool = True,
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
     disable_runtime_capabilities: bool = False,
     tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
@@ -1705,7 +1705,7 @@ def create_agent(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether the turn answers outside Matrix, through the OpenAI-compatible
+        outside_matrix: Whether the turn answers outside Matrix, through the OpenAI-compatible
             API or a headless run, so the identity names no Matrix ID and the prompt attributes no sender.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
@@ -1848,7 +1848,7 @@ def create_agent(
         runtime_paths,
         agent_runtime,
         model_name=model_name,
-        include_openai_compat_guidance=include_openai_compat_guidance,
+        outside_matrix=outside_matrix,
         headless=execution_identity is not None and execution_identity.channel == "headless",
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,

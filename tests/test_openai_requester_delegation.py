@@ -122,7 +122,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         child_calls.append(ctx)
         assert ctx.requester_id == "@alice:example.org"
         assert ctx.room_id is None
-        assert ctx.include_openai_compat_guidance is True
+        assert ctx.outside_matrix is True
         assert get_tool_runtime_context() is None
         assert get_detached_requester_context() is not None
         return TurnResult("specialist result")

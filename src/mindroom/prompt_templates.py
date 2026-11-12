@@ -103,7 +103,7 @@ def build_agent_identity_context(
     model_id: str,
     identity_context_template: str,
     openai_compat_history_guidance: str,
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
 ) -> str:
     """Render the shared identity prompt with optional OpenAI-compatible guidance."""
     return render_prompt_template(
@@ -112,7 +112,7 @@ def build_agent_identity_context(
         matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
-        openai_compat_history_guidance=(openai_compat_history_guidance if include_openai_compat_guidance else ""),
+        openai_compat_history_guidance=(openai_compat_history_guidance if outside_matrix else ""),
     )
 
 

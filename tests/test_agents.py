@@ -305,7 +305,7 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert "## Custom Identity" in _role(agent)
@@ -378,7 +378,7 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert OPENAI_COMPAT_HISTORY_GUIDANCE not in _role(matrix_agent)

@@ -1141,13 +1141,13 @@ class TestUserIdPassthrough:
         assert "session preamble" not in str(stable.content)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("include_openai_compat_guidance", [True, False])
+    @pytest.mark.parametrize("outside_matrix", [True, False])
     @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_derives_current_sender_from_requester(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        include_openai_compat_guidance: bool,
+        outside_matrix: bool,
     ) -> None:
         """OpenAI-compatible preparation suppresses the Matrix sender; Matrix turns name it in the prompt."""
         config, runtime_paths = _bound(tmp_path)
@@ -1161,13 +1161,13 @@ class TestUserIdPassthrough:
                 config=config,
                 execution_identity=_execution_identity(
                     runtime_paths,
-                    channel="openai_compat" if include_openai_compat_guidance else "matrix",
+                    channel="openai_compat" if outside_matrix else "matrix",
                     requester_id="@alice:example.com",
                 ),
             )
 
         prompt = str(prepared_run.turn.prompt.content)
-        assert ('from="@alice:example.com"' in prompt) is not include_openai_compat_guidance
+        assert ('from="@alice:example.com"' in prompt) is not outside_matrix
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -1221,7 +1221,7 @@ class TestUserIdPassthrough:
             )
 
         assert prepare.await_args.kwargs["runtime_paths"].config_path == config_path
-        assert prepare.await_args.args[0].include_openai_compat_guidance is True
+        assert prepare.await_args.args[0].outside_matrix is True
         assert prepare.await_args.args[0].requester_id == "user-123"
 
     @pytest.mark.asyncio

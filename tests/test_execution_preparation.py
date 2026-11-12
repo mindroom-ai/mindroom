@@ -172,7 +172,7 @@ async def _prepare_agent_execution_context_for_test(
         "current_timestamp_ms": None,
         "current_event_id": None,
         "current_prompt_is_structured": False,
-        "include_openai_compat_guidance": False,
+        "outside_matrix": False,
         "pipeline_timing": None,
     }
     return await prepare_agent_execution_context(ctx, **(turn_options | options))
@@ -302,7 +302,7 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
         runtime_paths=runtime_paths,
         config=config,
         resolved_runtime_model=snapshot,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert result is prepared
@@ -348,7 +348,7 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
             context_window=6_000,
             overridden=False,
         ),
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert prepare_common.await_args.kwargs["resolved_inputs"].execution_plan.limit_tokens == 4_000

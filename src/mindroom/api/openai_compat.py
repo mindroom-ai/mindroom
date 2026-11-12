@@ -961,7 +961,7 @@ def _build_team(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=refresh_scheduler,
         active_model_names=models.member_model_names,
@@ -976,7 +976,7 @@ def _build_team(
         model_name=models.team_model_name,
         configured_team_name=team_name,
         timezone=entity_timezone(config, team_name),
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
 
