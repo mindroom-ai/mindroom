@@ -199,6 +199,7 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
 CLAUDE_PREFIX_CHECKED_THINKING_MODELS = (
     "claude-fable-5-1",
     "claude-fable-5-2",
+    "claude-mythos-5-1",
     "claude-mythos-5-2",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
