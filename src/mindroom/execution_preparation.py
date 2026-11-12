@@ -42,11 +42,12 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.media_inputs import MediaInputs
+from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -232,15 +233,25 @@ def _context_message_from_visible_message(
 ) -> Message:
     """Convert one visible Matrix message, whose prompt text is ``body``, into a structured prompt message."""
     annotation = format_attachment_annotation(list(attachment_records))
+    msgtype, filename = message.content.get("msgtype"), message.content.get("filename")
+    # A media body beside a different file name is a caption (MSC2530); otherwise it can be the file's name, after the
+    # time prefix an earlier user turn carries.
+    unprefixed = strip_user_turn_time_prefix(str(message.content.get("body", "")))
+    captioned = isinstance(filename, str) and bool(filename) and filename != unprefixed
+    media = (
+        {MEDIA_MSGTYPE_KEY: msgtype}
+        if msgtype in ("m.image", "m.file", "m.audio", "m.video") and not captioned
+        else None
+    )
     if _is_own_reply(message, response_sender_id):
-        if message.content.get("msgtype") == "m.audio":
+        if msgtype == "m.audio":
             body = f"[audio message: {body}]"
         if annotation:
             body = f"{body}\n{annotation}" if body else annotation
         # Provider APIs reject media on assistant turns, so agent-sent
         # attachments surface through text annotations only. The leading
         # separator prevents same-role provider merges from gluing messages.
-        return Message(role="assistant", content=f"\n\n{body}")
+        return Message(role="assistant", content=f"\n\n{body}", provider_data=media)
     if annotation:
         body = f"{body}\n{annotation}" if body else annotation
     hook_source = hook_source_from_content(message.content)
@@ -260,7 +271,7 @@ def _context_message_from_visible_message(
         event_id=event_id,
         display_name=member_display_names.get(sender),
     )
-    return Message(role="user", content=content)
+    return Message(role="user", content=content, provider_data=media)
 
 
 def _context_messages_from_visible_messages(

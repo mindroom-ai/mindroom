@@ -1614,6 +1614,61 @@ async def test_a_new_personal_room_does_not_ask_a_router_that_is_not_in_it(
     assert not any(event["type"] == "io.mindroom.accounts" for event in server.state[room_id])
 
 
+def _power_levels(server: MatrixServer, room_id: str) -> dict[str, Any]:
+    return next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
+
+
+@pytest.mark.asyncio
+async def test_the_router_may_publish_a_personal_rooms_thread_mode_which_stays_closed_to_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new personal room gives the router the state level, and each reconciliation restores it; the type stays closed."""
+    server = MatrixServer()
+    room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
+    router = RouterAccount(server, room_id)
+    power = _power_levels(server, room_id)
+    assert power["users"][router.user_id] == 50
+    assert power.get("users_default", 0) < power["state_default"]
+    assert "io.mindroom.thread_mode" not in power["events"]
+    published = await router.room_put_state(room_id, "io.mindroom.thread_mode", {"mode": "thread"})
+    assert isinstance(published, nio.RoomPutStateResponse)
+
+    del power["users"][router.user_id]
+    await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
+    assert _power_levels(server, room_id)["users"][router.user_id] == 50
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("router_listed", [True, False])
+async def test_an_imported_room_gives_the_state_level_only_to_a_router_its_record_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    router_listed: bool,
+) -> None:
+    """An imported room's record decides whether the router belongs there, and with it whether it gets the level."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    router = "@mindroom_router:localhost"
+    del _power_levels(server, room_id)["users"][router]
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(
+        creator_user_id=server.user_id,
+        agent_user_id=server.user_id,
+        router_user_id=router if router_listed else None,
+    )
+    write_personal_room(path, record)
+    if not router_listed:
+        server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != router]
+
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+
+    assert (_power_levels(server, room_id)["users"].get(router) == 50) is router_listed
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoke", ["access", "feature", "admin_setting"])
 async def test_policy_change_during_admin_state_read_prevents_grant(

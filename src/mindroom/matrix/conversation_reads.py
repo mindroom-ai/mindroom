@@ -33,7 +33,14 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView, RoomPage
+    from mindroom.event_journal import (
+        ConversationCursor,
+        ConversationPage,
+        ConversationReadView,
+        RoomPage,
+        VisibleMessage,
+    )
+    from mindroom.event_journal.reads import ThreadActivity
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
@@ -66,24 +73,25 @@ def projected_visible_messages(page: ConversationPage | RoomPage) -> list[Resolv
     MindRoom renders, so a prompt and an exported thread cannot disagree about
     which revision is current or when it was made.
     """
-    messages = [
-        ResolvedVisibleMessage.from_message_data(
-            {
-                "sender": message.sender,
-                "body": str(message.content.get("body", "")),
-                "timestamp": message.created_ts,
-                "event_id": message.logical_event_id,
-                "content": dict(message.content),
-            },
-            thread_id=message.thread_id,
-            latest_event_id=message.revision_event_id,
-        )
-        for message in page.messages
-    ]
-    for message, projected in zip(messages, page.messages, strict=True):
-        if projected.revision_event_id != projected.logical_event_id:
-            message.edited_timestamp = projected.revision_ts
-    return messages
+    return [projected_visible_message(message) for message in page.messages]
+
+
+def projected_visible_message(projected: VisibleMessage) -> ResolvedVisibleMessage:
+    """Render one projection row as a visible message, its edit time set when its visible revision is an edit."""
+    message = ResolvedVisibleMessage.from_message_data(
+        {
+            "sender": projected.sender,
+            "body": str(projected.content.get("body", "")),
+            "timestamp": projected.created_ts,
+            "event_id": projected.logical_event_id,
+            "content": dict(projected.content),
+        },
+        thread_id=projected.thread_id,
+        latest_event_id=projected.revision_event_id,
+    )
+    if projected.revision_event_id != projected.logical_event_id:
+        message.edited_timestamp = projected.revision_ts
+    return message
 
 
 def projected_thread_history(
@@ -306,6 +314,33 @@ class ConversationReader:
     async def latest_room_cursor(self, room_id: str) -> ConversationCursor | None:
         """Return the position of a room's newest visible message, in any thread, or nothing when it has none."""
         return await self.store.latest_room_cursor(room_id=room_id)
+
+    async def room_thread_activity(
+        self,
+        *,
+        room_id: str,
+        since_ts: int,
+        until_ts: int,
+        exclude_thread_id: str | None,
+        thread_limit: int,
+        row_limit: int,
+        summary_tail: int,
+        summary_key: str,
+    ) -> tuple[ThreadActivity, ...]:
+        """Return the room's threads with messages in a window, most recent first, from the projection alone.
+
+        Never waits for a hydration or a refetch, so a thread nobody walked counts only what sync delivered.
+        """
+        return await self.store.room_thread_activity(
+            room_id=room_id,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            exclude_thread_id=exclude_thread_id,
+            thread_limit=thread_limit,
+            row_limit=row_limit,
+            summary_tail=summary_tail,
+            summary_key=summary_key,
+        )
 
     async def read_strict(
         self,

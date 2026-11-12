@@ -14,6 +14,7 @@ from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import (
     CredentialServiceName,
@@ -475,6 +476,10 @@ class DefaultsConfig(BaseModel):
         description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
+    room_activity: RoomActivityConfig = Field(
+        default_factory=RoomActivityConfig,
+        description="Opt-in note in thread replies listing the room's other threads with new messages",
+    )
     max_consecutive_agent_replies: int = Field(
         default=50,
         ge=1,

@@ -5019,12 +5019,45 @@ class TestMultiAgentOrchestrator:
         first_bot.apply_published_config.assert_called_once_with()
         second_bot.apply_published_config.assert_called_once_with()
         first_bot.refresh_presence.side_effect = RuntimeError("presence unavailable")
+        previous_config = Config()
         with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
-            await orchestrator._refresh_running_bots_presence()
+            await orchestrator._refresh_running_bots(previous_config)
 
         first_bot.refresh_presence.assert_awaited_once_with()
         second_bot.refresh_presence.assert_awaited_once_with()
+        # A presence failure leaves the bot's server state, such as its role, to be published.
+        first_bot.refresh_server_state.assert_awaited_once_with(previous_config)
+        second_bot.refresh_server_state.assert_awaited_once_with(previous_config)
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
+
+    @pytest.mark.asyncio
+    async def test_a_reload_writes_every_bots_server_state_at_once(self, tmp_path: Path) -> None:
+        """A slow homeserver holds the reload for one publish timeout, not one per running bot."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+        bots = {name: _mock_managed_bot() for name in ("first", "second", "third")}
+        install_bots(orchestrator, bots)
+        started: list[str] = []
+        all_started = asyncio.Event()
+        answered = asyncio.Event()
+
+        def slow_write(name: str) -> AsyncMock:
+            async def write(_previous_config: Config) -> None:
+                started.append(name)
+                if len(started) == len(bots):
+                    all_started.set()
+                await answered.wait()
+
+            return AsyncMock(side_effect=write)
+
+        for name, bot in bots.items():
+            bot.refresh_server_state = slow_write(name)
+        refresh = asyncio.create_task(orchestrator._refresh_running_bots(Config()))
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=1)
+        finally:
+            answered.set()
+            await refresh
+        assert sorted(started) == ["first", "second", "third"]
 
     def test_publishing_a_reload_gives_every_bot_the_new_hook_registry(self, tmp_path: Path) -> None:
         """Bots kept through a plugin reload dispatch hooks through the registry the reload committed."""
@@ -5069,6 +5102,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot})
 
         with (
@@ -5093,6 +5127,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
         with (
@@ -5560,9 +5595,11 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.refresh_presence = AsyncMock()
+        general_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
         new_bot = MagicMock()
@@ -5647,9 +5684,11 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.refresh_presence = AsyncMock()
+        general_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
         new_bot = MagicMock()
@@ -5825,6 +5864,7 @@ async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_pat
     orchestrator.running = True
     router_bot = MagicMock()
     router_bot.refresh_presence = AsyncMock()
+    router_bot.refresh_server_state = AsyncMock()
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
     with (

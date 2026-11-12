@@ -55,7 +55,10 @@ async def reconcile_room_accounts(
                     state_key=client.user_id,
                 )
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    logger.warning("room_accounts_publish_failed", room_id=room_id, error=str(response))
+                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                    log = logger.debug if forbidden else logger.warning
+                    log("room_accounts_publish_failed", room_id=room_id, error=str(response))
                     return False
                 return True
     except Exception:

@@ -262,6 +262,31 @@ class ConversationReadView(_HydrationMarkerView):
         """Return the position of a room's newest visible message, or nothing."""
         return await self._read(reads.latest_room_cursor, room_id=room_id)
 
+    async def room_thread_activity(
+        self,
+        *,
+        room_id: str,
+        since_ts: int,
+        until_ts: int,
+        exclude_thread_id: str | None,
+        thread_limit: int,
+        row_limit: int,
+        summary_tail: int,
+        summary_key: str,
+    ) -> tuple[reads.ThreadActivity, ...]:
+        """Return the threads of a room with messages in a window, each with its title sources, in one snapshot."""
+        return await self._read(
+            reads.room_thread_activity,
+            room_id=room_id,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            exclude_thread_id=exclude_thread_id,
+            thread_limit=thread_limit,
+            row_limit=row_limit,
+            summary_tail=summary_tail,
+            summary_key=summary_key,
+        )
+
     async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
         """Return the newest visible event in one thread, or nothing."""
         return await self._read(reads.latest_visible_event_id, room_id=room_id, thread_id=thread_id)

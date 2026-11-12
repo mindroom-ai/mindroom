@@ -295,13 +295,15 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
     room_id: str,
     admin_user_ids: Iterable[str] = (),
     *,
+    state_writer_ids: Iterable[str] = (),
     snapshot: RoomStateSnapshot | None = None,
     creators: frozenset[str] | None = None,
 ) -> bool:
     """Reconcile managed-room power levels with one read-modify-write.
 
-    Applies the PL0 state events used by MindRoom clients and grants configured
-    room admins power level 100 in one conditional PUT.
+    Applies the PL0 state events used by MindRoom clients, grants configured
+    room admins power level 100, and raises ``state_writer_ids`` to the state
+    level 50 in one conditional PUT.
     """
     current_response = await read_state_event(client, room_id, _POWER_LEVELS_EVENT_TYPE, snapshot=snapshot)
     if not isinstance(current_response, nio.RoomGetStateEventResponse):
@@ -329,6 +331,13 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
         desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
     desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids, creators)
+    concrete_writer_ids = {user_id for user_id in state_writer_ids if user_id}
+    desired_content = _with_room_admin_power_levels(
+        desired_content,
+        concrete_writer_ids,
+        creators,
+        power_level=_POWER_USER_POWER_LEVEL,
+    )
     if desired_content == current_content:
         logger.debug(
             "Managed room power levels already configured",
@@ -341,7 +350,13 @@ async def ensure_managed_room_power_levels(  # noqa: PLR0911 - each unsafe Matri
         # Topics and other policy operations may have awaited since this snapshot.
         # A required read-modify-write must preserve current grants, not restore old ones.
         # The create event is immutable, so the snapshot's creators stay current.
-        return await ensure_managed_room_power_levels(client, room_id, concrete_admin_ids, creators=creators)
+        return await ensure_managed_room_power_levels(
+            client,
+            room_id,
+            concrete_admin_ids,
+            state_writer_ids=concrete_writer_ids,
+            creators=creators,
+        )
 
     response = await client.room_put_state(
         room_id=room_id,
@@ -370,8 +385,10 @@ def _with_room_admin_power_levels(
     power_levels_content: dict[str, Any],
     user_ids: Iterable[str],
     creators: frozenset[str],
+    *,
+    power_level: int = ROOM_ADMIN_POWER_LEVEL,
 ) -> dict[str, Any]:
-    """Return power-level content with users promoted while preserving existing admins.
+    """Return power-level content with users promoted to ``power_level``, never lowering anyone.
 
     Privileged creators already have unlimited power, and listing them would be rejected.
     """
@@ -380,8 +397,8 @@ def _with_room_admin_power_levels(
     next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
     for user_id in sorted(set(user_ids) - creators):
         current_level = next_users.get(user_id)
-        if not isinstance(current_level, int) or current_level < ROOM_ADMIN_POWER_LEVEL:
-            next_users[user_id] = ROOM_ADMIN_POWER_LEVEL
+        if not isinstance(current_level, int) or current_level < power_level:
+            next_users[user_id] = power_level
     next_content["users"] = next_users
     return next_content
 

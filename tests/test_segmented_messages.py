@@ -1,11 +1,18 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
+import random
+
+import pytest
+
+from mindroom.constants import REASONING_CONTENT_KEY
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
+    SEGMENT_COUNT_KEY,
     _chunk_mentions,
     _render_segment_html,
     _unclosed_fence_start,
@@ -264,6 +271,79 @@ def test_mention_pills_survive_segmentation() -> None:
     # m.mentions belongs to the event whose body carries the mention.
     assert mentioned[0]["m.mentions"] == {"user_ids": ["@alice:localhost"]}
     assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -> None:
+    """The first segment's visible content carries the segment count, and continuations keep the delivery identity."""
+    message = {**build_message_content(_body()), DURABLE_DELIVERY_ID_KEY: {"delivery_id": "turn-1"}}
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert segmented.continuations
+    first = segmented.first["m.new_content"] if edit else segmented.first
+    assert first[SEGMENT_COUNT_KEY] == 1 + len(segmented.continuations)
+    assert all(SEGMENT_COUNT_KEY not in part for part in segmented.continuations)
+    assert all(part[DURABLE_DELIVERY_ID_KEY] == first[DURABLE_DELIVERY_ID_KEY] for part in segmented.continuations)
+
+
+# Replies whose first segment's tool trace fills it to within the count's bytes, as a plain message and as an edit.
+@pytest.mark.parametrize(("seed", "edit"), [(1383, False), (1146, True)])
+def test_a_first_segment_filled_to_its_budget_is_still_sent_as_segments(seed: int, *, edit: bool) -> None:
+    """A first segment with no room left for the segment count goes without it instead of falling back to the sidecar."""
+    rng = random.Random(seed)  # noqa: S311 - a fixed test fixture, not a secret
+    paragraphs = [f"Paragraph {index} " + "x" * rng.randint(20, 400) for index in range(rng.randint(150, 400))]
+    calls = rng.randint(1, 12)
+    body = "\n\n".join([*(f"🔧 `tool{index}` [{index + 1}]" for index in range(calls)), *paragraphs])
+    events = [
+        {
+            "type": "tool_call_completed",
+            "tool_name": f"tool{index}",
+            "args_preview": "a" * rng.randint(0, 3000),
+            "result_preview": "r" * rng.randint(0, 6000),
+        }
+        for index in range(calls)
+    ]
+    message = build_message_content(body, extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}})
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations
+    first = segmented.first["m.new_content"] if edit else segmented.first
+    assert SEGMENT_COUNT_KEY not in first
+    budget = _SEGMENT_TARGET_EDIT_BYTES if edit else _SEGMENT_TARGET_PLAINTEXT_BYTES
+    assert calculate_event_size(segmented.first) <= budget
+
+
+def test_a_fenced_block_that_fills_the_first_segment_still_splits() -> None:
+    """A code block sized right up to the first segment's budget splits as before; the count never moves the cut."""
+    code = ("data = 1234567890\n" * 1400)[:19218]
+    message = {
+        **build_message_content(f"```\n{code}\n```\n\n{'z' * 52000}"),
+        DURABLE_DELIVERY_ID_KEY: {"principal": "@research:localhost", "delivery_id": "turn-1", "stage": "final"},
+    }
+
+    segmented = segment_matrix_content(message, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations
+    assert segmented.first["body"].rstrip().endswith("```")
+
+
+def test_a_reply_that_stays_one_segment_has_no_segment_count() -> None:
+    """Dropping internal metadata can leave one segment, which has nothing to wait for."""
+    message = build_message_content("Short answer.", extra_content={REASONING_CONTENT_KEY: "x" * 60_000})
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message)
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations == ()
+    assert SEGMENT_COUNT_KEY not in segmented.first["m.new_content"]
 
 
 def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:

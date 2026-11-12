@@ -243,7 +243,7 @@ async def test_joined_team_uses_team_resolution(room_state: RoomState) -> None:
 @pytest.mark.parametrize(
     "failure",
     [
-        nio.RoomPutStateError("forbidden", "M_FORBIDDEN"),
+        nio.RoomPutStateError("unavailable", "M_UNKNOWN"),
         aiohttp.ClientConnectionError("offline"),
         TimeoutError(),
     ],
@@ -262,6 +262,26 @@ async def test_write_failure_is_nonfatal_and_retried(
     assert client.room_put_state.await_count == 2
     assert len(logs) == 2
     assert all(log["event"] == "room_thread_mode_reconcile_failed" and log["log_level"] == "warning" for log in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status_code", "level"), [("M_FORBIDDEN", "debug"), ("M_UNKNOWN", "warning")])
+async def test_a_room_that_refuses_the_routers_state_is_no_warning(
+    room_state: RoomState,
+    status_code: str,
+    level: str,
+) -> None:
+    """Where the room's power levels refuse the router's state, a start logs the refusal at debug and still tries it."""
+    config, paths, _, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("user_level (0) < send_level (50)", status_code)
+    with capture_logs() as logs:
+        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    assert {write.args[1] for write in client.room_put_state.await_args_list} == {EVENT_TYPE, ACCOUNTS_EVENT_TYPE}
+    assert sorted((log["event"], log["log_level"]) for log in logs) == [
+        ("room_accounts_publish_failed", level),
+        ("room_thread_mode_reconcile_failed", level),
+    ]
 
 
 @pytest.mark.asyncio
@@ -606,7 +626,7 @@ def _router_duties(state: RoomState) -> RouterDuties:
         matrix_id=ids[ROUTER_AGENT_NAME],
         hook_context=MagicMock(),
         journal=MagicMock(),
-        room_lifecycle=MagicMock(send_welcome_message_if_empty=AsyncMock()),
+        room_lifecycle=MagicMock(send_welcome_message_if_empty=AsyncMock(), refresh_welcome=AsyncMock()),
         personal_rooms=MagicMock(),
     )
     deps.hook_context.registry.has_hooks.return_value = False

@@ -211,13 +211,20 @@ async def test_a_snapshot_write_rereads_power_levels_and_still_omits_creators(he
     )
     targets = {OWNER, "@guest:example.com"}
 
+    writers = {ROUTER} if helper == "managed" else set()
     if helper == "managed":
-        assert await client_room_admin.ensure_managed_room_power_levels(client, ROOM, targets, snapshot=snapshot)
+        assert await client_room_admin.ensure_managed_room_power_levels(
+            client,
+            ROOM,
+            targets,
+            state_writer_ids=writers,
+            snapshot=snapshot,
+        )
     else:
         assert await client_room_admin.ensure_room_admin_power_levels(client, ROOM, targets, snapshot=snapshot)
 
     content = client.room_put_state.await_args.kwargs["content"]
-    assert content["users"] == {"@later:example.com": 100, "@guest:example.com": 100}
+    assert content["users"] == {"@later:example.com": 100, "@guest:example.com": 100} | dict.fromkeys(writers, 50)
     assert content["custom"] == "keep"
     client.room_get_state_event.assert_awaited_once_with(ROOM, "m.room.power_levels", "")
 

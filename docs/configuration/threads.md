@@ -4,7 +4,7 @@ icon: lucide/messages-square
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](router.md), [Access Control](../authorization.md), and [Logs & Monitoring](../deployment/operational-log-events.md).
 
 ## Thread Mode Resolution
@@ -215,10 +215,14 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 
 #### Participation Context and Fallback
 
-A participation judgment sends the agent's guidance and up to eight recent user and assistant messages, with Matrix identities replaced by aliases.
-System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
-When the context contains media, attachment references, detected secrets, or more than 16 KB of text, the backend is skipped and the reply model decides instead.
+A participation judgment sends the agent's display name, its guidance, and up to eight recent messages, where one reply's consecutive agent messages count as one, with Matrix identities replaced by aliases that tell people (`speaker_1`) from agents (`agent_1`).
+The newest message is sent whole, while long earlier messages are shortened to their start and end and the oldest drop out first, so the request fits 16 KB.
+The agent's own tool calls appear as `[used tools: shell, web_search]` and a file or image as `[sent a file]` or `[sent an image]`, with its caption when it has one, so threads where agents use tools and people share files are judged too.
+MindRoom does not send tool inputs or results, file names or contents, media, conversation summaries, system prompts, memory, or tool definitions.
+Message text is sent as it appears in the thread, so it can still contain private information: a file name someone typed, tool output an agent quoted in its reply, or the closing line of a reply that ended because a tool kept failing, which names the tool and its last error, redacted (see `max_tool_calls_per_turn` in [Agent Configuration](agents.md#configuration-options)).
+When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
+Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, whichever `provider` it uses, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
 
 ## Mid-Turn Coalescing
 
@@ -282,6 +286,47 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+## Activity in Other Threads
+
+An agent's context is the thread it replies in, so it does not know that another thread of the same room, where the same people worked a few minutes ago, exists.
+Turn on `room_activity` to add a short note to the agent's thread replies listing the room's other threads with new messages since its last reply in this thread, or within the window for its first reply there:
+
+```text
+Other threads in this room with activity since your last reply here:
+- "Main game work" (thread $abc...): Max, Daniel; 14 new messages, last 3 min ago; you replied there 10 min ago
+- "Design assets" (thread $def...): Kinsey; 3 new messages, last 20 min ago
+Read one with matrix_message(action="read", thread_id="...") if it bears on this request.
+```
+
+Each line has the thread's title (its current summary title, else the first line of its first message), who wrote there by display name, how many new messages and when the last one came, and whether the agent itself replied there.
+The note never quotes messages beyond the title, never lists the current thread or another room's threads, and lists only messages the agent's own Matrix account received in that room.
+The agent decides from the note whether to read a thread with `matrix_message`, so the note appears only for agents that have the `matrix_message` tool.
+
+```yaml
+defaults:
+  room_activity:
+    window_minutes: 60
+
+agents:
+  helper:
+    display_name: Helper
+    tools: [matrix_message]
+    room_activity:
+      enabled: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Add the note to this agent's thread replies |
+| `window_minutes` | int, 1-1440 | `120` | How far back the note looks; it never looks back past the agent's last reply in the current thread |
+| `max_threads` | int, 1-20 | `5` | Most threads one note lists, the most recently active first |
+
+`defaults.room_activity` applies to every agent, and `agents.<name>.room_activity` overrides it field by field, so the example above gives `helper` a 60-minute window.
+Only an agent's thread replies get the note: replies outside a thread, team replies, subagents, and agents in minimal mode do not.
+A turn with nothing new in the room's other threads gets no note, so a quiet room costs nothing.
+Otherwise the note adds about 70 tokens per listed thread, most of them the thread ID the agent needs to read it, plus about 35 for its first and last lines, to that turn's requests.
+It goes after the current message, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
 
 ## Message Edits
 

@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from dataclasses import replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -19,7 +20,7 @@ from uuid import UUID
 import nio
 import pytest
 
-from mindroom import background_tasks
+from mindroom import background_tasks, bot_room_lifecycle
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -70,7 +71,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.test_listed_rooms import PARENT, _create, _parent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 
 _DURABLE_MEMBERSHIP_GATEWAY = AgentBot.change_local_membership
@@ -2063,6 +2064,143 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **Code** (alias `code`): Writes code" in response_text
     bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
+
+
+@dataclass
+class _WelcomedRoom:
+    bot: AgentBot
+    room: nio.MatrixRoom
+    members: list[nio.RoomMember]
+    edit: AsyncMock
+
+    async def change(self, name: str, membership: str) -> None:
+        """Sync adds or drops the agent before the router sees its member event, which returns before the edit."""
+        user_id = f"@mindroom_{name}:localhost"
+        if membership == "join":
+            self.members.append(nio.RoomMember(user_id, name.title(), None))
+            self.room.add_member(user_id, name.title(), None)
+        else:
+            self.members[:] = [member for member in self.members if member.user_id != user_id]
+            self.room.remove_member(user_id)
+        previous = "invite" if membership == "join" else "join"
+        assert self.bot._router is not None
+        await self.bot._router.member_event(self.room, _membership_change(user_id, membership, previous))
+
+
+def _membership_change(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": f"${membership}-{user_id}",
+            "origin_server_ts": 1,
+            "sender": user_id,
+            "state_key": user_id,
+            "content": {"membership": membership},
+            "unsigned": {"prev_content": {"membership": previous}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
+
+
+async def _router_welcomed_an_empty_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _WelcomedRoom:
+    """A router invited into an ad-hoc room before any agent, which it welcomes with no agents listed."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(
+                    display_name=name.title(),
+                    role=f"{name.title()} role",
+                    access=ResponderAccessConfig(current_room_members=True),
+                )
+                for name in ("code", "docs")
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.members_synced = False
+    members: list[nio.RoomMember] = []
+    bot.client = AsyncMock()
+    bot.client.rooms = {"!adhoc:localhost": room}
+    bot.client.joined_members = AsyncMock(
+        side_effect=lambda room_id: nio.JoinedMembersResponse(members=list(members), room_id=room_id),
+    )
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(room_id="!adhoc:localhost", chunk=[], start="", end=None),
+    )
+    install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
+    edit = AsyncMock(return_value=MagicMock(spec=bot_room_lifecycle.DeliveredMatrixEvent))
+    monkeypatch.setattr(bot_room_lifecycle, "edit_message_outcome", edit)
+    await bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
+    return _WelcomedRoom(bot, room, members, edit)
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_lists_agents_that_join_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router invited before the agents edits its welcome to list the agents in the room as they join and leave."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    lifecycle = welcomed.bot._room_lifecycle
+    real_fence = lifecycle.deps.admit_response
+    fenced = False
+
+    @asynccontextmanager
+    async def fence() -> AsyncIterator[None]:
+        nonlocal fenced
+        async with real_fence():
+            fenced = True
+            try:
+                yield
+            finally:
+                fenced = False
+
+    edits_fenced: list[bool] = []
+    welcomed.edit.side_effect = lambda *_args: edits_fenced.append(fenced) or welcomed.edit.return_value
+    lifecycle.deps = replace(lifecycle.deps, admit_response=fence)
+
+    for name, membership in [("code", "join"), ("docs", "join"), ("docs", "join"), ("docs", "leave")]:
+        await welcomed.change(name, membership)
+        assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+
+    calls = welcomed.edit.await_args_list
+    texts = [await_call.args[4] for await_call in calls]
+    # The repeated join of an agent already listed leaves the welcome as it is.
+    assert [await_call.args[2] for await_call in calls] == ["$welcome"] * 3
+    code = "\u2022 **Code** (alias `code`): Code role"
+    docs = "\u2022 **Docs** (alias `docs`): Docs role"
+    assert [(code in text, docs in text) for text in texts] == [(True, False), (True, True), (True, False)]
+    # The edit keeps the welcome from waking the agents it lists, and runs where an access reload cannot pass it.
+    assert all(await_call.args[3]["com.mindroom.skip_mentions"] is True for await_call in calls)
+    assert edits_fenced == [True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_router_membership_handling_does_not_wait_for_the_welcome_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit stuck on a slow homeserver holds no later event of the room."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    answered = asyncio.Event()
+
+    async def slow_edit(*_args: object) -> object:
+        await answered.wait()
+        return welcomed.edit.return_value
+
+    welcomed.edit.side_effect = slow_edit
+    await asyncio.wait_for(welcomed.change("code", "join"), timeout=1)
+    answered.set()
+    assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+    welcomed.edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

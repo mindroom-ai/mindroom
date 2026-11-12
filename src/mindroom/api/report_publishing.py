@@ -7,7 +7,7 @@ import hmac
 import re
 import secrets
 import time
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -33,7 +33,7 @@ _VIEW_LINK_SECONDS = 4 * 3600
 # A new key per process, as for portal sessions, so a restart ends every view link.
 _VIEW_LINK_KEY = secrets.token_bytes(32)
 _VIEW_LINK_SEGMENT = re.compile(r"~(\d{1,12})\.([0-9a-f]{64})")
-# Remembers, across Chat's sign-in, the slug of the report that sent the browser there.
+# Remembers, across Chat's sign-in, the report page and query that sent the browser there.
 _RETURN_COOKIE = "mindroom_report_return"
 _RETURN_SECONDS = 600
 
@@ -79,19 +79,22 @@ async def _published_report_response(
         # Module scripts and CSS fonts are CORS requests from the site's opaque origin; the view link is the credential.
         response.headers["Access-Control-Allow-Origin"] = "*"
         return response
+    # A stale view link is replaced, keeping the asset it led to.
+    asset = rest if view_link is not None else asset_path
+    # `request.url` is rebuilt from the decoded path, so a `#` or `?` in a file name would swallow its query.
+    query_string = request.scope["query_string"].decode("latin-1")
+    query = f"?{query_string}" if query_string else ""
     try:
         await require_connections_user(request)
     except HTTPException as error:
         if error.status_code not in {401, 403}:
             raise
-        return _sign_in_response(request, slug)
-    # A stale view link is replaced, keeping the asset it led to.
-    asset = rest if view_link is not None else asset_path or ""
-    # `request.url` is rebuilt from the decoded path, so a `#` or `?` in a file name would swallow its query.
-    query_string = request.scope["query_string"].decode("latin-1")
-    query = f"?{query_string}" if query_string else ""
+        return _sign_in_response(request, slug, asset, query)
+    if asset and _leaves_report(asset):
+        # A browser would resolve the view link's dot segments to a path outside the report.
+        raise HTTPException(status_code=404, detail="Public report was not found.")
     return RedirectResponse(
-        f"/reports/public/{quote(slug, safe='')}/{_view_link(slug)}/{quote(asset)}{query}",
+        f"/reports/public/{quote(slug, safe='')}/{_view_link(slug)}/{quote(asset or '')}{query}",
         status_code=303,
         headers=_NO_STORE_HEADERS,
     )
@@ -139,8 +142,8 @@ def _view_link_valid(slug: str, view_link: re.Match[str]) -> bool:
     return time.time() < int(expires_at) and hmac.compare_digest(signature, _view_link_signature(slug, expires_at))
 
 
-def _sign_in_response(request: Request, slug: str) -> Response:
-    """Send a signed-out browser to Chat's sign-in page, remembering the report to come back to."""
+def _sign_in_response(request: Request, slug: str, asset: str | None, query: str) -> Response:
+    """Send a signed-out browser to Chat's sign-in page, remembering the report page and query to come back to."""
     sign_in_url = connections_sign_in_page(api_runtime_paths(request))
     if sign_in_url is None:
         return HTMLResponse(_SIGN_IN_REQUIRED_PAGE, status_code=401, headers=_NO_STORE_HEADERS)
@@ -149,9 +152,11 @@ def _sign_in_response(request: Request, slug: str) -> Response:
         name, secure = _return_cookie(request)
         # Chat's hand-off is a cross-site post, which carries only a `SameSite=None` cookie; that needs HTTPS.
         samesite = "none" if secure else "lax"
+        way_back = slug if asset is None else f"{slug}/{quote(asset)}"
         response.set_cookie(
             name,
-            slug,
+            # Percent-encoded whole, so the cookie holds only characters a cookie value may carry.
+            quote(f"{way_back}{query}", safe=""),
             max_age=_RETURN_SECONDS,
             path="/",
             secure=secure,
@@ -169,13 +174,28 @@ def _return_cookie(request: Request) -> tuple[str, bool]:
 
 
 def sign_in_landing(request: Request) -> RedirectResponse:
-    """Return where a Connections sign-in lands: the published report that sent the browser to sign in, else the portal."""
+    """Return where a Connections sign-in lands: the report page that sent the browser to sign in, else the portal."""
     name, secure = _return_cookie(request)
-    slug = request.cookies.get(name)
-    redirect = RedirectResponse(
-        f"/reports/public/{slug}" if slug and PUBLIC_REPORT_SLUG_RE.fullmatch(slug) else "/connections/",
-        status_code=303,
-    )
-    if slug is not None:
+    cookie = request.cookies.get(name)
+    redirect = RedirectResponse(_way_back(cookie) if cookie else "/connections/", status_code=303)
+    if cookie is not None:
         redirect.delete_cookie(name, path="/", secure=secure, httponly=True, samesite="none" if secure else "lax")
     return redirect
+
+
+def _way_back(cookie: str) -> str:
+    """Return the report page a return cookie names, or the portal unless it names a slug and a path inside it."""
+    way_back, separator, query = unquote(cookie).partition("?")
+    slug, slash, quoted_asset = way_back.partition("/")
+    asset = unquote(quoted_asset)
+    if not PUBLIC_REPORT_SLUG_RE.fullmatch(slug) or _leaves_report(asset):
+        return "/connections/"
+    return f"/reports/public/{slug}{slash}{quote(asset)}{separator}{query}"
+
+
+def _leaves_report(asset: str) -> bool:
+    """Return whether a report path has a dot segment or backslash, as the server decodes it or one more decoding reads it."""
+    return any(
+        "\\" in decoded or any(segment in {".", ".."} for segment in decoded.split("/"))
+        for decoded in (asset, unquote(asset))
+    )
