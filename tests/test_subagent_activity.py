@@ -144,8 +144,9 @@ def _call(
 
 
 def test_start_reads_the_child_identity() -> None:
-    """The snapshot carries the resolved thread, callers, and parent link."""
+    """The snapshot carries the resolved thread, callers, parent link, and the sub-agent the run is a turn of."""
     snapshot = _activity().snapshot()
+    assert snapshot.subagent_id == "s1"
     assert (snapshot.caller_agent_name, snapshot.root_caller_agent_name) == ("parent", "lead")
     assert (snapshot.thread_id, snapshot.parent_delegation_id, snapshot.source) == ("$thread", "p0", "delegate")
     assert (snapshot.status, snapshot.started_at, snapshot.ended_at) == ("running", 1.0, None)
