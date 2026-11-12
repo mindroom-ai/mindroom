@@ -71,7 +71,7 @@ _COMMON_KEYS = frozenset(
 # The ``extra_kwargs`` keys each route's config may set. Bedrock's ``aws_profile`` names the AWS profile its boto3
 # ``session`` resolves, so it is no setting of its own.
 ACCEPTED_KEYS: dict[ClaudeRouteKind, frozenset[str]] = {
-    "anthropic": _COMMON_KEYS | {"auth_token"},
+    "anthropic": _COMMON_KEYS | {"auth_token", "base_url"},
     "vertexai_claude": _COMMON_KEYS | {"base_url", "project_id", "region"},
     "bedrock_claude": _COMMON_KEYS
     | {"aws_access_key", "aws_profile", "aws_region", "aws_secret_key", "aws_session_token", "session"},
@@ -105,7 +105,7 @@ class ClaudeSettings:
     # Direct API credentials; Vertex and Bedrock authenticate with Google and AWS credentials and ignore a key.
     api_key: str | None = field(default=None, metadata=SECRET)
     auth_token: str | None = field(default=None, metadata=SECRET)
-    # Vertex AI.
+    # Vertex AI; ``base_url`` is also the direct API's endpoint root, which the SDK appends ``/v1`` to.
     project_id: str | None = None
     region: str | None = None
     base_url: str | None = None
