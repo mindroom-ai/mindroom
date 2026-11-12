@@ -294,6 +294,7 @@ def persist_offline_entity_accounts(
     usernames = usernames or {}
     domain = config.get_domain(runtime_paths)
     mindroom_user = config.mindroom_user
+    user_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
 
     def add_missing(state: MatrixState) -> None:
         for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
@@ -302,9 +303,9 @@ def persist_offline_entity_accounts(
                 continue
             username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
             state.add_account(account_key, username, password, domain=domain)
-        if mindroom_user is not None and managed_account_key("user") not in state.accounts:
+        if mindroom_user is not None and user_key not in state.accounts:
             state.add_account(
-                managed_account_key("user"),
+                user_key,
                 mindroom_user.username,
                 password,
                 requested_username=mindroom_user.username,

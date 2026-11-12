@@ -18,7 +18,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    Reusing `openai_compat` would have needed no new sites but would label headless tool calls, logs, and subagent records as API traffic.
 3. The requester must be an administrator, the first one by default.
    Delegation rechecks the requester's responder access to each target, and outside a room only administrators pass it for every agent.
-4. A run records the router's, every agent's and team's, and the internal user's Matrix accounts in `matrix_state.yaml` without credentials, through the same helper the tests use.
+4. A run records the router's, every agent's and team's, and the internal user's Matrix accounts in `matrix_state.yaml` without credentials.
    Turn code resolves every configured entity's Matrix ID, for prompts, sender attribution, and authorization.
    A storage that already holds credentialed accounts is refused, because a later `mindroom run` on it stops with `Stored Matrix credentials for <agent> are incomplete` for any agent that got such a record.
 5. Refusals cover only what a headless run cannot serve: a running MindRoom indexes knowledge bases, semantic file memory, and the knowledge graph, loads plugins, connects MCP servers, and runs workers.
@@ -53,5 +53,4 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 - Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
 - The agent's identity prompt is the one the OpenAI-compatible API uses, which names that API.
 - Beside a workdir, a few prompt lines still name workspace-relative paths that the tools resolve in the workdir: the note that editing an existing workspace skill with file tools is fine, and where delegation records live; leaving them out needs splitting prompt templates that configs can override.
-- Each call is a new conversation, and memories are not written automatically after a turn, as in the OpenAI-compatible API.
 - Tools that save files of their own under the workspace, such as `file_generation`, save them under `mindroom_tool_outputs/` in workdir mode; the paths their replies name are not rewritten.

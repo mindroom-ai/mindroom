@@ -51,7 +51,7 @@ _DETACHED_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/tool_system/runtime_context.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-# Runners without a Matrix conversation: the OpenAI-compatible API, the MCP gateway, and an API turn's delegated child.
+# Runners without a Matrix conversation: the OpenAI-compatible API, headless runs, the MCP gateway, and their delegated children.
 _DETACHED_TOOL_SCOPE_ALLOWLIST = {
     "src/mindroom/ai.py",
     "src/mindroom/api/openai_compat.py",

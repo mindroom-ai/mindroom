@@ -40,7 +40,7 @@ __all__ = ["HeadlessConfigError", "HeadlessResult", "run_turn", "validate_config
 
 
 class HeadlessConfigError(ValueError):
-    """A config, storage, or requester that a headless run cannot serve; ``problems`` names each reason."""
+    """A config, storage, workdir, or requester that a headless run cannot serve; ``problems`` names each reason."""
 
     def __init__(self, problems: list[str]) -> None:
         self.problems = problems
@@ -80,6 +80,7 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
     """Return why ``agent`` or a subagent it may delegate to needs a running MindRoom or a Matrix room."""
     tools = config_plugins(config, runtime_paths).tools
     placement = tool_placement(runtime_paths, tools)
+    allow_shell = config.defaults.allow_shell_without_worker
     problems = []
     for name in sorted(config.get_agent_delegation_closure(agent)):
         if agent_knowledge_base_ids(config, name):
@@ -89,7 +90,7 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
         if uses_knowledge_graph(config, name):
             problems.append(f"agent {name!r}: the knowledge graph needs a running MindRoom")
         agent_tools = resolve_agent_tools(config, name, tools)
-        mcp = [tool for tool in agent_tools.tool_names if (metadata := tools.get(tool)) and metadata.mcp_server_id]
+        mcp = [tool for tool in agent_tools.tool_names if tools.mcp_server_id(tool)]
         if mcp:
             problems.append(f"agent {name!r}: MCP tools need a running MindRoom: {', '.join(mcp)}")
         routed = [
@@ -97,9 +98,8 @@ def _agent_problems(config: Config, runtime_paths: RuntimePaths, agent: str) -> 
         ]
         if routed:
             problems.append(
-                f"agent {name!r}: {', '.join(routed)} run in a worker; set its worker_tools: [] to run them here",
+                f"agent {name!r} runs {', '.join(routed)} in a worker; set its worker_tools: [] to run them here",
             )
-        allow_shell = config.defaults.allow_shell_without_worker
         if "shell" in agent_tools.tool_names and "shell" not in routed and not allow_shell:
             problems.append(
                 f"agent {name!r}: shell runs in this process; set defaults.allow_shell_without_worker: true",

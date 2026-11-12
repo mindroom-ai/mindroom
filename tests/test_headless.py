@@ -16,16 +16,16 @@ import pytest
 from aiohttp import web
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.headless import HeadlessConfigError, run_turn, validate_config
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers import model_http_client
 from mindroom.shell.output_capture import ShellOutputDestination
-from tests.conftest import install_model_providers, requires_linux
-from tests.minimal_agent_fixtures import ScriptedProvider
+from tests.conftest import requires_linux
+from tests.identity_helpers import persist_entity_accounts
+from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
@@ -42,12 +42,17 @@ def _config(**agent: object) -> dict[str, Any]:
 
 def _install(monkeypatch: pytest.MonkeyPatch, *steps: object) -> ScriptedProvider:
     provider = ScriptedProvider(steps=list(steps))
-    install_model_providers(monkeypatch, {"default": provider})
+    provider.install(monkeypatch)
     return provider
 
 
 def _last_tool_result(request: ModelRequest) -> str:
     return str([message for message in request.messages if message.role == "tool"][-1].content)
+
+
+def _sent(request: ModelRequest, role: str | None = None) -> str:
+    """Return the content of a request's messages, or only of those with ``role``, as one string."""
+    return str([message.content for message in request.messages if role is None or message.role == role])
 
 
 def _files(root: Path) -> list[str]:
@@ -91,7 +96,7 @@ async def test_run_turn_runs_tools_and_returns_text(
     # A headless turn makes no request of its own, such as routing or a thread title.
     assert len(provider.requests) == 2
     # No Matrix room: the prompt neither describes one nor attributes the prompt to the requester's Matrix ID.
-    sent = str([message.content for message in provider.requests[0].messages])
+    sent = _sent(provider.requests[0])
     assert "Matrix Reply Targeting" not in sent
     assert "@alice:localhost" not in sent
 
@@ -117,12 +122,15 @@ async def test_run_turn_needs_no_matrix(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(nio.AsyncClient, "__init__", no_client)
     _install(monkeypatch, "hello")
     storage = tmp_path / "storage"
-    result = await run_turn(_config(), agent="coder", prompt="hi", storage=storage)
+    config = _config()
+    config["mindroom_user"] = {"username": "mindroom_owner"}
+    result = await run_turn(config, agent="coder", prompt="hi", storage=storage)
 
     assert (result.text, result.completed) == ("hello", True)
     runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
     accounts = matrix_state_for_runtime(runtime_paths).accounts
-    assert {"agent_router", "agent_coder"} <= set(accounts)
+    assert {"agent_router", "agent_coder", "agent_user"} <= set(accounts)
+    assert accounts["agent_user"].username == "mindroom_owner"
     assert all(account.password is None and account.access_token is None for account in accounts.values())
 
 
@@ -161,7 +169,7 @@ async def test_delegation_stops_at_depth_three(tmp_path: Path, monkeypatch: pyte
     result = await run_turn(_config(delegate_to=["coder"]), agent="coder", prompt="go", storage=tmp_path / "storage")
 
     assert (result.text, result.completed) == ("lead", True)
-    offered = ["run_subagent" in [tool.name for tool in request.tools] for request in provider.requests]
+    offered = ["run_subagent" in offered_tools(request) for request in provider.requests]
     assert offered == [True, True, True, False, False, True, True, True]
     assert _last_tool_result(provider.requests[4]) == "Error: The requested tool does not exist or is not available."
 
@@ -204,91 +212,87 @@ def _plugin(tmp_path: Path) -> str:
 def _credentialed_storage(tmp_path: Path, config: dict[str, Any]) -> None:
     storage = tmp_path / "storage"
     runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
-    validated = validate_config(config, agent="coder", storage=storage)
-    persist_offline_entity_accounts(validated, runtime_paths, password="pw")  # noqa: S106 - a fixture account
+    persist_entity_accounts(validate_config(config, agent="coder", storage=storage), runtime_paths)
 
 
 @pytest.mark.parametrize(
     ("change", "problem"),
     [
-        (
+        pytest.param(
             lambda c, _p: c.update(teams={"crew": {"display_name": "Crew", "role": "r", "agents": ["coder"]}}),
             "'crew' is a team",
+            id="team",
         ),
-        (lambda c, _p: c["agents"]["coder"].update(worker_tools=["shell"]), "'coder': shell run in a worker"),
-        (lambda c, _p: c.pop("defaults"), "shell runs in this process; set defaults.allow_shell_without_worker: true"),
-        (
+        pytest.param(
+            lambda c, _p: c["agents"]["coder"].update(worker_tools=["shell"]),
+            "agent 'coder' runs shell in a worker",
+            id="worker-tools",
+        ),
+        pytest.param(
+            lambda c, _p: c["agents"]["helper"].update(tools=["shell"], worker_tools=["shell"]),
+            "agent 'helper' runs shell in a worker",
+            id="subagent-worker-tools",
+        ),
+        pytest.param(
+            lambda c, _p: c.pop("defaults"),
+            "shell runs in this process; set defaults.allow_shell_without_worker: true",
+            id="shell-without-worker",
+        ),
+        pytest.param(
             lambda c, _p: (
                 c.update(mcp_servers={"docs": {"transport": "stdio", "command": "true"}})
                 or c["agents"]["coder"]["tools"].append("mcp_docs")
             ),
             "MCP tools need a running MindRoom: mcp_docs",
+            id="mcp",
         ),
-        (lambda c, _p: c.update(administrators=[]), "administrators is empty"),
-        (lambda c, _p: c.update(requester_id="@bob:localhost"), "'@bob:localhost' is not in administrators"),
-        (
+        pytest.param(lambda c, _p: c.update(administrators=[]), "administrators is empty", id="no-administrators"),
+        pytest.param(
             lambda c, p: (
                 c.update(knowledge_bases={"docs": {"path": str(p)}})
                 or c["agents"]["coder"].update(knowledge_bases=["docs"])
             ),
             "knowledge bases need a running MindRoom",
+            id="knowledge",
         ),
-        (
+        pytest.param(
             lambda c, _p: c["agents"]["coder"].update(memory_backend="file", memory_search={"mode": "semantic"}),
             "semantic memory_search needs a running MindRoom",
+            id="semantic-memory",
         ),
-        (lambda c, p: c.update(plugins=[_plugin(p)]), "plugins need a running MindRoom"),
-        (
+        pytest.param(lambda c, p: c.update(plugins=[_plugin(p)]), "plugins need a running MindRoom", id="plugins"),
+        pytest.param(
             lambda c, _p: (
                 c.update(knowledge_graph={"model": "default"}) or c["agents"]["coder"].update(knowledge_graph=True)
             ),
             "the knowledge graph needs a running MindRoom",
+            id="knowledge-graph",
         ),
-        (lambda c, p: _credentialed_storage(p, c), "give headless runs a storage of their own"),
-    ],
-    ids=[
-        "team",
-        "worker-tools",
-        "shell-without-worker",
-        "mcp",
-        "no-administrators",
-        "non-administrator",
-        "knowledge",
-        "semantic-memory",
-        "plugins",
-        "knowledge-graph",
-        "storage",
+        pytest.param(
+            lambda c, p: _credentialed_storage(p, c),
+            "give headless runs a storage of their own",
+            id="storage",
+        ),
     ],
 )
 @pytest.mark.asyncio
 async def test_run_turn_refuses_what_needs_a_running_mindroom(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    change: Any,  # noqa: ANN401
+    change: Callable[[dict[str, Any], Path], object],
     problem: str,
 ) -> None:
-    """Each refusal names its setting, and the turn never reaches the model."""
+    """Each refusal names its setting, also for a subagent the agent may run, and the turn never reaches the model."""
     provider = _install(monkeypatch)
     config = _config(delegate_to=["helper"])
     config["agents"]["helper"] = {"display_name": "Helper"}
     change(config, tmp_path)
-    requester_id = config.pop("requester_id", None)
     agent = "crew" if "teams" in config else "coder"
     with pytest.raises(HeadlessConfigError) as raised:
-        await run_turn(config, agent=agent, prompt="hi", storage=tmp_path / "storage", requester_id=requester_id)
+        await run_turn(config, agent=agent, prompt="hi", storage=tmp_path / "storage")
 
     assert any(problem in item for item in raised.value.problems), raised.value.problems
     assert provider.requests == []
-
-
-@pytest.mark.asyncio
-async def test_refusals_cover_the_subagents_an_agent_may_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A subagent's worker tools are refused too, since its calls would run in the same turn."""
-    _install(monkeypatch)
-    config = _config(delegate_to=["helper"])
-    config["agents"]["helper"] = {"display_name": "Helper", "tools": ["shell"], "worker_tools": ["shell"]}
-    with pytest.raises(HeadlessConfigError, match="agent 'helper': shell run in a worker"):
-        await run_turn(config, agent="coder", prompt="hi", storage=tmp_path / "storage")
 
 
 @pytest.mark.asyncio
@@ -303,7 +307,7 @@ async def test_mem0_memory_runs_headless(tmp_path: Path, monkeypatch: pytest.Mon
         result = await run_turn(config, agent="coder", prompt="what do I like?", storage=tmp_path / "storage")
 
     assert result.completed
-    assert "PINEAPPLE" in str([message.content for message in provider.requests[0].messages])
+    assert "PINEAPPLE" in _sent(provider.requests[0])
 
 
 @pytest.mark.asyncio
@@ -326,8 +330,8 @@ async def test_workdir_is_shell_cwd_and_file_base(
     assert str(shell_result.content).splitlines()[-1] == str(workdir)
     assert _files(workdir) == ["a.txt"]
     assert (storage / "agents" / "coder" / "sessions" / "coder.db").is_file()
-    # The notes on writing into the workspace, which the tools no longer resolve paths against, are left out.
-    system = str([message.content for message in provider.requests[0].messages if message.role == "system"])
+    # The notes on writing into the workspace are left out, since the tools resolve relative paths in the workdir.
+    system = _sent(provider.requests[0], "system")
     assert "MINDROOM_AGENT_WORKSPACE" not in system
     assert "skills/<skill-name>/" not in system
 
@@ -368,21 +372,40 @@ async def test_default_base_dir_is_the_workspace(tmp_path: Path, monkeypatch: py
     await run_turn(_config(), agent="coder", prompt="go", storage=storage)
 
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(storage / "agents" / "coder" / "workspace")
-    system = str([message.content for message in provider.requests[0].messages if message.role == "system"])
+    system = _sent(provider.requests[0], "system")
     assert "MINDROOM_AGENT_WORKSPACE" in system
     assert "skills/<skill-name>/" in system
 
 
+@dataclasses.dataclass
 class _ReadsSavedOutput(ScriptedProvider):
-    """Read a large file, then read back the start of the saved output by the path its receipt names."""
+    """Read a large file, then read back the start of the saved output by the path its receipt names, or write it."""
+
+    write_back: bool = False
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         if len(self.requests) == 2:
             receipt = ast.literal_eval(_last_tool_result(request))
             path = receipt["mindroom_tool_output"]["path"]
-            self.steps.insert(0, [("read_file_chunk", {"file_name": path, "start_line": 0, "end_line": 1})])
+            call = (
+                ("save_file", {"contents": "x", "file_name": path})
+                if self.write_back
+                else ("read_file_chunk", {"file_name": path, "start_line": 0, "end_line": 1})
+            )
+            self.steps.insert(0, [call])
         async for event in super().stream(request):
             yield event
+
+
+def _reads_saved_output(*, write_back: bool = False) -> _ReadsSavedOutput:
+    return _ReadsSavedOutput(
+        steps=[
+            [("run_shell_command", {"args": "seq 1 20000 > big.txt"})],
+            [("read_file", {"file_name": "big.txt"})],
+            "done",
+        ],
+        write_back=write_back,
+    )
 
 
 @pytest.mark.asyncio
@@ -394,19 +417,30 @@ async def test_saved_output_is_read_back_through_file(
     file_access: str,
 ) -> None:
     """A tool output over the save threshold stays in storage, and `file` reads it back by its receipt's path."""
-    provider = _ReadsSavedOutput(
-        steps=[
-            [("run_shell_command", {"args": "seq 1 20000 > big.txt"})],
-            [("read_file", {"file_name": "big.txt"})],
-            "done",
-        ],
-    )
-    install_model_providers(monkeypatch, {"default": provider})
+    provider = _reads_saved_output()
+    provider.install(monkeypatch)
     storage = tmp_path / "storage"
     await run_turn(_config(file_access=file_access), agent="coder", prompt="go", storage=storage, workdir=workdir)
 
     assert _last_tool_result(provider.requests[3]).splitlines() == ["1", "2"]
     assert _files(workdir) == ["big.txt"]
+    (saved,) = (storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs").iterdir()
+    assert saved.read_text().startswith("1\n2\n")
+
+
+@pytest.mark.asyncio
+async def test_saved_outputs_are_read_only_under_workspace_access(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `file_access: workspace`, `file` may read the saved outputs beside a workdir but not write them."""
+    provider = _reads_saved_output(write_back=True)
+    provider.install(monkeypatch)
+    storage = tmp_path / "storage"
+    await run_turn(_config(), agent="coder", prompt="go", storage=storage, workdir=workdir)
+
+    assert "you can only read" in _last_tool_result(provider.requests[3])
     (saved,) = (storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs").iterdir()
     assert saved.read_text().startswith("1\n2\n")
 

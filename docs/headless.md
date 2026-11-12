@@ -43,8 +43,8 @@ print(result.text)
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 
 Provider API keys come from the process environment, or from a `.env` file in `storage`.
-Give headless runs a storage of their own: a storage holding Matrix account credentials, such as one `mindroom run` set up, is refused, and `mindroom run` with its default password accounts cannot start on a storage a headless run used.
-[Budgets](budgets.md) never limit a headless run.
+Give headless runs a storage of their own: `mindroom run` with its default password accounts cannot start on a storage a headless run used.
+[Budgets](budgets.md) do not count a headless run's spend, so only a `monthly_limit_usd` of `0` switches it to the `fallback_model`.
 Each call is a new conversation, so the agent sees no history from earlier calls, and it does not write memories on its own after the turn.
 
 `HeadlessResult` has these fields:
@@ -83,8 +83,8 @@ As in the [OpenAI-compatible API](openai-api.md#limitations), tools that need a 
 
 ## Subagents
 
-An agent's `run_subagent` and `continue_subagent` work as in Matrix: the target must be in the agent's `delegate_to`, which may name the agent itself to run copies of it.
-Subagents run inside the turn and share its `workdir`; several `run_subagent` calls in one model response run at the same time, and nesting stops at depth 3.
+An agent's `run_subagent` and `continue_subagent` work as in Matrix, following its `delegate_to` ([Agent Orchestration](tools/agent-orchestration.md)), which may name the agent itself to run copies of it.
+Subagents run inside the turn and share its `workdir`, and several `run_subagent` calls in one model response run at the same time.
 They run in standard mode; [minimal mode](tools/agent-cli.md) needs `mindroom run`.
 
 ## Files

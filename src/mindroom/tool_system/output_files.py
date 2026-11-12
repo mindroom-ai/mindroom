@@ -137,7 +137,6 @@ class _SerializedToolOutput:
 class _ToolOutputWriteResult:
     """Result from writing caller-managed bytes to a validated output path."""
 
-    receipt: dict[str, object]
     absolute_path: Path
     byte_count: int
     overwritten: bool
@@ -443,7 +442,6 @@ def write_bytes_to_output_path(
     raw_path: object,
     payload: bytes,
     *,
-    output_format: Literal["binary"] = "binary",
     file_mode: int | None = None,
 ) -> _ToolOutputWriteResult | str:
     """Validate and atomically write caller-owned bytes to a MindRoom output path."""
@@ -465,12 +463,6 @@ def write_bytes_to_output_path(
         return write_error
 
     return _ToolOutputWriteResult(
-        receipt=_success_receipt(
-            path=_receipt_path(policy, validated_path),
-            byte_count=byte_count,
-            output_format=output_format,
-            overwritten=validated_path.overwritten,
-        ),
         absolute_path=validated_path.absolute_path,
         byte_count=byte_count,
         overwritten=validated_path.overwritten,

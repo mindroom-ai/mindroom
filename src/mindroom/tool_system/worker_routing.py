@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat", "headless", "mcp"]
+ExecutionChannel = Literal["matrix", "openai_compat", "headless", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
@@ -46,7 +46,7 @@ _SUBAGENT_PIN_PATTERN = re.compile(rf"{re.escape(_SUBAGENT_PIN_PREFIX)}[0-9a-f]{
 class ToolExecutionIdentity:
     """Serializable execution identity used for worker resolution."""
 
-    channel: _ExecutionChannel
+    channel: ExecutionChannel
     agent_name: str
     requester_id: str | None
     room_id: str | None
@@ -95,7 +95,7 @@ def parse_tool_execution_identity_payload(
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in get_args(_ExecutionChannel):
+    if channel not in get_args(ExecutionChannel):
         msg = f"{error_prefix}.channel must be matrix, openai_compat, headless, or mcp"
         raise TypeError(msg)
 
@@ -112,7 +112,7 @@ def parse_tool_execution_identity_payload(
             raise TypeError(msg)
         optional_values[field_name] = value
 
-    return ToolExecutionIdentity(channel=cast("_ExecutionChannel", channel), agent_name=agent_name, **optional_values)
+    return ToolExecutionIdentity(channel=cast("ExecutionChannel", channel), agent_name=agent_name, **optional_values)
 
 
 @dataclass(frozen=True)
@@ -323,7 +323,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def build_tool_execution_identity(
     *,
-    channel: _ExecutionChannel,
+    channel: ExecutionChannel,
     agent_name: str,
     transport_agent_name: str | None = None,
     runtime_paths: RuntimePaths,
