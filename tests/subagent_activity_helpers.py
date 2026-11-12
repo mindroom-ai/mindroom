@@ -28,6 +28,7 @@ def make_snapshot(**overrides: Any) -> SubagentSnapshot:  # noqa: ANN401
     """Return a running sub-agent snapshot, with any field overridden."""
     fields: dict[str, Any] = {
         "delegation_id": "d1",
+        "subagent_id": "d1",
         "parent_delegation_id": None,
         "caller_agent_name": "helper",
         "root_caller_agent_name": "helper",

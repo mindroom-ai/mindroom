@@ -94,6 +94,7 @@ def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
     """Return what every frame says about its run; ``full``, for a snapshot, adds the task and an ended run's result."""
     meta: dict[str, object] = {
         "agent": snapshot.agent_name,
+        "subagent": snapshot.subagent_id,
         "caller": snapshot.caller_agent_name,
         "root": snapshot.root_caller_agent_name,
         "parent": snapshot.parent_delegation_id,
