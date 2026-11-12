@@ -74,7 +74,7 @@ class PersonalAgentTemplateConfig(BaseModel):
         description=(
             "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, "
             "{username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names "
-            "each user's own agent. Only the owner and administrators may use each agent "
+            "each user's own agent. Only the owner may use each agent, platform administrators included, "
             "unless access admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
