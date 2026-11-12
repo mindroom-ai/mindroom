@@ -214,7 +214,9 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 A participation judgment sends the agent's display name, its guidance, and up to eight recent messages, where one reply's consecutive agent messages count as one, with Matrix identities replaced by aliases that tell people (`speaker_1`) from agents (`agent_1`).
 The newest message is sent whole, while long earlier messages are shortened to their start and end and the oldest drop out first, so the request fits 16 KB.
 A tool call appears as `[used tools: shell, web_search]` and a file or image as `[sent a file]` or `[sent an image]`, with its caption when it has one, so threads where agents use tools and people share files are judged too.
-Tool inputs and results, file names and contents, media, conversation summaries, system prompts, memory, and tool definitions are not sent, but message text can still contain private information.
+Tool inputs and results, file names and contents, media, conversation summaries, system prompts, memory, and tool definitions are not sent.
+The text of each message is sent, so it can still contain private information, such as a file name someone typed.
+One exception carries tool output: when MindRoom ends a reply because a tool kept failing, the reply's closing line `Stopped: tool <name> failed in <n> requests with no success in between. Its last error: <error>` is sent with the rest of the reply, its error cut to 500 characters with recognized secrets removed.
 When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
 Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, whichever `provider` it uses, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
