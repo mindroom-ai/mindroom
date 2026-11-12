@@ -1521,6 +1521,16 @@ def test_context_media_messages_name_their_msgtype() -> None:
             ),
             make_visible_message(
                 sender="@alice:localhost",
+                body="[2026-11-12 05:54 UTC] tax-return.pdf",
+                event_id="$timed",
+                content={
+                    "msgtype": "m.file",
+                    "body": "[2026-11-12 05:54 UTC] tax-return.pdf",
+                    "filename": "tax-return.pdf",
+                },
+            ),
+            make_visible_message(
+                sender="@alice:localhost",
                 body="Why does this crash?",
                 event_id="$captioned",
                 content={"msgtype": "m.image", "body": "Why does this crash?", "filename": "err.png"},
@@ -1531,10 +1541,12 @@ def test_context_media_messages_name_their_msgtype() -> None:
         config=_config(),
     ).in_request_order()
 
-    # A body beside a different file name is a caption (MSC2530), which readers may show.
-    assert [message.provider_data for message in messages[:4]] == [
+    # A body beside a different file name is a caption (MSC2530), which readers may show; a user turn's time prefix
+    # does not make a file name a caption.
+    assert [message.provider_data for message in messages[:5]] == [
         {MEDIA_MSGTYPE_KEY: "m.file"},
         {MEDIA_MSGTYPE_KEY: "m.audio"},
+        {MEDIA_MSGTYPE_KEY: "m.file"},
         None,
         None,
     ]

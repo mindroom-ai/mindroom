@@ -27,6 +27,7 @@ from mindroom.llm.media import rendered_label
 from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import complete
 from mindroom.logging_config import get_logger
+from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
 
 if TYPE_CHECKING:
@@ -101,7 +102,14 @@ def _annotation_placeholder(match: re.Match[str]) -> str:
     files = re.findall(_ANNOTATED_FILE, match[3])
     placeholder = _sent([kind for kind, _ in files])
     body = match[2]
-    if body is not None and not any(name and name in rendered_label(body) for _, name in files):
+    # LEGACY_COMPAT: Thread context stored without the media msgtype marker.
+    # Legacy format: a stored thread-context message with no ``MEDIA_MSGTYPE_KEY`` whose line before its attachment
+    # annotation is an uncaptioned file's name, after any user-turn time prefix, or ``[audio message: <name>]``.
+    # Last legacy release: v2026.11.304 wrote context messages without the marker; the next release marks media.
+    # Handling: that line is dropped, so the name never reaches the judge; any other line is a caption and is kept.
+    # Coverage: tests/test_participation_judgment.py::test_an_uncaptioned_file_reaches_the_judge_without_its_name
+    line = None if body is None else strip_user_turn_time_prefix(body).removeprefix("[audio message: ")
+    if line is not None and rendered_label(line.removesuffix("]")) not in {name for _, name in files}:
         placeholder = f"{body}\n{placeholder}"
     return match[1] + placeholder
 

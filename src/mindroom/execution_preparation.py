@@ -47,6 +47,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.media_inputs import MediaInputs
+from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -233,8 +234,10 @@ def _context_message_from_visible_message(
     """Convert one visible Matrix message, whose prompt text is ``body``, into a structured prompt message."""
     annotation = format_attachment_annotation(list(attachment_records))
     msgtype, filename = message.content.get("msgtype"), message.content.get("filename")
-    # A media body beside a different file name is a caption (MSC2530); otherwise it can be the file's name.
-    captioned = isinstance(filename, str) and filename and filename != message.content.get("body")
+    # A media body beside a different file name is a caption (MSC2530); otherwise it can be the file's name, after the
+    # time prefix an earlier user turn carries.
+    unprefixed = strip_user_turn_time_prefix(str(message.content.get("body", "")))
+    captioned = isinstance(filename, str) and bool(filename) and filename != unprefixed
     media = (
         {MEDIA_MSGTYPE_KEY: msgtype}
         if msgtype in ("m.image", "m.file", "m.audio", "m.video") and not captioned

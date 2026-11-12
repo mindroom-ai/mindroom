@@ -2698,6 +2698,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.memory",
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
@@ -8059,6 +8060,7 @@ depends_on = [
     "mindroom.json_utils",
     "mindroom.judgment.state",
     "mindroom.llm",
+    "mindroom.memory",
     "mindroom.participation",
 ]
 visibility = ["mindroom.loop_hooks"]

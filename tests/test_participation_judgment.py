@@ -504,6 +504,7 @@ async def test_decisions_judge_reads_tool_calls_and_files_as_placeholders(
     ("role", "body", "placeholder"),
     [
         ("user", "{name}", "[sent a file]"),
+        ("user", "[2026-11-12 05:54 UTC] {name}", "[sent a file]"),
         ("user", "Here it is.\n{name}", "[sent a file]"),
         ("assistant", "\n\n{name}", "[sent a file]"),
         ("assistant", "\n\n[audio message: {name}]", "[sent audio]"),
@@ -516,7 +517,7 @@ async def test_an_uncaptioned_file_reaches_the_judge_without_its_name(
     body: str,
     placeholder: str,
 ) -> None:
-    """A file sent without a caption has its name as its body, which must not reach the judge either."""
+    """Context stored without a media msgtype gives an uncaptioned file its name as body, which must not reach the judge."""
     gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
     name = 'tax "return" 2026.pdf'
     kind = "audio" if "audio" in placeholder else "file"
@@ -535,6 +536,27 @@ async def test_an_uncaptioned_file_reaches_the_judge_without_its_name(
     assert "return" not in wire
     assert placeholder in posted[0]["input"][1]["content"]
     assert ("Here it is." in wire) is ("Here it is." in body)
+
+
+@pytest.mark.asyncio
+async def test_a_caption_that_names_its_file_reaches_the_judge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caption is what its sender wrote, even when it names the file, and it says who is addressed."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    annotation = format_attachment_annotation([_record("att_file", "file", "report.pdf")])
+    messages = [
+        Message(role="user", content=_msg("@bob:example.org", f"Alice, please review report.pdf\n{annotation}")),
+        Message(role="user", content=_msg("@alice:example.org", "Can you take a look now?")),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    await _reply(model, gate, messages)
+
+    assert posted[0]["input"][0]["content"] == (
+        'user: <msg from="speaker_1"><![CDATA[Alice, please review report.pdf\n[sent a file]]]></msg>'
+    )
 
 
 @pytest.mark.asyncio
