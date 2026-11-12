@@ -225,7 +225,7 @@ async def test_a_snapshot_write_rereads_power_levels_and_still_omits_creators(he
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_type",
-    ["io.mindroom.background_jobs", "io.mindroom.auto_approve", "io.mindroom.accounts"],
+    ["io.mindroom.background_jobs", "io.mindroom.auto_approve", "io.mindroom.accounts", "io.mindroom.thread_mode"],
 )
 async def test_managed_rooms_let_members_publish_their_own_agent_state(event_type: str) -> None:
     """A router that only joined a room another account created can still publish its own state there."""
@@ -237,3 +237,16 @@ async def test_managed_rooms_let_members_publish_their_own_agent_state(event_typ
     assert written["events"][event_type] == 0
     created = client_room_admin._create_room_initial_state(client, None, None, encrypted=False, creators=frozenset())
     assert created[0]["content"]["events"][event_type] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("version", "allowed"), [("12", True), ("11", False)])
+async def test_only_a_version_12_creator_may_send_state_its_level_does_not_reach(
+    version: str,
+    *,
+    allowed: bool,
+) -> None:
+    """The router's own state check counts a version 12 creator's unlimited power, which power levels never list."""
+    client = _room_client(version=version, sender=ROUTER)
+
+    assert await client_room_admin.may_send_state(client, ROOM, "io.mindroom.accounts") is allowed

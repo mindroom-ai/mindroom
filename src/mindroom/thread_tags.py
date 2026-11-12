@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from mindroom.logging_config import get_logger
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
-from mindroom.matrix.room_power import user_power_level
+from mindroom.matrix.room_power import state_power_level, user_power_level
 from mindroom.matrix.room_reconciliation import read_room_creators
 
 logger = get_logger(__name__)
@@ -27,7 +27,6 @@ THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 RESOLVED_THREAD_TAG = "resolved"
 AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({RESOLVED_THREAD_TAG})
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
-_DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
@@ -184,13 +183,6 @@ def _parse_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
-
-
-def _parse_power_level(value: object) -> int | None:
-    """Return one Matrix power level value when it is a real integer."""
-    if type(value) is not int:
-        return None
-    return value
 
 
 def _normalize_non_empty_string(value: object) -> str | None:
@@ -524,25 +516,6 @@ async def _put_thread_tag_state(
     raise ThreadTagsError(msg)
 
 
-def _required_state_event_power_level(
-    power_levels_content: Mapping[str, object],
-    *,
-    event_type: str,
-) -> int:
-    """Return the power level required to send one state event type."""
-    events = power_levels_content.get("events")
-    if isinstance(events, Mapping):
-        typed_events = cast("Mapping[str, object]", events)
-        event_level = _parse_power_level(typed_events.get(event_type))
-        if event_level is not None:
-            return event_level
-
-    state_default = _parse_power_level(power_levels_content.get("state_default"))
-    if state_default is not None:
-        return state_default
-    return _DEFAULT_STATE_EVENT_POWER_LEVEL
-
-
 def _raise_insufficient_power_level(
     room_id: str,
     *,
@@ -592,10 +565,7 @@ async def _assert_user_can_write_thread_tags(
     user_id: str,
 ) -> None:
     """Assert one Matrix user can send the thread-tags state event."""
-    required_power_level = _required_state_event_power_level(
-        power_levels_content,
-        event_type=THREAD_TAGS_EVENT_TYPE,
-    )
+    required_power_level = state_power_level(power_levels_content, THREAD_TAGS_EVENT_TYPE)
     level = user_power_level(power_levels_content, user_id)
     if level >= required_power_level:
         return

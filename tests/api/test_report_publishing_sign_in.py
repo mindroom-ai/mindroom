@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import pytest
 from fastapi import HTTPException, Request
@@ -133,6 +134,33 @@ def test_signed_out_browser_is_sent_to_sign_in_and_lands_on_the_report(signin: d
     assert "app.js" in page.text
 
 
+@pytest.mark.parametrize(
+    ("path", "landing"),
+    [
+        (
+            "/reports/public/{slug}/inner/page.html?region=emea&x=1",
+            "/reports/public/{slug}/inner/page.html?region=emea&x=1",
+        ),
+        ("/reports/public/{slug}/Issue%20%2342%3F.html", "/reports/public/{slug}/Issue%20%2342%3F.html"),
+        ("/reports/public/{slug}/~1.{fake}/app.js?v=2", "/reports/public/{slug}/app.js?v=2"),
+        ("/reports/public/{slug}?next=//evil.example.org", "/reports/public/{slug}?next=//evil.example.org"),
+    ],
+)
+def test_signed_out_deep_link_lands_on_the_page_asked_for(signin: dict[str, Any], path: str, landing: str) -> None:
+    """Sign-in comes back to the page and query a signed-out browser asked for, inside the same report."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+
+    bounce = client.get(path.format(slug=slug, fake="0" * 64), follow_redirects=False)
+    assert (bounce.status_code, bounce.headers["location"]) == (303, SIGN_IN_PAGE)
+
+    landed = hand_off(client, "alice")
+    assert landed.headers["location"] == landing.format(slug=slug)
+    assert RETURN_COOKIE not in client.cookies
+    view = client.get(landed.headers["location"], follow_redirects=False)
+    assert view.headers["location"].startswith(f"/reports/public/{slug}/~")
+
+
 def test_hand_off_without_a_report_still_opens_the_portal(signin: dict[str, Any]) -> None:
     """A sign-in that no report started lands on the portal and sets no other cookie."""
     _signed_in_mode(signin)
@@ -152,9 +180,14 @@ def test_hand_off_without_a_report_still_opens_the_portal(signin: dict[str, Any]
         UNKNOWN_SLUG + "/../../api/config",
         UNKNOWN_SLUG + "%2F..%2F..%2Fapi%2Fconfig",
         UNKNOWN_SLUG + "\\evil.example.org",
-        UNKNOWN_SLUG + "?next=//evil.example.org",
         UNKNOWN_SLUG.upper(),
         UNKNOWN_SLUG[:-1],
+        UNKNOWN_SLUG + "/./api",
+        UNKNOWN_SLUG + "/%2e%2e/%2e%2e/api/config",
+        UNKNOWN_SLUG + "%2F..%252F..%252Fapi",
+        UNKNOWN_SLUG + "%2F%252e%252e%252F..%252Fapi",
+        UNKNOWN_SLUG + "/a%255Cb",
+        quote(UNKNOWN_SLUG + "//evil.example.org/" + quote("../../x"), safe=""),
     ],
 )
 def test_hand_off_drops_a_crafted_way_back(signin: dict[str, Any], crafted: str) -> None:

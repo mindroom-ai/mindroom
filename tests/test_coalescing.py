@@ -1317,6 +1317,72 @@ async def test_only_a_follow_up_backlog_waits_for_its_conversation_to_idle() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("for_another_participant", "upload", "waits"),
+    [(True, False, False), (None, False, False), (False, False, True), (None, True, True)],
+)
+async def test_an_agents_message_not_for_this_agent_skips_the_busy_conversations_follow_up_queue(
+    *,
+    for_another_participant: bool | None,
+    upload: bool,
+    waits: bool,
+) -> None:
+    """While a response runs, an agent's text that does not mention this agent dispatches at once, to be settled.
+
+    An agent's message that mentions this agent, and an upload whose caption may still follow, wait as follow-ups.
+    """
+    dispatched: list[tuple[list[str], bool]] = []
+    idle = asyncio.Event()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        dispatched.append((list(batch.handled_turn.source_event_ids), batch.active_follow_up))
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
+        active_thread_ids_for_room=lambda _room_id: frozenset({"$thread:localhost"}),
+    )
+    router = "@mindroom_router:localhost"
+    event = (
+        _image_event("$reply:localhost", 1_000_000) if upload else _text_event("$reply:localhost", "Done.", 1_000_000)
+    )
+    event.sender = router
+    pending = make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=IMAGE_SOURCE_KIND if upload else MESSAGE_SOURCE_KIND,
+        facts=make_ingress_facts(
+            router,
+            source_kind=IMAGE_SOURCE_KIND if upload else MESSAGE_SOURCE_KIND,
+            sender_entity_name="router",
+            requester_entity_name="router",
+        ),
+    )
+    pending.event = replace(pending.event, for_another_participant=for_another_participant)
+
+    await _admit_ready(
+        gate,
+        CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(router)),
+        pending,
+    )
+    if waits:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert dispatched == []
+        idle.set()
+        await _wait_for(lambda: dispatched == [(["$reply:localhost"], True)])
+    else:
+        await _wait_for(lambda: dispatched == [(["$reply:localhost"], False)])
+    idle.set()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
     """Same-target follow-ups flush in order as one turn per consecutive requester run."""
     calls: list[tuple[list[str], str, str]] = []

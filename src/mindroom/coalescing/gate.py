@@ -831,6 +831,15 @@ class CoalescingGate:
         if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
             return key
         pending_event = ready_result.pending_event
+        event = pending_event.event
+        if (
+            pending_event.facts.origin.blocks_unmentioned_managed_sender
+            and event.raw_event is None
+            and event.for_another_participant is not False
+        ):
+            # An agent's text that does not mention this agent is settled as chatter when dispatched, so it does not
+            # wait for the response; an upload still waits, since a caption that mentions this agent may follow.
+            return key
         if not source_kind_bypasses_coalescing(pending_event.facts.source_kind):
             pending_event.event = replace(pending_event.event, active_follow_up=True)
         return active_follow_up_coalescing_key(key.room_id, key.thread_id)

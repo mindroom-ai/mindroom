@@ -126,4 +126,4 @@ For a room with shared history and one existing guest, a record looks like this:
 If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
-Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
+Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list and thread mode, set to 0 at each reconciliation, so the router and agents can publish them.

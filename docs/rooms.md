@@ -76,7 +76,7 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 - Uses the room's `description` as its topic, and generates a topic with the `default` model only when the description is empty.
 - Invites the configured agents and teams and the room's `invite_users`.
 - Sets the room name from `display_name`, and adds a topic only when the room has none, so changing `description` never replaces an existing topic.
-- Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
+- Lets every room member write thread tags, the room's thread mode, and call membership state, which requires the router to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
 Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).

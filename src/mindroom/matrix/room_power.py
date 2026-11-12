@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 _PRIVILEGED_CREATOR_PREVIEW_VERSION = "org.matrix.hydra.11"
 _FIRST_PRIVILEGED_CREATOR_VERSION = 12
 _DEFAULT_USER_POWER_LEVEL = 0
+_DEFAULT_STATE_POWER_LEVEL = 50
 # The level Matrix clients show as room admin, and the one MindRoom grants the users it makes room admins.
 ROOM_ADMIN_POWER_LEVEL = 100
 
@@ -74,3 +75,13 @@ def send_power_level(power_levels_content: Mapping[str, object], event_type: str
         return level
     default = power_levels_content.get("events_default")
     return default if type(default) is int else 0
+
+
+def state_power_level(power_levels_content: Mapping[str, object], event_type: str) -> int:
+    """Return the power level sending state events of ``event_type`` needs: its own entry, else ``state_default``, else 50."""
+    events = power_levels_content.get("events")
+    level = cast("Mapping[str, object]", events).get(event_type) if isinstance(events, dict) else None
+    if type(level) is int:
+        return level
+    default = power_levels_content.get("state_default")
+    return default if type(default) is int else _DEFAULT_STATE_POWER_LEVEL
