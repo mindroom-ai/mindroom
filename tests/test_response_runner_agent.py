@@ -599,9 +599,9 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         [tree] = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "room_tree"]
-        assert "- 'design' (room ID !design:localhost)" in tree.text
-        assert "  - 'planning' (room ID !planning:localhost)" in tree.text
-        assert "(room ID !test:localhost), the room you are responding in" in tree.text
+        assert "- 'design' (!design:localhost), main room" in tree.text
+        assert "  - 'planning' (!planning:localhost)" in tree.text
+        assert "(!test:localhost), you are here" in tree.text
 
     @pytest.mark.asyncio
     async def test_streamed_agent_reply_includes_matrix_metadata_when_tool_enabled(

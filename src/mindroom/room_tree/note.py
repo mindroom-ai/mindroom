@@ -31,12 +31,10 @@ logger = get_logger(__name__)
 _ROOM_TREE_ENRICHMENT_KEY = "room_tree"
 # The rooms beside and under the agent's room one note checks and names at most; it counts the rest.
 _MAX_LISTED = 15
-_HEADER = (
-    "This room is in a tree of rooms, each listed under the room above it. "
-    "To read one, pass its room ID as room_id to matrix_message or matrix_room."
-)
-_UNREADABLE_PARENT = "a room the requester is not in"
-_HERE = ", the room you are responding in"
+_HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to matrix_message or matrix_room."
+_NO_ACCESS = "the person you are answering has no access to"
+_MAIN = ", main room"
+_HERE = ", you are here"
 
 
 async def with_room_tree(items: Sequence[EnrichmentItem], context: ToolRuntimeContext) -> tuple[EnrichmentItem, ...]:
@@ -94,18 +92,22 @@ async def _room_tree_note(
     lines = [_HEADER]
     depth = 0
     if parent_id is not None:
-        lines.append(_line(rooms[parent_id], 0) if parent_id in readable else f"- {_UNREADABLE_PARENT}")
+        parent_line = _line(rooms[parent_id], 0) + _MAIN
+        lines.append(parent_line if parent_id in readable else f"- main room, hidden because {_NO_ACCESS} it")
         depth = 1
     for peer in sorted([*named_siblings, room], key=_sort_key):
         lines.append(_line(peer, depth) + (_HERE if peer is room else ""))
         if peer is room:
             lines.extend(_line(child, depth + 1) for child in named_children)
+    refused = len(checked) - len(named_siblings) - len(named_children)
+    if refused:
+        lines.append(_left_out_line(refused, f"hidden because {_NO_ACCESS} {'it' if refused == 1 else 'them'}"))
     # Spaces the agent is in are no sub-rooms, so only the other listed rooms count as left out.
     listed_ids = sibling_ids | child_ids
     spaces = {listed_id for listed_id in listed_ids if listed_id in rooms and _chat_room(rooms, listed_id) is None}
-    hidden = len(listed_ids - spaces) - len(named_siblings) - len(named_children)
-    if hidden:
-        lines.append(_hidden_line(hidden))
+    unchecked = len(listed_ids - spaces) - len(checked)
+    if unchecked:
+        lines.append(_left_out_line(unchecked, "not shown"))
     return "\n".join(lines)
 
 
@@ -138,10 +140,10 @@ async def _readable_ids(can_read: Callable[[str], Awaitable[bool]], room_ids: Se
     return {room_id for room_id, allowed in zip(room_ids, readable, strict=True) if allowed}
 
 
-def _hidden_line(count: int) -> str:
+def _left_out_line(count: int, reason: str) -> str:
     if count == 1:
-        return "1 more room in this tree is not listed."
-    return f"{count} more rooms in this tree are not listed."
+        return f"1 more nested room is {reason}."
+    return f"{count} more nested rooms are {reason}."
 
 
 def _sort_key(room: nio.MatrixRoom) -> tuple[str, str]:
@@ -149,4 +151,5 @@ def _sort_key(room: nio.MatrixRoom) -> tuple[str, str]:
 
 
 def _line(room: nio.MatrixRoom, depth: int) -> str:
-    return f"{'  ' * depth}- {room.display_name!r} (room ID {room.room_id})"
+    """Return the room's line; ``!r`` keeps a name holding a line break from adding a line of its own."""
+    return f"{'  ' * depth}- {room.display_name!r} ({room.room_id})"

@@ -318,8 +318,8 @@ class TestAgentBot(AgentBotTestBase):
 
         _spec, ctx = team_stream.call_args.args
         [tree] = [item for item in ctx.transient_enrichment_items if item.key == "room_tree"]
-        assert "  - 'planning' (room ID !planning:localhost)" in tree.text
-        assert "(room ID !test:localhost), the room you are responding in" in tree.text
+        assert "  - 'planning' (!planning:localhost)" in tree.text
+        assert "(!test:localhost), you are here" in tree.text
 
     @pytest.mark.asyncio
     async def test_a_team_whose_member_delegates_to_a_private_agent_is_refused_before_it_runs(

@@ -33,14 +33,12 @@ PLANNING = "!planning:localhost"
 NOTES = "!notes:localhost"
 PRIVATE = "!private:localhost"
 SPACE = "!space:localhost"
-HEADER = (
-    "This room is in a tree of rooms, each listed under the room above it. "
-    "To read one, pass its room ID as room_id to matrix_message or matrix_room."
-)
-DESIGN_LINE = "- 'design' (room ID !design:localhost)"
-PLANNING_LINE = "  - 'planning' (room ID !planning:localhost)"
-HERE_LINE = "  - 'release-prep' (room ID !room:localhost), the room you are responding in"
-NOTES_LINE = "    - 'notes' (room ID !notes:localhost)"
+HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to matrix_message or matrix_room."
+DESIGN_LINE = "- 'design' (!design:localhost), main room"
+PLANNING_LINE = "  - 'planning' (!planning:localhost)"
+HERE_LINE = "  - 'release-prep' (!room:localhost), you are here"
+NOTES_LINE = "    - 'notes' (!notes:localhost)"
+HIDDEN_ONE = "1 more nested room is hidden because the person you are answering has no access to it."
 # Captured at collection, before the suite-wide authorization bypass replaces it for each test.
 _REAL_REQUESTER_JOINED_TARGET_ROOM = attachment_helpers.requester_joined_target_room
 TARGET = EnrichmentItem(key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, text="You are responding in Matrix room !room.")
@@ -126,20 +124,31 @@ async def test_a_room_with_sub_rooms_names_them_under_itself() -> None:
     note = await _room_tree_note(client, DESIGN, can_read=_readable(DESIGN, ROOM, PLANNING, NOTES))
 
     assert note == _note(
-        "- 'design' (room ID !design:localhost), the room you are responding in",
+        "- 'design' (!design:localhost), you are here",
         PLANNING_LINE,
-        "  - 'release-prep' (room ID !room:localhost)",
+        "  - 'release-prep' (!room:localhost)",
     )
 
 
 @pytest.mark.asyncio
 async def test_rooms_the_requester_cannot_read_or_the_agent_is_not_in_are_only_counted() -> None:
     """The agent knows the name of a private room the requester is not in, and the note keeps it to a count."""
-    client = _design_tree(_room(PRIVATE, "acquisition plans"), design_children={PRIVATE, "!elsewhere:localhost"})
+    client = _design_tree(
+        _room(PRIVATE, "acquisition plans"),
+        _room("!board:localhost", "board"),
+        design_children={PRIVATE, "!board:localhost", "!elsewhere:localhost"},
+    )
 
     note = await _room_tree_note(client, ROOM, can_read=_readable(DESIGN, ROOM, PLANNING, NOTES))
 
-    assert note == _note(DESIGN_LINE, PLANNING_LINE, HERE_LINE, NOTES_LINE, "2 more rooms in this tree are not listed.")
+    assert note == _note(
+        DESIGN_LINE,
+        PLANNING_LINE,
+        HERE_LINE,
+        NOTES_LINE,
+        "2 more nested rooms are hidden because the person you are answering has no access to them.",
+        "1 more nested room is not shown.",
+    )
 
 
 @pytest.mark.asyncio
@@ -150,10 +159,10 @@ async def test_a_room_above_the_requester_cannot_read_is_not_named() -> None:
     note = await _room_tree_note(client, ROOM, can_read=_readable(ROOM, PLANNING))
 
     assert note == _note(
-        "- a room the requester is not in",
+        "- main room, hidden because the person you are answering has no access to it",
         PLANNING_LINE,
         HERE_LINE,
-        "1 more room in this tree is not listed.",
+        HIDDEN_ONE,
     )
 
 
@@ -203,7 +212,7 @@ async def test_a_big_tree_names_its_first_rooms_and_counts_the_rest() -> None:
     assert note is not None
     assert "'sibling 14'" in note
     assert "'sibling 15'" not in note
-    assert note.endswith("2 more rooms in this tree are not listed.")
+    assert note.endswith("'sibling 14' (!sibling14:localhost)\n2 more nested rooms are not shown.")
     assert {call.args[0] for call in can_read.await_args_list} == {DESIGN, ROOM} | {
         sibling.room_id for sibling in siblings[:15]
     }
@@ -261,7 +270,7 @@ async def test_a_turn_told_where_it_responds_gets_the_tree_of_rooms_the_requeste
         PLANNING_LINE,
         HERE_LINE,
         NOTES_LINE,
-        "1 more room in this tree is not listed.",
+        HIDDEN_ONE,
     )
 
 
