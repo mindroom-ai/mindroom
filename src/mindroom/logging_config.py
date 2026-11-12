@@ -198,16 +198,15 @@ def uses_default_logging() -> bool:
     return structlog.get_config() == _DEFAULT_CONFIG
 
 
-# structlog's own printer, which the loggers of a program that runs MindRoom as a library keep.
-_PRINT_LOGGER_FACTORY = structlog.PrintLoggerFactory()
-
-
 def _library_logger_factory(*args: object) -> object:
-    """Wrap each MindRoom logger, which `get_logger` names after its module, around the stdlib logger of that name."""
+    """Wrap each MindRoom logger, which `get_logger` names after its module, around the stdlib logger of that name.
+
+    Every other logger, such as the program's own, gets structlog's own printer.
+    """
     name = args[0] if args else None
     if isinstance(name, str) and (name == "mindroom" or name.startswith("mindroom.")):
         return logging.getLogger(name)
-    return _PRINT_LOGGER_FACTORY(*args)
+    return structlog.PrintLogger()
 
 
 def configure_library_logging() -> None:
@@ -216,9 +215,8 @@ def configure_library_logging() -> None:
     Until that program configures `logging`, Python shows only MindRoom's warnings and errors, on stderr. Only the
     logger factory changes, so the program's own structlog loggers keep printing through the same processors.
     """
-    if not uses_default_logging():
-        return
-    structlog.configure(logger_factory=_library_logger_factory)
+    if uses_default_logging():
+        structlog.configure(logger_factory=_library_logger_factory)
 
 
 def _normalize_log_level(level: str) -> str:

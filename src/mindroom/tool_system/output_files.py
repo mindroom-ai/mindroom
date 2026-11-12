@@ -234,24 +234,20 @@ def _error_receipt(error: str) -> dict[str, object]:
     }
 
 
-def _output_path_schema(*, tools_use_workdir: bool) -> dict[str, object]:
-    return {
+def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
+
+    With ``tools_use_workdir``, the path is described as relative to the saved tool outputs, where such a policy puts it.
+    """
+    finished = dict(parameters)
+    properties = dict(finished.get("properties") or {})
+    properties[OUTPUT_PATH_ARGUMENT] = {
         "anyOf": [{"type": "string"}, {"type": "null"}],
         "default": None,
         "description": _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION
         if tools_use_workdir
         else _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
     }
-
-
-def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
-    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
-
-    ``tools_use_workdir`` describes the path as its policy of that name resolves it.
-    """
-    finished = dict(parameters)
-    properties = dict(finished.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema(tools_use_workdir=tools_use_workdir)
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
     required = finished.get("required")

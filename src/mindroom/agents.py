@@ -1076,16 +1076,16 @@ def _render_agent_identity_context(
         )
         return openai_compat_identity(
             config.prompts,
-            openai_identity=render_prompt_template(
-                config.get_prompt(prompt_name),
+            openai_identity=config.render_prompt(
+                prompt_name,
                 agent_name=agent_name,
                 display_name=display_name,
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            matrix_identity=render_prompt_template(
-                config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            matrix_identity=config.render_prompt(
+                "AGENT_IDENTITY_CONTEXT_TEMPLATE",
                 display_name=display_name,
                 matrix_id="not available in a headless run" if headless else "not available in OpenAI-compatible API",
                 model_provider=model_provider,
@@ -1705,8 +1705,8 @@ def create_agent(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        include_openai_compat_guidance: Whether the turn answers outside Matrix, through the OpenAI-compatible
+            API or a headless run, so the identity names no Matrix ID and the prompt attributes no sender.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         tool_function_filter: Optional policy applied to each fully resolved
