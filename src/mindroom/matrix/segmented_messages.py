@@ -97,12 +97,10 @@ def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _chunk_mentions(source: Mapping[str, Any], body: str) -> dict[str, Any] | None:
-    """Return the mention metadata for just the mentions one chunk carries.
+    """Return the mention metadata for just the mentions ``body`` carries.
 
-    ``m.mentions`` must travel with the event whose body carries the mention;
-    leaving every mentioned user on the first segment both misattributes the
-    mention and can notify a user whose name never visibly arrived. A room
-    mention follows the same rule for the ``@room`` text.
+    A user the source lists but whose ID the text never shows is left out, and a
+    room mention needs the ``@room`` text.
     """
     mentions = source.get("m.mentions")
     if not isinstance(mentions, Mapping):
@@ -149,9 +147,6 @@ def _rich_text_content(
     content["body"] = body
     content["format"] = "org.matrix.custom.html"
     content["formatted_body"] = _render_segment_html(source, body)
-    mentions = _chunk_mentions(source, body)
-    if mentions is not None:
-        content["m.mentions"] = mentions
     if relation is not None:
         content["m.relates_to"] = dict(relation)
     return content
@@ -411,6 +406,12 @@ def segment_matrix_content(
     else:
         first = first_build(chunks[0])
         continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
+    # The reply's mentions travel on its last segment: an agent they wake then reads the whole reply, and no one is
+    # notified before the text naming them has arrived.
+    mentions = _chunk_mentions(source, source["body"])
+    if mentions is not None:
+        last = continuations[-1] if continuations else (first["m.new_content"] if is_edit else first)
+        last["m.mentions"] = mentions
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):
