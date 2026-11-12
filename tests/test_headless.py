@@ -644,7 +644,8 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
 
     system = _sent(provider.requests[0], "system")
     assert "(`file` and `coding`: the workdir and, read-only, your saved tool outputs;" in system
-    assert f"- Workdir: `{workdir}`, where `shell` runs" in system
+    assert f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; " in system
+    assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
     (save_file,) = (tool for tool in provider.requests[0].tools if tool.name == "save_file")
     description = save_file.parameters["properties"]["mindroom_output_path"]["description"]
     assert description.startswith("Optional MindRoom-managed path relative to your saved tool outputs directory.")
@@ -701,11 +702,12 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
     )
 
 
-_PROBES = ("probe_debug", "probe_info", "probe_warning")
+_PROBES = ("probe_debug", "probe_info", "probe_warning", "agno_info", "agno_warning")
 _STRUCTLOG_TO_STDOUT = (
     "structlog.configure(processors=[structlog.processors.JSONRenderer()], "
     "logger_factory=structlog.PrintLoggerFactory(sys.stdout), wrapper_class=structlog.make_filtering_bound_logger(0))"
 )
+_STRUCTLOG_PROCESSORS = "structlog.configure(processors=[structlog.processors.JSONRenderer()])"
 
 
 def _library_program(tmp_path: Path, *, before: str = "", after: str = "") -> subprocess.CompletedProcess[bytes]:
@@ -719,9 +721,15 @@ from mindroom.headless import validate_config
 from mindroom.logging_config import get_logger
 {after}
 validate_config({_config()!r}, agent="coder", storage=Path({str(tmp_path / "storage")!r}))
-for probe in {_PROBES!r}:
-    getattr(get_logger("probe"), probe.removeprefix("probe_"))(probe)
+class Rendered:
+    def __repr__(self) -> str:
+        sys.stderr.write("rendered_below_level")
+        return "value"
+get_logger("probe").debug("probe_debug", value=Rendered())
+get_logger("probe").info("probe_info")
+get_logger("probe").warning("probe_warning")
 get_logger("probe").warning("positional %s", "formatted")
+get_logger("probe").exception("probe_exception")
 from agno.utils.log import log_info, log_warning
 log_info("agno_info")
 log_warning("agno_warning")
@@ -738,23 +746,39 @@ def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
     completed = _library_program(tmp_path)
 
     assert completed.stdout == b""
-    assert _probes(completed.stderr) == ["probe_warning"]
-    assert b"positional formatted" in completed.stderr
     # MindRoom's tools also log through Agno's loggers, whose own handler would print to stdout.
-    assert b"agno_warning" in completed.stderr
-    assert b"agno_info" not in completed.stderr
+    assert _probes(completed.stderr) == ["probe_warning", "agno_warning"]
+    assert b"positional formatted" in completed.stderr
+    assert b"probe_exception" in completed.stderr
+    # A record below the level is dropped before it is rendered, as a prompt in a debug line would be.
+    assert b"rendered_below_level" not in completed.stderr
 
 
 @pytest.mark.parametrize(
-    ("before", "after", "shown"),
+    ("before", "after", "stdout", "stderr"),
     [
-        pytest.param(_STRUCTLOG_TO_STDOUT, "", list(_PROBES), id="structlog-before-import"),
-        pytest.param("", _STRUCTLOG_TO_STDOUT, list(_PROBES), id="structlog-after-import"),
-        pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _PROBES[1:], id="logging"),
+        # MindRoom never touched logging, so Agno's own handler still prints to stdout.
+        pytest.param(_STRUCTLOG_TO_STDOUT, "", _PROBES, (), id="structlog-before-import"),
+        pytest.param("", _STRUCTLOG_TO_STDOUT, _PROBES[:3], ("agno_warning",), id="structlog-after-import"),
+        pytest.param("", _STRUCTLOG_PROCESSORS, _PROBES[:3], ("agno_warning",), id="structlog-processors-after-import"),
+        pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _PROBES[1:], (), id="logging"),
+        pytest.param(
+            "",
+            "logging.basicConfig(level=logging.WARNING, stream=sys.stdout)",
+            ("probe_warning", "agno_warning"),
+            (),
+            id="logging-warning",
+        ),
     ],
 )
-def test_library_use_follows_the_programs_logging(tmp_path: Path, before: str, after: str, shown: list[str]) -> None:
+def test_library_use_follows_the_programs_logging(
+    tmp_path: Path,
+    before: str,
+    after: str,
+    stdout: tuple[str, ...],
+    stderr: tuple[str, ...],
+) -> None:
     """The program's own structlog setup wins whenever it ran, and its `logging` setup decides what MindRoom shows."""
     completed = _library_program(tmp_path, before=before, after=after)
 
-    assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(shown), [])
+    assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(stdout), list(stderr))

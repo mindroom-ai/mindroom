@@ -891,7 +891,8 @@ def _render_tool_execution_environment(
     if workdir is not None:
         # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
         file_access_lines.append(
-            f"- Workdir: `{workdir}`, where `shell` runs and `file`, `coding`, and `python` resolve relative paths. "
+            f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; "
+            "code that `python` runs uses this process's current directory, so give it absolute paths. "
             "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
             f"is `{workspace_root}`; name files there by absolute path.",
         )
