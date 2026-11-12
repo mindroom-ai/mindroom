@@ -836,3 +836,25 @@ def test_administrators_still_rotate_the_key_of_a_shared_agent_s_trigger(tmp_pat
             config=config,
         )
         assert rotated.key_id == admin
+
+
+def test_an_administrator_owner_rotates_their_trigger_for_a_personal_agent_through_a_bridge_alias(
+    tmp_path: Path,
+) -> None:
+    """The owner check matches the owner's bridge aliases, like the administrator check."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _generated_agents_config(runtime_paths)
+    config.administrators = [_OWNER]
+    config.authorization.aliases = {_OWNER: ["@bridge-owner:example.org"]}
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create_for(store, config, "mind_owner")
+
+    rotated = store.rotate_key(
+        record.trigger_id,
+        public_key=_PUBLIC_KEY,
+        key_id="bridge",
+        actor_user_id="@bridge-owner:example.org",
+        config=config,
+    )
+
+    assert rotated.key_id == "bridge"
