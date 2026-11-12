@@ -113,6 +113,7 @@ from tests.bot_helpers import (
     _set_knowledge_for_agent,
     _visible_message,
     _visible_response_event_id,
+    install_sub_room,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
@@ -548,6 +549,59 @@ class TestAgentBot(AgentBotTestBase):
         model_prompt = mock_ai.call_args.args[0].model_prompt
         assert "[Matrix metadata for tool calls]" not in model_prompt
         assert "!test:localhost" in _matrix_target_item(mock_ai).text
+
+    @pytest.mark.asyncio
+    async def test_agent_reply_in_a_sub_room_is_told_the_rooms_around_it(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A turn in a room listed under another room gets the tree of rooms around it, with their room IDs."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        install_sub_room(bot.client, mock_agent_user.matrix_id.full_id)
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="What did planning decide?",
+                    reply_to_event_id="$event123",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="What did planning decide?",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        [tree] = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "room_tree"]
+        assert "- 'design' (room ID !design:localhost)" in tree.text
+        assert "  - 'planning' (room ID !planning:localhost)" in tree.text
+        assert "(room ID !test:localhost), the room you are responding in" in tree.text
 
     @pytest.mark.asyncio
     async def test_streamed_agent_reply_includes_matrix_metadata_when_tool_enabled(

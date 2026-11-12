@@ -55,6 +55,7 @@ from tests.bot_helpers import (
     _visible_message,
     _visible_response_event_id,
     _wrap_extracted_collaborators,
+    install_sub_room,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
@@ -270,6 +271,55 @@ class TestAgentBot(AgentBotTestBase):
         assert ctx.requester_id is not None
         assert ctx.requester_id == ctx.execution_identity.requester_id
         assert MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY in {item.key for item in ctx.transient_enrichment_items}
+
+    @pytest.mark.asyncio
+    async def test_a_team_turn_in_a_sub_room_is_told_the_rooms_around_it(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A team whose member can post to rooms gets the tree around a sub-room, as an agent does."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.agents["general"].tools = ["matrix_message"]
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        install_sub_room(bot.client, mock_agent_user.matrix_id.full_id)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        team_stream = scripted_team_stream("Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response_stream=team_stream,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        _spec, ctx = team_stream.call_args.args
+        [tree] = [item for item in ctx.transient_enrichment_items if item.key == "room_tree"]
+        assert "  - 'planning' (room ID !planning:localhost)" in tree.text
+        assert "(room ID !test:localhost), the room you are responding in" in tree.text
 
     @pytest.mark.asyncio
     async def test_a_team_whose_member_delegates_to_a_private_agent_is_refused_before_it_runs(

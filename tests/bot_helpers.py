@@ -190,6 +190,33 @@ def _make_matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
 
 
+def install_sub_room(client: AsyncMock, agent_id: str, room_id: str = "!test:localhost") -> None:
+    """Make ``room_id`` a sub-room of `design`, which also lists `planning`, with the agent in all three."""
+    room = nio.MatrixRoom(room_id, agent_id)
+    design = nio.MatrixRoom("!design:localhost", agent_id)
+    design.name = "design"
+    design.children.update({room_id, "!planning:localhost"})
+    planning = nio.MatrixRoom("!planning:localhost", agent_id)
+    planning.name = "planning"
+    client.rooms = {listed.room_id: listed for listed in (room, design, planning)}
+
+    async def state_event(
+        state_room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if (state_room_id, event_type, state_key) == (room_id, "m.space.parent", design.room_id):
+            return nio.RoomGetStateEventResponse(
+                {"via": ["localhost"], "canonical": True},
+                event_type,
+                state_key,
+                room_id,
+            )
+        return nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
+
+    client.room_get_state_event = AsyncMock(side_effect=state_event)
+
+
 def owned_matrix_login(client: object, session: object | None = None) -> SimpleNamespace:
     """Wrap a test client in Bot's private owned-login carrier shape."""
     return SimpleNamespace(
