@@ -11,6 +11,13 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import (
+    CreatedAgentEntry,
+    GeneratedAgentEdits,
+    PersonalAgentRoster,
+    PersonalAgentRosterEntry,
+    personal_agent_roster_path,
+)
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.delivery_replay import DeliveryEventClaim
 from mindroom.external_triggers.auth import mint_trigger_capability
@@ -701,3 +708,131 @@ def test_public_key_rejects_undecodable_material() -> None:
 
     with pytest.raises(ExternalTriggerStoreError, match=r"raw base64 .* OpenSSH .* PEM"):
         public_key_fingerprint("ssh-rsa AAAAB3NzaC1yc2E= user@host")
+
+
+_PLATFORM_ADMIN = "@platform-admin:example.org"
+_TRIGGER_ADMIN = "@trigger-admin:example.org"
+_CO_OWNER = "@co-owner:example.org"
+_CREATED_ROOM = "!created:example.org"
+
+
+def _generated_agents_config(runtime_paths: RuntimePaths) -> Config:
+    """A shared agent, the owner's personal agent, an agent it created for the owner, and a team with the personal one."""
+    roster = PersonalAgentRoster(
+        entries=[
+            PersonalAgentRosterEntry(
+                template="mind",
+                user_id=_OWNER,
+                username="owner",
+                agent_name="mind_owner",
+                matrix_username=None,
+                user_display_name="Owner",
+                source_room_id="!lobby:example.org",
+            ),
+        ],
+        created=[
+            CreatedAgentEntry(
+                agent_name="watcher_helper",
+                creator="watcher",
+                owner=_OWNER,
+                co_owners=[_CO_OWNER],
+                edits=GeneratedAgentEdits(display_name="Helper"),
+            ),
+        ],
+    )
+    roster_path = personal_agent_roster_path(runtime_paths)
+    roster_path.parent.mkdir(parents=True, exist_ok=True)
+    roster_path.write_text(roster.model_dump_json(), encoding="utf-8")
+    data = _config(administrators=[_PLATFORM_ADMIN], admin_users=[_TRIGGER_ADMIN]).model_dump(exclude_unset=True)
+    data["agents"]["watcher"]["created_agents_per_owner"] = 1
+    data["personal_agents"] = {"mind": {"agent": {"display_name": "Mind", "model": "default", "rooms": ["lobby"]}}}
+    data["teams"] = {"crew": {"display_name": "Crew", "role": "Crew", "agents": ["mind_owner"], "rooms": ["lobby"]}}
+    return Config.validate_with_runtime(data, runtime_paths)
+
+
+def _create_for(
+    store: ExternalTriggerStore,
+    config: Config,
+    agent: str,
+    *,
+    owner_user_id: str = _OWNER,
+) -> ExternalTriggerRecord:
+    """Create a signed trigger for ``agent``; a created agent's trigger targets the room it was made in."""
+    room_id = _CREATED_ROOM if agent == "watcher_helper" else "lobby"
+    return store.create_record(
+        trigger_id=f"{agent}_trigger",
+        owner_user_id=owner_user_id,
+        created_by_agent_name=agent,
+        created_in_room_id=_CREATED_ROOM,
+        created_in_thread_id=None,
+        target=_target(room_id=room_id, agent=agent),
+        public_key=_PUBLIC_KEY,
+        key_id="default",
+        config=config,
+    )
+
+
+@pytest.mark.parametrize("agent", ["mind_owner", "watcher_helper", "crew"])
+def test_only_the_owner_rotates_the_key_of_a_generated_agent_s_trigger(tmp_path: Path, agent: str) -> None:
+    """Administrators keep disabling and deleting such a trigger, but only its owner may change its key."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _generated_agents_config(runtime_paths)
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create_for(store, config, agent)
+
+    for admin in (_PLATFORM_ADMIN, _TRIGGER_ADMIN):
+        with pytest.raises(ExternalTriggerStoreError, match="only its owner"):
+            store.rotate_key(
+                record.trigger_id,
+                public_key=_PUBLIC_KEY,
+                key_id="admin",
+                actor_user_id=admin,
+                config=config,
+            )
+        assert not store.set_enabled(record.trigger_id, enabled=False, actor_user_id=admin, config=config).enabled
+    rotated = store.rotate_key(
+        record.trigger_id,
+        public_key=_PUBLIC_KEY,
+        key_id="mine",
+        actor_user_id=_OWNER,
+        config=config,
+    )
+    assert rotated.key_id == "mine"
+    store.delete_record(record.trigger_id, actor_user_id=_TRIGGER_ADMIN, config=config)
+    assert store.list_records() == []
+
+
+def test_a_co_owner_rotates_the_key_of_their_own_trigger_for_a_created_agent(tmp_path: Path) -> None:
+    """A co-owner's trigger is theirs to rotate, like the owner's."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _generated_agents_config(runtime_paths)
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create_for(store, config, "watcher_helper", owner_user_id=_CO_OWNER)
+
+    rotated = store.rotate_key(
+        record.trigger_id,
+        public_key=_PUBLIC_KEY,
+        key_id="mine",
+        actor_user_id=_CO_OWNER,
+        config=config,
+    )
+
+    assert rotated.key_id == "mine"
+
+
+def test_administrators_still_rotate_the_key_of_a_shared_agent_s_trigger(tmp_path: Path) -> None:
+    """A trigger for a shared agent keeps its administrators' key rotation."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _generated_agents_config(runtime_paths)
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create_for(store, config, "watcher")
+
+    for admin in (_PLATFORM_ADMIN, _TRIGGER_ADMIN):
+        rotated = store.rotate_key(
+            record.trigger_id,
+            public_key=_PUBLIC_KEY,
+            key_id=admin,
+            actor_user_id=admin,
+            config=config,
+        )
+        assert rotated.key_id == admin
