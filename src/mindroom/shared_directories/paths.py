@@ -12,6 +12,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories.store import (
     is_shareable_agent,
     load_shared_directories,
+    pending_shared_directory_invitations,
     shared_directory_access,
     shared_directory_relative_path,
 )
@@ -95,6 +96,18 @@ def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePath
     return tuple(
         f"`{view.path}` " + ("(yours, read-write)" if view.writable else f"(from {view.directory.owner}, read-only)")
         for view in agent_shared_directory_views(config, runtime_paths, agent_name)
+    )
+
+
+def describe_agent_pending_invitations(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> tuple[str, ...]:
+    """Name each invitation waiting for one agent by its owner and directory only, never by path."""
+    return tuple(
+        f"`{directory.owner}/{directory.name}`"
+        for directory, _invitation in pending_shared_directory_invitations(config, runtime_paths, agent_name)
     )
 
 

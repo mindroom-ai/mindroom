@@ -24906,7 +24906,7 @@
       },
       {
         "name": "invite_to_shared_directory",
-        "description": "Let another agent read one of your shared directories from its own worker.",
+        "description": "Let another agent read one of your shared directories from its own worker.\nWhen the user you act for may not use that agent, the invitation waits until a user who may use it\naccepts it through that agent.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -25009,7 +25009,7 @@
       },
       {
         "name": "list_shared_directories",
-        "description": "List the shared directories you own or were invited to, with their paths and your access.",
+        "description": "List the shared directories you own or joined, with their paths and your access, and your pending invitations.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -25027,6 +25027,78 @@
             }
           },
           "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "accept_shared_directory",
+        "description": "Accept an invitation to read another agent's shared directory, once the user you act for agrees.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string",
+              "description": "Agent that owns the directory."
+            },
+            "name": {
+              "type": "string",
+              "description": "Name of the directory."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "owner",
+            "name"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "decline_shared_directory",
+        "description": "Decline an invitation to read another agent's shared directory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string",
+              "description": "Agent that owns the directory."
+            },
+            "name": {
+              "type": "string",
+              "description": "Name of the directory."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "owner",
+            "name"
+          ]
         },
         "strict": false,
         "gate": null,
