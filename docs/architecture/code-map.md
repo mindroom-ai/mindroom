@@ -80,7 +80,7 @@ Matrix sync callback
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
-| `participation_hook.py` | The reply's participation check as a pre-request loop hook: a decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
+| `participation_hook.py` | The reply's participation check as a pre-request loop hook: the configured judgment backend on a projection with tool calls and files as placeholders, or a decision request on the reply's exact messages, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM, TypeSafe, or OpenAI Decisions judge and map its result to a participation decision |
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |

@@ -215,10 +215,13 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 
 #### Participation Context and Fallback
 
-A participation judgment sends the agent's guidance and up to eight recent user and assistant messages, with Matrix identities replaced by aliases.
-System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
-When the context contains media, attachment references, detected secrets, or more than 16 KB of text, the backend is skipped and the reply model decides instead.
+A participation judgment sends the agent's display name, its guidance, and up to eight recent user and assistant messages, with Matrix identities replaced by aliases that tell people (`speaker_1`) from agents (`agent_1`).
+The newest message is sent whole, while long earlier messages are shortened to their start and end and the oldest drop out first, so the request fits 16 KB.
+A tool call appears as `[used tools: shell, web_search]` and a file or image as `[sent a file]` or `[sent an image]`, so threads where agents use tools and people share files are judged too.
+Tool inputs and results, file names and contents, media, conversation summaries, system prompts, memory, and tool definitions are not sent, but message text can still contain private information.
+When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
+Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
 
 ## Mid-Turn Coalescing
 

@@ -38,7 +38,8 @@ class ParticipationDecision(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
-type ParticipationDecider = Callable[[tuple[JudgmentMessage, ...]], Awaitable[ParticipationDecision | None]]
+# A decider returns its decision, or why the reply model must decide instead.
+type ParticipationDecider = Callable[[tuple[JudgmentMessage, ...]], Awaitable[ParticipationDecision | str]]
 
 
 @dataclass

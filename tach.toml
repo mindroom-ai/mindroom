@@ -2751,6 +2751,7 @@ visibility = [
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
+    "mindroom.participation_hook",
 ]
 
 [[modules]]
@@ -8053,6 +8054,7 @@ path = "mindroom.participation_hook"
 depends_on = [
     "mindroom.agent_loop",
     "mindroom.history.message_content",
+    "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
     "mindroom.json_utils",
     "mindroom.judgment.state",
@@ -9381,7 +9383,12 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.participation_judgment"
-depends_on = ["mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.participation"]
+depends_on = [
+    "mindroom.entity_resolution",
+    "mindroom.judgment.evaluator",
+    "mindroom.judgment.state",
+    "mindroom.participation",
+]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]
