@@ -79,7 +79,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
     `reasoning` and `activity` are always empty.
 - `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
-  - `agent`: the sub-agent's name; `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the sub-agent that delegated to it, or `null`.
+  - `agent`: the sub-agent's name; `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
   - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
   - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
   - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
