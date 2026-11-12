@@ -23,7 +23,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.media import rendered_label
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import complete
 from mindroom.logging_config import get_logger
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
@@ -88,6 +88,8 @@ _RETAINED_TOOLS = re.compile(rf"{_RETAINED_TOOLS_HEADING} \([^\n]*\):((?:\n- [^\
 _RETAINED_TOOL = re.compile(r"^- The `((?:[^`\\]|\\.)*)` tool", re.MULTILINE)
 _SENT = {"image": "[sent an image]", "audio": "[sent audio]", "video": "[sent a video]", "file": "[sent a file]"}
 _MEDIA_KINDS = {"images": "image", "audio": "audio", "videos": "video", "files": "file"}
+_MEDIA_MSGTYPES = {"m.image": "image", "m.file": "file", "m.audio": "audio", "m.video": "video"}
+_CDATA_BODY = re.compile(r"(?<=<!\[CDATA\[).*(?=\]\]>)", re.DOTALL)
 
 
 def _sent(kinds: Sequence[str]) -> str:
@@ -120,7 +122,12 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
         if not isinstance(message.content, str | None):
             # Content blocks can hold media or provider data no placeholder describes.
             return "unreadable_content"
-        text, annotations = _ANNOTATION.subn(_annotation_placeholder, message.content or "")
+        text = message.content or ""
+        if (msgtype := (message.provider_data or {}).get(MEDIA_MSGTYPE_KEY)) in _MEDIA_MSGTYPES:
+            # A media event's body may be its file name, so the judge reads only its kind.
+            placeholder = _sent([_MEDIA_MSGTYPES[msgtype]])
+            text = _CDATA_BODY.sub(placeholder, text, count=1) if "<![CDATA[" in text else placeholder
+        text, annotations = _ANNOTATION.subn(_annotation_placeholder, text)
         text, listings = _CURRENT_FILES.subn(
             lambda match: _sent(re.findall(rf"^{_LISTED_FILE}", match[0], re.MULTILINE)),
             text,

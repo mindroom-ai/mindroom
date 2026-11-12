@@ -24,7 +24,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_hook import participation_hook
@@ -535,6 +535,37 @@ async def test_an_uncaptioned_file_reaches_the_judge_without_its_name(
     assert "return" not in wire
     assert placeholder in posted[0]["input"][1]["content"]
     assert ("Here it is." in wire) is ("Here it is." in body)
+
+
+@pytest.mark.asyncio
+async def test_a_media_message_reaches_the_judge_as_its_kind_whatever_its_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A media event with no attachment record keeps its file name as body; the judge reads only its kind."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    messages = [
+        Message(
+            role="user",
+            content=_msg("@bob:example.org", "tax-return-2026.pdf"),
+            provider_data={MEDIA_MSGTYPE_KEY: "m.file"},
+        ),
+        Message(
+            role="assistant",
+            content="\n\n[audio message: voice-note.ogg]",
+            provider_data={MEDIA_MSGTYPE_KEY: "m.audio"},
+        ),
+        Message(role="user", content=_msg("@alice:example.org", "Got it, thanks.")),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    await _reply(model, gate, messages)
+
+    assert [message["content"] for message in posted[0]["input"]] == [
+        'user: <msg from="speaker_1"><![CDATA[[sent a file]]]></msg>',
+        "assistant: [sent audio]",
+        'user: <msg from="speaker_2"><![CDATA[Got it, thanks.]]></msg>',
+    ]
 
 
 @pytest.mark.asyncio

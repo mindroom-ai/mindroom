@@ -3175,7 +3175,7 @@ A tool call appears as `[used tools: shell, web_search]` and a file or image as 
 Tool inputs and results, file names and contents, media, conversation summaries, system prompts, memory, and tool definitions are not sent, but message text can still contain private information.
 When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
-Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
+Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, whichever `provider` it uses, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
 
 ## Mid-Turn Coalescing
 

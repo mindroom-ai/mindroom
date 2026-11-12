@@ -54,7 +54,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedReplayPlan,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import ModelRequest, TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1500,6 +1500,36 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         event_id="$raw-img",
     )
     assert not messages[0].images
+
+
+def test_context_media_messages_name_their_msgtype() -> None:
+    """A media event's body may be its file name, so its context message names its msgtype for readers that hide it."""
+    messages = _build_thread_history_messages_for_test(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="tax-return.pdf",
+                event_id="$file",
+                content={"msgtype": "m.file", "body": "tax-return.pdf"},
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="voice.ogg",
+                event_id="$voice",
+                content={"msgtype": "m.audio", "body": "voice.ogg"},
+            ),
+            make_visible_message(sender="@alice:localhost", body="tax-return.pdf", event_id="$text"),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+    ).in_request_order()
+
+    assert [message.provider_data for message in messages[:3]] == [
+        {MEDIA_MSGTYPE_KEY: "m.file"},
+        {MEDIA_MSGTYPE_KEY: "m.audio"},
+        None,
+    ]
 
 
 def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) -> None:
