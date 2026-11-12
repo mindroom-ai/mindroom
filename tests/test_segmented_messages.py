@@ -291,8 +291,8 @@ def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -
 
 # Replies whose first segment's tool trace fills it to within the count's bytes, as a plain message and as an edit.
 @pytest.mark.parametrize(("seed", "edit"), [(1383, False), (1146, True)])
-def test_a_first_segment_filled_to_its_budget_still_fits_its_segment_count(seed: int, *, edit: bool) -> None:
-    """The count is sized with the first segment, so a tool trace that fills the budget does not force the sidecar."""
+def test_a_first_segment_filled_to_its_budget_is_still_sent_as_segments(seed: int, *, edit: bool) -> None:
+    """A first segment with no room left for the segment count goes without it instead of falling back to the sidecar."""
     rng = random.Random(seed)  # noqa: S311 - a fixed test fixture, not a secret
     paragraphs = [f"Paragraph {index} " + "x" * rng.randint(20, 400) for index in range(rng.randint(150, 400))]
     calls = rng.randint(1, 12)
@@ -312,10 +312,26 @@ def test_a_first_segment_filled_to_its_budget_still_fits_its_segment_count(seed:
     segmented = segment_matrix_content(content, room_encrypted=False)
 
     assert segmented is not None
+    assert segmented.continuations
     first = segmented.first["m.new_content"] if edit else segmented.first
-    assert first[SEGMENT_COUNT_KEY] == 1 + len(segmented.continuations)
+    assert SEGMENT_COUNT_KEY not in first
     budget = _SEGMENT_TARGET_EDIT_BYTES if edit else _SEGMENT_TARGET_PLAINTEXT_BYTES
     assert calculate_event_size(segmented.first) <= budget
+
+
+def test_a_fenced_block_that_fills_the_first_segment_still_splits() -> None:
+    """A code block sized right up to the first segment's budget splits as before; the count never moves the cut."""
+    code = ("data = 1234567890\n" * 1400)[:19218]
+    message = {
+        **build_message_content(f"```\n{code}\n```\n\n{'z' * 52000}"),
+        DURABLE_DELIVERY_ID_KEY: {"principal": "@research:localhost", "delivery_id": "turn-1", "stage": "final"},
+    }
+
+    segmented = segment_matrix_content(message, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations
+    assert segmented.first["body"].rstrip().endswith("```")
 
 
 def test_a_reply_that_stays_one_segment_has_no_segment_count() -> None:
