@@ -187,6 +187,7 @@ def test_hand_off_without_a_report_still_opens_the_portal(signin: dict[str, Any]
         UNKNOWN_SLUG + "%2F..%252F..%252Fapi",
         UNKNOWN_SLUG + "%2F%252e%252e%252F..%252Fapi",
         UNKNOWN_SLUG + "/a%255Cb",
+        UNKNOWN_SLUG + "%2F%25252e%25252e%2Fapi",
         quote(UNKNOWN_SLUG + "//evil.example.org/" + quote("../../x"), safe=""),
     ],
 )

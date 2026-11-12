@@ -296,26 +296,43 @@ async def test_router_without_the_power_skips_the_writes_until_it_gains_it(room_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("levels", [{"events": {EVENT_TYPE: 0, ACCOUNTS_EVENT_TYPE: 0}}, {"state_default": 0}])
-async def test_router_without_power_still_writes_what_the_room_opens_to_it(
+@pytest.mark.parametrize(
+    ("power_levels", "create", "writes"),
+    [
+        # A power-levels event without `state_default` asks 50 for state.
+        ({"users": {}}, {"room_version": "11"}, False),
+        ({"users": {}, "events": {EVENT_TYPE: 0, ACCOUNTS_EVENT_TYPE: 0}}, {"room_version": "11"}, True),
+        ({"users": {}, "state_default": 0}, {"room_version": "11"}, True),
+        # Levels or creators the router cannot read leave the answer to the write.
+        (None, {"room_version": "11"}, True),
+        ({"users": {}}, None, True),
+    ],
+)
+async def test_router_writes_every_state_its_level_or_unreadable_levels_may_allow(
     room_state: RoomState,
-    levels: dict[str, Any],
+    power_levels: dict[str, Any] | None,
+    create: dict[str, str] | None,
+    *,
+    writes: bool,
 ) -> None:
-    """A type whose own level, or the state default, the router's level meets is written as before."""
+    """A type whose own level or the state default the router meets, or whose levels it cannot read, is written."""
     config, paths, _, events, client = room_state
+    if create is not None:
+        events["m.room.create", ""] = create
     read_event = client.room_get_state_event.side_effect
 
     async def read_power(room_id: str, event_type: str, state_key: str = "") -> object:
         if event_type == "m.room.power_levels":
-            content = {"users": {}, "state_default": 50, **levels}
-            return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
+            if power_levels is None:
+                return nio.RoomGetStateEventError("unavailable", "M_UNKNOWN", room_id=room_id)
+            return nio.RoomGetStateEventResponse(dict(power_levels), event_type, state_key, room_id)
         return await read_event(room_id, event_type, state_key)
 
     client.room_get_state_event.side_effect = read_power
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
-    assert await reconcile_room_accounts(client, config, paths, ROOM_ID)
-    assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
-    assert _accounts(room_state) is not None
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is writes
+    assert await reconcile_room_accounts(client, config, paths, ROOM_ID) is writes
+    assert ((EVENT_TYPE, "") in events) is writes
+    assert (_accounts(room_state) is not None) is writes
 
 
 @pytest.mark.asyncio
