@@ -63,6 +63,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
 - When it onboards someone, MindRoom invites the router into the personal room it created, so [approval cards](tool-approval.md) work there without the agent inviting it first, unless [`router.accept_invites`](configuration/router.md) leaves out the agent; once the router has left, MindRoom does not invite it again.
+- The router gets power level 50 in the personal room, so it can publish the room's [thread mode](configuration/threads.md#thread-mode-resolution) there; other members keep their power level.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
@@ -127,3 +128,4 @@ If the room's history setting stops matching the record, or anyone other than a 
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
 Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
+The router gets power level 50 only in an adopted room whose record lists it in `router_user_id`.
