@@ -626,7 +626,7 @@ def _router_duties(state: RoomState) -> RouterDuties:
         matrix_id=ids[ROUTER_AGENT_NAME],
         hook_context=MagicMock(),
         journal=MagicMock(),
-        room_lifecycle=MagicMock(send_welcome_message_if_empty=AsyncMock()),
+        room_lifecycle=MagicMock(send_welcome_message_if_empty=AsyncMock(), refresh_welcome=AsyncMock()),
         personal_rooms=MagicMock(),
     )
     deps.hook_context.registry.has_hooks.return_value = False
