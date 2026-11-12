@@ -59,5 +59,5 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 ## Limitations
 
 - Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
-- Under `file_access: workspace`, `file` and `coding` beside a workdir cannot reach the workspace's skills, subagent profiles, or delegation records, which only `shell` or `file_access: unrestricted` reach.
+- Under `file_access: workspace`, `file` and `coding` beside a workdir cannot reach the workspace's skills, subagent profiles, or delegation records, which `shell` and `python`, being unconfined, and `file_access: unrestricted` still reach.
 - Tools that work on files of their own, such as `file_generation`, keep the workspace beside a workdir, and the workspace-relative paths their replies name do not resolve in the workdir.
