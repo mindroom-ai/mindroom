@@ -72,7 +72,12 @@ from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
+from mindroom.shared_directories.store import (
+    PendingInvitation,
+    add_shared_directory_member,
+    create_shared_directory,
+    invite_pending_shared_directory_member,
+)
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -555,6 +560,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -575,6 +581,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -600,6 +607,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -629,6 +637,7 @@ def test_tool_execution_environment_reports_file_access(
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
             shared_directories=(),
+            pending_shared_directory_invitations=(),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -657,9 +666,32 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
         f"`{shares / 'general' / 'report'}` (from general, read-only)."
     ) in _role(calculator)
     assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in _role(general)
+    assert "Pending shared directory invitations" not in _role(calculator)
     file_access_line = "- File access for path tools: `workspace` (agent workspace and attachments only)."
     assert file_access_line in _role(calculator)
     assert file_access_line in _role(general)
+
+
+def test_agent_role_names_pending_invitations_without_their_path(tmp_path: Path) -> None:
+    """An invited agent that has not accepted learns of the invitation, but not the directory's path or who asked."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    invite_pending_shared_directory_member(
+        runtime_paths,
+        owner="general",
+        name="report",
+        invitation=PendingInvitation(agent="calculator", requester="@a:localhost", requested_at="2026-11-12T10:00Z"),
+    )
+
+    role = _role(_create_agent_for_test("calculator", config=config))
+
+    assert (
+        "- Pending shared directory invitations; ask your user before accepting or declining: `general/report`."
+    ) in role
+    assert "@a:localhost" not in role
+    assert "shared_directories/general" not in role
+    assert "- Shared directories:" not in role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -673,6 +705,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
     assert "Not confined by file_access" not in rendered
 

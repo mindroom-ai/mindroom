@@ -31,6 +31,8 @@ if TYPE_CHECKING:
         "remove_from_shared_directory",
         "delete_shared_directory",
         "list_shared_directories",
+        "accept_shared_directory",
+        "decline_shared_directory",
     ),
 )
 def shared_directories_tools() -> type[SharedDirectoryTools]:
