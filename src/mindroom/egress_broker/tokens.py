@@ -31,7 +31,7 @@ class WorkerClaims:
     routing_agent_name: str | None
     tenant_id: str | None
     account_id: str | None
-    channel: Literal["matrix", "openai_compat", "mcp"]
+    channel: Literal["matrix", "openai_compat", "headless", "mcp"]
     agent_name: str
     requester_id: str | None
 

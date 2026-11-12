@@ -2,6 +2,7 @@
 
 MindRoom serves an OpenAI-compatible chat completions API at `/v1`, so any chat frontend that speaks the OpenAI protocol (LibreChat, Open WebUI, LobeChat, ChatBox, BoltAI, and others) can use MindRoom agents and teams as selectable models.
 Each request runs the selected agent with its configured tools, instructions, memory, and knowledge bases, without Matrix.
+To run an agent from a Python program without `mindroom run`, use [headless runs](https://docs.mindroom.chat/headless/) instead.
 
 ## Setup
 

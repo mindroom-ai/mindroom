@@ -189,3 +189,4 @@ The external MCP gateway keeps its own authentication and tool restrictions; min
 A smaller initial prompt alone does not establish lower total cost or better task quality.
 To evaluate minimal mode, run the same tasks with the same agent, model, tool configuration, and starting workspace in both modes, including tool-heavy work, approval waits, and tasks that depend on long instructions.
 Compare task success, input and output tokens, elapsed time, editing failures, and discovery calls, and record the model and configuration versions.
+[Headless runs](https://docs.mindroom.chat/headless/) run such tasks from a script to compare agents and models in standard mode, but not minimal against standard mode.

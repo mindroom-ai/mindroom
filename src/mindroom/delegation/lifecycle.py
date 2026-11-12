@@ -525,7 +525,7 @@ def authorize_delegation(  # noqa: PLR0911
     elif (
         detached_context is not None
         and execution_identity is not None
-        and execution_identity.channel == "openai_compat"
+        and execution_identity.channel in ("openai_compat", "headless")
         and execution_identity.requester_id == detached_context.requester_id
         and runtime_paths == detached_context.runtime_paths
     ):

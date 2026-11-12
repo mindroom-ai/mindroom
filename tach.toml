@@ -5539,7 +5539,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix_identifiers",
     "mindroom.mcp_gateway.toolkits",
     "mindroom.mcp_gateway.tools",
     "mindroom.orchestration.plugin_http_runtime",

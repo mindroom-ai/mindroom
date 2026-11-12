@@ -153,8 +153,22 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
         f"{prefix}/connect": pairing,
         f"{prefix}/connect/": pairing,
         f"{prefix}/connections": ("200", "text/html", no_store, "frame-ancestors 'self'", "SAMEORIGIN", "app shell"),
-        f"{prefix}/notices.json": ("200", "application/json", "no-store, max-age=0", "", "", '[{"id":"maintenance"}]'),
-        "/.well-known/apple-app-site-association": ("200", "application/json", "", "", "", app_links),
+        f"{prefix}/notices.json": (
+            "200",
+            "application/json",
+            "no-store, max-age=0",
+            "frame-ancestors 'self'",
+            "SAMEORIGIN",
+            '[{"id":"maintenance"}]',
+        ),
+        "/.well-known/apple-app-site-association": (
+            "200",
+            "application/json",
+            "",
+            "frame-ancestors 'self'",
+            "SAMEORIGIN",
+            app_links,
+        ),
     }
 
     responses = _serve(
