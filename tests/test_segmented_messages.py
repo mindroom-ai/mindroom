@@ -2,7 +2,7 @@
 
 import pytest
 
-from mindroom.constants import REASONING_CONTENT_KEY
+from mindroom.constants import EXACT_MENTIONS_KEY, REASONING_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
@@ -293,10 +293,13 @@ def test_a_split_reply_carries_its_mentions_on_its_last_segment(*, edit: bool) -
     first = segmented.first["m.new_content"] if edit else segmented.first
     assert "@writer:localhost" in first["body"]
     assert '<a href="https://matrix.to/#/@writer:localhost">@Writer</a>' in first["formatted_body"]
-    assert "m.mentions" not in first
-    assert all("m.mentions" not in part for part in segmented.continuations[:-1])
+    # Earlier segments mention nobody, so receivers do not find the pill or the ID in their text instead.
+    for part in (first, *segmented.continuations[:-1]):
+        assert "m.mentions" not in part
+        assert part[EXACT_MENTIONS_KEY] is True
     # Only mentions the reply's text carries, as for an unsplit reply's chunks.
     assert segmented.continuations[-1]["m.mentions"] == {"user_ids": ["@writer:localhost"]}
+    assert EXACT_MENTIONS_KEY not in segmented.continuations[-1]
 
 
 def test_a_reply_that_sheds_only_its_reasoning_keeps_its_mentions_on_its_one_segment() -> None:

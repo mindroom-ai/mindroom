@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import REASONING_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import (
+    EXACT_MENTIONS_KEY,
+    REASONING_CONTENT_KEY,
+    STREAM_VISIBLE_BODY_KEY,
+    TOOL_TRACE_CONTENT_KEY,
+)
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -335,6 +340,21 @@ def _split_body(
     return chunks or None
 
 
+def _carry_mentions_on_last_segment(source: Mapping[str, Any], segments: tuple[dict[str, Any], ...]) -> None:
+    """Put the reply's mentions on its last segment's visible content, and mark the earlier ones as mentioning nobody.
+
+    An agent the reply wakes then reads all of it, and no one is notified before the text naming them has arrived.
+    Earlier segments mark their missing mentions exact, so receivers do not find the pills or IDs in their text instead.
+    """
+    mentions = _chunk_mentions(source, source["body"])
+    if mentions is None:
+        return
+    *earlier, last = segments
+    for segment in earlier:
+        segment[EXACT_MENTIONS_KEY] = True
+    last["m.mentions"] = mentions
+
+
 def segment_matrix_content(
     content: dict[str, Any],
     *,
@@ -406,12 +426,7 @@ def segment_matrix_content(
     else:
         first = first_build(chunks[0])
         continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
-    # The reply's mentions travel on its last segment: an agent they wake then reads the whole reply, and no one is
-    # notified before the text naming them has arrived.
-    mentions = _chunk_mentions(source, source["body"])
-    if mentions is not None:
-        last = continuations[-1] if continuations else (first["m.new_content"] if is_edit else first)
-        last["m.mentions"] = mentions
+    _carry_mentions_on_last_segment(source, (first["m.new_content"] if is_edit else first, *continuations))
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):
