@@ -237,7 +237,7 @@ A call stopped together with its turn logs `error_type` `CancelledError`.
 | `error_message` | The error's message, with credentials redacted |
 | `duration_ms` | Milliseconds from the call's start until it failed |
 | `correlation_id` | ID shared by the tool calls that answer one message |
-| `channel` | `matrix`, `openai_compat`, `mcp`, or `null` |
+| `channel` | `matrix`, `openai_compat`, `headless`, `mcp`, or `null` |
 
 Count it grouped by `tool_name` and alert when one tool fails far more often than usual.
 Failures that share a `correlation_id` came from a single turn, and `error_type` and `error_message` give the cause.

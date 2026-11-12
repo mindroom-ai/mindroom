@@ -8,6 +8,7 @@ import json
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
@@ -54,6 +55,9 @@ class ToolOutputFilePolicy:
     workspace_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    # Whether the agent's tools work in a directory other than its workspace, as in a headless run with a workdir: every
+    # saved output then goes to ``saved_output_dir``, which those tools can read, and receipts name it by absolute path.
+    tools_use_workdir: bool = False
 
     @classmethod
     def from_runtime(
@@ -62,13 +66,20 @@ class ToolOutputFilePolicy:
         runtime_paths: RuntimePaths,
         *,
         auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        tools_use_workdir: bool = False,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
             auto_save_threshold_bytes=auto_save_threshold_bytes,
+            tools_use_workdir=tools_use_workdir,
         )
+
+    @property
+    def saved_output_dir(self) -> Path:
+        """Return the workspace directory that holds automatically saved outputs."""
+        return self.workspace_root / _AUTO_SAVE_ROOT
 
 
 @dataclass(frozen=True)
@@ -96,6 +107,23 @@ class ToolOutputFileHandled:
 
 
 _active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
+# The directory a headless run's caller chose for its agents' tools to work in, in place of their workspaces.
+_TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
+
+
+@contextmanager
+def tool_workdir(workdir: Path | None) -> Iterator[None]:
+    """Build the tools of the block's turns to work in ``workdir``, or in their agents' workspaces when None."""
+    token = _TOOL_WORKDIR.set(workdir)
+    try:
+        yield
+    finally:
+        _TOOL_WORKDIR.reset(token)
+
+
+def current_tool_workdir() -> Path | None:
+    """Return the workdir bound for the tools built now, if any."""
+    return _TOOL_WORKDIR.get()
 
 
 def current_tool_output_file_request() -> ToolOutputFileRequest | None:
@@ -114,7 +142,6 @@ class _SerializedToolOutput:
 class _ToolOutputWriteResult:
     """Result from writing caller-managed bytes to a validated output path."""
 
-    receipt: dict[str, object]
     absolute_path: Path
     byte_count: int
     overwritten: bool
@@ -269,6 +296,8 @@ def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _Va
         return raw_validation
 
     requested_path, relative_path = raw_validation
+    if policy.tools_use_workdir:
+        relative_path = Path(_AUTO_SAVE_ROOT, relative_path)
     try:
         candidate = resolve_relative_path_within_root_preserving_leaf(
             policy.workspace_root,
@@ -379,9 +408,19 @@ def _safe_tool_name(tool_name: str) -> str:
     return safe[:80] or "tool"
 
 
-def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "json", "binary"]) -> str:
+def _auto_output_relative_path(
+    policy: ToolOutputFilePolicy,
+    tool_name: str,
+    output_format: Literal["text", "json", "binary"],
+) -> str:
     suffix = {"text": "txt", "json": "json", "binary": "bin"}[output_format]
-    return f"{_AUTO_SAVE_ROOT}/{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    name = f"{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    return name if policy.tools_use_workdir else f"{_AUTO_SAVE_ROOT}/{name}"
+
+
+def _receipt_path(policy: ToolOutputFilePolicy, validated_path: _ValidatedOutputPath) -> str:
+    """Name a saved file as the agent's tools can open it: from their workdir only by its absolute path."""
+    return str(validated_path.absolute_path) if policy.tools_use_workdir else validated_path.requested_path
 
 
 def _write_atomic(
@@ -410,7 +449,6 @@ def write_bytes_to_output_path(
     raw_path: object,
     payload: bytes,
     *,
-    output_format: Literal["binary"] = "binary",
     file_mode: int | None = None,
 ) -> _ToolOutputWriteResult | str:
     """Validate and atomically write caller-owned bytes to a MindRoom output path."""
@@ -432,12 +470,6 @@ def write_bytes_to_output_path(
         return write_error
 
     return _ToolOutputWriteResult(
-        receipt=_success_receipt(
-            path=validated_path.requested_path,
-            byte_count=byte_count,
-            output_format=output_format,
-            overwritten=validated_path.overwritten,
-        ),
         absolute_path=validated_path.absolute_path,
         byte_count=byte_count,
         overwritten=validated_path.overwritten,
@@ -469,7 +501,7 @@ def _redirect_result_to_file(
         return _error_receipt(write_error)
 
     return _success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         overwritten=validated_path.overwritten,
@@ -508,7 +540,7 @@ def _write_auto_saved_result(
             f"Tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte auto-save limit.",
         )
 
-    relative_path = _auto_output_relative_path(tool_name, serialized.format)
+    relative_path = _auto_output_relative_path(policy, tool_name, serialized.format)
     validated_path = _validate_output_path(policy, relative_path)
     if isinstance(validated_path, str):
         return _error_receipt(validated_path)
@@ -522,7 +554,7 @@ def _write_auto_saved_result(
         return _error_receipt(write_error)
 
     return _auto_save_success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         threshold_bytes=policy.auto_save_threshold_bytes,

@@ -109,6 +109,7 @@ nav = [
     { "Hooks" = "hooks.md" },
     { "External Triggers" = "external-triggers.md" },
     { "OpenAI-Compatible API" = "openai-api.md" },
+    { "Headless Runs" = "headless.md" },
     { "MCP Gateway" = "deployment/mcp-gateway.md" },
   ] },
   { "Deployment" = [

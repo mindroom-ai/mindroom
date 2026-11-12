@@ -32,7 +32,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.entity_resolution import current_entity_id
+from mindroom.entity_resolution import current_entity_id, persist_offline_entity_accounts
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -63,10 +63,8 @@ from mindroom.hooks import (
     emit_transform,
     validate_event_name,
 )
-from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.state import MatrixState, update_matrix_state
-from mindroom.matrix_identifiers import agent_username_localpart
+from mindroom.matrix.state import update_matrix_state
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
 from mindroom.mcp_gateway.tools import may_need_approval
 from mindroom.message_target import MessageTarget
@@ -553,14 +551,7 @@ def load_plugin(
     entry = {"path": str(Path(path).resolve()), "settings": dict(settings or {})}
     data = {"models": {"default": {"provider": "openai", "id": "unused"}}, **(config or {}), "plugins": [entry]}
     validated = Config.validate_with_runtime(data, runtime_paths)
-    domain = validated.get_domain(runtime_paths)
-
-    def save_accounts(state: MatrixState) -> None:
-        for entity in (ROUTER_AGENT_NAME, *validated.agents, *validated.teams):
-            username = agent_username_localpart(entity, runtime_paths)
-            state.add_account(managed_account_key(entity), username, None, domain=domain)
-
-    update_matrix_state(runtime_paths, save_accounts)
+    persist_offline_entity_accounts(validated, runtime_paths)
     published = config_plugins(validated, runtime_paths).generation
     generation = prepare_plugins(validated, runtime_paths)
     # MindRoom serves a plugin whose routes, origin, or lifecycle module fails without them; a test fails on it instead.

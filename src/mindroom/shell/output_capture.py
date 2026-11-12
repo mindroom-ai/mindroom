@@ -19,6 +19,8 @@ class ShellOutputDestination:
     workspace_root: str
     path: str
     max_bytes: int
+    # Whether the agent's tools work in a workdir, so the receipt names the saved file by absolute path.
+    tools_use_workdir: bool = False
 
     @classmethod
     def from_payload(cls, payload: object) -> ShellOutputDestination | None:
@@ -30,16 +32,18 @@ class ShellOutputDestination:
             raise TypeError(msg)
         data = cast("dict[str, object]", payload)
         workspace_root, path, max_bytes = data.get("workspace_root"), data.get("path"), data.get("max_bytes")
+        tools_use_workdir = data.get("tools_use_workdir")
         if (
             not isinstance(workspace_root, str)
             or not isinstance(path, str)
             or not isinstance(max_bytes, int)
             or isinstance(max_bytes, bool)
             or max_bytes <= 0
+            or not isinstance(tools_use_workdir, bool)
         ):
             msg = "Invalid shell output destination policy."
             raise ValueError(msg)
-        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes)
+        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, tools_use_workdir=tools_use_workdir)
 
 
 def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
@@ -144,6 +148,7 @@ class ShellOutputCapture:
                 ToolOutputFilePolicy(
                     workspace_root=Path(self.destination.workspace_root),
                     max_bytes=self.destination.max_bytes,
+                    tools_use_workdir=self.destination.tools_use_workdir,
                 ),
                 tool_name=SHELL_FUNCTION,
                 output_path=self.destination.path,

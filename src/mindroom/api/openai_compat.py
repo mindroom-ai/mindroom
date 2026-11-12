@@ -76,6 +76,7 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     TurnSinks,
     build_llm_request_log_context,
+    detached_turn_context,
     stream_with_llm_request_log_context,
 )
 from mindroom.routing import suggest_responder
@@ -115,7 +116,6 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.teams.envelope import PreparedTeamExecution
     from mindroom.teams.runtime import TeamRunEvent
@@ -532,38 +532,6 @@ async def _resolve_auto_route(
     return selection.entity_name
 
 
-def _openai_turn_context(
-    entity_label: str,
-    *,
-    session_id: str | None,
-    execution_identity: ToolExecutionIdentity,
-    model_name: str | None = None,
-    prompt: str = "",
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    knowledge: AgentKnowledge | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-) -> ResponseTurnContext:
-    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
-    return ResponseTurnContext(
-        entity_label=entity_label,
-        session_id=session_id,
-        run_id=None,
-        correlation_id=uuid4().hex,
-        reply_to_event_id=None,
-        room_id=None,
-        thread_id=None,
-        requester_id=execution_identity.requester_id,
-        matrix_run_metadata=None,
-        active_model_name=model_name,
-        prompt=prompt,
-        thread_history=thread_history,
-        execution_identity=execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        knowledge=knowledge,
-        include_interactive_questions=False,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -789,7 +757,7 @@ async def _chat_completions(
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
             prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
-            turn = _openai_turn_context(
+            turn = detached_turn_context(
                 agent_name,
                 session_id=session_id,
                 model_name=resolve_turn_model(config, runtime_paths, ModelScope(entity=agent_name), budget).model_name,
@@ -1026,7 +994,7 @@ async def _prepare_openai_team_execution(
 ) -> PreparedTeamExecution:
     """Prepare one OpenAI-compatible team turn: the scope summary, the replayed history, then the turn."""
     return await prepare_materialized_team_execution(
-        _openai_turn_context(team_name, session_id=None, execution_identity=execution_identity),
+        detached_turn_context(team_name, session_id=None, execution_identity=execution_identity),
         scope_context=scope_context,
         built=built,
         message=prompt,
