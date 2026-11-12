@@ -84,6 +84,10 @@ describe("ModelConfig", () => {
     updateConfigValue: vi.fn(),
     deleteModel: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue({ status: "saved" }),
+    // More settings reads these once a schema renders its fields.
+    agents: [],
+    rooms: [],
+    diagnostics: [],
   };
 
   let keyStatusByService: Record<string, KeyStatusResponse>;
@@ -1235,19 +1239,7 @@ describe("ModelConfig", () => {
         error: null,
         retry: vi.fn(),
       });
-      vi.mocked(useConfigStore).mockReturnValue({
-        ...mockStore,
-        config: {
-          ...mockStore.config,
-          models: {
-            ...mockStore.config.models,
-            gateway: { ...gateway, extra_kwargs: extraKwargs },
-          },
-        },
-        agents: [],
-        rooms: [],
-        diagnostics: [],
-      } as never);
+      addModels({ gateway: { ...gateway, extra_kwargs: extraKwargs } });
     }
 
     function editExtraKwargs(
@@ -1273,23 +1265,36 @@ describe("ModelConfig", () => {
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
     }
 
+    const endpoints = {
+      base_url: "http://localhost:9292/v1",
+      client_params: { base_url: "https://gateway.example/v1" },
+    };
+
     it.each([
       {
-        endpoint: "a new base URL",
+        outcome: "keeps a new base URL",
         start: { base_url: "http://localhost:9292/v1" },
         edits: [{ base_url: "http://proxy:8080/v1", temperature: 0.2 }],
+        saved: { base_url: "http://proxy:8080/v1", temperature: 0.2 },
       },
       {
-        endpoint: "the old client_params base URL again",
+        outcome: "keeps the old client_params base URL set again",
         start: { client_params: { base_url: "https://gateway.example/v1" } },
         edits: [
           {},
           { client_params: { base_url: "https://gateway.example/v1" } },
         ],
+        saved: { client_params: { base_url: "https://gateway.example/v1" } },
+      },
+      {
+        outcome: "drops the old endpoints when it sets only other keys",
+        start: endpoints,
+        edits: [{ ...endpoints, temperature: 0.2 }],
+        saved: { temperature: 0.2 },
       },
     ])(
-      "keeps $endpoint More settings set after the row's provider changed",
-      async ({ start, edits }) => {
+      "$outcome in More settings after the row's provider changed",
+      async ({ start, edits, saved }) => {
         commitGateway(start);
         const { rerender } = render(<ModelConfig />);
         chooseProvider(editRow("gateway"), /Anthropic/i);
@@ -1304,41 +1309,11 @@ describe("ModelConfig", () => {
         await waitFor(() => {
           expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
             ["models", "gateway"],
-            {
-              ...gateway,
-              provider: "anthropic",
-              extra_kwargs: edits[edits.length - 1],
-            },
+            { ...gateway, provider: "anthropic", extra_kwargs: saved },
           );
         });
       },
     );
-
-    it("drops the old endpoints when More settings edits only other keys after the provider changed", async () => {
-      const endpoints = {
-        base_url: "http://localhost:9292/v1",
-        client_params: { base_url: "https://gateway.example/v1" },
-      };
-      commitGateway(endpoints);
-      const { rerender } = render(<ModelConfig />);
-      chooseProvider(editRow("gateway"), /Anthropic/i);
-      fireEvent.click(
-        screen.getByRole("button", { name: /More settings for gateway/ }),
-      );
-      editExtraKwargs(rerender, { ...endpoints, temperature: 0.2 });
-      saveGatewayRow();
-
-      await waitFor(() => {
-        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-          ["models", "gateway"],
-          {
-            ...gateway,
-            provider: "anthropic",
-            extra_kwargs: { temperature: 0.2 },
-          },
-        );
-      });
-    });
 
     it("drops an endpoint More settings set in an earlier row edit when the provider changes", async () => {
       const proxy = { base_url: "http://proxy:8080/v1" };
