@@ -444,6 +444,53 @@ describe("ModelConfig", () => {
     },
   );
 
+  it.each([
+    {
+      provider: /OpenAI/i,
+      extraKwargs: { base_url: "https://gateway.example/v1", temperature: 0.2 },
+      saved: { provider: "openai", extra_kwargs: { temperature: 0.2 } },
+    },
+    {
+      provider: /DeepSeek/i,
+      extraKwargs: {
+        client_params: { base_url: "https://gateway.example/v1", timeout: 30 },
+      },
+      saved: {
+        provider: "deepseek",
+        extra_kwargs: { client_params: { timeout: 30 } },
+      },
+    },
+    {
+      provider: /OpenAI/i,
+      extraKwargs: {
+        client_params: { base_url: "https://gateway.example/v1" },
+      },
+      saved: { provider: "openai" },
+    },
+  ])(
+    "drops the old provider's endpoint when changing provider (%o)",
+    async ({ provider, extraKwargs, saved }) => {
+      addModels({
+        gateway: {
+          provider: "anthropic",
+          id: "claude-sonnet-5-5",
+          extra_kwargs: extraKwargs,
+        },
+      });
+      render(<ModelConfig />);
+      const row = editRow("gateway");
+      chooseProvider(row, provider);
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "gateway"],
+          { id: "claude-sonnet-5-5", ...saved },
+        );
+      });
+    },
+  );
+
   it("clears a saved dashboard key when changing provider", async () => {
     addKeyedOpenAIModel({});
     await renderWithSavedKeyedModelKey();

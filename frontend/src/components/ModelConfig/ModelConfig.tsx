@@ -44,6 +44,7 @@ import {
   SERVICE_NAME_CHARACTERS,
   SERVICE_NAME_PATTERN,
 } from "@/lib/serviceNames";
+import { isPlainObject } from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
 import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { ProviderLogo } from "./ProviderLogos";
@@ -179,6 +180,20 @@ function getOpenAIBaseUrl(modelConfig: {
   }
   const trimmed = baseUrl.trim();
   return trimmed || null;
+}
+
+/** `settings` without the `base_url` it still shares with `start`. */
+function withoutStartBaseUrl(
+  settings: Record<string, unknown>,
+  start: unknown,
+): Record<string, unknown> {
+  const startBaseUrl = isPlainObject(start) ? start.base_url : undefined;
+  if (settings.base_url !== startBaseUrl) {
+    return settings;
+  }
+  const kept = { ...settings };
+  delete kept.base_url;
+  return kept;
 }
 
 function isValidHttpUrl(value: string): boolean {
@@ -873,7 +888,27 @@ export function ModelConfig() {
       delete nextModelConfig.icon;
     }
 
-    const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    let nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    if (providerChanged) {
+      // The old provider's endpoint and config.yaml key never reach the new
+      // one; an endpoint More settings set during this edit stays.
+      const startExtraKwargs = editingStart?.config.extra_kwargs;
+      nextExtraKwargs = withoutStartBaseUrl(nextExtraKwargs, startExtraKwargs);
+      const clientParams = nextExtraKwargs.client_params;
+      if (isPlainObject(clientParams)) {
+        const kept = withoutStartBaseUrl(
+          clientParams,
+          startExtraKwargs?.client_params,
+        );
+        if (Object.keys(kept).length > 0) {
+          nextExtraKwargs.client_params = kept;
+        } else {
+          delete nextExtraKwargs.client_params;
+        }
+      }
+      delete nextModelConfig.api_key;
+      delete nextExtraKwargs.api_key;
+    }
     if (rowDraft.provider === "openai") {
       // More settings may have edited extra_kwargs; keep its base_url unless
       // the row's own Base URL input changed.
@@ -885,20 +920,7 @@ export function ModelConfig() {
         }
       }
     } else {
-      // A provider change drops the old provider's endpoint but keeps one More
-      // settings set during this edit.
-      if (
-        providerChanged &&
-        nextExtraKwargs.base_url === editingStart?.config.extra_kwargs?.base_url
-      ) {
-        delete nextExtraKwargs.base_url;
-      }
       delete nextModelConfig.api;
-    }
-    if (providerChanged) {
-      // A config.yaml key belongs to the old provider; never send it to the new one.
-      delete nextModelConfig.api_key;
-      delete nextExtraKwargs.api_key;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
