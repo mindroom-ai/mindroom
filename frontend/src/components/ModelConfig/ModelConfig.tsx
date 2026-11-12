@@ -886,7 +886,10 @@ export function ModelConfig() {
         }
       }
     } else {
-      delete nextExtraKwargs.base_url;
+      // An endpoint belongs to the provider it was set for.
+      if (rowDraft.provider !== originalModelConfig.provider) {
+        delete nextExtraKwargs.base_url;
+      }
       delete nextModelConfig.api;
     }
     if (rowDraft.provider !== originalModelConfig.provider) {

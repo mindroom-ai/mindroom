@@ -352,6 +352,28 @@ describe("ModelConfig", () => {
     });
   });
 
+  it("keeps a non-OpenAI model's base URL when its row is saved", async () => {
+    const gateway = {
+      provider: "anthropic",
+      id: "claude-sonnet-5-5",
+      extra_kwargs: { base_url: "https://gateway.example/anthropic" },
+    };
+    addModels({ gateway });
+    render(<ModelConfig />);
+    fireEvent.click(screen.getByText("gateway"));
+    const row = screen.getByDisplayValue("gateway").closest("tr");
+    if (!row) throw new Error("row not found");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "gateway"],
+        gateway,
+      );
+    });
+  });
+
   function addModels(models: Record<string, Record<string, unknown>>) {
     vi.mocked(useConfigStore).mockReturnValue({
       ...mockStore,

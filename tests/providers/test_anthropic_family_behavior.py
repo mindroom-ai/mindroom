@@ -1686,6 +1686,31 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
     assert providers[2].capabilities.native_compaction is False
 
 
+@pytest.mark.asyncio
+async def test_a_null_or_empty_base_url_leaves_the_direct_endpoint_to_anthropic_base_url(tmp_path: Path) -> None:
+    """A null or empty ``base_url`` or ``client_params.base_url`` sets no endpoint, as on the OpenAI routes."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example/"},
+    )
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    unset = ({"base_url": ""}, {"base_url": None}, {"client_params": {"base_url": ""}})
+    with isolated_provider_environment():
+        providers = [
+            build_provider(
+                ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
+                runtime_paths,
+            )
+            for extra_kwargs in unset
+        ]
+        for provider in providers:
+            await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
+
+    assert [(sent.url.host, sent.url.path) for sent in wire.requests] == [("env-gateway.example", "/v1/messages")] * 3
+    assert [provider.identity.endpoint for provider in providers] == ["https://env-gateway.example"] * 3
+
+
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

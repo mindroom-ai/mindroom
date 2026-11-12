@@ -488,7 +488,7 @@ A model with any other key, including a misspelled key or a retired Agno model s
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 `role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` to OpenAI's own API and as `system` to every other endpoint, including an OpenAI-compatible server such as vLLM or llama.cpp set as `provider: openai` with its `base_url`, so remove it.
 
-- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path; `client_params.base_url` wins when both are set.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
