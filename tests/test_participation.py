@@ -14,7 +14,6 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.events import ToolStarted
-from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay, RequestOverrides
 from mindroom.participation import ParticipationDecision, ParticipationGate
@@ -318,7 +317,7 @@ async def test_an_external_decider_never_reads_a_turns_stored_context() -> None:
 @pytest.mark.asyncio
 async def test_an_abstaining_decider_falls_back_to_the_model_decision() -> None:
     """When the backend abstains, the reply's own model decides as it would without a backend."""
-    decider = AsyncMock(return_value=None)
+    decider = AsyncMock(return_value="abstained")
     model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
 
     _, record = await _reply(model, ParticipationGate(decider=decider), run_id="run-1")
@@ -329,20 +328,18 @@ async def test_an_abstaining_decider_falls_back_to_the_model_decision() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["media", "attachment_text", "history_attachment", "tool_calls"])
-async def test_conversations_with_more_than_room_text_skip_the_external_decider(kind: str) -> None:
-    """Media, attachments, and tool calls are not projected to a backend; the model decides on the full context."""
+@pytest.mark.parametrize("kind", ["attachment_text", "history_attachment", "content_blocks"])
+async def test_conversations_the_projection_cannot_read_skip_the_external_decider(kind: str) -> None:
+    """Attachment references in another shape and content blocks could carry file names or media; the model decides."""
     decider = AsyncMock(return_value=ParticipationDecision(action="stay_silent", reason="Nope."))
     model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
     message = Message(role="user", content="Any ideas?")
-    if kind == "media":
-        message.images = [Image(url="https://example.org/image.png")]
-    elif kind == "attachment_text":
+    if kind == "attachment_text":
         message.content = "Attachments sent with the current message (use tool calls to inspect them):\nprivate.txt"
     elif kind == "history_attachment":
         message.content = "Can you inspect this? [attachments: att_123 (private.txt)]"
     else:
-        message = Message(role="assistant", content="Looking.", tool_calls=[tool_call("operate", "call-0")])
+        message.content = [{"type": "image_url", "image_url": {"url": "https://example.org/image.png"}}]
 
     _, record = await _reply(model, ParticipationGate(decider=decider), [message])
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
 MAX_REQUEST_BYTES = 16_000
 _MAX_CONTEXT_MESSAGES = 8
@@ -113,8 +113,9 @@ def build_judgment_request(
     *,
     instructions: str,
     max_context_messages: int = _MAX_CONTEXT_MESSAGES,
+    agent_ids: Collection[str] = (),
 ) -> JudgmentRequest:
-    """Send a bounded complete text window, refusing redacted or oversized inputs."""
+    """Send a bounded complete text window, refusing redacted or oversized inputs; ``agent_ids`` speak as agents."""
     criteria = _question_criteria(question)
     if (
         criteria is None
@@ -143,7 +144,10 @@ def build_judgment_request(
         if sender is None:
             return "<msg>"
         identity = unescape(sender[1][1:-1])
-        alias = aliases.setdefault(identity, f"speaker_{len(aliases) + 1}")
+        if identity not in aliases:
+            kind = "agent" if identity in agent_ids else "speaker"
+            aliases[identity] = f"{kind}_{sum(alias.startswith(kind) for alias in aliases.values()) + 1}"
+        alias = aliases[identity]
         return f'<msg from="{alias}">'
 
     state = {
@@ -199,6 +203,7 @@ def fit_judgment_request(
     *,
     instructions: str,
     max_context_messages: int,
+    agent_ids: Collection[str] = (),
 ) -> JudgmentRequest | None:
     """Clip earlier messages and keep the newest that fit; None when a kept message is unjudgeable."""
     history = history[-max_context_messages:]
@@ -209,6 +214,7 @@ def fit_judgment_request(
             (*context, final),
             max_context_messages=max_context_messages + 1,
             instructions=instructions,
+            agent_ids=agent_ids,
         )
         if request.incomplete_reason != "essential_input_too_large" or not context:
             break
