@@ -192,7 +192,7 @@ Platform administrators may:
 
 - Run `!reload-plugins`, and `!config` when `authorization.config_command_enabled` is `true` (see [Chat Commands](chat-commands.md#config)).
 - Manage any agent's credentials and the deployment-wide OAuth client configuration.
-- Talk to every responder regardless of its `access`.
+- Talk to every responder regardless of its `access`, except the [generated agents and teams](#responder-access) that admit an administrator only through their own `access`.
 
 A credential manager may manage only the named agent's shared credentials and OAuth connections, and sees every requester's brokered requests on that agent in its [request log](deployment/egress-broker.md#personal-request-log).
 The credential managers of one agent can change each other's keys and services in [Agent Keys](deployment/egress-broker.md#connecting-an-account).
