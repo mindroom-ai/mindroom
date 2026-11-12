@@ -736,6 +736,15 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
     return normalized
 
 
+def _endpoint_settings(settings: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    """Return ``settings`` without a null or empty ``base_url``; reject a ``base_url`` that is not a string."""
+    endpoint = settings.get("base_url")
+    if endpoint is not None and not isinstance(endpoint, str):
+        msg = f"{field_name}.base_url must be a string, not {type(endpoint).__name__}"
+        raise ValueError(msg)
+    return {key: item for key, item in settings.items() if key != "base_url" or item}
+
+
 class ModelPricing(BaseModel):
     """Provider prices in USD per million tokens."""
 
@@ -843,21 +852,21 @@ class ModelConfig(BaseModel):
     def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Reject a ``client_params`` that is not a mapping, or a ``base_url`` or ``client_params.base_url`` that is not a string.
 
-        The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family
-        routes read their endpoint, and the ``openai`` route its API, from the two ``base_url`` keys.
+        The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family,
+        ``anthropic``, and ``vertexai_claude`` routes read their endpoint, and the ``openai`` route its API, from the
+        two ``base_url`` keys. A null or empty ``base_url`` is dropped, so it sets no endpoint on any route.
         """
-        client_params = (value or {}).get("client_params")
+        if value is None:
+            return None
+        client_params = value.get("client_params")
         if client_params is not None and not isinstance(client_params, Mapping):
             msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
             raise ValueError(msg)
-        for key, endpoint in (
-            ("client_params.base_url", (client_params or {}).get("base_url")),
-            ("base_url", (value or {}).get("base_url")),
-        ):
-            if endpoint is not None and not isinstance(endpoint, str):
-                msg = f"extra_kwargs.{key} must be a string, not {type(endpoint).__name__}"
-                raise ValueError(msg)
-        return value
+        endpoint_params = _endpoint_settings(client_params or {}, "extra_kwargs.client_params")
+        settings = _endpoint_settings(value, "extra_kwargs")
+        if client_params:
+            settings["client_params"] = endpoint_params
+        return settings
 
     @field_validator("icon")
     @classmethod

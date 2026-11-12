@@ -1649,7 +1649,10 @@ def test_bedrock_reads_the_region_variables_in_the_order_aws_tools_read_them(tmp
 
 @pytest.mark.asyncio
 async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic_base_url(tmp_path: Path) -> None:
-    """The endpoint is ``client_params.base_url``, else ``base_url`` (a root the SDK appends ``/v1`` to), else the env."""
+    """The endpoint is ``client_params.base_url``, else ``base_url`` (a root the SDK appends ``/v1`` to), else the env.
+
+    A null or empty ``base_url`` or ``client_params.base_url`` sets no endpoint.
+    """
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
@@ -1658,13 +1661,19 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     params = {"client_params": {"base_url": "https://params-gateway.example"}}
     own = {"base_url": "https://gateway.example/anthropic/"}
+    unset = (
+        {"base_url": ""},
+        {"base_url": None},
+        {"client_params": {"base_url": ""}},
+        {"client_params": {"base_url": None}},
+    )
     with isolated_provider_environment():
         providers = [
             build_provider(
                 ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
                 runtime_paths,
             )
-            for extra_kwargs in (None, params, own, {**own, **params})
+            for extra_kwargs in (None, params, own, {**own, **params}, *unset)
         ]
         for provider in providers:
             await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
@@ -1674,12 +1683,14 @@ async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic
         ("params-gateway.example", "/v1/messages"),
         ("gateway.example", "/anthropic/v1/messages"),
         ("params-gateway.example", "/v1/messages"),
+        *[("env-gateway.example", "/v1/messages")] * len(unset),
     ]
     assert [provider.identity.endpoint for provider in providers] == [
         "https://env-gateway.example",
         "https://params-gateway.example",
         "https://gateway.example/anthropic",
         "https://params-gateway.example",
+        *["https://env-gateway.example"] * len(unset),
     ]
     assert providers[1].settings.client_params == params["client_params"]
     # MindRoom adds its compaction trigger only on Anthropic's own endpoint.

@@ -809,13 +809,12 @@ export function ModelConfig() {
     setIsSavingRow(true);
 
     const renamed = targetModelName !== originalModelName;
+    const providerChanged = rowDraft.provider !== originalModelConfig.provider;
     const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
     const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
     const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
     // A saved key belongs to the provider it was saved for.
-    const clearsCustomKey =
-      rowDraft.clearCustomKey ||
-      rowDraft.provider !== originalModelConfig.provider;
+    const clearsCustomKey = rowDraft.clearCustomKey || providerChanged;
 
     let keyOperationOk = true;
     let deletedOriginalKey = false;
@@ -886,10 +885,17 @@ export function ModelConfig() {
         }
       }
     } else {
-      delete nextExtraKwargs.base_url;
+      // A provider change drops the old provider's endpoint but keeps one More
+      // settings set during this edit.
+      if (
+        providerChanged &&
+        nextExtraKwargs.base_url === editingStart?.config.extra_kwargs?.base_url
+      ) {
+        delete nextExtraKwargs.base_url;
+      }
       delete nextModelConfig.api;
     }
-    if (rowDraft.provider !== originalModelConfig.provider) {
+    if (providerChanged) {
       // A config.yaml key belongs to the old provider; never send it to the new one.
       delete nextModelConfig.api_key;
       delete nextExtraKwargs.api_key;
