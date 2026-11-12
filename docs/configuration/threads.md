@@ -4,7 +4,7 @@ icon: lucide/messages-square
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](router.md), [Access Control](../authorization.md), and [Logs & Monitoring](../deployment/operational-log-events.md).
 
 ## Thread Mode Resolution
@@ -282,6 +282,47 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+## Activity in Other Threads
+
+An agent's context is the thread it replies in, so it does not know that another thread of the same room, where the same people worked a few minutes ago, exists.
+Turn on `room_activity` to add a short note to the agent's thread replies listing the room's other threads with new messages since its last reply in this thread, or within the window for its first reply there:
+
+```text
+Other threads in this room with activity since your last reply here:
+- "Main game work" (thread $abc...): Max, Daniel; 14 new messages, last 3 min ago; you replied there 10 min ago
+- "Design assets" (thread $def...): Kinsey; 3 new messages, last 20 min ago
+Read one with matrix_message(action="read", thread_id="...") if it bears on this request.
+```
+
+Each line has the thread's title (its current summary title, else the first line of its first message), who wrote there by display name, how many new messages and when the last one came, and whether the agent itself replied there.
+The note never quotes messages beyond the title, never lists the current thread or another room's threads, and lists only messages the agent's own Matrix account received in that room.
+The agent decides from the note whether to read a thread with `matrix_message`, so the note appears only for agents that have the `matrix_message` tool.
+
+```yaml
+defaults:
+  room_activity:
+    window_minutes: 60
+
+agents:
+  helper:
+    display_name: Helper
+    tools: [matrix_message]
+    room_activity:
+      enabled: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Add the note to this agent's thread replies |
+| `window_minutes` | int, 1-1440 | `120` | How far back the note looks; it never looks back past the agent's last reply in the current thread |
+| `max_threads` | int, 1-20 | `5` | Most threads one note lists, the most recently active first |
+
+`defaults.room_activity` applies to every agent, and `agents.<name>.room_activity` overrides it field by field, so the example above gives `helper` a 60-minute window.
+Only an agent's thread replies get the note: replies outside a thread, team replies, subagents, and agents in minimal mode do not.
+A turn with nothing new in the room's other threads gets no note, so a quiet room costs nothing.
+Otherwise the note adds about 70 tokens per listed thread, most of them the thread ID the agent needs to read it, plus about 35 for its first and last lines, to that turn's requests.
+It goes after the current message, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
 
 ## Message Edits
 

@@ -25,6 +25,7 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
+from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
@@ -140,6 +141,7 @@ from tests.response_runner_helpers import (
     stream_transport,
     streamed_answer,
 )
+from tests.test_event_journal_store import admit
 from tests.test_sandbox_proxy import _FakeResponse, _static_worker_manager_lease, _StreamsFromPost
 
 if TYPE_CHECKING:
@@ -370,6 +372,68 @@ class TestAgentBot(AgentBotTestBase):
         assert target_item.cache_policy == "stable"
         assert "Matrix room 'Engineering' (room ID !test:localhost)" in target_item.text
         assert "outside any thread" in target_item.text
+
+    @pytest.mark.asyncio
+    async def test_agent_thread_reply_hears_about_the_room_s_other_threads(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """With room_activity on, a thread reply's turn context lists the room's other threads with new messages."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        room_activity=AgentRoomActivityConfig(enabled=True),
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
+        bot.client.rooms = {room.room_id: room}
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        await admit(
+            bot.journal_principal(),
+            "$other-reply",
+            room_id="!test:localhost",
+            thread_id="$other",
+            sender="@bob:localhost",
+            ts=int(time.time() * 1000) - 60_000,
+        )
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    thread_id="$thread",
+                    prompt="Any news?",
+                    reply_to_event_id="$event123",
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        thread_id="$thread",
+                        reply_to_event_id="$event123",
+                        prompt="Any news?",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        items = mock_ai.call_args.args[0].transient_enrichment_items
+        (note,) = [item for item in items if item.key == "room_activity"]
+        assert "- (thread $other): bob; 1 new message, last 1 min ago" in note.text.splitlines()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
