@@ -6,11 +6,15 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelConfig } from "./ModelConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
+import type { JsonSchema } from "@/lib/configSchema";
+// Regenerated from the backend models by .github/scripts/generate_config_schema.py.
+import configSchema from "@/test/fixtures/config-schema.json";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
@@ -1221,28 +1225,142 @@ describe("ModelConfig", () => {
       });
     });
 
-    it("keeps a base URL More settings set after the row's provider changed", async () => {
-      const { rerender } = render(<ModelConfig />);
-      chooseProvider(editRow("openai_local"), /Anthropic/i);
-      vi.mocked(useConfigStore).mockReturnValue(
-        withEditedExtraKwargs() as never,
-      );
-      rerender(<ModelConfig />);
+    const gateway = { provider: "openai", id: "gpt-6-astra" };
 
-      const row = screen.getByDisplayValue("openai_local").closest("tr");
+    // Show the gateway model as the store holds it once More settings
+    // committed `extraKwargs`, with the forms built from the real schema.
+    function commitGateway(extraKwargs: Record<string, unknown>) {
+      vi.mocked(useConfigSchema).mockReturnValue({
+        schema: configSchema as JsonSchema,
+        error: null,
+        retry: vi.fn(),
+      });
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            gateway: { ...gateway, extra_kwargs: extraKwargs },
+          },
+        },
+        agents: [],
+        rooms: [],
+        diagnostics: [],
+      } as never);
+    }
+
+    function editExtraKwargs(
+      rerender: (ui: ReactElement) => void,
+      extraKwargs: Record<string, unknown>,
+    ) {
+      const reveal = screen.queryByRole("button", {
+        name: "Show extra kwargs",
+      });
+      if (reveal) fireEvent.click(reveal);
+      const editor = screen.getByLabelText("Extra kwargs YAML");
+      fireEvent.change(editor, {
+        target: { value: JSON.stringify(extraKwargs) },
+      });
+      fireEvent.blur(editor);
+      commitGateway(extraKwargs);
+      rerender(<ModelConfig />);
+    }
+
+    function saveGatewayRow() {
+      const row = screen.getByDisplayValue("gateway").closest("tr");
       if (!row) throw new Error("row not found");
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+    }
+
+    it.each([
+      {
+        endpoint: "a new base URL",
+        start: { base_url: "http://localhost:9292/v1" },
+        edits: [{ base_url: "http://proxy:8080/v1", temperature: 0.2 }],
+      },
+      {
+        endpoint: "the old client_params base URL again",
+        start: { client_params: { base_url: "https://gateway.example/v1" } },
+        edits: [
+          {},
+          { client_params: { base_url: "https://gateway.example/v1" } },
+        ],
+      },
+    ])(
+      "keeps $endpoint More settings set after the row's provider changed",
+      async ({ start, edits }) => {
+        commitGateway(start);
+        const { rerender } = render(<ModelConfig />);
+        chooseProvider(editRow("gateway"), /Anthropic/i);
+        fireEvent.click(
+          screen.getByRole("button", { name: /More settings for gateway/ }),
+        );
+        for (const extraKwargs of edits) {
+          editExtraKwargs(rerender, extraKwargs);
+        }
+        saveGatewayRow();
+
+        await waitFor(() => {
+          expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+            ["models", "gateway"],
+            {
+              ...gateway,
+              provider: "anthropic",
+              extra_kwargs: edits[edits.length - 1],
+            },
+          );
+        });
+      },
+    );
+
+    it("drops the old endpoints when More settings edits only other keys after the provider changed", async () => {
+      const endpoints = {
+        base_url: "http://localhost:9292/v1",
+        client_params: { base_url: "https://gateway.example/v1" },
+      };
+      commitGateway(endpoints);
+      const { rerender } = render(<ModelConfig />);
+      chooseProvider(editRow("gateway"), /Anthropic/i);
+      fireEvent.click(
+        screen.getByRole("button", { name: /More settings for gateway/ }),
+      );
+      editExtraKwargs(rerender, { ...endpoints, temperature: 0.2 });
+      saveGatewayRow();
 
       await waitFor(() => {
         expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-          ["models", "openai_local"],
-          expect.objectContaining({
+          ["models", "gateway"],
+          {
+            ...gateway,
             provider: "anthropic",
-            extra_kwargs: {
-              base_url: "http://proxy:8080/v1",
-              temperature: 0.2,
-            },
-          }),
+            extra_kwargs: { temperature: 0.2 },
+          },
+        );
+      });
+    });
+
+    it("drops an endpoint More settings set in an earlier row edit when the provider changes", async () => {
+      const proxy = { base_url: "http://proxy:8080/v1" };
+      commitGateway({});
+      const { rerender } = render(<ModelConfig />);
+      editRow("gateway");
+      fireEvent.click(
+        screen.getByRole("button", { name: /More settings for gateway/ }),
+      );
+      editExtraKwargs(rerender, proxy);
+      saveGatewayRow();
+      await waitFor(() => {
+        expect(screen.queryByDisplayValue("gateway")).toBeNull();
+      });
+
+      chooseProvider(editRow("gateway"), /Anthropic/i);
+      saveGatewayRow();
+
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenLastCalledWith(
+          ["models", "gateway"],
+          { ...gateway, provider: "anthropic" },
         );
       });
     });
