@@ -510,16 +510,17 @@ async def test_decisions_judge_reads_tool_calls_and_files_as_placeholders(
         ("assistant", "\n\n[audio message: {name}]", "[sent audio]"),
     ],
 )
+@pytest.mark.parametrize("name", ['tax "return" 2026.pdf', "tax return [2026]"])
 async def test_an_uncaptioned_file_reaches_the_judge_without_its_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     role: str,
     body: str,
     placeholder: str,
+    name: str,
 ) -> None:
     """Context stored without a media msgtype gives an uncaptioned file its name as body, which must not reach the judge."""
     gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
-    name = 'tax "return" 2026.pdf'
     kind = "audio" if "audio" in placeholder else "file"
     text = f"{body.format(name=name)}\n{format_attachment_annotation([_record('att_file', kind, name)])}"
     messages = [

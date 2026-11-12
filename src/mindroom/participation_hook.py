@@ -90,6 +90,7 @@ _RETAINED_TOOLS = re.compile(rf"{_RETAINED_TOOLS_HEADING} \([^\n]*\):((?:\n- [^\
 _RETAINED_TOOL = re.compile(r"^- The `((?:[^`\\]|\\.)*)` tool", re.MULTILINE)
 _SENT = {"image": "[sent an image]", "audio": "[sent audio]", "video": "[sent a video]", "file": "[sent a file]"}
 _MEDIA_KINDS = {"images": "image", "audio": "audio", "videos": "video", "files": "file"}
+_AUDIO_LINE = re.compile(r"\[audio message: (.*)\]")
 _MEDIA_MSGTYPES = {"m.image": "image", "m.file": "file", "m.audio": "audio", "m.video": "video"}
 _CDATA_BODY = re.compile(r"(?<=<!\[CDATA\[).*(?=\]\]>)", re.DOTALL)
 
@@ -108,8 +109,10 @@ def _annotation_placeholder(match: re.Match[str]) -> str:
     # Last legacy release: v2026.11.304 wrote context messages without the marker; the next release marks media.
     # Handling: that line is dropped, so the name never reaches the judge; any other line is a caption and is kept.
     # Coverage: tests/test_participation_judgment.py::test_an_uncaptioned_file_reaches_the_judge_without_its_name
-    line = None if body is None else strip_user_turn_time_prefix(body).removeprefix("[audio message: ")
-    if line is not None and rendered_label(line.removesuffix("]")) not in {name for _, name in files}:
+    line = None if body is None else strip_user_turn_time_prefix(body)
+    if line is not None and (audio := _AUDIO_LINE.fullmatch(line)):
+        line = audio[1]
+    if line is not None and rendered_label(line) not in {name for _, name in files}:
         placeholder = f"{body}\n{placeholder}"
     return match[1] + placeholder
 
