@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
+from mindroom.agent_loop.tools import is_media_follow_up
 from mindroom.attachments.storage import mentions_attachments
 from mindroom.history.message_content import message_media_entries
 from mindroom.history.summary_message import is_compaction_summary
@@ -114,9 +115,19 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
     conversation = [
         message
         for message in messages
-        # A compaction summary retells earlier tool results; a judge reads only the recent room messages.
-        if message.role in {"user", "assistant"} and message.add_to_agent_memory and not is_compaction_summary(message)
-    ][-8:]
+        # A compaction summary retells earlier tool results, and a media follow-up is the loop's, not a person's.
+        if message.role in {"user", "assistant"}
+        and message.add_to_agent_memory
+        and not is_compaction_summary(message)
+        and not is_media_follow_up(message)
+    ]
+    # The judge reads the last eight messages, counting a run of agent messages, such as one reply's tool calls, as one.
+    starts = [
+        index
+        for index, message in enumerate(conversation)
+        if index == 0 or message.role == "user" or conversation[index - 1].role == "user"
+    ]
+    conversation = conversation[starts[-8] if len(starts) >= 8 else 0 :]
     projected = []
     for message in conversation:
         if not isinstance(message.content, str | None):
@@ -141,7 +152,11 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
             notes.append(_sent([_MEDIA_KINDS[name] for name, media in message_media_entries(message) if media]))
         if message.tool_calls:
             notes.append(_used([(call.get("function") or {}).get("name") for call in message.tool_calls]))
-        projected.append(JudgmentMessage(message.role, "\n".join(part for part in (text, *notes) if part)))
+        text = "\n".join(part for part in (text, *notes) if part)
+        if projected and projected[-1].sender == message.role == "assistant":
+            projected[-1] = JudgmentMessage("assistant", f"{projected[-1].text}\n{text}")
+        else:
+            projected.append(JudgmentMessage(message.role, text))
     return tuple(projected)
 
 

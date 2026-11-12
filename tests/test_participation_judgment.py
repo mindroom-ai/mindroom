@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT
 from mindroom.attachments.storage import AttachmentRecord, format_attachment_annotation, format_attachments_prompt
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
@@ -488,8 +489,7 @@ async def test_decisions_judge_reads_tool_calls_and_files_as_placeholders(
         assert private not in wire
     assert [message["content"] for message in posted[0]["input"]] == [
         'user: <msg from="speaker_1"><![CDATA[Can someone check the nightly build?]]></msg>',
-        "assistant: Checking.\n[used tools: shell]",
-        "assistant: The build passes. Send a screenshot if it fails again.",
+        "assistant: Checking.\n[used tools: shell]\nThe build passes. Send a screenshot if it fails again.",
         'user: <msg from="agent_1"><![CDATA[I saw the same failure yesterday.]]></msg>',
         'user: <msg from="speaker_2"><![CDATA[Here is mine.\n[sent an image]]]></msg>',
         "assistant: [sent an image]\n[used tools: web_search]",
@@ -569,6 +569,35 @@ async def test_a_media_message_reaches_the_judge_as_its_kind_whatever_its_body(
 
 
 @pytest.mark.asyncio
+async def test_a_long_tool_loop_does_not_push_people_out_of_the_judge_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One reply's tool calls reach the judge as one agent message, so the request it answers stays in view."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    loop: list[Message] = []
+    for index in range(7):
+        loop.append(Message(role="assistant", content="", tool_calls=[tool_call("shell", f"call-{index}")]))
+        loop.append(Message(role="tool", content="SECRET_RESULT", tool_call_id=f"call-{index}", tool_name="shell"))
+    loop.append(Message(role="user", content=MEDIA_FOLLOW_UP_TEXT, images=[Image(content=b"SECRET_IMAGE")]))
+    messages = [
+        Message(role="user", content=_msg("@alice:example.org", "Helper, audit prod and staging.")),
+        *loop,
+        Message(role="assistant", content="Prod is fine."),
+        Message(role="user", content=_msg("@bob:example.org", "What about the other one?")),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    await _reply(model, gate, messages)
+
+    assert [message["content"] for message in posted[0]["input"]] == [
+        'user: <msg from="speaker_1"><![CDATA[Helper, audit prod and staging.]]></msg>',
+        "assistant: " + "\n".join(["[used tools: shell]"] * 7) + "\nProd is fine.",
+        'user: <msg from="speaker_2"><![CDATA[What about the other one?]]></msg>',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_interrupted_tool_context_and_summaries_reach_the_judge_without_tool_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -622,14 +651,11 @@ async def test_people_talking_after_a_tool_reply_reach_the_judge_as_people(
     assert gate.is_declined
     assert model.requests == []
     contents = [message["content"] for message in posted[0]["input"]]
-    assert contents[:2] == [
-        'user: <msg from="speaker_1"><![CDATA[Helper, what\'s the weather in Paris?]]></msg>',
-        "assistant: [used tools: weather]",
-    ]
+    assert contents[0] == 'user: <msg from="speaker_1"><![CDATA[Helper, what\'s the weather in Paris?]]></msg>'
     # The agent's own long reply is shortened to its start and end, and the newest message arrives whole.
-    assert contents[2].startswith("assistant: It is 18C")
-    assert "characters omitted" in contents[2]
-    assert contents[3:] == [
+    assert contents[1].startswith("assistant: [used tools: weather]\nIt is 18C")
+    assert "characters omitted" in contents[1]
+    assert contents[2:] == [
         'user: <msg from="speaker_2"><![CDATA[Nice, see you there.]]></msg>',
         f'user: Current message:\n<msg from="speaker_1"><![CDATA[{newest}]]></msg>',
     ]

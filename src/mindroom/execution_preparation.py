@@ -232,8 +232,14 @@ def _context_message_from_visible_message(
 ) -> Message:
     """Convert one visible Matrix message, whose prompt text is ``body``, into a structured prompt message."""
     annotation = format_attachment_annotation(list(attachment_records))
-    msgtype = message.content.get("msgtype")
-    media = {MEDIA_MSGTYPE_KEY: msgtype} if msgtype in ("m.image", "m.file", "m.audio", "m.video") else None
+    msgtype, filename = message.content.get("msgtype"), message.content.get("filename")
+    # A media body beside a different file name is a caption (MSC2530); otherwise it can be the file's name.
+    captioned = isinstance(filename, str) and filename and filename != message.content.get("body")
+    media = (
+        {MEDIA_MSGTYPE_KEY: msgtype}
+        if msgtype in ("m.image", "m.file", "m.audio", "m.video") and not captioned
+        else None
+    )
     if _is_own_reply(message, response_sender_id):
         if msgtype == "m.audio":
             body = f"[audio message: {body}]"

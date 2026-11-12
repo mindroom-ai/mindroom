@@ -1503,7 +1503,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
 
 
 def test_context_media_messages_name_their_msgtype() -> None:
-    """A media event's body may be its file name, so its context message names its msgtype for readers that hide it."""
+    """A media event whose body is its file name names its msgtype, so readers that hide file names can show its kind."""
     messages = _build_thread_history_messages_for_test(
         "Current request",
         [
@@ -1519,15 +1519,23 @@ def test_context_media_messages_name_their_msgtype() -> None:
                 event_id="$voice",
                 content={"msgtype": "m.audio", "body": "voice.ogg"},
             ),
+            make_visible_message(
+                sender="@alice:localhost",
+                body="Why does this crash?",
+                event_id="$captioned",
+                content={"msgtype": "m.image", "body": "Why does this crash?", "filename": "err.png"},
+            ),
             make_visible_message(sender="@alice:localhost", body="tax-return.pdf", event_id="$text"),
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
     ).in_request_order()
 
-    assert [message.provider_data for message in messages[:3]] == [
+    # A body beside a different file name is a caption (MSC2530), which readers may show.
+    assert [message.provider_data for message in messages[:4]] == [
         {MEDIA_MSGTYPE_KEY: "m.file"},
         {MEDIA_MSGTYPE_KEY: "m.audio"},
+        None,
         None,
     ]
 
