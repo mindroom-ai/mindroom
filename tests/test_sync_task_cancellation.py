@@ -2736,7 +2736,7 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
             old_setup_started.set()
             await asyncio.Event().wait()
 
-    async def replace_general_bot() -> None:
+    async def replace_general_bot(_previous_config: Config) -> None:
         # Stands in for any apply step that replaces a bot the first setup pass holds.
         old_bot.running = False
         swap_fleet_bot(orchestrator, "general", new_bot)

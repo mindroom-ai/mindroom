@@ -1207,13 +1207,14 @@ class _MultiAgentOrchestrator:
                     task.cancel()
             await asyncio.gather(ready_wait, shutdown_wait, return_exceptions=True)
 
-    async def _refresh_running_bots_presence(self) -> None:
-        """Let each bot this reload keeps running show its presence under the published config."""
+    async def _refresh_running_bots_presence(self, previous_config: Config) -> None:
+        """Let each bot this reload keeps running show its presence and server state under the published config."""
         for entity_name, bot in self.agent_bots.items():
             try:
                 await bot.refresh_presence()
             except Exception:
                 logger.exception("bot_presence_update_failed", agent=entity_name)
+            await bot.refresh_server_state(previous_config)
             logger.debug("bot_config_updated", agent=entity_name)
 
     async def _emit_config_reloaded(self, plan: ConfigUpdatePlan, changed_entities: set[str]) -> None:
@@ -1375,7 +1376,7 @@ class _MultiAgentOrchestrator:
                     # Replies may still be running, so these dependents restart behind their own drain.
                     await self._notify_mcp_catalog_change(deferred_server_id)
                 await self.fleet.stop(catalog_restarts)
-                await self._refresh_running_bots_presence()
+                await self._refresh_running_bots_presence(current_config)
                 if plan.router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.restart:
                     router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
                     if router_bot is not None:

@@ -461,6 +461,7 @@ def _mock_managed_bot() -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
     bot.refresh_presence = AsyncMock()
+    bot.refresh_server_state = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot
 

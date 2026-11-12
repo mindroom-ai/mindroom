@@ -5019,11 +5019,15 @@ class TestMultiAgentOrchestrator:
         first_bot.apply_published_config.assert_called_once_with()
         second_bot.apply_published_config.assert_called_once_with()
         first_bot.refresh_presence.side_effect = RuntimeError("presence unavailable")
+        previous_config = Config()
         with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
-            await orchestrator._refresh_running_bots_presence()
+            await orchestrator._refresh_running_bots_presence(previous_config)
 
         first_bot.refresh_presence.assert_awaited_once_with()
         second_bot.refresh_presence.assert_awaited_once_with()
+        # A presence failure leaves the bot's server state, such as its role, to be published.
+        first_bot.refresh_server_state.assert_awaited_once_with(previous_config)
+        second_bot.refresh_server_state.assert_awaited_once_with(previous_config)
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
 
     def test_publishing_a_reload_gives_every_bot_the_new_hook_registry(self, tmp_path: Path) -> None:
@@ -5069,6 +5073,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot})
 
         with (
@@ -5093,6 +5098,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
         with (
@@ -5560,9 +5566,11 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.refresh_presence = AsyncMock()
+        general_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
         new_bot = MagicMock()
@@ -5647,9 +5655,11 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.refresh_presence = AsyncMock()
+        general_bot.refresh_server_state = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
         new_bot = MagicMock()
@@ -5825,6 +5835,7 @@ async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_pat
     orchestrator.running = True
     router_bot = MagicMock()
     router_bot.refresh_presence = AsyncMock()
+    router_bot.refresh_server_state = AsyncMock()
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
     with (

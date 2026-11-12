@@ -4,21 +4,33 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import nio
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom import bot as bot_module
+from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix import client_room_admin
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import computer_runtime, server_state
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.worker_computer.sessions import ComputerError
-from tests.conftest import make_matrix_client_mock
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_matrix_client_mock,
+    orchestrator_runtime_paths,
+    write_config_yaml,
+)
+from tests.identity_helpers import entity_ids
 from tests.test_bot_ready_hook import _agent_bot
 
 if TYPE_CHECKING:
@@ -27,6 +39,7 @@ if TYPE_CHECKING:
 ROOM = "!room:example.org"
 AGENT = "@mindroom_helper:example.org"
 CONFIG = Config(agents={"helper": {"display_name": "Helper"}})
+ROLE = "Answers questions about the codebase"
 
 
 def _paths(tmp_path: Path, **env: str) -> RuntimePaths:
@@ -75,6 +88,30 @@ def test_content_names_the_origin_chat_binds_tokens_to(
 def test_nothing_is_published_without_the_api(tmp_path: Path) -> None:
     """`mindroom run --no-api` serves no Connections or Computers, so Chat must not be pointed at it."""
     assert server_state_content("helper", CONFIG, _paths(tmp_path), api_enabled=False) == {}
+
+
+@pytest.mark.parametrize(
+    ("entity", "api_enabled", "content"),
+    [
+        ("helper", True, {"api_origin": "http://localhost:8765", "computer": False, "role": ROLE}),
+        ("crew", True, {"api_origin": "http://localhost:8765", "computer": False, "role": "Plans releases"}),
+        ("helper", False, {"role": ROLE}),
+        ("router", True, {"api_origin": "http://localhost:8765", "computer": False}),
+    ],
+    ids=["agent", "team", "agent-without-the-api", "router"],
+)
+def test_content_says_what_the_entity_does(
+    tmp_path: Path,
+    entity: str,
+    api_enabled: bool,
+    content: dict[str, object],
+) -> None:
+    """Chat shows an agent's or team's role under its name, also without the API; the router has none."""
+    config = Config(
+        agents={"helper": {"display_name": "Helper", "role": ROLE}},
+        teams={"crew": {"display_name": "Crew", "role": "Plans releases", "agents": ["helper"]}},
+    )
+    assert server_state_content(entity, config, _paths(tmp_path), api_enabled=api_enabled) == content
 
 
 @pytest.mark.parametrize(
@@ -243,3 +280,57 @@ async def test_a_join_without_the_api_publishes_no_server(tmp_path: Path, monkey
     monkeypatch.setattr(bot_module, "publish_server_state", publish)
     await bot_module.AgentBot.change_local_membership(bot, "!room:localhost", "join")
     publish.assert_awaited_once_with(bot.client, "!room:localhost", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("edit", "published"),
+    [({"role": ROLE}, True), ({"instructions": ["Answer briefly."]}, False)],
+    ids=["role", "instructions"],
+)
+async def test_a_reload_that_changes_the_role_publishes_it_where_the_entity_is(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: dict[str, object],
+    published: bool,
+) -> None:
+    """A role edit applies without restarting the agent, so the running agent writes its new role in its rooms."""
+    runtime_paths = orchestrator_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config, api_enabled=False)
+    matrix_ids = entity_ids(config, runtime_paths)
+    clients = {}
+    for name in ("helper", ROUTER_AGENT_NAME):
+        user = AgentMatrixUser(
+            agent_name=name,
+            user_id=matrix_ids[name].full_id,
+            display_name=name,
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(user, rooms=[], orchestrator=orchestrator)
+        bot.running = True
+        bot.client = clients[name] = make_matrix_client_mock(user_id=user.user_id)
+        bot.client.rooms = {"!b:localhost": MagicMock(), "!a:localhost": MagicMock()}
+        orchestrator.fleet.add(name, bot)
+    monkeypatch.setattr(AgentBot, "refresh_presence", AsyncMock())
+    publish = AsyncMock()
+    monkeypatch.setattr(bot_module, "publish_server_state", publish)
+    edited = config.model_copy(update={"agents": {"helper": AgentConfig(display_name="Helper", **edit)}})
+    try:
+        write_config_yaml(edited, runtime_paths.config_path)
+        assert await orchestrator.config_reload._update_config() is False
+        assert orchestrator.agent_bots["helper"].client is clients["helper"]
+    finally:
+        # The stand-in clients cannot shut down a sync loop.
+        for bot in orchestrator.agent_bots.values():
+            bot.client = None
+        await orchestrator.stop()
+    helper = clients["helper"]
+    expected = [call(helper, "!a:localhost", {"role": ROLE}), call(helper, "!b:localhost", {"role": ROLE})]
+    assert publish.await_args_list == (expected if published else [])

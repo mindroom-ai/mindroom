@@ -181,8 +181,10 @@ class TestDynamicConfigUpdate:
 
         general_bot = _mock_agent_bot()
         general_bot.refresh_presence = AsyncMock()
+        general_bot.refresh_server_state = AsyncMock()
         router_bot = _mock_agent_bot()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         install_bots(
             orchestrator,
             {
@@ -658,9 +660,11 @@ class TestDynamicConfigUpdate:
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
         mock_bot = _mock_agent_bot()
         mock_bot.refresh_presence = AsyncMock()
+        mock_bot.refresh_server_state = AsyncMock()
         orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
@@ -714,9 +718,11 @@ class TestDynamicConfigUpdate:
         orchestrator = orchestrator_factory(initial_config)
         mock_bot = _mock_agent_bot()
         mock_bot.refresh_presence = AsyncMock()
+        mock_bot.refresh_server_state = AsyncMock()
         orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot()
         router_bot.refresh_presence = AsyncMock()
+        router_bot.refresh_server_state = AsyncMock()
         orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (

@@ -364,10 +364,12 @@ async def test_server_emoji_change_alone_ensures_the_emoji_room_without_room_set
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
     general_bot = MagicMock()
     general_bot.refresh_presence = AsyncMock()
+    general_bot.refresh_server_state = AsyncMock()
     orchestrator.fleet.add("general", general_bot)
     router_bot = MagicMock()
     router_bot.running = True
     router_bot.refresh_presence = AsyncMock()
+    router_bot.refresh_server_state = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
