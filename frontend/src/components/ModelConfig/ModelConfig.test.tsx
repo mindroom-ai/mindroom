@@ -352,6 +352,26 @@ describe("ModelConfig", () => {
     });
   });
 
+  it("keeps a non-OpenAI model's base URL when its row is saved", async () => {
+    const gateway = {
+      provider: "anthropic",
+      id: "claude-sonnet-5-5",
+      extra_kwargs: { base_url: "https://gateway.example/anthropic" },
+    };
+    addModels({ gateway });
+    render(<ModelConfig />);
+    const row = editRow("gateway");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "gateway"],
+        gateway,
+      );
+    });
+  });
+
   function addModels(models: Record<string, Record<string, unknown>>) {
     vi.mocked(useConfigStore).mockReturnValue({
       ...mockStore,
@@ -366,9 +386,9 @@ describe("ModelConfig", () => {
     addModels({ keyed: { provider: "openai", id: "gpt-6-astra", ...fields } });
   }
 
-  function editKeyedRow(): HTMLElement {
-    fireEvent.click(screen.getByText("keyed"));
-    const row = screen.getByDisplayValue("keyed").closest("tr");
+  function editRow(modelName: string): HTMLElement {
+    fireEvent.click(screen.getByText(modelName));
+    const row = screen.getByDisplayValue(modelName).closest("tr");
     if (!row) throw new Error("row not found");
     return row;
   }
@@ -407,7 +427,7 @@ describe("ModelConfig", () => {
     async (keyFields) => {
       addKeyedOpenAIModel(keyFields);
       render(<ModelConfig />);
-      const row = editKeyedRow();
+      const row = editRow("keyed");
       chooseProvider(row, /DeepSeek/i);
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
@@ -428,7 +448,7 @@ describe("ModelConfig", () => {
     addKeyedOpenAIModel({});
     await renderWithSavedKeyedModelKey();
 
-    const row = editKeyedRow();
+    const row = editRow("keyed");
     chooseProvider(row, /DeepSeek/i);
     expect(
       within(row).getByText(
@@ -460,7 +480,7 @@ describe("ModelConfig", () => {
       };
       await renderWithSavedKeyedModelKey();
 
-      const row = editKeyedRow();
+      const row = editRow("keyed");
       fireEvent.change(within(row).getByDisplayValue("keyed"), {
         target: { value: "keyed2" },
       });
@@ -495,7 +515,7 @@ describe("ModelConfig", () => {
     addKeyedOpenAIModel({ api_key: "sk-openai-config" });
     await renderWithSavedKeyedModelKey();
 
-    const row = editKeyedRow();
+    const row = editRow("keyed");
     chooseProvider(row, /DeepSeek/i);
     chooseProvider(row, /OpenAI/i);
     expect(
@@ -1145,6 +1165,32 @@ describe("ModelConfig", () => {
         expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
           ["models", "openai_local"],
           expect.objectContaining({
+            extra_kwargs: {
+              base_url: "http://proxy:8080/v1",
+              temperature: 0.2,
+            },
+          }),
+        );
+      });
+    });
+
+    it("keeps a base URL More settings set after the row's provider changed", async () => {
+      const { rerender } = render(<ModelConfig />);
+      chooseProvider(editRow("openai_local"), /Anthropic/i);
+      vi.mocked(useConfigStore).mockReturnValue(
+        withEditedExtraKwargs() as never,
+      );
+      rerender(<ModelConfig />);
+
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "openai_local"],
+          expect.objectContaining({
+            provider: "anthropic",
             extra_kwargs: {
               base_url: "http://proxy:8080/v1",
               temperature: 0.2,
