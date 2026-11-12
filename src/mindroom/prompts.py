@@ -30,6 +30,7 @@ __all__ = [
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+    "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
     "INLINE_MEDIA_FALLBACK_PROMPT",
     "INTERACTIVE_QUESTION_PROMPT",
@@ -102,6 +103,14 @@ OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent exposed through the OpenAI-compatible API as model `{agent_name}`.
 You are powered by the {model_provider} model: {model_id}.
 {openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
+
+"""
+
+# The agent's identity in a headless run, which answers one prompt from another program, with no conversation history.
+HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+You are {display_name}, the MindRoom agent `{agent_name}`, answering a prompt from another program.
+You are powered by the {model_provider} model: {model_id}.
+Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
 
 """
 
@@ -732,6 +741,9 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
+        "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {"agent_name", "display_name", "model_provider", "model_id"},
+        ),
         "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE": frozenset({"memory_path"}),
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
             {"included_lines", "total_lines", "max_entrypoint_lines", "max_entrypoint_tokens", "memory_path"},

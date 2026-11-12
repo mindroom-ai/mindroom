@@ -59,6 +59,9 @@ Each call is a new conversation, so the agent sees no history from earlier calls
 
 Cancelling the call, directly or through `asyncio.timeout`, stops the turn, its subagents, and any shell command still running before the cancellation reaches the caller.
 
+Importing `mindroom.headless` sends MindRoom's logs through Python's `logging`, so a program that configures no logging sees only warnings and errors, on stderr, and nothing on stdout.
+Configure `logging` to see more, such as `logging.basicConfig(level=logging.INFO)`; a program that configures `structlog` itself, before or after the import, keeps its own setup.
+
 `mindroom.headless.validate_config(config, *, agent, storage, workdir=None, requester_id=None)` checks the same things without running a turn and returns the validated config.
 
 ## What headless runs refuse
@@ -95,5 +98,6 @@ Code that `python` runs uses the calling process's current directory, so give it
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `file` and `coding` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.
+The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; under `file_access: workspace`, `file` and `coding` cannot reach them, so an agent that writes its own profiles or skills beside a `workdir` needs `file_access: unrestricted` or `shell`.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](architecture/security-posture.md).

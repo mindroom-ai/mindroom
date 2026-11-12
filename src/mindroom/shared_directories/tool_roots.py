@@ -29,6 +29,8 @@ class SharedDirectoryRoot:
 
     path: Path
     writable: bool
+    # What a refused write calls the directory, such as the saved tool outputs that headless tools read beside a workdir.
+    label: str = "a shared directory"
 
 
 def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
@@ -94,7 +96,7 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
                 return _no_workspace_error(raw_path, has_shares=bool(toolkit.shared_directory_roots()))
             root, relative = match
             if writes and not root.writable:
-                return f"Error: {raw_path} is in a shared directory you can only read."
+                return f"Error: {raw_path} is in {root.label} you can only read."
             rooted = copy.copy(toolkit)
             try:
                 rooted.base_dir = resolve_tool_base_dir(root.path)

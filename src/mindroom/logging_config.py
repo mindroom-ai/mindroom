@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "bound_log_context",
     "configure_default_logging",
+    "configure_library_logging",
     "current_log_file",
     "exception_frames",
     "get_logger",
@@ -190,6 +191,26 @@ def configure_default_logging() -> None:
 def uses_default_logging() -> bool:
     """Return whether the processors are still the ones `configure_default_logging` installed."""
     return structlog.get_config()["processors"] is _DEFAULT_PROCESSORS
+
+
+def configure_library_logging() -> None:
+    """Log through the stdlib `logging` of a program that runs MindRoom as a library, unless it configured structlog.
+
+    Until that program configures `logging`, Python shows only warnings and errors, on stderr.
+    """
+    if not uses_default_logging():
+        return
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            *_DEFAULT_PROCESSORS,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+    )
+    # MindRoom's tools also log through Agno's loggers, which would otherwise print to stdout at INFO.
+    _route_agno_loggers_to_root({"": {"level": "WARNING"}})
 
 
 def _normalize_log_level(level: str) -> str:
@@ -521,7 +542,8 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     # handlers or setting their own levels.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
     # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
-    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.
+    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level;
+    # tests/test_headless.py::test_library_use_logs_only_warnings_to_stderr.
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
     for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):

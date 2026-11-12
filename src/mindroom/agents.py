@@ -866,11 +866,13 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
+    workdir: Path | None,
+    workspace_root: Path,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
 ) -> str:
-    """Describe effective per-tool execution routing and file access to the model."""
+    """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
 
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
@@ -879,10 +881,20 @@ def _render_tool_execution_environment(
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
     file_access_description = {
-        "workspace": "agent workspace and attachments only",
+        "workspace": "agent workspace and attachments only"
+        if workdir is None
+        else "`file` and `coding`: the workdir and, read-only, your saved tool outputs; "
+        "other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if workdir is not None:
+        # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
+        file_access_lines.append(
+            f"- Workdir: `{workdir}`, where `shell` runs and `file`, `coding`, and `python` resolve relative paths. "
+            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+            f"is `{workspace_root}`; name files there by absolute path.",
+        )
     if shared_directories:
         file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
     if unconfined_tool_names:
@@ -1046,13 +1058,18 @@ def _render_agent_identity_context(
     model_provider: str,
     model_id: str,
     include_openai_compat_guidance: bool,
+    headless: bool,
 ) -> str:
+    """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
     openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
     if include_openai_compat_guidance:
+        prompt_name = (
+            "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
+        )
         return openai_compat_identity(
             config.prompts,
             openai_identity=render_prompt_template(
-                config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+                config.get_prompt(prompt_name),
                 agent_name=agent_name,
                 display_name=display_name,
                 model_provider=model_provider,
@@ -1062,12 +1079,12 @@ def _render_agent_identity_context(
             matrix_identity=render_prompt_template(
                 config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
                 display_name=display_name,
-                matrix_id="not available in OpenAI-compatible API",
+                matrix_id="not available in a headless run" if headless else "not available in OpenAI-compatible API",
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            openai_prompt_name="OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
+            openai_prompt_name=prompt_name,
             matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
 
@@ -1386,6 +1403,7 @@ def _build_agent_role_context(
     *,
     model_name: str,
     include_openai_compat_guidance: bool,
+    headless: bool,
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
@@ -1409,6 +1427,8 @@ def _build_agent_role_context(
                 worker_routed_tool_names=worker_routed_tool_names,
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
+                workdir=current_tool_workdir(),
+                workspace_root=agent_runtime.workspace.root,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     tools=tools,
@@ -1438,6 +1458,7 @@ def _build_agent_role_context(
             model_provider=model_provider,
             model_id=model_id,
             include_openai_compat_guidance=include_openai_compat_guidance,
+            headless=headless,
         )
 
     context_documents: list[_PreloadChunk] = []
@@ -1815,6 +1836,7 @@ def create_agent(
         agent_runtime,
         model_name=model_name,
         include_openai_compat_guidance=include_openai_compat_guidance,
+        headless=execution_identity is not None and execution_identity.channel == "headless",
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
