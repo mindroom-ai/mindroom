@@ -10619,7 +10619,7 @@ ls("src")
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
-It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
+It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, `list_shared_directories()`, `accept_shared_directory(owner, name)`, and `decline_shared_directory(owner, name)`, and has no configuration fields.
 
 ### Setup
 
@@ -10627,8 +10627,9 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
    Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
    Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
 2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell`, `file`, or `coding`.
-3. Give each reading agent `shell`, `python`, `file`, or `coding`; it does not need `shared_directories`.
-4. Make sure the user who asks for the invitation can use each reading agent outside the current room, as described under [Rules](#rules); in the example below, every member of `lobby` can.
+3. Give each reading agent `shell`, `python`, `file`, or `coding`.
+   It also needs `shared_directories` to accept invitations from users who cannot use it, as in [Sharing between personal agents](#sharing-between-personal-agents).
+4. When the user who asks for the invitation can use the reading agent outside the current room, the invitation applies at once, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
 ```yaml
 agents:
@@ -10647,18 +10648,48 @@ agents:
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
 It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
-`list_shared_directories()` shows each directory an agent owns or joined, with its path and access.
+`list_shared_directories()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
+
+### Sharing between personal agents
+
+When each person has an agent only they may use, an invitation from one person waits until the other accepts it through their own agent.
+
+```yaml
+agents:
+  ann_assistant:
+    display_name: Ann's Assistant
+    access:
+      users: ["@ann:example.org"]
+    tools: [shell, shared_directories]
+  ben_assistant:
+    display_name: Ben's Assistant
+    access:
+      users: ["@ben:example.org"]
+    tools: [shell, shared_directories]
+  team_helper:
+    display_name: Team Helper
+    access:
+      users: ["@ann:example.org", "@ben:example.org"]
+    tools: [shell, shared_directories]
+```
+
+Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
+Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name and who asked, never its path or files.
+When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `accept_shared_directory("ann_assistant", "notes")` and reads the files from then on.
+The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 
 ### Rules
 
 Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
 Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
 Private agents can neither create nor join shared directories.
-Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+Creating or deleting a directory, and adding or removing a member, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
 
-The user who asks for an invitation must be allowed to use the invited agent outside the current room.
+An invitation applies at once when the user who asks for it may use the invited agent outside the current room.
 Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
-Otherwise the invitation fails with "The user you act for has no access to writer outside the current room, so it cannot be invited".
+Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `accept_shared_directory(owner, name)` or declines it with `decline_shared_directory(owner, name)`.
+A pending agent sees no path or file of the directory and its worker mounts nothing until the accept; inviting it again while pending changes nothing.
+The owner's `remove_from_shared_directory` and `delete_shared_directory` also cancel a pending invitation.
 
 Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
 When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
@@ -17690,7 +17721,9 @@ Do not report or "fix" these; they are deliberate.
 - A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
 - `config_manager`'s `manage_config(operation="inspect")` and `manage_agent(operation="validate")` calls never ask for approval, even under a matching rule or `tool_approval.default: require_approval`, because they only read configuration.
-- Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
+- Inviting an agent to a shared directory makes it readable to every requester of that agent.
+  An invitation from a user who may use that agent takes effect at once, because that user could already relay the files in chat; any other invitation waits until a user who may use the invited agent accepts it through that agent, and declining needs such a user too.
+- A pending invitation shows the invited agent's prompt the directory's owner and name and the inviting user's ID, never its path or files, so anyone who may use a shareable owner can place such a line in any shareable agent's prompt.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
 - Removing a service from `defaults.worker_grantable_credentials`, or removing the environment variable that declares a granted credential and restarting, deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.

@@ -13,7 +13,10 @@ The worker boundary between agents must not weaken for anything else.
   The request asked for invitees that can read, and one writer avoids concurrent-edit semantics.
 - A shared directory belongs to an agent, not to a requester, matching how a non-private agent's workspace is already shared by all of its requesters.
 - Private agents can neither own nor join a directory, because their data is per requester while a member's worker may serve every requester.
-- An invitation needs the requester's access to the invited agent, matching the rule that a mentioned entity acts for the requesting human.
+- An invitation from a requester with access to the invited agent applies at once, matching the rule that a mentioned entity acts for the requesting human.
+  Any other invitation waits until a user who may use the invited agent accepts it through that agent, so people whose agents only they may use can still share with each other.
+  A pending invitation is recorded beside the record's `members`, which is all an older image reads, so an older image ignores it instead of granting access; its next change to the ledger drops it.
+  The invited agent's prompt names a pending invitation without its path, so the agent can ask its user, and nothing is mounted before the accept.
 - Membership changes recreate the affected workers, because neither Docker nor Kubernetes adds a mount to a running container.
 - The tool reports the path the agent's code tools see, which differs between the primary and a dedicated worker because workers mount storage at their own mount path.
 - Deleting a directory empties it instead of removing it.
@@ -61,5 +64,5 @@ Rejected because it has no per-directory access, so an invitation would mean not
 
 - A removed member's running worker still reads the directory until its next tool call recreates it.
 - Directories of an agent removed from config stay on disk and in the ledger, and nothing cleans them up.
-- Write access for members, teams as members, private agents, quotas, and an acceptance step for invitations are not implemented.
+- Write access for members, teams as members, private agents, and quotas are not implemented.
 - Primary-process path tools such as `attachments` cannot read shared directories, so agents copy files into their workspace first.

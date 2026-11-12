@@ -40,12 +40,27 @@ class SharedDirectoryError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingInvitation:
+    """An invitation to an agent that waits for a user who may use that agent to accept it."""
+
+    agent: str
+    requester: str
+    requested_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class SharedDirectory:
-    """One directory an agent owns and the agents that may read it."""
+    """One directory an agent owns, the agents that may read it, and the invitations not yet accepted."""
 
     owner: str
     name: str
     members: tuple[str, ...]
+    # Recorded apart from members, which grant access, so a reader that knows only members ignores them.
+    pending: tuple[PendingInvitation, ...] = ()
+
+    def pending_for(self, agent_name: str) -> PendingInvitation | None:
+        """Return the invitation waiting for one agent, if any."""
+        return next((invitation for invitation in self.pending if invitation.agent == agent_name), None)
 
 
 def shared_directory_relative_path(owner: str, name: str) -> Path:
@@ -55,6 +70,21 @@ def shared_directory_relative_path(owner: str, name: str) -> Path:
 
 def _ledger_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / _LEDGER_FILENAME
+
+
+def _parse_pending(raw: object, members: tuple[str, ...]) -> tuple[PendingInvitation, ...]:
+    invitations: dict[str, PendingInvitation] = {}
+    for entry in cast("list[object]", raw) if isinstance(raw, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        fields = [cast("dict[str, object]", entry).get(field) for field in ("agent", "requester", "requested_at")]
+        if all(isinstance(field, str) for field in fields) and fields[0] not in members:
+            agent, requester, requested_at = cast("list[str]", fields)
+            invitations.setdefault(
+                agent,
+                PendingInvitation(agent=agent, requester=requester, requested_at=requested_at),
+            )
+    return tuple(invitations[agent] for agent in sorted(invitations))
 
 
 def _parse_record(key: str, raw: object) -> SharedDirectory | None:
@@ -73,10 +103,12 @@ def _parse_record(key: str, raw: object) -> SharedDirectory | None:
     member_names = cast("list[object]", members)
     if not all(isinstance(member, str) for member in member_names):
         return None
+    member_tuple = tuple(sorted(set(cast("list[str]", member_names))))
     return SharedDirectory(
         owner=owner,
         name=name,
-        members=tuple(sorted(set(cast("list[str]", member_names)))),
+        members=member_tuple,
+        pending=_parse_pending(record.get("pending"), member_tuple),
     )
 
 
@@ -110,6 +142,10 @@ def _write_ledger(runtime_paths: RuntimePaths, directories: dict[str, SharedDire
             "owner": directory.owner,
             "name": directory.name,
             "members": list(directory.members),
+            "pending": [
+                {"agent": invitation.agent, "requester": invitation.requester, "requested_at": invitation.requested_at}
+                for invitation in directory.pending
+            ],
         }
         for key, directory in directories.items()
     }
@@ -183,22 +219,36 @@ def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
         return directory
 
 
-def _set_members(
+def _update_directory(
     runtime_paths: RuntimePaths,
     *,
     owner: str,
     name: str,
-    members: Callable[[tuple[str, ...]], tuple[str, ...]],
-) -> tuple[SharedDirectory, bool]:
+    update: Callable[[SharedDirectory], SharedDirectory],
+) -> tuple[SharedDirectory, SharedDirectory]:
+    """Apply one change to a directory's record and return the record before and after it."""
     with _ledger_lock:
         directories = _read_ledger(runtime_paths, for_update=True)
         directory = _existing(directories, owner, name)
-        updated = replace(directory, members=members(directory.members))
-        if updated == directory:
-            return directory, False
-        directories[f"{owner}/{name}"] = updated
-        _write_ledger(runtime_paths, directories)
-        return updated, True
+        updated = update(directory)
+        if updated != directory:
+            directories[f"{owner}/{name}"] = updated
+            _write_ledger(runtime_paths, directories)
+        return directory, updated
+
+
+def _without(directory: SharedDirectory, agent_name: str) -> SharedDirectory:
+    """Return the directory with one agent neither a member nor invited."""
+    return replace(
+        directory,
+        members=tuple(member for member in directory.members if member != agent_name),
+        pending=tuple(invitation for invitation in directory.pending if invitation.agent != agent_name),
+    )
+
+
+def _with_member(directory: SharedDirectory, agent_name: str) -> SharedDirectory:
+    without = _without(directory, agent_name)
+    return replace(without, members=tuple(sorted({*without.members, agent_name})))
 
 
 def add_shared_directory_member(
@@ -208,13 +258,14 @@ def add_shared_directory_member(
     name: str,
     member: str,
 ) -> tuple[SharedDirectory, bool]:
-    """Add one member; return the directory and whether it changed."""
-    return _set_members(
+    """Add one member, replacing any invitation waiting for it; return the directory and whether it changed."""
+    before, after = _update_directory(
         runtime_paths,
         owner=owner,
         name=name,
-        members=lambda members: tuple(sorted({*members, member})),
+        update=lambda directory: _with_member(directory, member),
     )
+    return after, after != before
 
 
 def remove_shared_directory_member(
@@ -223,13 +274,85 @@ def remove_shared_directory_member(
     owner: str,
     name: str,
     member: str,
-) -> tuple[SharedDirectory, bool]:
-    """Remove one member; return the directory and whether it changed."""
-    return _set_members(
+) -> tuple[SharedDirectory, SharedDirectory]:
+    """Remove one member or cancel the invitation waiting for it; return the directory before and after."""
+    return _update_directory(
         runtime_paths,
         owner=owner,
         name=name,
-        members=lambda members: tuple(existing for existing in members if existing != member),
+        update=lambda directory: _without(directory, member),
+    )
+
+
+def invite_pending_shared_directory_member(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    invitation: PendingInvitation,
+) -> tuple[SharedDirectory, SharedDirectory]:
+    """Record an invitation unless the agent is already a member or invited; return the directory before and after."""
+
+    def invite(directory: SharedDirectory) -> SharedDirectory:
+        if invitation.agent in directory.members or directory.pending_for(invitation.agent) is not None:
+            return directory
+        pending = sorted((*directory.pending, invitation), key=lambda existing: existing.agent)
+        return replace(directory, pending=tuple(pending))
+
+    return _update_directory(runtime_paths, owner=owner, name=name, update=invite)
+
+
+def _answer_invitation(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    agent_name: str,
+    answer: Callable[[SharedDirectory, str], SharedDirectory],
+) -> SharedDirectory:
+    def update(directory: SharedDirectory) -> SharedDirectory:
+        if directory.pending_for(agent_name) is None:
+            msg = f"{agent_name} has no pending invitation to {owner}'s shared directory '{name}'."
+            raise SharedDirectoryError(msg)
+        return answer(directory, agent_name)
+
+    return _update_directory(runtime_paths, owner=owner, name=name, update=update)[1]
+
+
+def accept_shared_directory_invitation(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    agent_name: str,
+) -> SharedDirectory:
+    """Make an invited agent a member; refuse when no invitation waits for it."""
+    return _answer_invitation(runtime_paths, owner=owner, name=name, agent_name=agent_name, answer=_with_member)
+
+
+def decline_shared_directory_invitation(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    agent_name: str,
+) -> SharedDirectory:
+    """Drop the invitation waiting for one agent; refuse when there is none."""
+    return _answer_invitation(runtime_paths, owner=owner, name=name, agent_name=agent_name, answer=_without)
+
+
+def pending_shared_directory_invitations(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> tuple[tuple[SharedDirectory, PendingInvitation], ...]:
+    """Return the invitations waiting for one agent from owners that may still share."""
+    if not is_shareable_agent(config, agent_name):
+        return ()
+    return tuple(
+        (directory, invitation)
+        for directory in load_shared_directories(runtime_paths)
+        if is_shareable_agent(config, directory.owner) and (invitation := directory.pending_for(agent_name))
     )
 
 

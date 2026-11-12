@@ -10069,7 +10069,9 @@
         "invite_to_shared_directory",
         "remove_from_shared_directory",
         "delete_shared_directory",
-        "list_shared_directories"
+        "list_shared_directories",
+        "accept_shared_directory",
+        "decline_shared_directory"
       ],
       "helper_text": null,
       "icon": "FolderOpen",
