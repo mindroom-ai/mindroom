@@ -2346,7 +2346,7 @@ class TestRoomThreadActivity:
         """A root whose body was removed or that is too large for a title has no content, nor does an oversized summary."""
         monkeypatch.setattr(reads, "_ROOM_ACTIVITY_TITLE_BYTES", 2_000)
         await admit(alice, "$big-root", ts=100, content=text("x" * 3_000))
-        await admit(alice, "$big-summary", ts=1_500, thread_id="$big-root", content=summary_notice("y" * 5_000))
+        await admit(alice, "$big-summary", ts=1_500, thread_id="$big-root", content=summary_notice("y" * 9_000))
         await admit(alice, "$gone", ts=100, content=text("first"))
         await admit(alice, "$gone-edit", ts=150, content=edit("$gone", "deleted"))
         await admit(alice, "$gone-redaction", ts=160, redacts="$gone-edit", kind=EventKind.REDACTION)
@@ -2361,12 +2361,22 @@ class TestRoomThreadActivity:
         # Too large to be a summary notice, so it is ordinary activity.
         assert [m.logical_event_id for m in activity[1].recent] == ["$big-summary"]
 
+    async def test_loads_only_the_newest_summary_notices(self, alice: PrincipalStore) -> None:
+        """At most the five newest summary notices among a thread's newest messages are loaded, oldest first."""
+        for index in range(7):
+            await admit(alice, f"$title-{index}", ts=1_100 + index, thread_id="$t", content=summary_notice(f"T{index}"))
+        await admit(alice, "$reply", ts=2_000, thread_id="$t")
+
+        (thread,) = await self._activity(alice)
+
+        assert [m.logical_event_id for m in thread.summaries] == [f"$title-{index}" for index in range(2, 7)]
+
     async def test_summary_notices_are_no_activity_and_take_no_thread_slot(self, alice: PrincipalStore) -> None:
         """A thread whose only new message is a summary notice is left out before the thread limit applies."""
         await admit(alice, "$b-reply", ts=2_000, thread_id="$b")
         await admit(alice, "$a-title", ts=3_000, thread_id="$a", content=summary_notice("A title"))
         # The longest title in a non-Latin script is still a summary notice, however its text is escaped.
-        title = "ж" * 300
+        title = "\U0001e900" * 300  # Adlam, outside the Basic Multilingual Plane: twelve escaped bytes each
         notice = summary_notice(title) | {"format": "org.matrix.custom.html", "formatted_body": title}
         await admit(alice, "$b-title", ts=4_000, thread_id="$b", content=notice)
 
@@ -9857,12 +9867,12 @@ class TestHotQueriesAreIndexCovered:
 
         assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
 
-    async def test_room_activity_summaries_load_by_primary_key(self, tmp_path: Path) -> None:
-        """A thread's summary candidates are loaded by their IDs, not by walking the room's index to find them."""
+    async def test_room_activity_titles_load_by_primary_key(self, tmp_path: Path) -> None:
+        """Roots and summary notices are loaded by their IDs, not by walking the room's index to find them."""
         database = sqlite3.connect(tmp_path / "summary-plan.db")
         for statement in schema_statements(SQLITE_DIALECT):
             database.execute(statement)
-        sql = reads._room_activity_summaries_sql(3)
+        sql = reads._rows_by_id_sql(3)
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
 
