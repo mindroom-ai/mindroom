@@ -7794,7 +7794,7 @@ personal_rooms:
 ```
 
 `mind` is the template key, never an agent itself, and `personal_rooms.agent: mind` gives each user's personal room that user's own agent.
-Because `access` is omitted, only the owner and platform administrators may use each generated agent.
+Because `access` is omitted, only the owner may use each generated agent; to admit anyone else, platform administrators included, set `access` under the template's `agent:`.
 
 ## Configuration
 
@@ -7860,7 +7860,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 ## Letting Agents Talk to Each Other
 
-By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
+By default nobody except the owner can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
 To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) instead.
@@ -7982,7 +7982,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
-- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+- Only the person who asked and any co-owners they add may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
 
@@ -16446,7 +16446,8 @@ Defaults:
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
 - The router defaults to `current_room_members: true`.
 
-Platform administrators pass every responder's `access` check, and every agent, team, and the router admits its own account.
+Platform administrators pass every responder's `access` check except that of a [personal agent](https://docs.mindroom.chat/personal-agents/), an agent another agent created, or a team that includes one, which admits an administrator only when its own `access` does.
+Every agent, team, and the router admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
@@ -16543,7 +16544,7 @@ Platform administrators may:
 
 - Run `!reload-plugins`, and `!config` when `authorization.config_command_enabled` is `true` (see [Chat Commands](https://docs.mindroom.chat/chat-commands/#config)).
 - Manage any agent's credentials and the deployment-wide OAuth client configuration.
-- Talk to every responder regardless of its `access`.
+- Talk to every responder regardless of its `access`, except the [generated agents and teams](#responder-access) that admit an administrator only through their own `access`.
 
 A credential manager may manage only the named agent's shared credentials and OAuth connections, and sees every requester's brokered requests on that agent in its [request log](https://docs.mindroom.chat/deployment/egress-broker/#personal-request-log).
 The credential managers of one agent can change each other's keys and services in [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#connecting-an-account).
@@ -17627,7 +17628,7 @@ Do not report or "fix" these; they are deliberate.
 - Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, whether it has a worker computer, and for an agent or team its configured `role`, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, and the role, also in an encrypted room and with the API off.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
   It shows a published role likewise only from agents on the viewer's homeserver, so a person writing the same state under their own user ID shows no role.
-- Administrators may use every agent created with `create_agent`, whose instructions its owner wrote, and its tools act for the administrator, so a copy of a creator that has an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
+- An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
@@ -21295,7 +21296,7 @@ The checks cover the agent and every agent it can reach through `delegate_to`.
 | [MCP](https://docs.mindroom.chat/mcp/) tools | A running MindRoom connects to MCP servers. |
 | [`knowledge_bases`](https://docs.mindroom.chat/knowledge/), semantic file `memory_search`, and the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) | A running MindRoom indexes them. |
 | Enabled [`plugins`](https://docs.mindroom.chat/plugins/) | A running MindRoom loads them. |
-| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every agent's responder access, which delegation checks. |
+| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every shared agent's responder access, which delegation checks. |
 | A `storage` holding Matrix account credentials, such as one `mindroom run` set up | Headless runs record accounts without credentials, which would stop that instance from starting. |
 
 Memory runs headless: [Mem0](https://docs.mindroom.chat/memory/) memories are recalled into the turn, and file memory is read as in Matrix; set `memory: none` to run without memory.
