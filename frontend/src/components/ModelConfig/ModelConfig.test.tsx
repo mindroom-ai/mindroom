@@ -430,6 +430,12 @@ describe("ModelConfig", () => {
   it.each([
     { api_key: "sk-openai-config", extra_kwargs: { temperature: 0.2 } },
     { extra_kwargs: { api_key: "sk-openai-config", temperature: 0.2 } },
+    {
+      extra_kwargs: {
+        client_params: { api_key: "sk-openai-config" },
+        temperature: 0.2,
+      },
+    },
   ])(
     "drops config.yaml API keys when changing provider (%o)",
     async (keyFields) => {

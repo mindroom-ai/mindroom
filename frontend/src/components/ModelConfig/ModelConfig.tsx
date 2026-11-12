@@ -893,17 +893,17 @@ export function ModelConfig() {
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (providerChanged) {
-      // Drop the old provider's endpoint, unless More settings set it during
-      // this edit, and its config.yaml key.
+      // Drop the old provider's config.yaml keys, and its endpoint unless
+      // More settings set one during this edit.
       if (!endpointsSetInEdit.includes("base_url")) {
         delete nextExtraKwargs.base_url;
       }
       const clientParams = nextExtraKwargs.client_params;
-      if (
-        isPlainObject(clientParams) &&
-        !endpointsSetInEdit.includes("client_params.base_url")
-      ) {
-        const kept = setObjectKey(clientParams, "base_url", undefined);
+      if (isPlainObject(clientParams)) {
+        let kept = setObjectKey(clientParams, "api_key", undefined);
+        if (!endpointsSetInEdit.includes("client_params.base_url")) {
+          kept = setObjectKey(kept, "base_url", undefined);
+        }
         if (Object.keys(kept).length > 0) {
           nextExtraKwargs.client_params = kept;
         } else {
