@@ -711,6 +711,7 @@ _STRUCTLOG_PROCESSORS = "structlog.configure(processors=[structlog.processors.JS
 _STRUCTLOG_STDLIB = (
     "structlog.configure(wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())"
 )
+_STRUCTLOG_FACTORY = "structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stdout))"
 
 
 def _library_program(tmp_path: Path, *, before: str = "", after: str = "") -> subprocess.CompletedProcess[bytes]:
@@ -763,7 +764,8 @@ def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
         pytest.param(_STRUCTLOG_TO_STDOUT, "", _PROBES, (), id="structlog-before-import"),
         pytest.param("", _STRUCTLOG_TO_STDOUT, _PROBES[:4], ("agno_warning",), id="structlog-after-import"),
         pytest.param("", _STRUCTLOG_PROCESSORS, _PROBES[:4], ("agno_warning",), id="structlog-processors-after-import"),
-        # A stdlib wrapper names an error with a traceback `exception`, and keeps the library processors.
+        pytest.param("", _STRUCTLOG_FACTORY, _PROBES[:4], ("agno_warning",), id="structlog-factory-after-import"),
+        # The program's stdlib loggers, named `probe` here, decide; Python's default shows warnings and errors.
         pytest.param(
             "",
             _STRUCTLOG_STDLIB,

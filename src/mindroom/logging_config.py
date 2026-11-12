@@ -14,7 +14,7 @@ import traceback
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -195,6 +195,17 @@ def uses_default_logging() -> bool:
 
 # The stdlib logger through which a program that runs MindRoom as a library gets MindRoom's records.
 _LIBRARY_LOGGER = logging.getLogger("mindroom")
+# The structlog config that `configure_library_logging` set; a program that configures structlog since changes it.
+_LIBRARY_CONFIG: dict[str, object] = {}
+
+
+def _library_logging_in_charge() -> bool:
+    """Return whether structlog still runs as `configure_library_logging` set it, so its processors route records.
+
+    structlog keeps every setting a later `structlog.configure` call leaves out, such as these processors beside a
+    program's own logger factory, so the processors step aside once the program changed any setting.
+    """
+    return structlog.get_config() == _LIBRARY_CONFIG
 
 
 def _library_level(method_name: str) -> int:
@@ -204,13 +215,15 @@ def _library_level(method_name: str) -> int:
 
 def _drop_below_library_level(_logger: object, method_name: str, event_dict: EventDict) -> EventDict:
     """Drop a record the program's `logging` would not show, before it is rendered."""
-    if not _LIBRARY_LOGGER.isEnabledFor(_library_level(method_name)):
+    if _library_logging_in_charge() and not _LIBRARY_LOGGER.isEnabledFor(_library_level(method_name)):
         raise structlog.DropEvent
     return event_dict
 
 
-def _emit_to_library_logger(_logger: object, method_name: str, rendered: str) -> NoReturn:
-    """Hand the rendered record to the program's `logging` instead of printing it."""
+def _emit_to_library_logger(_logger: object, method_name: str, rendered: str) -> str:
+    """Hand the rendered record to the program's `logging` instead of printing it, unless the program took over."""
+    if not _library_logging_in_charge():
+        return rendered
     _LIBRARY_LOGGER.log(_library_level(method_name), rendered)
     raise structlog.DropEvent
 
@@ -218,8 +231,8 @@ def _emit_to_library_logger(_logger: object, method_name: str, rendered: str) ->
 def configure_library_logging() -> None:
     """Log through the stdlib `logging` of a program that runs MindRoom as a library, unless it configured structlog.
 
-    Until that program configures `logging`, Python shows only warnings and errors, on stderr. Only the processors
-    change, so a program that later configures structlog's processors replaces all of this.
+    Until that program configures `logging`, Python shows only warnings and errors, on stderr. Once the program
+    configures structlog, its own setup decides, as if MindRoom had not set any of this.
     """
     if not uses_default_logging():
         return
@@ -230,6 +243,7 @@ def configure_library_logging() -> None:
             cast("Processor", _emit_to_library_logger),
         ],
     )
+    _LIBRARY_CONFIG.update(structlog.get_config())
     # MindRoom's tools also log through Agno's loggers, which would otherwise print to stdout at INFO.
     _route_agno_loggers_to_root(None)
 
