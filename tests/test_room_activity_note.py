@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
@@ -275,6 +277,7 @@ async def _turn_items(
     *,
     thread_id: str | None = "$current",
     agent_mode: AgentMode = "standard",
+    reader: ConversationReader | None = None,
 ) -> tuple[EnrichmentItem, ...]:
     ctx = replace(
         make_turn_context("test_agent", room_id=ROOM, thread_id=thread_id),
@@ -287,7 +290,7 @@ async def _turn_items(
             ctx,
             runtime=cast("BotRuntimeView", _Runtime(config, MagicMock(), MagicMock())),
             runtime_paths=runtime_paths,
-            reader=_reader(principal),
+            reader=reader or _reader(principal),
             agent_user_id=AGENT,
         )
 
@@ -311,6 +314,24 @@ async def test_the_turn_gets_the_note_only_when_the_setting_is_on(tmp_path: Path
 
     config, runtime_paths = _config(tmp_path, AgentRoomActivityConfig(enabled=True), tools=[])
     assert await _turn_items(principal, config, runtime_paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_costs_the_reply_only_its_note(tmp_path: Path, principal: PrincipalStore) -> None:
+    """When the note cannot be built, the reply goes on without it and one warning names the room; a stop still stops."""
+    config, runtime_paths = _config(tmp_path, AgentRoomActivityConfig(enabled=True), tools=["matrix_message"])
+    failing = MagicMock(spec=ConversationReader)
+    failing.room_thread_activity = AsyncMock(side_effect=TimeoutError("journal busy"))
+
+    with capture_logs() as logs:
+        assert await _turn_items(principal, config, runtime_paths, reader=failing) == ()
+
+    assert [(log["log_level"], log["error_type"], log["room_id"]) for log in logs] == [
+        ("warning", "TimeoutError", ROOM),
+    ]
+    failing.room_thread_activity = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await _turn_items(principal, config, runtime_paths, reader=failing)
 
 
 def test_an_agent_overrides_the_defaults_field_by_field(tmp_path: Path) -> None:

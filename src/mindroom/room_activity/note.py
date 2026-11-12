@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.resolution import room_activity
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.hooks import EnrichmentItem
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import message_preview, trusted_visible_sender_ids
 from mindroom.matrix.conversation_reads import projected_visible_message
 from mindroom.thread_summary.state import human_summary_authorizer, summary_state
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.response_turn import ResponseTurnContext
 
+logger = get_logger(__name__)
 _ROOM_ACTIVITY_ENRICHMENT_KEY = "room_activity"
 _MINUTE_MS = 60_000
 # The newest messages of the window one note counts; a busier window leaves its oldest uncounted.
@@ -79,25 +81,30 @@ async def with_room_activity_note(
         or not _offers_read_tool(ctx, config)
     ):
         return items
-    note = await _room_activity_note(
-        reader,
-        settings,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        agent_user_id=agent_user_id,
-        thread_history=ctx.thread_history or (),
-        member_display_names=ctx.member_display_names,
-        trusted_sender_ids=trusted_visible_sender_ids(config, runtime_paths),
-        authorize_human=human_summary_authorizer(
-            client,
-            ctx.room_id,
-            config,
-            runtime_paths,
-            ctx.entity_label,
-            runtime.agent_reply_memberships,
-        ),
-        now_ms=int(time.time() * 1000),
-    )
+    # The note is optional turn context, so failing to build it never costs the reply; a stop still stops it.
+    try:
+        note = await _room_activity_note(
+            reader,
+            settings,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            agent_user_id=agent_user_id,
+            thread_history=ctx.thread_history or (),
+            member_display_names=ctx.member_display_names,
+            trusted_sender_ids=trusted_visible_sender_ids(config, runtime_paths),
+            authorize_human=human_summary_authorizer(
+                client,
+                ctx.room_id,
+                config,
+                runtime_paths,
+                ctx.entity_label,
+                runtime.agent_reply_memberships,
+            ),
+            now_ms=int(time.time() * 1000),
+        )
+    except Exception as error:
+        logger.warning("Room activity note unavailable", room_id=ctx.room_id, error_type=type(error).__name__)
+        return items
     return items if note is None else (*items, _room_activity_item(note))
 
 
