@@ -50,7 +50,7 @@ The steps are described in [Connections portal sign-in](architecture/security-po
 ## Published Reports
 
 With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](tools/agent-orchestration.md#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent or manage its credentials, or a [trusted upstream](#trusted-upstream-sign-in) identity.
-A signed-out browser goes to Chat's sign-in page described above and comes back to the report; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
+A signed-out browser goes to Chat's sign-in page described above and comes back to the page of the report it opened, with its query; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
 Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
 A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
 Anyone given the view address can open that report until its key expires, the report is revoked, or MindRoom restarts, so share the report's link instead.

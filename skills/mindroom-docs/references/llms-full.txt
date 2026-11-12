@@ -1769,6 +1769,7 @@ agents:
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
+| `room_activity` | object | `defaults.room_activity` | Note in thread replies listing the room's other threads with new messages; omitted fields inherit `defaults.room_activity`. See [Activity in Other Threads](https://docs.mindroom.chat/configuration/threads/#activity-in-other-threads) |
 | `listen` | object | `null` | Hear chosen rooms and act silently after a quiet period; see [Listening](#listening) |
 | `contacts` | object | `null` | Let a personal agent talk to other people's personal agents and people after both owners approve; see [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
@@ -2018,6 +2019,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
+| `room_activity` | off, `window_minutes: 120`, `max_threads: 5`; see [Activity in Other Threads](https://docs.mindroom.chat/configuration/threads/#activity-in-other-threads) |
 | `max_tool_calls_per_turn` | `1000` |
 | `show_tool_calls` | `true` |
 | `show_reasoning` | `true` |
@@ -2952,13 +2954,14 @@ Router judgments share the process-wide limit and logging described in [Judgment
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
 It posts none when that room's canonical `m.space.parent` is a chat room it can read, such as one it is in, rather than a Space, since the room continues the conversation of the [room above](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
+In a room the router was invited to, when agents or teams join or leave later, such as ones invited after the router, the router edits its welcome to list the ones there now; a welcome sent before the router restarted stays as it was.
 Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
 
 The router's other duties are documented on their own pages: [command handling](https://docs.mindroom.chat/chat-commands/#command-handling), [room management](https://docs.mindroom.chat/rooms/#room-management), [voice message processing](https://docs.mindroom.chat/voice/#voice-message-processing), [configuration confirmations](https://docs.mindroom.chat/chat-commands/#configuration-confirmations), and [running scheduled tasks](https://docs.mindroom.chat/scheduling/#scheduled-task-restoration).
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
 ## Thread Mode Resolution
@@ -3169,10 +3172,14 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 
 #### Participation Context and Fallback
 
-A participation judgment sends the agent's guidance and up to eight recent user and assistant messages, with Matrix identities replaced by aliases.
-System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
-When the context contains media, attachment references, detected secrets, or more than 16 KB of text, the backend is skipped and the reply model decides instead.
+A participation judgment sends the agent's display name, its guidance, and up to eight recent messages, where one reply's consecutive agent messages count as one, with Matrix identities replaced by aliases that tell people (`speaker_1`) from agents (`agent_1`).
+The newest message is sent whole, while long earlier messages are shortened to their start and end and the oldest drop out first, so the request fits 16 KB.
+The agent's own tool calls appear as `[used tools: shell, web_search]` and a file or image as `[sent a file]` or `[sent an image]`, with its caption when it has one, so threads where agents use tools and people share files are judged too.
+MindRoom does not send tool inputs or results, file names or contents, media, conversation summaries, system prompts, memory, or tool definitions.
+Message text is sent as it appears in the thread, so it can still contain private information: a file name someone typed, tool output an agent quoted in its reply, or the closing line of a reply that ended because a tool kept failing, which names the tool and its last error, redacted (see `max_tool_calls_per_turn` in [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#configuration-options)).
+When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
+Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, whichever `provider` it uses, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
 
 ## Mid-Turn Coalescing
 
@@ -3236,6 +3243,47 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+## Activity in Other Threads
+
+An agent's context is the thread it replies in, so it does not know that another thread of the same room, where the same people worked a few minutes ago, exists.
+Turn on `room_activity` to add a short note to the agent's thread replies listing the room's other threads with new messages since its last reply in this thread, or within the window for its first reply there:
+
+```text
+Other threads in this room with activity since your last reply here:
+- "Main game work" (thread $abc...): Max, Daniel; 14 new messages, last 3 min ago; you replied there 10 min ago
+- "Design assets" (thread $def...): Kinsey; 3 new messages, last 20 min ago
+Read one with matrix_message(action="read", thread_id="...") if it bears on this request.
+```
+
+Each line has the thread's title (its current summary title, else the first line of its first message), who wrote there by display name, how many new messages and when the last one came, and whether the agent itself replied there.
+The note never quotes messages beyond the title, never lists the current thread or another room's threads, and lists only messages the agent's own Matrix account received in that room.
+The agent decides from the note whether to read a thread with `matrix_message`, so the note appears only for agents that have the `matrix_message` tool.
+
+```yaml
+defaults:
+  room_activity:
+    window_minutes: 60
+
+agents:
+  helper:
+    display_name: Helper
+    tools: [matrix_message]
+    room_activity:
+      enabled: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Add the note to this agent's thread replies |
+| `window_minutes` | int, 1-1440 | `120` | How far back the note looks; it never looks back past the agent's last reply in the current thread |
+| `max_threads` | int, 1-20 | `5` | Most threads one note lists, the most recently active first |
+
+`defaults.room_activity` applies to every agent, and `agents.<name>.room_activity` overrides it field by field, so the example above gives `helper` a 60-minute window.
+Only an agent's thread replies get the note: replies outside a thread, team replies, subagents, and agents in minimal mode do not.
+A turn with nothing new in the room's other threads gets no note, so a quiet room costs nothing.
+Otherwise the note adds about 70 tokens per listed thread, most of them the thread ID the agent needs to read it, plus about 35 for its first and last lines, to that turn's requests.
+It goes after the current message, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
 
 ## Message Edits
 
@@ -7699,6 +7747,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
 - When it onboards someone, MindRoom invites the router into the personal room it created, so [approval cards](https://docs.mindroom.chat/tool-approval/) work there without the agent inviting it first, unless [`router.accept_invites`](https://docs.mindroom.chat/configuration/router/) leaves out the agent; once the router has left, MindRoom does not invite it again.
+- The router gets power level 50 in the personal room, so it can publish the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) there; other members keep their power level.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
@@ -7763,6 +7812,7 @@ If the room's history setting stops matching the record, or anyone other than a 
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
 Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
+The router gets power level 50 only in an adopted room whose record lists it in `router_user_id`.
 
 # Personal Agents
 
@@ -7794,7 +7844,7 @@ personal_rooms:
 ```
 
 `mind` is the template key, never an agent itself, and `personal_rooms.agent: mind` gives each user's personal room that user's own agent.
-Because `access` is omitted, only the owner and platform administrators may use each generated agent.
+Because `access` is omitted, only the owner may use each generated agent; to admit anyone else, platform administrators included, set `access` under the template's `agent:`.
 
 ## Configuration
 
@@ -7860,7 +7910,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 ## Letting Agents Talk to Each Other
 
-By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
+By default nobody except the owner can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
 To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) instead.
@@ -7982,7 +8032,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
-- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+- Only the person who asked and any co-owners they add may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
 
@@ -16446,7 +16496,8 @@ Defaults:
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
 - The router defaults to `current_room_members: true`.
 
-Platform administrators pass every responder's `access` check, and every agent, team, and the router admits its own account.
+Platform administrators pass every responder's `access` check except that of a [personal agent](https://docs.mindroom.chat/personal-agents/), an agent another agent created, or a team that includes one, which admits an administrator only when its own `access` does.
+Every agent, team, and the router admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
@@ -16543,7 +16594,7 @@ Platform administrators may:
 
 - Run `!reload-plugins`, and `!config` when `authorization.config_command_enabled` is `true` (see [Chat Commands](https://docs.mindroom.chat/chat-commands/#config)).
 - Manage any agent's credentials and the deployment-wide OAuth client configuration.
-- Talk to every responder regardless of its `access`.
+- Talk to every responder regardless of its `access`, except the [generated agents and teams](#responder-access) that admit an administrator only through their own `access`.
 
 A credential manager may manage only the named agent's shared credentials and OAuth connections, and sees every requester's brokered requests on that agent in its [request log](https://docs.mindroom.chat/deployment/egress-broker/#personal-request-log).
 The credential managers of one agent can change each other's keys and services in [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#connecting-an-account).
@@ -16950,7 +17001,7 @@ The steps are described in [Connections portal sign-in](https://docs.mindroom.ch
 ## Published Reports
 
 With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent or manage its credentials, or a [trusted upstream](#trusted-upstream-sign-in) identity.
-A signed-out browser goes to Chat's sign-in page described above and comes back to the report; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
+A signed-out browser goes to Chat's sign-in page described above and comes back to the page of the report it opened, with its query; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
 Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
 A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
 Anyone given the view address can open that report until its key expires, the report is revoked, or MindRoom restarts, so share the report's link instead.
@@ -17502,7 +17553,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal never sends the same tab there twice in a row, and links to it the second time instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
-When a [published report that requires sign-in](https://docs.mindroom.chat/connections-portal/#published-reports) sent the browser to Chat, the hand-off redirects to `/reports/public/<slug>` instead, read from the ten-minute `__Host-mindroom_report_return` cookie (`mindroom_report_return` over plain HTTP), which holds only a slug; it is `SameSite=None` over HTTPS because the hand-off is a cross-site post, and any other value lands on the portal.
+When a [published report that requires sign-in](https://docs.mindroom.chat/connections-portal/#published-reports) sent the browser to Chat, the hand-off redirects to the page of that report the browser asked for, `/reports/public/<slug>` plus the requested path and query, instead, read from the ten-minute `__Host-mindroom_report_return` cookie (`mindroom_report_return` over plain HTTP), which holds only that slug, path, and query, percent-encoded; it is `SameSite=None` over HTTPS because the hand-off is a cross-site post, and a value whose slug is malformed or whose path has a `.` or `..` segment or a backslash, before or after one more percent-decoding, lands on the portal.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
 MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
@@ -17624,9 +17675,10 @@ Do not report or "fix" these; they are deliberate.
 - The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
-- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
+- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, whether it has a worker computer, and for an agent or team its configured `role`, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one, and the role, also in an encrypted room and with the API off.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
-- Administrators may use every agent created with `create_agent`, whose instructions its owner wrote, and its tools act for the administrator, so a copy of a creator that has an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
+  It shows a published role likewise only from agents on the viewer's homeserver, so a person writing the same state under their own user ID shows no role.
+- An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
@@ -20772,6 +20824,7 @@ Each default must not exceed its matching cap.
 Lowering a cap also limits existing triggers.
 
 Top-level `administrators` and `admin_users` can list, enable, disable, rotate, and delete any owner's triggers, and can target other agents, teams, and rooms.
+Only a trigger's owner can rotate the key of a trigger for a [personal agent](https://docs.mindroom.chat/personal-agents/), a created agent, or a team that includes one, because a new key signs events that run as that owner.
 `admin_users` grants only this trigger authority, not wider administrator rights.
 Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
@@ -21294,7 +21347,7 @@ The checks cover the agent and every agent it can reach through `delegate_to`.
 | [MCP](https://docs.mindroom.chat/mcp/) tools | A running MindRoom connects to MCP servers. |
 | [`knowledge_bases`](https://docs.mindroom.chat/knowledge/), semantic file `memory_search`, and the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) | A running MindRoom indexes them. |
 | Enabled [`plugins`](https://docs.mindroom.chat/plugins/) | A running MindRoom loads them. |
-| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every agent's responder access, which delegation checks. |
+| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every shared agent's responder access, which delegation checks. |
 | A `storage` holding Matrix account credentials, such as one `mindroom run` set up | Headless runs record accounts without credentials, which would stop that instance from starting. |
 
 Memory runs headless: [Mem0](https://docs.mindroom.chat/memory/) memories are recalled into the turn, and file memory is read as in Matrix; set `memory: none` to run without memory.

@@ -267,9 +267,14 @@ class PersonalRoomService:
                     source_room_id,
                     reinvite_departed_owner,
                 )
-                # Keep the validated room's MindRoom state power levels current, then let the router, whose client
-                # observed the trigger, publish the room's accounts if it is already in the room.
-                await ensure_managed_room_power_levels(self._client(), record.room_id)
+                # Keep the validated room's MindRoom state power levels current, and the state level of a router the
+                # room admits, which publishes its thread mode; then let the router, whose client observed the trigger,
+                # publish the room's accounts if it is already in the room.
+                await ensure_managed_room_power_levels(
+                    self._client(),
+                    record.room_id,
+                    state_writer_ids=self._admitted_router_ids(record),
+                )
                 if record.room_id in source_client.rooms:
                     await reconcile_room_accounts(
                         source_client,
@@ -339,6 +344,13 @@ class PersonalRoomService:
         if not await invite_to_room(self._client(), record.room_id, record.user_id):
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
+
+    def _admitted_router_ids(self, record: PersonalRoomRecord) -> tuple[str, ...]:
+        """Return the router a personal room admits: an imported room's listed router, else this installation's."""
+        if record.adoption is not None:
+            router_id = record.adoption.router_user_id
+            return () if router_id is None else (router_id,)
+        return (current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id,)
 
     async def _invite_router_if_never_member(self, record: PersonalRoomRecord) -> None:
         """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.

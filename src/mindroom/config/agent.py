@@ -37,6 +37,7 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
+from mindroom.config.room_activity import AgentRoomActivityConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
 from mindroom.config.validation import (
@@ -304,6 +305,10 @@ class AgentConfig(BaseModel):
     cold_cache: ColdCacheConfig | None = Field(
         default=None,
         description="Opt-in switch of an idle thread to cheap_model for the rest of the thread",
+    )
+    room_activity: AgentRoomActivityConfig | None = Field(
+        default=None,
+        description="Per-agent override of defaults.room_activity; omitted fields inherit it",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,

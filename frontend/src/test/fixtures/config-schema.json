@@ -148,6 +148,18 @@
           "default": null,
           "description": "Opt-in switch of an idle thread to cheap_model for the rest of the thread"
         },
+        "room_activity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentRoomActivityConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of defaults.room_activity; omitted fields inherit it"
+        },
         "access": {
           "anyOf": [
             {
@@ -805,6 +817,57 @@
         }
       },
       "title": "AgentPrivateKnowledgeConfig",
+      "type": "object"
+    },
+    "AgentRoomActivityConfig": {
+      "additionalProperties": false,
+      "description": "Per-agent override of ``defaults.room_activity``; each unset field keeps the default.",
+      "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.enabled",
+          "title": "Enabled"
+        },
+        "window_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.window_minutes",
+          "title": "Window Minutes"
+        },
+        "max_threads": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.max_threads",
+          "title": "Max Threads"
+        }
+      },
+      "title": "AgentRoomActivityConfig",
       "type": "object"
     },
     "AgentThreadExportConfig": {
@@ -1547,6 +1610,15 @@
           "description": "Whether to automatically show stop button on messages",
           "title": "Show Stop Button",
           "type": "boolean"
+        },
+        "room_activity": {
+          "$ref": "#/$defs/RoomActivityConfig",
+          "default": {
+            "enabled": false,
+            "window_minutes": 120,
+            "max_threads": 5
+          },
+          "description": "Opt-in note in thread replies listing the room's other threads with new messages"
         },
         "max_consecutive_agent_replies": {
           "default": 50,
@@ -4225,7 +4297,7 @@
         },
         "agent": {
           "$ref": "#/$defs/AgentConfig",
-          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names each user's own agent. Only the owner and administrators may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
+          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names each user's own agent. Only the owner may use each agent, platform administrators included, unless access admits others, and the owner is always added to access.users and credential_managers"
         },
         "users": {
           "additionalProperties": {
@@ -4685,6 +4757,36 @@
         }
       },
       "title": "ResponderAccessConfig",
+      "type": "object"
+    },
+    "RoomActivityConfig": {
+      "additionalProperties": false,
+      "description": "Whether, and how far back, an agent's thread replies hear about activity in the room's other threads.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Add a short note listing the room's other threads with new messages to the agent's thread replies",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "window_minutes": {
+          "default": 120,
+          "description": "How far back the note looks, in minutes, and at most since the agent's last reply in the thread",
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Window Minutes",
+          "type": "integer"
+        },
+        "max_threads": {
+          "default": 5,
+          "description": "Most threads one note lists, the most recent first",
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Max Threads",
+          "type": "integer"
+        }
+      },
+      "title": "RoomActivityConfig",
       "type": "object"
     },
     "RoomConfig": {
@@ -5855,6 +5957,11 @@
           "debounce_ms": 1000
         },
         "show_stop_button": true,
+        "room_activity": {
+          "enabled": false,
+          "max_threads": 5,
+          "window_minutes": 120
+        },
         "max_consecutive_agent_replies": 50,
         "knowledge_graph": false,
         "knowledge_graph_edits": true,

@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.authorization import administrators_pass_access
 from mindroom.config.validation import non_empty_stripped
 from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.durable_write import write_json_file_durable
@@ -31,7 +32,7 @@ from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import is_human_requester_id
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -396,6 +397,14 @@ class ExternalTriggerStore:
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = self._require_owned_record(records, trigger_id, actor_user_id, config)
+            # A new key signs deliveries that run as the trigger's owner, which administrators may not do here.
+            actor = resolve_human_requester_alias(actor_user_id, config, self._runtime_paths)
+            owner = resolve_human_requester_alias(record.owner_user_id, config, self._runtime_paths)
+            if actor != owner and not administrators_pass_access(config, record.target.agent):
+                msg = (
+                    "only its owner can rotate the key of a trigger for a personal or created agent, or a team with one"
+                )
+                raise ExternalTriggerStoreError(msg)
             if record.auth != "ed25519":
                 msg = "only ed25519 trigger keys can be rotated"
                 raise ExternalTriggerStoreError(msg)

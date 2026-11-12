@@ -80,7 +80,7 @@ Matrix sync callback
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
-| `participation_hook.py` | The reply's participation check as a pre-request loop hook: a decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
+| `participation_hook.py` | The reply's participation check as a pre-request loop hook: the configured judgment backend on a projection with tool calls and files as placeholders, or a decision request on the reply's exact messages, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM, TypeSafe, or OpenAI Decisions judge and map its result to a participation decision |
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
@@ -88,6 +88,7 @@ Matrix sync callback
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `judgment/cold_cache.py` | Decide from a thread's idle time and an opt-in judge whether the thread moves to the agent's cheap model |
 | `config/cold_cache.py` | Opt-in agent settings for the cold-cache judgment backend |
+| `config/room_activity.py` | `defaults.room_activity` and its per-agent field overrides for the other-threads note |
 | `providers/tool_policy.py` | A decision request's tool policy: `tool_choice` "none" keeps tool schemas and allows no tool use, native tools included |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
@@ -153,6 +154,7 @@ Matrix sync callback
 | `thread_summary/generation.py` | The summary model call, its response schemas, and initial tag normalization |
 | `thread_summary/notices.py` | Summary notice sends ordered after their predecessors, and the manual and welcome writes |
 | `thread_summary/automatic.py` | The automatic pass after a reply: thresholds, pin and resolved checks, initial tags, and the source pin re-check before delivery |
+| `room_activity/note.py` | The opt-in turn-context note listing the room's other threads with messages since the agent's last reply in its thread, read in one projection snapshot (`event_journal/reads.py` `room_thread_activity`) |
 | `file_access.py` | Agent `file_access` resolution, the shared path authorization its callers, such as plugin tools, read and write model-supplied paths through, and the size-checked reads of files that upload tools send |
 | `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins without a worker-routed shell or python) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
@@ -228,7 +230,7 @@ Matrix sync callback
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery and control tool |
-| `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
+| `orchestration/server_state.py` | Each entity's runtime origin, worker computer, and role, published per room as state so MindRoom Chat finds its server and shows what the entity does |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
 | `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), and the service the API routes reach |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |

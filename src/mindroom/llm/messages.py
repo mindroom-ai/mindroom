@@ -104,6 +104,9 @@ def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
     return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
 
 
+# ``Message.provider_data`` key naming the Matrix media ``msgtype`` a thread-context message shows, whose body may be the
+# file's name.
+MEDIA_MSGTYPE_KEY = "mindroom_media_msgtype"
 # ``Message.provider_data`` key marking a queued-message notice MindRoom wrote, which tells the model a newer message waits.
 QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 
@@ -409,6 +412,7 @@ def tool_result_view(message: Message) -> ToolResultView:
 
 __all__ = [
     "AGGREGATE_USAGE_KEY",
+    "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
     "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
     "REWRITTEN_ATTEMPT_KEY",

@@ -108,6 +108,7 @@ Router judgments share the process-wide limit and logging described in [Judgment
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
 It posts none when that room's canonical `m.space.parent` is a chat room it can read, such as one it is in, rather than a Space, since the room continues the conversation of the [room above](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
+In a room the router was invited to, when agents or teams join or leave later, such as ones invited after the router, the router edits its welcome to list the ones there now; a welcome sent before the router restarted stays as it was.
 Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
 
 The router's other duties are documented on their own pages: [command handling](https://docs.mindroom.chat/chat-commands/#command-handling), [room management](https://docs.mindroom.chat/rooms/#room-management), [voice message processing](https://docs.mindroom.chat/voice/#voice-message-processing), [configuration confirmations](https://docs.mindroom.chat/chat-commands/#configuration-confirmations), and [running scheduled tasks](https://docs.mindroom.chat/scheduling/#scheduled-task-restoration).

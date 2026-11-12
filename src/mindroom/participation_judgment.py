@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.judgment.evaluator import create_judgment_evaluator
-from mindroom.judgment.state import JudgmentMessage, build_judgment_request
+from mindroom.judgment.state import JudgmentMessage, fit_judgment_request
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecider, ParticipationDecision
+from mindroom.requester_identity import mindroom_user_id
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -34,13 +36,26 @@ def create_participation_decider(
     )
     if evaluate is None:
         return None
-    instructions = participation.instructions
+    # The judge knows the agent's name, so a message naming it reads as addressed to it.
+    instructions = f"The assistant is {config.entity_display_name(agent_name)}. {participation.instructions}".strip()
 
-    async def decide(messages: tuple[JudgmentMessage, ...]) -> ParticipationDecision | None:
-        request = build_judgment_request(PARTICIPATION_QUESTION, messages, instructions=instructions)
+    async def decide(messages: tuple[JudgmentMessage, ...]) -> ParticipationDecision | str:
+        if not messages:
+            return "missing_essential_input"
+        agents = current_internal_sender_ids(config, runtime_paths) - {mindroom_user_id(config, runtime_paths)}
+        request = fit_judgment_request(
+            PARTICIPATION_QUESTION,
+            messages[:-1],
+            messages[-1],
+            instructions=instructions,
+            max_context_messages=len(messages) - 1,
+            agent_ids=agents,
+        )
+        if request is None:
+            return "essential_input_redacted"
         result = await evaluate(request)
         if result.decision is None:
-            return None
+            return request.incomplete_reason or result.failure or "abstained"
         return ParticipationDecision(
             action="respond" if result.decision else "stay_silent",
             reason=f"judgment_backend={settings.provider};decision={result.decision}",

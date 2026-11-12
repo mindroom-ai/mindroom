@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import pytest
 from fastapi import HTTPException, Request
@@ -133,6 +134,33 @@ def test_signed_out_browser_is_sent_to_sign_in_and_lands_on_the_report(signin: d
     assert "app.js" in page.text
 
 
+@pytest.mark.parametrize(
+    ("path", "landing"),
+    [
+        (
+            "/reports/public/{slug}/inner/page.html?region=emea&x=1",
+            "/reports/public/{slug}/inner/page.html?region=emea&x=1",
+        ),
+        ("/reports/public/{slug}/Issue%20%2342%3F.html", "/reports/public/{slug}/Issue%20%2342%3F.html"),
+        ("/reports/public/{slug}/~1.{fake}/app.js?v=2", "/reports/public/{slug}/app.js?v=2"),
+        ("/reports/public/{slug}?next=//evil.example.org", "/reports/public/{slug}?next=//evil.example.org"),
+    ],
+)
+def test_signed_out_deep_link_lands_on_the_page_asked_for(signin: dict[str, Any], path: str, landing: str) -> None:
+    """Sign-in comes back to the page and query a signed-out browser asked for, inside the same report."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+
+    bounce = client.get(path.format(slug=slug, fake="0" * 64), follow_redirects=False)
+    assert (bounce.status_code, bounce.headers["location"]) == (303, SIGN_IN_PAGE)
+
+    landed = hand_off(client, "alice")
+    assert landed.headers["location"] == landing.format(slug=slug)
+    assert RETURN_COOKIE not in client.cookies
+    view = client.get(landed.headers["location"], follow_redirects=False)
+    assert view.headers["location"].startswith(f"/reports/public/{slug}/~")
+
+
 def test_hand_off_without_a_report_still_opens_the_portal(signin: dict[str, Any]) -> None:
     """A sign-in that no report started lands on the portal and sets no other cookie."""
     _signed_in_mode(signin)
@@ -152,9 +180,15 @@ def test_hand_off_without_a_report_still_opens_the_portal(signin: dict[str, Any]
         UNKNOWN_SLUG + "/../../api/config",
         UNKNOWN_SLUG + "%2F..%2F..%2Fapi%2Fconfig",
         UNKNOWN_SLUG + "\\evil.example.org",
-        UNKNOWN_SLUG + "?next=//evil.example.org",
         UNKNOWN_SLUG.upper(),
         UNKNOWN_SLUG[:-1],
+        UNKNOWN_SLUG + "/./api",
+        UNKNOWN_SLUG + "/%2e%2e/%2e%2e/api/config",
+        UNKNOWN_SLUG + "%2F..%252F..%252Fapi",
+        UNKNOWN_SLUG + "%2F%252e%252e%252F..%252Fapi",
+        UNKNOWN_SLUG + "/a%255Cb",
+        UNKNOWN_SLUG + "%2F%25252e%25252e%2Fapi",
+        quote(UNKNOWN_SLUG + "//evil.example.org/" + quote("../../x"), safe=""),
     ],
 )
 def test_hand_off_drops_a_crafted_way_back(signin: dict[str, Any], crafted: str) -> None:
@@ -401,6 +435,22 @@ def test_sign_in_check_that_fails_on_the_server_is_not_a_sign_in_page(
     monkeypatch.setattr(report_routes, "require_connections_user", unavailable)
     response = client.get(f"/reports/public/{UNKNOWN_SLUG}/", follow_redirects=False)
     assert response.status_code == 503
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/config", "app.js/%2E%2E/%2e%2e/x", "%2e/app.js", "a%5C..%5C..%5Capi"],
+)
+def test_signed_in_request_with_a_dot_segment_stays_inside_the_report(signin: dict[str, Any], path: str) -> None:
+    """A path that a browser would resolve outside the report gets the report's not-found answer, not a redirect."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+    assert sign_in(client, "alice").status_code == 200
+
+    response = client.get(f"/reports/public/{slug}/{path}", follow_redirects=False)
+
+    assert response.status_code == 404
+    assert "location" not in response.headers
 
 
 def test_view_link_keeps_the_asked_for_file_name_and_query(signin: dict[str, Any]) -> None:
