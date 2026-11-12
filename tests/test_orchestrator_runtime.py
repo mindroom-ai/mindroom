@@ -5030,6 +5030,35 @@ class TestMultiAgentOrchestrator:
         second_bot.refresh_server_state.assert_awaited_once_with(previous_config)
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
 
+    @pytest.mark.asyncio
+    async def test_a_reload_writes_every_bots_server_state_at_once(self, tmp_path: Path) -> None:
+        """A slow homeserver holds the reload for one publish timeout, not one per running bot."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+        bots = {name: _mock_managed_bot() for name in ("first", "second", "third")}
+        install_bots(orchestrator, bots)
+        started: list[str] = []
+        all_started = asyncio.Event()
+        answered = asyncio.Event()
+
+        def slow_write(name: str) -> AsyncMock:
+            async def write(_previous_config: Config) -> None:
+                started.append(name)
+                if len(started) == len(bots):
+                    all_started.set()
+                await answered.wait()
+
+            return AsyncMock(side_effect=write)
+
+        for name, bot in bots.items():
+            bot.refresh_server_state = slow_write(name)
+        refresh = asyncio.create_task(orchestrator._refresh_running_bots(Config()))
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=1)
+        finally:
+            answered.set()
+            await refresh
+        assert sorted(started) == ["first", "second", "third"]
+
     def test_publishing_a_reload_gives_every_bot_the_new_hook_registry(self, tmp_path: Path) -> None:
         """Bots kept through a plugin reload dispatch hooks through the registry the reload committed."""
         config = _runtime_bound_config(

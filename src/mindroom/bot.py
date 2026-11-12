@@ -1129,7 +1129,7 @@ class AgentBot:
     async def refresh_server_state(self, previous_config: Config) -> None:
         """Publish the server state again in every joined room when a reload changed it, as a role edit does live.
 
-        The rooms write at once, so a homeserver that does not answer holds the reload for one publish timeout per entity.
+        The rooms write at once, so a homeserver that does not answer holds the reload for one publish timeout.
         """
         client = self.client
         content = self._server_state_content(self.config)

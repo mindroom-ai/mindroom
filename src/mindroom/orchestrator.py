@@ -1214,8 +1214,10 @@ class _MultiAgentOrchestrator:
                 await bot.refresh_presence()
             except Exception:
                 logger.exception("bot_presence_update_failed", agent=entity_name)
-            await bot.refresh_server_state(previous_config)
             logger.debug("bot_config_updated", agent=entity_name)
+        # Each bot writes only its own state, so all write at once and a slow homeserver holds the reload for one
+        # publish timeout instead of one per bot.
+        await asyncio.gather(*(bot.refresh_server_state(previous_config) for bot in self.agent_bots.values()))
 
     async def _emit_config_reloaded(self, plan: ConfigUpdatePlan, changed_entities: set[str]) -> None:
         """Emit the config:reloaded observer event after applying a new snapshot."""
