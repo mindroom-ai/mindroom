@@ -52,5 +52,6 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 
 - Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
 - The agent's identity prompt is the one the OpenAI-compatible API uses, which names that API.
+- Beside a workdir, a few prompt lines still name workspace-relative paths that the tools resolve in the workdir: the note that editing an existing workspace skill with file tools is fine, and where delegation records live; leaving them out needs splitting prompt templates that configs can override.
 - Each call is a new conversation, and memories are not written automatically after a turn, as in the OpenAI-compatible API.
 - Tools that save files of their own under the workspace, such as `file_generation`, save them under `mindroom_tool_outputs/` in workdir mode; the paths their replies name are not rewritten.
