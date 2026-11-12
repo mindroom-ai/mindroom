@@ -44,7 +44,7 @@ import {
   SERVICE_NAME_CHARACTERS,
   SERVICE_NAME_PATTERN,
 } from "@/lib/serviceNames";
-import { isPlainObject } from "@/lib/configSchema";
+import { getPathValue, isPlainObject, setObjectKey } from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
 import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { ProviderLogo } from "./ProviderLogos";
@@ -187,11 +187,10 @@ const ENDPOINT_KEYS = ["base_url", "client_params.base_url"] as const;
 type EndpointKey = (typeof ENDPOINT_KEYS)[number];
 
 function endpointValue(extraKwargs: unknown, key: EndpointKey): unknown {
-  if (!isPlainObject(extraKwargs)) {
-    return undefined;
-  }
-  const settings = key === "base_url" ? extraKwargs : extraKwargs.client_params;
-  return isPlainObject(settings) ? settings.base_url : undefined;
+  return getPathValue(
+    extraKwargs,
+    key === "base_url" ? ["base_url"] : ["client_params", "base_url"],
+  );
 }
 
 function isValidHttpUrl(value: string): boolean {
@@ -894,8 +893,8 @@ export function ModelConfig() {
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (providerChanged) {
-      // The old provider's endpoint and config.yaml key never reach the new
-      // one; an endpoint More settings set during this edit stays.
+      // Drop the old provider's endpoint, unless More settings set it during
+      // this edit, and its config.yaml key.
       if (!endpointsSetInEdit.includes("base_url")) {
         delete nextExtraKwargs.base_url;
       }
@@ -904,8 +903,7 @@ export function ModelConfig() {
         isPlainObject(clientParams) &&
         !endpointsSetInEdit.includes("client_params.base_url")
       ) {
-        const kept = { ...clientParams };
-        delete kept.base_url;
+        const kept = setObjectKey(clientParams, "base_url", undefined);
         if (Object.keys(kept).length > 0) {
           nextExtraKwargs.client_params = kept;
         } else {
