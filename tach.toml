@@ -711,6 +711,7 @@ visibility = [
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
+    "mindroom.room_activity.note",
     "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.thread_summary",
@@ -3398,6 +3399,7 @@ depends_on = [
     "mindroom.response_admission",
     "mindroom.response_sources",
     "mindroom.response_turn",
+    "mindroom.room_activity.note",
     "mindroom.runtime_resolution",
     "mindroom.skill_learning.capture",
     "mindroom.streaming",
@@ -4446,6 +4448,7 @@ visibility = [
     "mindroom.listening.service",
     "mindroom.matrix.conversation_reads",
     "mindroom.reply_turn.enrichment",
+    "mindroom.room_activity.note",
     "mindroom.routing",
     "mindroom.thread_export.selection",
     "mindroom.turns.ingress",
@@ -4624,6 +4627,18 @@ depends_on = [
 path = "mindroom.thread_models"
 depends_on = [
     "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.room_activity.note"
+depends_on = [
+    "mindroom.config.resolution",
+    "mindroom.constants",
+    "mindroom.hooks",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.conversation_reads",
+    "mindroom.thread_summary",
+    "mindroom.tool_system.agent_tools",
 ]
 
 [[modules]]
