@@ -44,7 +44,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
-from mindroom.shared_directories.paths import describe_agent_shared_directories
+from mindroom.shared_directories.paths import describe_agent_pending_invitations, describe_agent_shared_directories
 from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
@@ -871,6 +871,7 @@ def _render_tool_execution_environment(
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
+    pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
 
@@ -898,6 +899,11 @@ def _render_tool_execution_environment(
         )
     if shared_directories:
         file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
+    if pending_shared_directory_invitations:
+        file_access_lines.append(
+            "- Pending shared directory invitations; ask your user before accepting or declining: "
+            f"{', '.join(pending_shared_directory_invitations)}.",
+        )
     if unconfined_tool_names:
         file_access_lines.append(
             f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
@@ -1441,6 +1447,11 @@ def _build_agent_role_context(
                     requires_primary_runtime=True,
                 ),
                 shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
+                pending_shared_directory_invitations=describe_agent_pending_invitations(
+                    config,
+                    runtime_paths,
+                    agent_name,
+                ),
             ),
         ),
     )
