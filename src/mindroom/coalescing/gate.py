@@ -1015,13 +1015,18 @@ class CoalescingGate:
         first = split_reply_segment(gate.queue[0].pending_event) if gate.queue else None
         if first is None or first.count is None:
             return None
-        length = 1
-        for queued in islice(gate.queue, 1, None):
-            if split_reply_segment(queued.pending_event) != (first.delivery, None):
-                break
-            length += 1
+        continuations = [
+            (segment := split_reply_segment(queued.pending_event)) is not None
+            and segment.count is None
+            and segment.delivery == first.delivery
+            for queued in gate.queue
+        ]
+        # The turn takes the segments right behind the first; one whose segments interleave with another reply's waits
+        # no longer once all have arrived, and its segments then answer as they come.
+        length = 1 + next((index for index, joins in enumerate(continuations[1:]) if not joins), len(continuations) - 1)
         until = gate.queue[0].receipt_time + _SPLIT_REPLY_WAIT_SECONDS
-        return _FrontSplitReply(length=length, waits=length < first.count and time.monotonic() < until, until=until)
+        arrived = 1 + sum(continuations[1:])
+        return _FrontSplitReply(length=length, waits=arrived < first.count and time.monotonic() < until, until=until)
 
     def _front_run_limit(self, key: CoalescingKey, gate: _GateEntry) -> int | None:
         """Return how many front admissions may share one turn, or None for the whole front run.

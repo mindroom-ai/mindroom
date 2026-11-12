@@ -440,11 +440,20 @@ def build_prepared_turn(
 ) -> PreparedTurn:
     """Build the logical turn represented by one coalescing-gate flush."""
     ordered_pending_events = list(pending_events)
-    # A split reply's first segment carries its mentions and the reply it finishes, so it addresses the whole turn.
-    primary_pending_event = next(
-        (event for event in ordered_pending_events if (segment := split_reply_segment(event)) and segment.count),
-        ordered_pending_events[-1],
-    )
+    primary_pending_event = ordered_pending_events[-1]
+    # A turn that ends inside a split reply answers that reply: its first segment carries the mentions and the reply
+    # it finishes.
+    if (tail := split_reply_segment(primary_pending_event)) is not None:
+        primary_pending_event = next(
+            (
+                event
+                for event in ordered_pending_events
+                if (segment := split_reply_segment(event)) is not None
+                and segment.count is not None
+                and segment.delivery == tail.delivery
+            ),
+            primary_pending_event,
+        )
     active_follow_up = any(pending_event.event.active_follow_up for pending_event in ordered_pending_events)
     prompt_rendering = _render_coalesced_prompt(
         ordered_pending_events,

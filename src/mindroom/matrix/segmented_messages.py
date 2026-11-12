@@ -36,6 +36,8 @@ _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
 # The first segment of a split reply says how many segments the reply has, so a receiver can answer them as one turn.
 SEGMENT_COUNT_KEY = "io.mindroom.segment_count"
+# Stands in for the count while the first segment is sized, so the real count never pushes it over its budget.
+_SIZING_SEGMENT_COUNT = 999
 # Rebuilt per segment after sizing (the tool trace) or not part of the visible
 # answer, so metadata can never split an answer or push it into a sidecar. A split
 # reply keeps no reasoning, which would otherwise repeat on every segment.
@@ -371,8 +373,12 @@ def segment_matrix_content(
 
     def first_build(chunk: str) -> dict[str, Any]:
         if is_edit:
-            return _edit_content_chunk(content, source, chunk)
-        return _rich_text_content(source, chunk, relation=source.get("m.relates_to"))
+            first = _edit_content_chunk(content, source, chunk)
+            first["m.new_content"][SEGMENT_COUNT_KEY] = _SIZING_SEGMENT_COUNT
+            return first
+        first = _rich_text_content(source, chunk, relation=source.get("m.relates_to"))
+        first[SEGMENT_COUNT_KEY] = _SIZING_SEGMENT_COUNT
+        return first
 
     def continuation_build(chunk: str) -> dict[str, Any]:
         return _continuation_content(
@@ -413,8 +419,11 @@ def segment_matrix_content(
     else:
         first = first_build(chunks[0])
         continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
+    visible_first = first["m.new_content"] if is_edit else first
     if continuations:
-        (first["m.new_content"] if is_edit else first)[SEGMENT_COUNT_KEY] = 1 + len(continuations)
+        visible_first[SEGMENT_COUNT_KEY] = 1 + len(continuations)
+    else:
+        visible_first.pop(SEGMENT_COUNT_KEY, None)
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):

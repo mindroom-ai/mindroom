@@ -1,5 +1,7 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
+import random
+
 import pytest
 
 from mindroom.constants import REASONING_CONTENT_KEY
@@ -285,6 +287,35 @@ def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -
     assert first[SEGMENT_COUNT_KEY] == 1 + len(segmented.continuations)
     assert all(SEGMENT_COUNT_KEY not in part for part in segmented.continuations)
     assert all(part[DURABLE_DELIVERY_ID_KEY] == first[DURABLE_DELIVERY_ID_KEY] for part in segmented.continuations)
+
+
+# Replies whose first segment's tool trace fills it to within the count's bytes, as a plain message and as an edit.
+@pytest.mark.parametrize(("seed", "edit"), [(1383, False), (1146, True)])
+def test_a_first_segment_filled_to_its_budget_still_fits_its_segment_count(seed: int, *, edit: bool) -> None:
+    """The count is sized with the first segment, so a tool trace that fills the budget does not force the sidecar."""
+    rng = random.Random(seed)  # noqa: S311 - a fixed test fixture, not a secret
+    paragraphs = [f"Paragraph {index} " + "x" * rng.randint(20, 400) for index in range(rng.randint(150, 400))]
+    calls = rng.randint(1, 12)
+    body = "\n\n".join([*(f"🔧 `tool{index}` [{index + 1}]" for index in range(calls)), *paragraphs])
+    events = [
+        {
+            "type": "tool_call_completed",
+            "tool_name": f"tool{index}",
+            "args_preview": "a" * rng.randint(0, 3000),
+            "result_preview": "r" * rng.randint(0, 6000),
+        }
+        for index in range(calls)
+    ]
+    message = build_message_content(body, extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}})
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    first = segmented.first["m.new_content"] if edit else segmented.first
+    assert first[SEGMENT_COUNT_KEY] == 1 + len(segmented.continuations)
+    budget = _SEGMENT_TARGET_EDIT_BYTES if edit else _SEGMENT_TARGET_PLAINTEXT_BYTES
+    assert calculate_event_size(segmented.first) <= budget
 
 
 def test_a_reply_that_stays_one_segment_has_no_segment_count() -> None:

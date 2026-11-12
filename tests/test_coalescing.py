@@ -1525,6 +1525,42 @@ async def test_a_split_reply_missing_a_segment_dispatches_what_arrived_at_its_bo
     await gate.drain_all()
 
 
+def test_a_later_reply_batched_after_a_split_reply_still_addresses_the_turn() -> None:
+    """Only a batch that ends inside a split reply answers as that reply's first segment; a later reply leads otherwise."""
+    key = CoalescingKey(
+        "!room:localhost",
+        "$thread:localhost",
+        RequesterCoalescingOwner("@mindroom_research:localhost"),
+    )
+    split = [_split_reply_segment("$one:localhost", count=2), _split_reply_segment("$two:localhost")]
+    later = _split_reply_segment("$later:localhost", delivery="turn-2")
+
+    def primary(pending_events: list[PendingEvent]) -> str:
+        return build_prepared_turn(key, pending_events, queues_other_run=lambda _identity: False).event.event_id
+
+    assert primary(split) == "$one:localhost"
+    assert primary([*split, later]) == "$later:localhost"
+
+
+@pytest.mark.asyncio
+async def test_interleaved_split_replies_that_have_arrived_do_not_wait_for_the_bound() -> None:
+    """Two complete replies whose segments interleave in one queue dispatch at once instead of waiting out the bound."""
+    batches: list[PreparedTurn] = []
+    gate = _split_reply_gate(batches)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@mindroom_research:localhost"))
+    for pending in (
+        _split_reply_segment("$a1:localhost", count=2, thread_id=None),
+        _split_reply_segment("$b1:localhost", delivery="turn-2", count=2, thread_id=None),
+        _split_reply_segment("$a2:localhost", thread_id=None),
+        _split_reply_segment("$b2:localhost", delivery="turn-2", thread_id=None),
+    ):
+        await _admit_ready(gate, key, pending)
+
+    async with asyncio.timeout(2):
+        await _wait_for(lambda: sum(len(batch.handled_turn.source_event_ids) for batch in batches) == 4)
+    await gate.drain_all()
+
+
 @pytest.mark.asyncio
 async def test_shutdown_does_not_wait_for_a_split_replys_missing_segments() -> None:
     """Draining for shutdown dispatches a held split reply at once instead of waiting out its bound."""
