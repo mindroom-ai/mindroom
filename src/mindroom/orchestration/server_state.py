@@ -1,4 +1,4 @@
-"""Each entity's MindRoom server, published as room state so MindRoom Chat can open it without a typed URL."""
+"""Each entity's MindRoom server and role, published as room state so MindRoom Chat can open it without a typed URL."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# nio retries a homeserver it cannot reach without limit, and the join that triggers a write waits for it.
+# nio retries a homeserver it cannot reach without limit, and the join or reload that triggers a write waits for it.
 _PUBLISH_TIMEOUT_SECONDS = 10
 
 
@@ -29,22 +29,31 @@ def server_state_content(
     *,
     api_enabled: bool,
 ) -> dict[str, object]:
-    """Return the origin Chat must open, which is the OpenID audience, and whether the entity has a worker computer.
+    """Return the origin Chat must open (the OpenID audience), whether the entity has a worker computer, and its role.
 
-    Without a usable origin, or with the API off (`mindroom run --no-api`), the content is empty, which also clears
+    Without a usable origin, or with the API off (`mindroom run --no-api`), the content has no origin, which also clears
     what an earlier process published.
+    The configured role of an agent or team, which Chat shows under its name, is there whenever it is set.
     """
+    content: dict[str, object] = {}
     origin = openid_audience(runtime_paths)
-    if origin is None or not api_enabled:
-        return {}
-    return {"api_origin": origin, "computer": worker_computer_provider(entity_name, config, runtime_paths) is not None}
+    if origin is not None and api_enabled:
+        content = {
+            "api_origin": origin,
+            "computer": worker_computer_provider(entity_name, config, runtime_paths) is not None,
+        }
+    entity = config.agents.get(entity_name) or config.teams.get(entity_name)
+    role = entity.role.strip() if entity is not None else ""
+    if role:
+        content["role"] = role
+    return content
 
 
 async def publish_server_state(client: nio.AsyncClient, room_id: str, content: dict[str, object]) -> None:
     """Write the entity's server state in one room unless the room already holds it.
 
-    Room state is not encrypted, so every room member and the homeserver can read the origin.
-    A failure only leaves Chat without the address, so it is logged and never stops or long delays the join.
+    Room state is not encrypted, so every room member and the homeserver can read the origin and the role.
+    A failure only leaves Chat without the address or role, so it is logged and never stops or long delays the join or reload.
     """
     user_id = client.user_id
     try:
