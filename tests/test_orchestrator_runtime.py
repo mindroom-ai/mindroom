@@ -5021,7 +5021,7 @@ class TestMultiAgentOrchestrator:
         first_bot.refresh_presence.side_effect = RuntimeError("presence unavailable")
         previous_config = Config()
         with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
-            await orchestrator._refresh_running_bots_presence(previous_config)
+            await orchestrator._refresh_running_bots(previous_config)
 
         first_bot.refresh_presence.assert_awaited_once_with()
         second_bot.refresh_presence.assert_awaited_once_with()

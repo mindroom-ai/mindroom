@@ -478,7 +478,7 @@ async def test_serving_api_binds_membership_and_a_failed_reload_leaves_it_bound(
         with (
             patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_refresh_running_bots_presence", side_effect=RuntimeError("presence failed")),
+            patch.object(orchestrator, "_refresh_running_bots", side_effect=RuntimeError("presence failed")),
             pytest.raises(RuntimeError, match="presence failed"),
         ):
             await orchestrator._apply_config_update_plan(current, plan)

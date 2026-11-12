@@ -85,7 +85,7 @@ def test_content_names_the_origin_chat_binds_tokens_to(
     assert server_state_content("helper", CONFIG, _paths(tmp_path, **env), api_enabled=True) == content
 
 
-def test_nothing_is_published_without_the_api(tmp_path: Path) -> None:
+def test_no_origin_is_published_without_the_api(tmp_path: Path) -> None:
     """`mindroom run --no-api` serves no Connections or Computers, so Chat must not be pointed at it."""
     assert server_state_content("helper", CONFIG, _paths(tmp_path), api_enabled=False) == {}
 
@@ -306,7 +306,7 @@ async def test_a_reload_that_changes_the_role_publishes_it_where_the_entity_is(
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config, api_enabled=False)
     matrix_ids = entity_ids(config, runtime_paths)
-    clients = {}
+    helper_client = None
     for name in ("helper", ROUTER_AGENT_NAME):
         user = AgentMatrixUser(
             agent_name=name,
@@ -316,9 +316,11 @@ async def test_a_reload_that_changes_the_role_publishes_it_where_the_entity_is(
         )
         bot = AgentBot(user, rooms=[], orchestrator=orchestrator)
         bot.running = True
-        bot.client = clients[name] = make_matrix_client_mock(user_id=user.user_id)
+        bot.client = make_matrix_client_mock(user_id=user.user_id)
         bot.client.rooms = {"!b:localhost": MagicMock(), "!a:localhost": MagicMock()}
         orchestrator.fleet.add(name, bot)
+        if name == "helper":
+            helper_client = bot.client
     monkeypatch.setattr(AgentBot, "refresh_presence", AsyncMock())
     publish = AsyncMock()
     monkeypatch.setattr(bot_module, "publish_server_state", publish)
@@ -326,12 +328,14 @@ async def test_a_reload_that_changes_the_role_publishes_it_where_the_entity_is(
     try:
         write_config_yaml(edited, runtime_paths.config_path)
         assert await orchestrator.config_reload._update_config() is False
-        assert orchestrator.agent_bots["helper"].client is clients["helper"]
+        assert orchestrator.agent_bots["helper"].client is helper_client
     finally:
         # The stand-in clients cannot shut down a sync loop.
         for bot in orchestrator.agent_bots.values():
             bot.client = None
         await orchestrator.stop()
-    helper = clients["helper"]
-    expected = [call(helper, "!a:localhost", {"role": ROLE}), call(helper, "!b:localhost", {"role": ROLE})]
+    expected = [
+        call(helper_client, "!a:localhost", {"role": ROLE}),
+        call(helper_client, "!b:localhost", {"role": ROLE}),
+    ]
     assert publish.await_args_list == (expected if published else [])
