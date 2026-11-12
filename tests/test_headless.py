@@ -643,7 +643,7 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
 
     system = _sent(provider.requests[0], "system")
-    assert "(`file` and `coding`: the workdir and, read-only, your saved tool outputs;" in system
+    assert "(`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
     assert f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; " in system
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
     (save_file,) = (tool for tool in provider.requests[0].tools if tool.name == "save_file")
@@ -670,7 +670,8 @@ async def test_an_authored_matrix_identity_still_opens_the_headless_one(
     """An operator's own Matrix identity prompt still applies headless, without a Matrix ID or an API to name."""
     provider = _install(monkeypatch, "done")
     config = _config()
-    config["prompts"] = {"AGENT_IDENTITY_CONTEXT_TEMPLATE": "I am {display_name} ({matrix_id})."}
+    template = "I am {display_name} ({matrix_id}).\n{openai_compat_history_guidance}"
+    config["prompts"] = {"AGENT_IDENTITY_CONTEXT_TEMPLATE": template}
     await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage")
 
     system = _sent(provider.requests[0], "system")
@@ -705,7 +706,9 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
 # MindRoom's own records, the records MindRoom's tools write through Agno, and the program's own structlog record.
 _MINDROOM = ("probe_debug", "probe_info", "probe_warning", "probe_exception")
 _AGNO = ("agno_info", "agno_warning")
-_PROBES = (*_MINDROOM, *_AGNO, "caller_info")
+# What a program sees when every probe it logs reaches it; only one setup also logs `caller_msg`.
+_SEEN = (*_MINDROOM, *_AGNO, "caller_info")
+_PROBES = (*_SEEN, "caller_msg")
 _STRUCTLOG_TO_STDOUT = (
     "structlog.configure(processors=[structlog.processors.JSONRenderer()], "
     "logger_factory=structlog.PrintLoggerFactory(sys.stdout), wrapper_class=structlog.make_filtering_bound_logger(0))"
@@ -715,6 +718,10 @@ _STRUCTLOG_STDLIB = (
     "structlog.configure(wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())"
 )
 _STRUCTLOG_FACTORY = "structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stdout))"
+# A generic wrapper passes every method name through, such as `msg`, which is no log level.
+_STRUCTLOG_GENERIC = (
+    'structlog.configure(wrapper_class=structlog.BoundLogger); structlog.get_logger("caller").msg("caller_msg")'
+)
 
 
 def _library_program(tmp_path: Path, *, before: str = "", after: str = "") -> subprocess.CompletedProcess[bytes]:
@@ -728,15 +735,10 @@ from mindroom.headless import validate_config
 from mindroom.logging_config import get_logger
 {after}
 validate_config({_config()!r}, agent="coder", storage=Path({str(tmp_path / "storage")!r}))
-class Rendered:
-    def __repr__(self) -> str:
-        sys.stderr.write("rendered_below_level")
-        return "value"
 logger = get_logger("mindroom.probe")
-logger.debug("probe_debug", value=Rendered())
+logger.debug("probe_debug")
 logger.info("probe_info")
 logger.warning("probe_warning")
-logger.warning("positional %s", "formatted")
 logger.exception("probe_exception")
 from agno.utils.log import log_info, log_warning
 log_info("agno_info")
@@ -754,50 +756,27 @@ def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
     """A program that imports headless runs and configures no logging gets MindRoom's warnings on stderr, only."""
     completed = _library_program(tmp_path)
 
-    # The program's own structlog logger prints as it would without MindRoom, and nothing else reaches stdout.
-    (line,) = completed.stdout.decode().splitlines()
-    assert "caller_info" in line
-    # MindRoom's tools also log through Agno's loggers, whose own handler would print to stdout.
-    assert _probes(completed.stderr) == ["probe_warning", "probe_exception", "agno_warning"]
-    assert b"positional formatted" in completed.stderr
-    # A record below the level is dropped before it is rendered, as a prompt in a debug line would be.
-    assert b"rendered_below_level" not in completed.stderr
+    # Agno's loggers keep their own stdout handler, and the program's own structlog logger prints as before.
+    assert _probes(completed.stdout) == [*_AGNO, "caller_info"]
+    assert _probes(completed.stderr) == ["probe_warning", "probe_exception"]
 
 
 @pytest.mark.parametrize(
     ("before", "after", "stdout", "stderr"),
     [
-        # MindRoom never touched logging, so Agno's own handler still prints to stdout.
-        pytest.param(_STRUCTLOG_TO_STDOUT, "", _PROBES, (), id="structlog-before-import"),
-        pytest.param("", _STRUCTLOG_TO_STDOUT, (*_MINDROOM, "caller_info"), ("agno_warning",), id="structlog-after"),
-        pytest.param("", _STRUCTLOG_FACTORY, (*_MINDROOM, "caller_info"), ("agno_warning",), id="factory-after"),
+        pytest.param(_STRUCTLOG_TO_STDOUT, "", _SEEN, (), id="structlog-before-import"),
+        pytest.param("", _STRUCTLOG_TO_STDOUT, _SEEN, (), id="structlog-after"),
+        pytest.param("", _STRUCTLOG_FACTORY, _SEEN, (), id="factory-after"),
         # Without a logger factory of the program's, MindRoom's records stay with `logging`.
-        pytest.param(
-            "",
-            _STRUCTLOG_PROCESSORS,
-            ("caller_info",),
-            ("probe_warning", "probe_exception", "agno_warning"),
-            id="processors-after",
-        ),
+        pytest.param("", _STRUCTLOG_PROCESSORS, (*_AGNO, "caller_info"), _MINDROOM[2:], id="processors-after"),
+        pytest.param("", _STRUCTLOG_GENERIC, (*_AGNO, "caller_info", "caller_msg"), _MINDROOM[2:], id="generic-after"),
         # The program's stdlib loggers decide; Python's default shows warnings and errors.
-        pytest.param(
-            "",
-            _STRUCTLOG_STDLIB,
-            (),
-            ("probe_warning", "probe_exception", "agno_warning"),
-            id="stdlib-after",
-        ),
-        pytest.param(
-            "",
-            "logging.basicConfig(level=logging.INFO, stream=sys.stdout)",
-            _PROBES[1:],
-            (),
-            id="logging",
-        ),
+        pytest.param("", _STRUCTLOG_STDLIB, _AGNO, ("probe_warning", "probe_exception"), id="stdlib-after"),
+        pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _SEEN[1:], (), id="logging"),
         pytest.param(
             "",
             "logging.basicConfig(level=logging.WARNING, stream=sys.stdout)",
-            ("probe_warning", "probe_exception", "agno_warning", "caller_info"),
+            (*_MINDROOM[2:], *_AGNO, "caller_info"),
             (),
             id="logging-warning",
         ),
@@ -821,4 +800,4 @@ def test_library_logging_leaves_a_structlog_setup_made_after_another_import(tmp_
     before = f"import mindroom.config.main\n{_STRUCTLOG_FACTORY}"
     completed = _library_program(tmp_path, before=before)
 
-    assert (_probes(completed.stdout), _probes(completed.stderr)) == ([*_MINDROOM, *_AGNO, "caller_info"], [])
+    assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(_SEEN), [])

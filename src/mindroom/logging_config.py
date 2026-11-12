@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from typing import TextIO
 
-    from structlog.typing import EventDict, ExceptionRenderer, ExcInfo, Processor
+    from structlog.typing import ExceptionRenderer, ExcInfo, Processor
 
     from mindroom.constants import RuntimePaths
 
@@ -210,29 +210,15 @@ def _library_logger_factory(*args: object) -> object:
     return _PRINT_LOGGER_FACTORY(*args)
 
 
-def _drop_below_library_level(logger: object, method_name: str, event_dict: EventDict) -> EventDict:
-    """Drop a MindRoom record that the program's `logging` would not show, before it is rendered."""
-    # A stdlib wrapper names an error with a traceback `exception`; every other record is named by its level.
-    level = logging.ERROR if method_name == "exception" else logging.getLevelNamesMapping()[method_name.upper()]
-    if isinstance(logger, logging.Logger) and not logger.isEnabledFor(level):
-        raise structlog.DropEvent
-    return event_dict
-
-
 def configure_library_logging() -> None:
     """Log through the stdlib `logging` of a program that runs MindRoom as a library, unless it configured structlog.
 
-    Until that program configures `logging`, Python shows only MindRoom's warnings and errors, on stderr. Only
-    MindRoom's loggers change: the program's own structlog loggers print as they did.
+    Until that program configures `logging`, Python shows only MindRoom's warnings and errors, on stderr. Only the
+    logger factory changes, so the program's own structlog loggers keep printing through the same processors.
     """
     if not uses_default_logging():
         return
-    structlog.configure(
-        processors=[cast("Processor", _drop_below_library_level), *_DEFAULT_PROCESSORS],
-        logger_factory=_library_logger_factory,
-    )
-    # MindRoom's tools also log through Agno's loggers, which would otherwise print to stdout at INFO.
-    _route_agno_loggers_to_root(None)
+    structlog.configure(logger_factory=_library_logger_factory)
 
 
 def _normalize_log_level(level: str) -> str:
@@ -548,11 +534,8 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     return renderer_name
 
 
-def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) -> None:
-    """Send Agno records through the configured handlers, so they share their format, level, and stream.
-
-    Without ``loggers``, as in library use, the records follow the root logger's level, whatever the program sets it to.
-    """
+def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
+    """Send Agno records through the configured handlers, so they share their format, level, and stream."""
     # AGNO_COMPAT: Agno library loggers bypass the host's logging configuration.
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
@@ -567,9 +550,7 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) ->
     # handlers or setting their own levels.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
     # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
-    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level;
-    # tests/test_headless.py::test_library_use_logs_only_warnings_to_stderr;
-    # tests/test_headless.py::test_library_use_follows_the_programs_logging.
+    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
     for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
@@ -579,9 +560,6 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) ->
         for log_filter in list(agno_logger.filters):
             if isinstance(log_filter, _AgnoLevelFilter):
                 agno_logger.removeFilter(log_filter)
-        if loggers is None:
-            agno_logger.setLevel(logging.NOTSET)
-            continue
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
         level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))

@@ -60,7 +60,7 @@ def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error
     if runtime_paths is not None and identity is not None and identity.channel == "headless":
         # A headless run has no dashboard: its keys come from the process environment or the storage's `.env`.
         return (
-            f"🔑 No AI provider key is set up yet, so I can't reply. {safe_error} "
+            f"🔑 No AI provider key is set up yet, so I can't reply. {safe_error.rstrip('.')}. "
             f"A `.env` file at {runtime_paths.env_path} works too."
         )
     dashboard_url = configured_public_url(runtime_paths) if runtime_paths else None

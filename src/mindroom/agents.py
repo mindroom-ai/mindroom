@@ -884,7 +884,7 @@ def _render_tool_execution_environment(
     file_access_description = {
         "workspace": "agent workspace and attachments only"
         if workdir is None
-        else "`file` and `coding`: the workdir and, read-only, your saved tool outputs; "
+        else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
         "other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
@@ -1068,7 +1068,8 @@ def _render_agent_identity_context(
     headless: bool,
 ) -> str:
     """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
-    openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
+    # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
+    openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
     if include_openai_compat_guidance:
         prompt_name = (
             "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
