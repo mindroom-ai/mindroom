@@ -37,7 +37,7 @@ from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
+from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -1068,9 +1068,9 @@ def _render_agent_identity_context(
     headless: bool,
 ) -> str:
     """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
-    # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
-    openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
     if outside_matrix:
+        # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
+        openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
         prompt_name = (
             "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
         )
@@ -1096,15 +1096,13 @@ def _render_agent_identity_context(
             matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
 
-    matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
-    return build_agent_identity_context(
+    return config.render_prompt(
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE",
         display_name=display_name,
-        matrix_id=matrix_id,
+        matrix_id=entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id,
         model_provider=model_provider,
         model_id=model_id,
-        outside_matrix=False,
-        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-        openai_compat_history_guidance=openai_compat_history_guidance,
+        openai_compat_history_guidance="",
     )
 
 
@@ -1706,7 +1704,7 @@ def create_agent(
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         outside_matrix: Whether the turn answers outside Matrix, through the OpenAI-compatible
-            API or a headless run, so the identity names no Matrix ID and the prompt attributes no sender.
+            API or a headless run, so the identity names no Matrix ID.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         tool_function_filter: Optional policy applied to each fully resolved

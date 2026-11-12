@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PromptTemplateError",
-    "build_agent_identity_context",
     "openai_compat_identity",
     "render_prompt_template",
     "validate_prompt_template_fields",
@@ -95,27 +94,6 @@ def render_prompt_template(template: str, **kwargs: object) -> str:
     return "".join(rendered_parts)
 
 
-def build_agent_identity_context(
-    *,
-    display_name: str,
-    matrix_id: str,
-    model_provider: str,
-    model_id: str,
-    identity_context_template: str,
-    openai_compat_history_guidance: str,
-    outside_matrix: bool = False,
-) -> str:
-    """Render the shared identity prompt with optional OpenAI-compatible guidance."""
-    return render_prompt_template(
-        identity_context_template,
-        display_name=display_name,
-        matrix_id=matrix_id,
-        model_provider=model_provider,
-        model_id=model_id,
-        openai_compat_history_guidance=(openai_compat_history_guidance if outside_matrix else ""),
-    )
-
-
 def openai_compat_identity(
     prompts: Mapping[str, str],
     *,
@@ -124,7 +102,7 @@ def openai_compat_identity(
     openai_prompt_name: str,
     matrix_prompt_name: str,
 ) -> str:
-    """Return an agent's or team leader's identity in the OpenAI-compatible API, from its two rendered identities.
+    """Return an agent's or team leader's identity outside Matrix, from its two rendered identities.
 
     It is ``openai_identity``, opened by ``matrix_identity`` and one blank line when the operator overrides the Matrix
     template ``matrix_prompt_name`` in ``prompts`` but not the API template ``openai_prompt_name``, so their authored
