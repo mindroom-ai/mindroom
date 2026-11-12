@@ -75,7 +75,7 @@ The checks cover the agent and every agent it can reach through `delegate_to`.
 | [MCP](mcp.md) tools | A running MindRoom connects to MCP servers. |
 | [`knowledge_bases`](knowledge.md), semantic file `memory_search`, and the [knowledge graph](knowledge-graph.md) | A running MindRoom indexes them. |
 | Enabled [`plugins`](plugins.md) | A running MindRoom loads them. |
-| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every agent's responder access, which delegation checks. |
+| A requester who is not in `administrators`, or no administrators | Without a room, only administrators pass every shared agent's responder access, which delegation checks. |
 | A `storage` holding Matrix account credentials, such as one `mindroom run` set up | Headless runs record accounts without credentials, which would stop that instance from starting. |
 
 Memory runs headless: [Mem0](memory.md) memories are recalled into the turn, and file memory is read as in Matrix; set `memory: none` to run without memory.
