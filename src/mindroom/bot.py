@@ -1096,7 +1096,7 @@ class AgentBot:
         """Serialize one local membership command while ingestion keeps draining.
 
         Every join, including configured, invited, and personal rooms and the rejoin at startup, publishes the entity's
-        MindRoom server in the room, so MindRoom Chat can find it.
+        MindRoom server and role in the room, so MindRoom Chat can find it and show what the entity does.
         """
         session = self._ingestion_session
         if session is None:
@@ -1114,14 +1114,28 @@ class AgentBot:
                 is_authorized=is_authorized,
             )
         if changed and target_membership == "join" and self.client is not None:
-            content = server_state_content(
-                self.agent_name,
-                self.config,
-                self.runtime_paths,
-                api_enabled=self.orchestrator.api_enabled,
-            )
-            await publish_server_state(self.client, room_id, content)
+            await publish_server_state(self.client, room_id, self._server_state_content(self.config))
         return changed
+
+    def _server_state_content(self, config: Config) -> dict[str, object]:
+        """Return the server state this entity publishes under ``config``."""
+        return server_state_content(
+            self.agent_name,
+            config,
+            self.runtime_paths,
+            api_enabled=self.orchestrator.api_enabled,
+        )
+
+    async def refresh_server_state(self, previous_config: Config) -> None:
+        """Publish the server state again in every joined room when a reload changed it, as a role edit does live.
+
+        The rooms write at once, so a homeserver that does not answer holds the reload for one publish timeout.
+        """
+        client = self.client
+        content = self._server_state_content(self.config)
+        if client is None or content == self._server_state_content(previous_config):
+            return
+        await asyncio.gather(*(publish_server_state(client, room_id, content) for room_id in sorted(client.rooms)))
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
