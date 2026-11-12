@@ -160,7 +160,7 @@ def _validated(
     runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
     validated = Config.validate_with_runtime(dict(config), runtime_paths)
     workdir = workdir.expanduser().resolve() if workdir is not None else None
-    requester = requester_id or next(iter(validated.administrators), None)
+    requester = requester_id if requester_id is not None else next(iter(validated.administrators), None)
     if problems := _problems(validated, runtime_paths, agent, requester, workdir):
         raise HeadlessConfigError(problems)
     assert requester is not None, "a missing requester is one of the problems"

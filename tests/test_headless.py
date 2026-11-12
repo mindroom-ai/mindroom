@@ -283,7 +283,7 @@ async def test_run_turn_refuses_what_needs_a_running_mindroom(
     change: Callable[[dict[str, Any], Path], object],
     problem: str,
 ) -> None:
-    """Each refusal names its setting, also for a subagent the agent may run, and the turn never reaches the model."""
+    """Each refusal names its setting, and the turn never reaches the model; one case refuses a subagent's tools."""
     provider = _install(monkeypatch)
     config = _config(delegate_to=["helper"])
     config["agents"]["helper"] = {"display_name": "Helper"}
@@ -478,6 +478,8 @@ def test_shell_output_destination_keeps_the_workdir_flag_across_the_supervisor()
 def test_validate_config_returns_the_config_or_names_every_problem(tmp_path: Path) -> None:
     """A config headless runs can serve validates to its `Config`; a refusal lists each problem, not only the first."""
     assert set(validate_config(_config(), agent="coder", storage=tmp_path / "storage").agents) == {"coder"}
+    with pytest.raises(HeadlessConfigError, match="requester '' is not in administrators"):
+        validate_config(_config(), agent="coder", storage=tmp_path / "storage", requester_id="")
     with pytest.raises(HeadlessConfigError) as raised:
         validate_config(_config(), agent="ghost", storage=tmp_path / "storage", requester_id="@bob:localhost")
 
