@@ -106,7 +106,7 @@ def _responder_reply_authorization(
     allowed = _is_own_account(sender_id, entity_name, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
-    allowed = allowed or (resolved_sender in config.administrators and _admits_administrators(config, entity_name))
+    allowed = allowed or (resolved_sender in config.administrators and administrators_pass_access(config, entity_name))
     allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
     allowed = allowed or (
         room_id is not None
@@ -149,7 +149,7 @@ def _responder_reply_authorization(
     return _ReplyAuthorizationDecision.DENIED
 
 
-def _admits_administrators(config: Config, entity_name: str) -> bool:
+def administrators_pass_access(config: Config, entity_name: str) -> bool:
     """Return whether administrators pass this responder's access: not for a generated agent or a team with one.
 
     A personal or created agent serves its owners, so only its own ``access`` admits anyone else.
