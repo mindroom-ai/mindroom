@@ -27,6 +27,7 @@ from mindroom.api import config_lifecycle, connections, egress_credentials, egre
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
@@ -3939,3 +3940,33 @@ def test_a_key_of_the_agents_without_a_scope_never_becomes_the_administrator_key
 
     for agent in ("personal", "unscoped_dev"):
         assert _egress_row(portal, "alice", agent, "search")["configured"] is False
+
+
+def test_an_administrator_manages_a_personal_agent_s_keys_without_using_it(egress_portal: dict[str, Any]) -> None:
+    """An administrator whom a personal agent's access does not admit still lists and sets its shared keys here."""
+    portal = egress_portal
+    roster = PersonalAgentRoster(
+        entries=[
+            PersonalAgentRosterEntry(
+                template="mind",
+                user_id="@alice:example.org",
+                username="alice",
+                agent_name="mind_alice",
+                matrix_username=None,
+                user_display_name="Alice",
+                source_room_id="!lobby:example.org",
+            ),
+        ],
+    )
+    roster_path = personal_agent_roster_path(portal["paths"])
+    roster_path.parent.mkdir(parents=True, exist_ok=True)
+    roster_path.write_text(roster.model_dump_json(), encoding="utf-8")
+    template = _agent_config("{user_display_name}'s Mind", "Personal assistant", worker_scope="shared")
+    del template["access"]
+    portal["payload"]["personal_agents"] = {"mind": {"agent": template}}
+    _republish(portal)
+
+    assert "mind_alice" in _listed_agents(portal, "admin")
+    assert _put_key(portal, "admin", "mind_alice", "github").status_code == 204
+    assert "mind_alice" not in _listed_agents(portal, "bob")
+    assert _put_key(portal, "bob", "mind_alice", "github").status_code == 404
