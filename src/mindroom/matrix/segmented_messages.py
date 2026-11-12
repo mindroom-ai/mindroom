@@ -101,26 +101,27 @@ def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
     return pills
 
 
-def _chunk_mentions(source: Mapping[str, Any], body: str) -> dict[str, Any] | None:
-    """Return the mention metadata for just the mentions ``body`` carries.
+def _visible_mentions(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the mention metadata for just the mentions the source's text carries.
 
-    A user the source lists but whose ID the text never shows is left out, and a
+    A user the source lists but whose ID its text never shows is left out, and a
     room mention needs the ``@room`` text.
     """
+    body = source["body"]
     mentions = source.get("m.mentions")
     if not isinstance(mentions, Mapping):
         return None
-    chunk_mentions: dict[str, Any] = {}
+    visible: dict[str, Any] = {}
     user_ids = mentions.get("user_ids")
     if isinstance(user_ids, list):
         candidates = [user_id for user_id in user_ids if isinstance(user_id, str)]
         if candidates:
             present = set(_user_id_boundary_pattern(candidates).findall(body))
             if present:
-                chunk_mentions["user_ids"] = [user_id for user_id in candidates if user_id in present]
+                visible["user_ids"] = [user_id for user_id in candidates if user_id in present]
     if mentions.get("room") is True and "@room" in body:
-        chunk_mentions["room"] = True
-    return chunk_mentions or None
+        visible["room"] = True
+    return visible or None
 
 
 def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
@@ -160,10 +161,8 @@ def _rich_text_content(
 def _edit_content_chunk(content: dict[str, Any], source: dict[str, Any], body: str) -> dict[str, Any]:
     """Build the first edit event with one complete rich-text chunk.
 
-    The outer envelope keeps the source edit's own ``m.mentions`` -- for an
-    edit that is the revision delta, and re-deriving it from one chunk could
-    re-notify recipients an earlier revision already mentioned. The resolved
-    per-chunk set lives under ``m.new_content``.
+    The outer envelope keeps the source edit's own fields, its ``m.mentions``
+    revision delta included, until the mentions move to the last segment.
     """
     replacement = _rich_text_content(source, body)
     edit = {key: value for key, value in content.items() if key not in _INTERNAL_STREAM_KEYS}
@@ -340,19 +339,32 @@ def _split_body(
     return chunks or None
 
 
-def _carry_mentions_on_last_segment(source: Mapping[str, Any], segments: tuple[dict[str, Any], ...]) -> None:
-    """Put the reply's mentions on its last segment's visible content, and mark the earlier ones as mentioning nobody.
+def _carry_mentions_on_last_segment(
+    source: Mapping[str, Any],
+    first: dict[str, Any],
+    continuations: tuple[dict[str, Any], ...],
+    *,
+    is_edit: bool,
+) -> None:
+    """Put the reply's mentions on its last segment, and make every earlier event mention nobody.
 
-    An agent the reply wakes then reads all of it, and no one is notified before the text naming them has arrived.
-    Earlier segments mark their missing mentions exact, so receivers do not find the pills or IDs in their text instead.
+    An agent the reply wakes then reads all of it, and a mention notifies once, after the text naming its target has
+    arrived. An earlier event lists no mentions, which keeps clients from matching names in its text, and marks that
+    list exact, which keeps receivers from finding the pills or IDs in its text instead; for a first edit that also
+    covers its outer revision delta. A reply that stays one segment keeps its mentions in place.
     """
-    mentions = _chunk_mentions(source, source["body"])
+    mentions = _visible_mentions(source)
     if mentions is None:
         return
-    *earlier, last = segments
-    for segment in earlier:
-        segment[EXACT_MENTIONS_KEY] = True
-    last["m.mentions"] = mentions
+    visible_first = first["m.new_content"] if is_edit else first
+    if not continuations:
+        visible_first["m.mentions"] = mentions
+        return
+    earlier = (first, visible_first) if is_edit else (first,)
+    for event_content in (*earlier, *continuations[:-1]):
+        event_content["m.mentions"] = {}
+        event_content[EXACT_MENTIONS_KEY] = True
+    continuations[-1]["m.mentions"] = mentions
 
 
 def segment_matrix_content(
@@ -426,7 +438,7 @@ def segment_matrix_content(
     else:
         first = first_build(chunks[0])
         continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
-    _carry_mentions_on_last_segment(source, (first["m.new_content"] if is_edit else first, *continuations))
+    _carry_mentions_on_last_segment(source, first, continuations, is_edit=is_edit)
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):

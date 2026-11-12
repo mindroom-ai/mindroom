@@ -841,7 +841,7 @@ class CoalescingGate:
         ):
             # An agent's text that does not mention this agent is settled as chatter when dispatched, so it does not
             # wait for the response. An upload still waits, since a caption that mentions this agent may follow, and so
-            # does a message from a sender already waiting here, such as the next segment of a split reply.
+            # does a message from a sender already waiting here, such as the text it sent after mentioning this agent.
             return key
         if not source_kind_bypasses_coalescing(pending_event.facts.source_kind):
             pending_event.event = replace(pending_event.event, active_follow_up=True)
