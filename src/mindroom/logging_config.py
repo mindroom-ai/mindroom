@@ -198,8 +198,8 @@ _LIBRARY_LOGGER = logging.getLogger("mindroom")
 
 
 def _library_level(method_name: str) -> int:
-    # structlog names each record by its level, such as `error` for `exception`.
-    return logging.getLevelNamesMapping()[method_name.upper()]
+    # A record is named by its level, except that a stdlib wrapper names an error with a traceback `exception`.
+    return logging.ERROR if method_name == "exception" else logging.getLevelNamesMapping()[method_name.upper()]
 
 
 def _drop_below_library_level(_logger: object, method_name: str, event_dict: EventDict) -> EventDict:

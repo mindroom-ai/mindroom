@@ -702,12 +702,15 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
     )
 
 
-_PROBES = ("probe_debug", "probe_info", "probe_warning", "agno_info", "agno_warning")
+_PROBES = ("probe_debug", "probe_info", "probe_warning", "probe_exception", "agno_info", "agno_warning")
 _STRUCTLOG_TO_STDOUT = (
     "structlog.configure(processors=[structlog.processors.JSONRenderer()], "
     "logger_factory=structlog.PrintLoggerFactory(sys.stdout), wrapper_class=structlog.make_filtering_bound_logger(0))"
 )
 _STRUCTLOG_PROCESSORS = "structlog.configure(processors=[structlog.processors.JSONRenderer()])"
+_STRUCTLOG_STDLIB = (
+    "structlog.configure(wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())"
+)
 
 
 def _library_program(tmp_path: Path, *, before: str = "", after: str = "") -> subprocess.CompletedProcess[bytes]:
@@ -747,9 +750,8 @@ def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
 
     assert completed.stdout == b""
     # MindRoom's tools also log through Agno's loggers, whose own handler would print to stdout.
-    assert _probes(completed.stderr) == ["probe_warning", "agno_warning"]
+    assert _probes(completed.stderr) == ["probe_warning", "probe_exception", "agno_warning"]
     assert b"positional formatted" in completed.stderr
-    assert b"probe_exception" in completed.stderr
     # A record below the level is dropped before it is rendered, as a prompt in a debug line would be.
     assert b"rendered_below_level" not in completed.stderr
 
@@ -759,13 +761,21 @@ def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
     [
         # MindRoom never touched logging, so Agno's own handler still prints to stdout.
         pytest.param(_STRUCTLOG_TO_STDOUT, "", _PROBES, (), id="structlog-before-import"),
-        pytest.param("", _STRUCTLOG_TO_STDOUT, _PROBES[:3], ("agno_warning",), id="structlog-after-import"),
-        pytest.param("", _STRUCTLOG_PROCESSORS, _PROBES[:3], ("agno_warning",), id="structlog-processors-after-import"),
+        pytest.param("", _STRUCTLOG_TO_STDOUT, _PROBES[:4], ("agno_warning",), id="structlog-after-import"),
+        pytest.param("", _STRUCTLOG_PROCESSORS, _PROBES[:4], ("agno_warning",), id="structlog-processors-after-import"),
+        # A stdlib wrapper names an error with a traceback `exception`, and keeps the library processors.
+        pytest.param(
+            "",
+            _STRUCTLOG_STDLIB,
+            (),
+            ("probe_warning", "probe_exception", "agno_warning"),
+            id="structlog-stdlib-after-import",
+        ),
         pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _PROBES[1:], (), id="logging"),
         pytest.param(
             "",
             "logging.basicConfig(level=logging.WARNING, stream=sys.stdout)",
-            ("probe_warning", "agno_warning"),
+            ("probe_warning", "probe_exception", "agno_warning"),
             (),
             id="logging-warning",
         ),
