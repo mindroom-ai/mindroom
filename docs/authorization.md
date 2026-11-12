@@ -94,7 +94,8 @@ Defaults:
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
 - The router defaults to `current_room_members: true`.
 
-Platform administrators pass every responder's `access` check, and every agent, team, and the router admits its own account.
+Platform administrators pass every responder's `access` check except that of a [personal agent](personal-agents.md), an agent another agent created, or a team that includes one, which admits an administrator only when its own `access` does.
+Every agent, team, and the router admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
