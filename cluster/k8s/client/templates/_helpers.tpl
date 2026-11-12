@@ -179,6 +179,22 @@ http {
 {{- end -}}
 
 {{/*
+Who may frame a response: "none" for no origin, anything else for the client's own origin, which
+frames its own pages such as the PDF viewer's frame page and client plugin pages under public/plugins/.
+nginx drops every inherited add_header in a location that sets its own, so each such location
+includes these headers again.
+*/}}
+{{- define "mindroom-client.frameHeaders" -}}
+{{- if eq . "none" -}}
+add_header Content-Security-Policy "frame-ancestors 'none'" always;
+add_header X-Frame-Options "DENY" always;
+{{- else -}}
+add_header Content-Security-Policy "frame-ancestors 'self'" always;
+add_header X-Frame-Options "SAMEORIGIN" always;
+{{- end -}}
+{{- end -}}
+
+{{/*
 The nginx server config serving the client under basePath.
 The image entrypoint normally writes runtime-config.js into the app directory,
 which an unprivileged read-only container forbids, so the chart serves
@@ -218,6 +234,7 @@ server {
   listen [::]:{{ .Values.nginx.port }};
 {{- end }}
   absolute_redirect off;
+{{ include "mindroom-client.frameHeaders" "self" | indent 2 }}
 {{- if ne $base "/" }}
 
   location = / {
@@ -233,6 +250,7 @@ server {
   location = /runtime-config.js {
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 200 {{ $runtimeConfig | quote }};
   }
 
@@ -261,10 +279,12 @@ server {
     alias /usr/share/nginx/html/authentication-recovery.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   location = /authentication-recovery-probe {
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 204;
   }
 {{- end }}
@@ -293,6 +313,7 @@ server {
     add_header Access-Control-Allow-Origin "*" always;
     add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
     add_header Access-Control-Allow-Headers "X-Requested-With, Content-Type, Authorization" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 200 '{{ include "mindroom-client.matrixClientWellKnown" . }}';
   }
 {{- end }}
@@ -334,6 +355,7 @@ server {
     alias /usr/share/nginx/html/config.json;
     default_type application/json;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # The client polls this manifest and reloads after a new build is published.
@@ -341,6 +363,7 @@ server {
     alias /usr/share/nginx/html/version.json;
     default_type application/json;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # Operator notices come from the image's notices directory, which an operator
@@ -349,6 +372,7 @@ server {
     alias /opt/mindroom/notices/notices.json;
     default_type application/json;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # The client service worker, scoped to basePath.
@@ -356,6 +380,7 @@ server {
     alias /usr/share/nginx/html/sw.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- if .Values.rootServiceWorkerCleanup.enabled }}
 
@@ -367,6 +392,7 @@ server {
     alias /usr/share/nginx/html/root-cleanup-sw.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- end }}
 {{- if ne $base "/" }}
@@ -374,6 +400,7 @@ server {
   location = {{ $prefix }}/manifest.json {
     alias /usr/share/nginx/html/manifest.json;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # Older images selected through image.tag, such as latest, load the PDF.js
@@ -387,8 +414,7 @@ server {
   location ~ ^{{ regexQuoteMeta $prefix }}/connect/?$ {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    add_header Content-Security-Policy "frame-ancestors 'none'" always;
-    add_header X-Frame-Options "DENY" always;
+{{ include "mindroom-client.frameHeaders" "none" | indent 4 }}
     try_files /index.html =404;
   }
 
@@ -400,6 +426,7 @@ server {
     root /usr/share/nginx/html;
     try_files /$1 =404;
     add_header Cache-Control "public, max-age=31536000, immutable";
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # Stable Element Call names such as index.html must revalidate so a client
@@ -408,6 +435,7 @@ server {
     root /usr/share/nginx/html;
     try_files /$1 =404;
     add_header Cache-Control "no-cache";
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # Build files are referenced relative to the current route, so strip any
@@ -416,14 +444,14 @@ server {
     root /usr/share/nginx/html;
     try_files /$1/$2 =404;
     add_header Cache-Control $client_build_cache_control;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- if eq $base "/" }}
 
   location / {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    add_header Content-Security-Policy "frame-ancestors 'self'" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     try_files $uri $uri/ /index.html;
   }
 {{- else }}
@@ -432,8 +460,7 @@ server {
   location {{ $base }}/ {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    add_header Content-Security-Policy "frame-ancestors 'self'" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     try_files /index.html =404;
   }
 {{- end }}
