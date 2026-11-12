@@ -90,6 +90,9 @@ async def _published_report_response(
         if error.status_code not in {401, 403}:
             raise
         return _sign_in_response(request, slug, asset, query)
+    if asset and _leaves_report(asset):
+        # A browser would resolve the view link's dot segments to a path outside the report.
+        raise HTTPException(status_code=404, detail="Public report was not found.")
     return RedirectResponse(
         f"/reports/public/{quote(slug, safe='')}/{_view_link(slug)}/{quote(asset or '')}{query}",
         status_code=303,
@@ -185,10 +188,14 @@ def _way_back(cookie: str) -> str:
     way_back, separator, query = unquote(cookie).partition("?")
     slug, slash, quoted_asset = way_back.partition("/")
     asset = unquote(quoted_asset)
-    if not PUBLIC_REPORT_SLUG_RE.fullmatch(slug):
+    if not PUBLIC_REPORT_SLUG_RE.fullmatch(slug) or _leaves_report(asset):
         return "/connections/"
-    # A dot segment or backslash, as the server decodes the path or as one more decoding reads it, could leave the report.
-    for decoded in (asset, unquote(asset)):
-        if "\\" in decoded or any(segment in {".", ".."} for segment in decoded.split("/")):
-            return "/connections/"
     return f"/reports/public/{slug}{slash}{quote(asset)}{separator}{query}"
+
+
+def _leaves_report(asset: str) -> bool:
+    """Return whether a report path has a dot segment or backslash, as the server decodes it or one more decoding reads it."""
+    return any(
+        "\\" in decoded or any(segment in {".", ".."} for segment in decoded.split("/"))
+        for decoded in (asset, unquote(asset))
+    )

@@ -437,6 +437,22 @@ def test_sign_in_check_that_fails_on_the_server_is_not_a_sign_in_page(
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/config", "app.js/%2E%2E/%2e%2e/x", "%2e/app.js", "a%5C..%5C..%5Capi"],
+)
+def test_signed_in_request_with_a_dot_segment_stays_inside_the_report(signin: dict[str, Any], path: str) -> None:
+    """A path that a browser would resolve outside the report gets the report's not-found answer, not a redirect."""
+    client = _signed_in_mode(signin)
+    slug, _ = _publish_static_site(client)
+    assert sign_in(client, "alice").status_code == 200
+
+    response = client.get(f"/reports/public/{slug}/{path}", follow_redirects=False)
+
+    assert response.status_code == 404
+    assert "location" not in response.headers
+
+
 def test_view_link_keeps_the_asked_for_file_name_and_query(signin: dict[str, Any]) -> None:
     """The redirect to a view link names the same file, however its name is spelled, and keeps the query."""
     client = _signed_in_mode(signin)
