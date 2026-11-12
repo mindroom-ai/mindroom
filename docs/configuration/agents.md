@@ -79,6 +79,7 @@ agents:
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](threads.md#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](threads.md#mid-turn-coalescing) |
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](models.md#cold-cache-model) |
+| `room_activity` | object | `defaults.room_activity` | Note in thread replies listing the room's other threads with new messages; omitted fields inherit `defaults.room_activity`. See [Activity in Other Threads](threads.md#activity-in-other-threads) |
 | `listen` | object | `null` | Hear chosen rooms and act silently after a quiet period; see [Listening](#listening) |
 | `contacts` | object | `null` | Let a personal agent talk to other people's personal agents and people after both owners approve; see [Agent Contacts](../agent-contacts.md) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
@@ -328,6 +329,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](history.md#agent-compaction-settings) |
+| `room_activity` | off, `window_minutes: 120`, `max_threads: 5`; see [Activity in Other Threads](threads.md#activity-in-other-threads) |
 | `max_tool_calls_per_turn` | `1000` |
 | `show_tool_calls` | `true` |
 | `show_reasoning` | `true` |

@@ -7,6 +7,7 @@ whether such a call exists to be made.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
@@ -252,6 +253,132 @@ def latest_room_cursor(transaction: Transaction, principal_id: str, *, room_id: 
     if row is None:
         return None
     return ConversationCursor(created_ts=int(row["created_ts"]), logical_event_id=row["logical_event_id"])
+
+
+# The largest root or summary a room activity read loads for a thread's title. A
+# title is one cut line, and a summary is at most a few hundred characters, but
+# anyone who can post can make a root a resolved long-text sidecar.
+_ROOM_ACTIVITY_TITLE_BYTES = 64 * 1024
+
+# The newest messages of a window, in any thread or none; their content is never loaded.
+_ROOM_ACTIVITY_ROWS_SQL = """
+    SELECT logical_event_id, thread_id, sender, created_ts FROM visible_messages
+    WHERE principal_id = ? AND room_id = ? AND created_ts > ? AND created_ts <= ?
+    ORDER BY created_ts DESC, logical_event_id DESC
+    LIMIT ?
+"""
+# The messages among one thread's newest whose content names a key, such as a
+# summary notice's. A `_` in the key matches any character too, so a caller
+# checks the key it decodes.
+_ROOM_ACTIVITY_SUMMARIES_SQL = f"""
+    SELECT {_PAGE_COLUMNS} FROM visible_messages
+    WHERE principal_id = ? AND room_id = ? AND logical_event_id IN (
+        SELECT logical_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        ORDER BY created_ts DESC, logical_event_id DESC
+        LIMIT ?
+    )
+    AND octet_length(content_json) <= ? AND content_json LIKE ?
+    ORDER BY created_ts, logical_event_id
+"""  # noqa: S608 - a fixed column list, not input
+
+
+@dataclass(frozen=True, slots=True)
+class _RecentMessage:
+    """One message of a room activity window, without its content."""
+
+    logical_event_id: str
+    sender: str
+    created_ts: int
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadActivity:
+    """One thread's messages in a room activity window, and what its title can be read from."""
+
+    thread_id: str
+    # The window's messages in this thread, newest first.
+    recent: tuple[_RecentMessage, ...]
+    # The thread's root, unless it was redacted, awaits a refetch, or is too large for a title.
+    root: VisibleMessage | None
+    # The messages among the thread's newest that hold the summary key, oldest first.
+    summaries: tuple[VisibleMessage, ...]
+
+
+def room_thread_activity(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    since_ts: int,
+    until_ts: int,
+    exclude_thread_id: str | None,
+    thread_limit: int,
+    row_limit: int,
+    summary_tail: int,
+    summary_key: str,
+) -> tuple[ThreadActivity, ...]:
+    """Return the threads of a room with messages stamped after ``since_ts`` up to ``until_ts``, most recent first.
+
+    Only the newest ``row_limit`` messages of the window are counted, in any
+    thread or at the room level, so a busy window costs no more than that and
+    its oldest messages go uncounted. Room-level messages and
+    ``exclude_thread_id`` are left out, and at most ``thread_limit`` threads
+    are returned. For each, the root and the messages among its newest
+    ``summary_tail`` whose content holds the ``summary_key`` key are loaded
+    with their content, each no larger than ``_ROOM_ACTIVITY_TITLE_BYTES``; no
+    other message's content is.
+    """
+    if min(thread_limit, row_limit, summary_tail) <= 0:
+        msg = "A room activity read requires positive limits"
+        raise ValueError(msg)
+    excluded = {encode_thread_id(None), encode_thread_id(exclude_thread_id)}
+    recent: dict[str, list[_RecentMessage]] = {}
+    for row in transaction.fetchall(_ROOM_ACTIVITY_ROWS_SQL, (principal_id, room_id, since_ts, until_ts, row_limit)):
+        thread_id = row["thread_id"]
+        if thread_id in excluded or (thread_id not in recent and len(recent) == thread_limit):
+            continue
+        recent.setdefault(thread_id, []).append(
+            _RecentMessage(row["logical_event_id"], row["sender"], int(row["created_ts"])),
+        )
+    if not recent:
+        return ()
+    placeholders = ", ".join("?" for _ in recent)
+    roots = {
+        row["logical_event_id"]: _visible_message(row)
+        for row in transaction.fetchall(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({placeholders})
+            AND octet_length(content_json) <= ?
+            """,  # noqa: S608 - a fixed column list and generated placeholders, not input
+            (principal_id, room_id, *recent, _ROOM_ACTIVITY_TITLE_BYTES),
+        )
+    }
+    return tuple(
+        ThreadActivity(
+            thread_id=thread_id,
+            recent=tuple(messages),
+            root=roots.get(thread_id),
+            summaries=tuple(
+                _visible_message(row)
+                for row in transaction.fetchall(
+                    _ROOM_ACTIVITY_SUMMARIES_SQL,
+                    (
+                        principal_id,
+                        room_id,
+                        principal_id,
+                        room_id,
+                        thread_id,
+                        summary_tail,
+                        _ROOM_ACTIVITY_TITLE_BYTES,
+                        f'%"{summary_key}"%',
+                    ),
+                )
+            ),
+        )
+        for thread_id, messages in recent.items()
+    )
 
 
 def _page_rows(

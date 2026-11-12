@@ -2249,6 +2249,128 @@ class TestReadingAWholeRoom:
         assert await alice.latest_room_cursor(room_id=ROOM) == ConversationCursor(2_000, "$c")
 
 
+def summary_notice(summary: str) -> dict[str, object]:
+    """Return a thread summary notice as MindRoom sends one."""
+    return {
+        "msgtype": "m.notice",
+        "body": summary,
+        "io.mindroom.thread_summary": {
+            "version": 1,
+            "summary": summary,
+            "message_count": 2,
+            "generated_at": "2026-11-11T10:00:00+00:00",
+            "model": "default",
+        },
+    }
+
+
+class TestRoomThreadActivity:
+    """One bounded read says which threads of a room had messages in a window, with each one's title sources."""
+
+    async def _activity(self, store: PrincipalStore, **overrides: object) -> tuple[reads.ThreadActivity, ...]:
+        arguments: dict[str, Any] = {
+            "room_id": ROOM,
+            "since_ts": 1_000,
+            "until_ts": 9_000,
+            "exclude_thread_id": "$current",
+            "thread_limit": 5,
+            "row_limit": 100,
+            "summary_tail": 10,
+            "summary_key": "io.mindroom.thread_summary",
+        } | overrides
+        return await store.room_thread_activity(**arguments)
+
+    async def test_lists_other_threads_with_messages_in_the_window_newest_first(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Room-level messages, the excluded thread, other rooms, and messages outside the window never count."""
+        await admit(alice, "$old-root", ts=100)
+        await admit(alice, "$new-root", ts=2_000)
+        await admit(alice, "$before-window", ts=900, thread_id="$old-root")
+        await admit(alice, "$at-window-start", ts=1_000, thread_id="$old-root")
+        await admit(alice, "$old-1", ts=3_000, thread_id="$old-root", sender=BOB)
+        await admit(alice, "$new-1", ts=4_000, thread_id="$new-root")
+        await admit(alice, "$old-2", ts=5_000, thread_id="$old-root")
+        await admit(alice, "$current-1", ts=6_000, thread_id="$current")
+        await admit(alice, "$room-level", ts=7_000)
+        await admit(alice, "$elsewhere", ts=7_000, room_id=OTHER_ROOM, thread_id="$old-root")
+        await admit(alice, "$after-window", ts=9_500, thread_id="$new-root")
+
+        activity = await self._activity(alice)
+
+        assert [thread.thread_id for thread in activity] == ["$old-root", "$new-root"]
+        old, new = activity
+        assert [(m.logical_event_id, m.sender, m.created_ts) for m in old.recent] == [
+            ("$old-2", ALICE, 5_000),
+            ("$old-1", BOB, 3_000),
+        ]
+        assert [m.logical_event_id for m in new.recent] == ["$new-1"]
+        assert old.root is not None
+        assert old.root.content["body"] == "$old-root"
+        assert new.root is not None
+        assert new.root.logical_event_id == "$new-root"
+
+    async def test_the_thread_and_row_limits_keep_the_newest(self, alice: PrincipalStore) -> None:
+        """At most ``thread_limit`` threads, read from at most ``row_limit`` of the window's newest messages."""
+        for index in range(4):
+            await admit(alice, f"$t{index}-reply", ts=2_000 + index, thread_id=f"$t{index}")
+        await admit(alice, "$t3-second", ts=3_000, thread_id="$t3")
+
+        assert [thread.thread_id for thread in await self._activity(alice, thread_limit=2)] == ["$t3", "$t2"]
+        limited = await self._activity(alice, row_limit=2)
+        assert [(thread.thread_id, len(thread.recent)) for thread in limited] == [("$t3", 2)]
+        with pytest.raises(ValueError, match="positive"):
+            await self._activity(alice, row_limit=0)
+
+    async def test_loads_only_summaries_among_the_thread_s_newest_messages(self, alice: PrincipalStore) -> None:
+        """Summary notices come with their content, oldest first; other messages and older summaries do not."""
+        await admit(alice, "$root", ts=100)
+        await admit(alice, "$too-old-summary", ts=200, thread_id="$root", content=summary_notice("Stale title"))
+        for index in range(3):
+            await admit(alice, f"$filler-{index}", ts=300 + index, thread_id="$root")
+        await admit(alice, "$summary-1", ts=400, thread_id="$root", content=summary_notice("First title"))
+        await admit(alice, "$summary-2", ts=1_500, thread_id="$root", content=summary_notice("Current title"))
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        (thread,) = await self._activity(alice, summary_tail=4)
+
+        assert [m.logical_event_id for m in thread.summaries] == ["$summary-1", "$summary-2"]
+        assert thread.summaries[-1].content["body"] == "Current title"
+
+    async def test_a_redacted_or_oversized_root_and_summary_load_nothing(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A root or summary whose body was removed, or that is too large for a title, has no content to read."""
+        monkeypatch.setattr(reads, "_ROOM_ACTIVITY_TITLE_BYTES", 2_000)
+        await admit(alice, "$big-root", ts=100, content=text("x" * 3_000))
+        await admit(alice, "$big-summary", ts=1_500, thread_id="$big-root", content=summary_notice("y" * 3_000))
+        await admit(alice, "$big-reply", ts=2_000, thread_id="$big-root")
+        await admit(alice, "$gone", ts=100, content=text("first"))
+        await admit(alice, "$gone-edit", ts=150, content=edit("$gone", "deleted"))
+        await admit(alice, "$gone-redaction", ts=160, redacts="$gone-edit", kind=EventKind.REDACTION)
+        await admit(alice, "$gone-reply", ts=3_000, thread_id="$gone")
+
+        activity = await self._activity(alice)
+
+        assert [(thread.thread_id, thread.root, thread.summaries) for thread in activity] == [
+            ("$gone", None, ()),
+            ("$big-root", None, ()),
+        ]
+
+    async def test_another_principal_sees_nothing(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Each Matrix login reads only what it received."""
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await self._activity(journal_store.principal("agent@bob")) == ()
+
+
 class TestLatestVisibleEvent:
     """The reply target a thread-blind client is pointed at."""
 
@@ -9601,6 +9723,8 @@ class TestHotQueriesAreIndexCovered:
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=?"  # noqa: S608 - the production clause, not input
             f"{_ROOM_CURSOR_CLAUSE}{_ROOM_UNTIL_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
         ),
+        "room activity window": reads._ROOM_ACTIVITY_ROWS_SQL,
+        "room activity summary tail": reads._ROOM_ACTIVITY_SUMMARIES_SQL,
         "room's newest message": (
             "SELECT created_ts, logical_event_id FROM visible_messages WHERE principal_id=? AND room_id=? "
             "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 1"
