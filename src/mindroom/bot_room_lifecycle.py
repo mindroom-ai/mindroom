@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 import nio
@@ -12,7 +12,7 @@ import nio
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.contacts.federation import (
     answer_contact_invite,
     contact_member_event,
@@ -25,6 +25,7 @@ from mindroom.contacts.flow import withdraw_removed_contact_invites
 from mindroom.contacts.parties import agent_party
 from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_outcome
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
     forget_invited_room,
@@ -38,6 +39,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_persist_invited_rooms,
     update_pending_room_invites,
 )
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -119,6 +121,15 @@ class BotRoomLifecycleDeps:
     get_agent_bot: Callable[[str], AgentBot | None]
 
 
+@dataclass(frozen=True)
+class _SentWelcome:
+    """A welcome this process sent, which it edits as the room's agents change."""
+
+    event_id: str
+    visible_to_sender_id: str | None
+    text: str
+
+
 class BotRoomLifecycle:
     """Own room joins, leaves, invite handling, and invited-room persistence."""
 
@@ -134,6 +145,7 @@ class BotRoomLifecycle:
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._welcomed_room_ids: set[str] = set()
+        self._sent_welcomes: dict[str, _SentWelcome] = {}
         self._decrypt_notice_fenced_room_ids: set[str] = set()
         self._applied_continuity_revision = -1
 
@@ -657,10 +669,8 @@ class BotRoomLifecycle:
 
         return allowed() or await memberships.refresh_reading_room(room_id, self.deps.refresh_memberships, allowed)
 
-    async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
-        """Generate and deliver one welcome after its caller owns the send boundary."""
-        self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-        welcome_msg = await generate_welcome_message_for_room(
+    async def _welcome_text(self, room_id: str, visible_to_sender_id: str | None) -> str:
+        return await generate_welcome_message_for_room(
             self._client(),
             self._room_for_welcome(room_id),
             visible_to_sender_id,
@@ -668,6 +678,11 @@ class BotRoomLifecycle:
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
         )
+
+    async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
+        """Generate and deliver one welcome after its caller owns the send boundary."""
+        self._logger().info("Room is empty, sending welcome message", room_id=room_id)
+        welcome_msg = await self._welcome_text(room_id, visible_to_sender_id)
         target = MessageTarget.resolve(
             room_id=room_id,
             thread_id=None,
@@ -683,6 +698,7 @@ class BotRoomLifecycle:
             self._logger().warning("Welcome message delivery failed", room_id=room_id)
             return False
         self._welcomed_room_ids.add(room_id)
+        self._sent_welcomes[room_id] = _SentWelcome(event_id, visible_to_sender_id, welcome_msg)
         self._logger().info("Welcome message sent", room_id=room_id)
         try:
             await send_welcome_thread_summary(
@@ -694,6 +710,30 @@ class BotRoomLifecycle:
         except Exception:
             self._logger().exception("Welcome thread summary send failed", room_id=room_id)
         return True
+
+    async def refresh_welcome(self, room_id: str) -> None:
+        """Edit the welcome this process sent in a room to list the agents there now, such as ones that joined after it.
+
+        A welcome sent before a restart stays as it was.
+        """
+        async with self._lock_for_room(self._welcome_locks, room_id):
+            sent = self._sent_welcomes.get(room_id)
+            if sent is None:
+                return
+            text = await self._welcome_text(room_id, sent.visible_to_sender_id)
+            if text == sent.text:
+                return
+            content = format_message_with_mentions(
+                self._config(),
+                self.deps.runtime_paths,
+                text,
+                extra_content={SKIP_MENTIONS_KEY: True},
+            )
+            outcome = await edit_message_outcome(self._client(), room_id, sent.event_id, content, text)
+            if not isinstance(outcome, DeliveredMatrixEvent):
+                self._logger().warning("Welcome message edit failed", room_id=room_id, error=str(outcome))
+                return
+            self._sent_welcomes[room_id] = replace(sent, text=text)
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after configuration changes.

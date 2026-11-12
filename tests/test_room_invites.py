@@ -19,7 +19,7 @@ from uuid import UUID
 import nio
 import pytest
 
-from mindroom import background_tasks
+from mindroom import background_tasks, bot_room_lifecycle
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -2063,6 +2063,82 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **Code** (alias `code`): Writes code" in response_text
     bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_lists_agents_that_join_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router invited before the agents welcomes an empty room, then edits its welcome to list each agent that joins."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(
+                    display_name=name.title(),
+                    role=f"{name.title()} role",
+                    access=ResponderAccessConfig(current_room_members=True),
+                )
+                for name in ("code", "docs")
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.members_synced = False
+    members: list[nio.RoomMember] = []
+    bot.client = AsyncMock()
+    bot.client.rooms = {"!adhoc:localhost": room}
+    bot.client.joined_members = AsyncMock(
+        side_effect=lambda room_id: nio.JoinedMembersResponse(members=list(members), room_id=room_id),
+    )
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(room_id="!adhoc:localhost", chunk=[], start="", end=None),
+    )
+    install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
+    edit = AsyncMock(return_value=MagicMock(spec=bot_room_lifecycle.DeliveredMatrixEvent))
+    monkeypatch.setattr(bot_room_lifecycle, "edit_message_outcome", edit)
+    assert bot._router is not None
+
+    await bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
+    for name in ("code", "docs"):
+        # Sync adds the member to the room before the router sees its member event.
+        members.append(nio.RoomMember(f"@mindroom_{name}:localhost", name.title(), None))
+        room.add_member(f"@mindroom_{name}:localhost", name.title(), None)
+        await bot._router.member_event(room, _member_joined(f"@mindroom_{name}:localhost"))
+    # Another join of an agent already listed leaves the welcome as it is.
+    await bot._router.member_event(room, _member_joined("@mindroom_docs:localhost"))
+
+    texts = [await_call.args[4] for await_call in edit.await_args_list]
+    assert [await_call.args[2] for await_call in edit.await_args_list] == ["$welcome", "$welcome"]
+    assert "\u2022 **Code** (alias `code`): Code role" in texts[0]
+    assert "**Docs**" not in texts[0]
+    assert "\u2022 **Code** (alias `code`): Code role" in texts[1]
+    assert "\u2022 **Docs** (alias `docs`): Docs role" in texts[1]
+    # The edit keeps the welcome from waking the agents it lists.
+    assert edit.await_args_list[1].args[3]["com.mindroom.skip_mentions"] is True
+
+
+def _member_joined(user_id: str) -> nio.RoomMemberEvent:
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": f"$join-{user_id}",
+            "origin_server_ts": 1,
+            "sender": user_id,
+            "state_key": user_id,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "invite"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
 
 
 @pytest.mark.asyncio

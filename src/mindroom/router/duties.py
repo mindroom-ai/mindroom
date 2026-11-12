@@ -183,7 +183,7 @@ class RouterDuties:
         )
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Refresh responder presentation and the room's MindRoom accounts, and emit human membership hooks."""
+        """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
         if event.membership != event.prev_membership and event.state_key in prepared_entity_names_by_user_id(
@@ -191,6 +191,7 @@ class RouterDuties:
             runtime.runtime_paths,
         ):
             await self._publish_room_state(room.room_id)
+            await self.deps.room_lifecycle.refresh_welcome(room.room_id)
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:
