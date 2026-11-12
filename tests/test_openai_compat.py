@@ -80,7 +80,7 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.response_turn import CompletedAttempt
+from mindroom.response_turn import CompletedAttempt, detached_turn_context
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
@@ -1806,7 +1806,7 @@ class TestStreamingCompletion:
                 resolved_thread_id=None,
             )
             response = await openai_compat._stream_completion(
-                openai_compat._openai_turn_context(
+                detached_turn_context(
                     "general",
                     session_id="session-123",
                     model_name="default",
@@ -1867,7 +1867,7 @@ class TestStreamingCompletion:
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
-                openai_compat._openai_turn_context(
+                detached_turn_context(
                     "general",
                     session_id="session-123",
                     model_name="default",
@@ -1955,7 +1955,7 @@ class TestStreamingCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        turn = openai_compat._openai_turn_context(
+        turn = detached_turn_context(
             "general",
             session_id="session-123",
             execution_identity=execution_identity,
@@ -2630,7 +2630,7 @@ async def test_an_agent_stream_the_client_left_tells_budgets_its_cost_is_unknown
         thread_id=None,
         resolved_thread_id=None,
     )
-    turn = openai_compat._openai_turn_context(
+    turn = detached_turn_context(
         "general",
         session_id="session-123",
         execution_identity=execution_identity,

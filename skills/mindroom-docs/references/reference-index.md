@@ -90,6 +90,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Extend & Integrate | Hooks | `hooks.md` | `hooks/index.md` | `page__hooks__index.md` |
 | Extend & Integrate | External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
 | Extend & Integrate | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |
+| Extend & Integrate | Headless Runs | `headless.md` | `headless/index.md` | `page__headless__index.md` |
 | Extend & Integrate | MCP Gateway | `deployment/mcp-gateway.md` | `deployment/mcp-gateway/index.md` | `page__deployment__mcp-gateway__index.md` |
 | Deployment | Deployment Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
 | Deployment | Hosted Matrix + Local Backend | `deployment/hosted-matrix.md` | `deployment/hosted-matrix/index.md` | `page__deployment__hosted-matrix__index.md` |

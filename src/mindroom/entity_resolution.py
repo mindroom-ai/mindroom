@@ -10,7 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import managed_room_key_for_alias
+from mindroom.matrix_identifiers import agent_username_localpart, managed_room_key_for_alias
 from mindroom.requester_identity import (
     INTERNAL_USER_ENTITY_NAME,
     IdentityMemo,
@@ -277,6 +277,42 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
         return EntityIdentityRegistry(current_ids=current_ids)
 
     return memoized_entity_identities(_REGISTRIES, config, runtime_paths, derive)
+
+
+def persist_offline_entity_accounts(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    usernames: Mapping[str, str] | None = None,
+    password: str | None = None,
+) -> None:
+    """Record a Matrix account for the router, every agent and team, and the internal user, without a homeserver.
+
+    A run that never reaches Matrix still resolves its entities' Matrix IDs. An entity keeps the account it already
+    has unless ``usernames`` names it; the others get their generated username, or the one ``usernames`` gives.
+    """
+    usernames = usernames or {}
+    domain = config.get_domain(runtime_paths)
+    mindroom_user = config.mindroom_user
+    user_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
+
+    def add_missing(state: MatrixState) -> None:
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account_key = managed_account_key(entity_name)
+            if account_key in state.accounts and entity_name not in usernames:
+                continue
+            username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
+            state.add_account(account_key, username, password, domain=domain)
+        if mindroom_user is not None and user_key not in state.accounts:
+            state.add_account(
+                user_key,
+                mindroom_user.username,
+                password,
+                requested_username=mindroom_user.username,
+                domain=domain,
+            )
+
+    matrix_state.update_matrix_state(runtime_paths, add_missing)
 
 
 def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:

@@ -2,79 +2,40 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.identity import MatrixID, managed_account_key
-from mindroom.matrix.state import MatrixState
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import entity_identity_registry, persist_offline_entity_accounts
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_identifiers import agent_username_localpart
-from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
 _DEFAULT_TEST_PASSWORD = "mock_test_password"  # noqa: S105
 
 
-class MindRoomUserLike(Protocol):
-    """Minimal internal-user config surface needed by identity fixtures."""
-
-    username: str
-
-
-class ConfigLike(Protocol):
-    """Minimal config surface needed for persisted identity fixtures."""
-
-    agents: Mapping[str, object]
-    teams: Mapping[str, object]
-    mindroom_user: MindRoomUserLike | None
-
-    def get_domain(self, runtime_paths: RuntimePaths) -> str:
-        """Return the Matrix domain for the runtime paths."""
-        ...
-
-
 def persist_entity_accounts(
-    config: ConfigLike,
+    config: Config,
     runtime_paths: RuntimePaths,
     *,
     usernames: Mapping[str, str] | None = None,
     password: str = _DEFAULT_TEST_PASSWORD,
 ) -> None:
     """Persist managed Matrix accounts for tests that need prepared runtime identity."""
-    usernames = usernames or {}
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
-    changed = False
-    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        account_key = managed_account_key(entity_name)
-        if account_key in state.accounts and entity_name not in usernames:
-            continue
-        username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
-        state.add_account(account_key, username, password, domain=domain)
-        changed = True
-    mindroom_user = config.mindroom_user
-    if mindroom_user is not None and managed_account_key("user") not in state.accounts:
-        state.add_account(
-            managed_account_key("user"),
-            mindroom_user.username,
-            password,
-            requested_username=mindroom_user.username,
-            domain=domain,
-        )
-        changed = True
-    if changed:
-        save_matrix_state(state, runtime_paths)
+    persist_offline_entity_accounts(config, runtime_paths, usernames=usernames, password=password)
 
 
-def actual_entity_usernames(config: ConfigLike) -> dict[str, str]:
+def actual_entity_usernames(config: Config) -> dict[str, str]:
     """Return non-generated Matrix usernames for runtime identity tests."""
     return {entity_name: f"actual_{entity_name}" for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]}
 
 
 def persist_actual_entity_accounts(
-    config: ConfigLike,
+    config: Config,
     runtime_paths: RuntimePaths,
     *,
     password: str = _DEFAULT_TEST_PASSWORD,
@@ -84,7 +45,7 @@ def persist_actual_entity_accounts(
 
 
 def entity_ids(
-    config: ConfigLike,
+    config: Config,
     runtime_paths: RuntimePaths,
     *,
     usernames: Mapping[str, str] | None = None,
@@ -94,13 +55,13 @@ def entity_ids(
     return entity_identity_registry(config, runtime_paths).current_ids
 
 
-def entity_names_for_ids(ids: list[MatrixID], config: ConfigLike, runtime_paths: RuntimePaths) -> list[str | None]:
+def entity_names_for_ids(ids: list[MatrixID], config: Config, runtime_paths: RuntimePaths) -> list[str | None]:
     """Return configured aliases for Matrix IDs through persisted test identity."""
     registry = entity_identity_registry(config, runtime_paths)
     return [registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False) for matrix_id in ids]
 
 
-def entity_name_for_id(matrix_id: MatrixID, config: ConfigLike, runtime_paths: RuntimePaths) -> str | None:
+def entity_name_for_id(matrix_id: MatrixID, config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Return one configured alias for a Matrix ID through persisted test identity."""
     return entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
         matrix_id.full_id,
