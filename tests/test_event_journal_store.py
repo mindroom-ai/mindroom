@@ -2365,7 +2365,10 @@ class TestRoomThreadActivity:
         """A thread whose only new message is a summary notice is left out before the thread limit applies."""
         await admit(alice, "$b-reply", ts=2_000, thread_id="$b")
         await admit(alice, "$a-title", ts=3_000, thread_id="$a", content=summary_notice("A title"))
-        await admit(alice, "$b-title", ts=4_000, thread_id="$b", content=summary_notice("B title"))
+        # The longest title in a non-Latin script is still a summary notice, however its text is escaped.
+        title = "ж" * 300
+        notice = summary_notice(title) | {"format": "org.matrix.custom.html", "formatted_body": title}
+        await admit(alice, "$b-title", ts=4_000, thread_id="$b", content=notice)
 
         (thread,) = await self._activity(alice, thread_limit=1)
 

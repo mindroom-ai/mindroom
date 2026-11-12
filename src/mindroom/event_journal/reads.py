@@ -259,10 +259,12 @@ def latest_room_cursor(transaction: Transaction, principal_id: str, *, room_id: 
 # one cut line, but anyone who can post can make a root a resolved long-text
 # sidecar.
 _ROOM_ACTIVITY_TITLE_BYTES = 64 * 1024
-# The largest message that counts as a summary notice. A summary is at most a
-# few hundred characters, and anyone who can post can name the key, so a small
-# bound keeps every summary candidate of a read to a few megabytes once decoded.
-_ROOM_ACTIVITY_SUMMARY_BYTES = 4 * 1024
+# The largest message that counts as a summary notice. A notice holds its
+# summary of at most 300 characters three times, and stored JSON escapes each
+# non-ASCII character to six bytes, so the longest non-Latin title takes about
+# 6 KB. Anyone who can post can name the key, so the bound stays that small,
+# keeping every summary candidate of a read to a few megabytes.
+_ROOM_ACTIVITY_SUMMARY_BYTES = 8 * 1024
 # Whether a row is a summary notice: small, and its content names the key.
 # CASE fixes the order on both backends, so no larger row is searched. A `_` in
 # the key also matches any character, so a caller checks the key it decodes.
