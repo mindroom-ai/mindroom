@@ -410,8 +410,9 @@ server {
   }
 {{- end }}
 
-  # The device pairing page approves a sign-in, so no origin may frame it.
-  location ~ ^{{ regexQuoteMeta $prefix }}/connect/?$ {
+  # The device pairing page approves a sign-in, so no origin may frame it. The
+  # client router matches its name in any letter case.
+  location ~ ^{{ regexQuoteMeta $prefix }}/(?i:connect)/?$ {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
 {{ include "mindroom-client.frameHeaders" "none" | indent 4 }}

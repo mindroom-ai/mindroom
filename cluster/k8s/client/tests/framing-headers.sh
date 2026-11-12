@@ -51,7 +51,7 @@ render_conf() {
 # without add_header of their own inherit, and a location that sets add_header must repeat them.
 check_conf() {
   awk '
-    function expected(block) { return block ~ /\/connect\/\?\$/ ? "none" : "self" }
+    function expected(block) { return block ~ /connect\)?\/\?\$/ ? "none" : "self" }
     function check(where, policy, csp, xfo) {
       if (policy == "none") { want_csp = "\"frame-ancestors '\''none'\''\""; want_xfo = "\"DENY\"" }
       else { want_csp = "\"frame-ancestors '\''self'\''\""; want_xfo = "\"SAMEORIGIN\"" }
@@ -111,6 +111,7 @@ printf '%s\n' '"use strict";' | tee "$html/sw.js" "$html/root-cleanup-sw.js" "$h
 # Each request: the path, then the expected framing policy.
 root_requests=(
   "/ self" "/rooms/!room:example.com self" "/pdf-frame.html self" "/connect none" "/connect/ none"
+  "/CONNECT none" "/Connect/ none"
   "/config.json self" "/version.json self" "/notices.json self" "/manifest.json self" "/sw.js self"
   "/assets/app-1a2b.js self" "/assets/missing.js self" "/rooms/x/assets/app-1a2b.js self"
   "/public/locales/en.json self" "/public/plugins/example/frame.html self"
@@ -121,7 +122,8 @@ root_requests=(
 )
 chat_requests=(
   "/ self" "/chat self" "/chat/ self" "/chat/rooms/!room:example.com self" "/chat/connect none"
-  "/chat/connect/ none" "/chat/config.json self" "/chat/version.json self" "/chat/notices.json self"
+  "/chat/connect/ none" "/chat/Connect none" "/chat/%43ONNECT/ none" "/chat/connection self"
+  "/chat/config.json self" "/chat/version.json self" "/chat/notices.json self"
   "/chat/manifest.json self" "/chat/pdf.worker.min.js self" "/chat/sw.js self" "/chat/sw.js/x self"
   "/sw.js self" "/chat/assets/app-1a2b.js self" "/chat/public/locales/en.json self"
   "/chat/public/plugins/example/frame.html self" "/chat/public/element-call/index.html self"

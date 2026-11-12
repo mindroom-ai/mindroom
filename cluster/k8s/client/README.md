@@ -254,9 +254,10 @@ nginx:
 The chart rejects `nginx.serverSnippet` and `nginx.httpSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
 
 Every response of the chart-managed nginx sends `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the client and its files, as the client does for its PDF viewer and client plugin pages.
-The device pairing page at `basePath/connect` sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
+The device pairing page at `basePath/connect`, in any letter case, sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
 nginx ignores server-level `add_header` directives in any location that sets its own headers, as the app shell, configuration, and asset locations do, so response headers added through `nginx.serverSnippet` do not reach those responses.
 For the same reason, a location added through `nginx.serverSnippet` that sets its own `add_header` must repeat both framing headers.
+Response headers added through `nginx.httpSnippet` reach no response, because the server block sets its own framing headers.
 
 ## Custom nginx Config
 
