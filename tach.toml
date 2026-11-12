@@ -7125,7 +7125,6 @@ expose = [
     "normal_worker_key",
     "normalize_worker_key_part",
     "SHARED_DIRECTORIES_DIRNAME",
-    "ExecutionChannel",
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",

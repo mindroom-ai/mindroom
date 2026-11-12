@@ -11,15 +11,10 @@ import secrets
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path  # noqa: TC003 - Required at runtime for load_or_create parameter
-from typing import Any, get_args, get_type_hints
+from typing import Any, Literal, get_args, get_type_hints
 
 from mindroom.atomic_file import atomic_write_bytes_at
-from mindroom.tool_system.worker_routing import (
-    ExecutionChannel,
-    ResolvedWorkerTarget,
-    ToolExecutionIdentity,
-    WorkerScope,
-)
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 
 _TOKEN_PREFIX = "mrb1"  # noqa: S105
 _TOKEN_VERSION_TAG = b"mindroom-egress-broker-token-v1"
@@ -36,7 +31,7 @@ class WorkerClaims:
     routing_agent_name: str | None
     tenant_id: str | None
     account_id: str | None
-    channel: ExecutionChannel
+    channel: Literal["matrix", "openai_compat", "headless", "mcp"]
     agent_name: str
     requester_id: str | None
 
