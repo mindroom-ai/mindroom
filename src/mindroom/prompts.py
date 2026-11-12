@@ -741,12 +741,12 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
-        "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
-            {"agent_name", "display_name", "model_provider", "model_id"},
-        ),
         "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE": frozenset({"memory_path"}),
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
             {"included_lines", "total_lines", "max_entrypoint_lines", "max_entrypoint_tokens", "memory_path"},
+        ),
+        "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {"agent_name", "display_name", "model_provider", "model_id"},
         ),
         "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "PROMPT_CURATION_PROMPT_TEMPLATE": frozenset(
