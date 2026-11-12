@@ -72,7 +72,7 @@ from mindroom.tool_system.declarations import (
     is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
-from mindroom.tool_system.output_files import SAVED_OUTPUT_DIRNAME, ToolOutputFilePolicy, current_tool_workdir
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -653,15 +653,6 @@ def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: s
         raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
-def _tool_output_root(agent_runtime: ResolvedAgentRuntime) -> Path:
-    """Return where an agent's tools save outputs: its workspace, or only its saved-output directory beside a workdir."""
-    if current_tool_workdir() is None:
-        return agent_runtime.workspace.root
-    root = agent_runtime.workspace.root / SAVED_OUTPUT_DIRNAME
-    root.mkdir(exist_ok=True)
-    return root
-
-
 def _agent_tool_output_file_policy(
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
@@ -669,7 +660,7 @@ def _agent_tool_output_file_policy(
 ) -> ToolOutputFilePolicy:
     """Resolve the shared output-file policy for one agent's in-process tools."""
     return ToolOutputFilePolicy.from_runtime(
-        _tool_output_root(agent_runtime),
+        agent_runtime.workspace.root,
         runtime_paths,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         tools_use_workdir=current_tool_workdir() is not None,
@@ -860,7 +851,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         ),
         runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
         allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
-        tool_output_workspace_root=_tool_output_root(agent_runtime),
+        tool_output_workspace_root=agent_runtime.workspace.root,
         agent_state_root=agent_runtime.state_root,
         tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         workspace_in_worker=workspace_in_worker,

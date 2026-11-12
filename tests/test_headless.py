@@ -14,14 +14,15 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from aiohttp import web
 
+from mindroom import headless
 from mindroom.constants import resolve_runtime_paths
 from mindroom.headless import HeadlessConfigError, run_turn, validate_config
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers import model_http_client
 from mindroom.shell.output_capture import ShellOutputDestination
-from tests.conftest import requires_linux
+from tests.conftest import install_model_providers, requires_linux
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 
@@ -510,57 +511,33 @@ async def test_workdir_may_be_a_link_under_home(tmp_path: Path, workdir: Path, m
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(workdir.resolve())
 
 
-def _chat_chunk(delta: dict[str, object], finish: str | None = None) -> bytes:
-    choice = {"index": 0, "delta": delta, "finish_reason": finish}
-    body = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [choice]}
-    return f"data: {json.dumps(body)}\n\n".encode()
-
-
 @pytest.mark.asyncio
-async def test_concurrent_turns_on_one_loop_keep_their_model_connections(tmp_path: Path) -> None:
-    """A turn that ends while another still streams from its model leaves the other's connection open."""
+async def test_concurrent_turns_close_model_connections_once_after_the_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that ends while another still runs leaves the loop's pooled model connections to the last one to end."""
     slow_streaming, fast_done = asyncio.Event(), asyncio.Event()
 
-    async def completions(request: web.Request) -> web.StreamResponse:
-        body = await request.json()
-        slow = "slow" in json.dumps(body["messages"])
-        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
-        await response.prepare(request)
-        await response.write(_chat_chunk({"content": "one "}))
-        if slow:
-            # The slow stream stays open until the fast turn has ended.
-            slow_streaming.set()
-            await asyncio.wait_for(fast_done.wait(), 10)
-        await response.write(_chat_chunk({"content": "two three"}))
-        await response.write(_chat_chunk({}, "stop"))
-        await response.write(b"data: [DONE]\n\n")
-        return response
+    async def hold() -> None:
+        slow_streaming.set()
+        await fast_done.wait()
 
-    app = web.Application()
-    app.router.add_post("/v1/chat/completions", completions)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = runner.addresses[0][1]
-    config = _config()
-    config["models"]["default"] = {
-        "provider": "openai",
-        "id": "m",
-        "api": "chat_completions",
-        "extra_kwargs": {"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "unused"},
-    }
-    try:
-        slow_turn = asyncio.create_task(run_turn(config, agent="coder", prompt="slow", storage=tmp_path / "slow"))
-        await asyncio.wait_for(slow_streaming.wait(), 10)
-        fast = await run_turn(config, agent="coder", prompt="fast", storage=tmp_path / "fast")
-        fast_done.set()
-        slow = await slow_turn
-    finally:
-        await runner.cleanup()
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(hold), *answer("slow")], answer("fast")])})
+    closes: list[bool] = []
 
-    assert (fast.text, fast.completed) == ("one two three", True)
-    assert (slow.text, slow.completed) == ("one two three", True)
+    async def close() -> None:
+        closes.append(fast_done.is_set())
+
+    monkeypatch.setattr(headless, "aclose_model_http_client", close)
+    slow_turn = asyncio.create_task(run_turn(_config(), agent="coder", prompt="slow", storage=tmp_path / "slow"))
+    await asyncio.wait_for(slow_streaming.wait(), 10)
+    fast = await run_turn(_config(), agent="coder", prompt="fast", storage=tmp_path / "fast")
+    fast_done.set()
+    slow = await slow_turn
+
+    assert (fast.text, slow.text) == ("fast", "slow")
+    assert closes == [True]
 
 
 def test_a_refusal_survives_pickling() -> None:
@@ -584,3 +561,22 @@ async def test_file_memory_runs_headless(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert result.completed
     assert "PINEAPPLE" in _sent(provider.requests[0])
+
+
+@pytest.mark.asyncio
+async def test_subagent_redirect_receipt_names_the_saved_file(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `run_subagent` answer redirected with `mindroom_output_path` beside a workdir is saved with the saved outputs."""
+    call = {"agent_name": "coder", "task": "answer", "mindroom_output_path": "child.txt"}
+    provider = _install(monkeypatch, [("run_subagent", call)], "the child's answer", "done")
+    storage = tmp_path / "storage"
+    await run_turn(_config(delegate_to=["coder"]), agent="coder", prompt="go", storage=storage, workdir=workdir)
+
+    saved = storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs" / "child.txt"
+    receipt = ast.literal_eval(_last_tool_result(provider.requests[2]))["mindroom_tool_output"]
+    assert receipt["path"] == str(saved.resolve())
+    assert saved.read_text().startswith("the child's answer")
+    assert _files(workdir) == []

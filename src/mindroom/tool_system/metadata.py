@@ -581,21 +581,17 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
-    tools_use_workdir: bool,
+    saved_output_dir: Path | None,
     workspace_in_worker: bool | None,
     agent_state_root: Path | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool.
 
-    Path tools working in a workdir can read the directory of saved outputs, whose receipts name files there.
+    Path tools working in a workdir can read ``saved_output_dir``, the saved outputs whose receipts name files there.
     """
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    saved_outputs = (
-        (SharedDirectoryRoot(path=tool_output_workspace_root, writable=False),)
-        if tools_use_workdir and tool_output_workspace_root is not None
-        else ()
-    )
+    saved_outputs = (SharedDirectoryRoot(path=saved_output_dir, writable=False),) if saved_output_dir else ()
 
     def path_tool_roots() -> tuple[SharedDirectoryRoot, ...]:
         # Shared directories change during a response, so path tools resolve them on each call.
@@ -780,7 +776,6 @@ def get_tool_by_name(
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
     None follows the sandbox settings for those tools.
-    Under a bound tool workdir, ``tool_output_workspace_root`` holds only the toolkit's saved outputs.
     """
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
@@ -810,8 +805,16 @@ def get_tool_by_name(
         )
         from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
 
-        tools_use_workdir = current_tool_workdir() is not None
-
+        output_file_policy = (
+            ToolOutputFilePolicy.from_runtime(
+                tool_output_workspace_root,
+                runtime_paths,
+                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+                tools_use_workdir=current_tool_workdir() is not None,
+            )
+            if tool_output_workspace_root is not None
+            else None
+        )
         settings = resolve_tool_settings(
             tool_name,
             runtime_paths,
@@ -849,7 +852,11 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tool_output_workspace_root=tool_output_workspace_root,
-                tools_use_workdir=tools_use_workdir,
+                saved_output_dir=(
+                    output_file_policy.saved_output_dir
+                    if output_file_policy is not None and output_file_policy.tools_use_workdir
+                    else None
+                ),
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
             ),
@@ -868,16 +875,6 @@ def get_tool_by_name(
             include_tools=include_tools,
             exclude_tools=exclude_tools,
             declared_functions=declared,
-        )
-        output_file_policy = (
-            ToolOutputFilePolicy.from_runtime(
-                tool_output_workspace_root,
-                runtime_paths,
-                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-                tools_use_workdir=tools_use_workdir,
-            )
-            if tool_output_workspace_root is not None
-            else None
         )
         configure_toolkit_functions(
             toolkit,

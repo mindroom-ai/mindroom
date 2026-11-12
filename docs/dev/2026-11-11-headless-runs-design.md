@@ -32,6 +32,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    A receipt's workspace-relative path would resolve against the workdir, where the file is not, or where a different file of the same name may be.
    Under `file_access: workspace`, `file` and `coding` get that one directory as an extra read-only root, which keeps their confinement as narrow as possible while they can still read what the receipts name.
    The system prompt leaves out its notes on saving outputs and skills into the workspace, because the tools would resolve those relative paths in the workdir.
+   Only saved outputs move: tools that keep files of their own in the workspace, such as `file_generation` or `google_drive`, keep it, so a workdir changes nothing for them.
 8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 
@@ -43,6 +44,8 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
   It would put context files, `mindroom_tool_outputs/`, subagent profiles, and delegation records among the caller's files.
 - Saving tool outputs in the workdir.
   They are MindRoom's state, and they would appear among the caller's files.
+- Pointing every toolkit's workspace at the saved-output directory beside a workdir.
+  It would move the files of tools that the workdir does not concern.
 - Giving `file` and `coding` the whole agent workspace as an extra root.
   Reading saved outputs needs only their directory.
 - Refusing Mem0 memory.
@@ -53,4 +56,4 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 - Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
 - The agent's identity prompt is the one the OpenAI-compatible API uses, which names that API.
 - Beside a workdir, a few prompt lines still name workspace-relative paths that the tools resolve in the workdir: the note that editing an existing workspace skill with file tools is fine, and where delegation records live; leaving them out needs splitting prompt templates that configs can override.
-- Tools that save files of their own under the workspace, such as `file_generation`, save them under `mindroom_tool_outputs/` in workdir mode; the paths their replies name are not rewritten.
+- Tools that work on files of their own, such as `file_generation`, keep the workspace beside a workdir, and the workspace-relative paths their replies name do not resolve in the workdir.

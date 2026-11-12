@@ -38,7 +38,7 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
-SAVED_OUTPUT_DIRNAME = "mindroom_tool_outputs"
+_AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _AUTO_SAVE_READ_HINT = (
     "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
     "Read it in parts instead, such as a line range (for example with read_file_chunk) or a search for what you need."
@@ -55,8 +55,8 @@ class ToolOutputFilePolicy:
     workspace_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-    # Whether the agent's tools work in a directory other than ``workspace_root``, as in a headless run with a workdir,
-    # where ``workspace_root`` is the directory for saved outputs only: receipts then name saved files by absolute path.
+    # Whether the agent's tools work in a directory other than its workspace, as in a headless run with a workdir: every
+    # saved output then goes to ``saved_output_dir``, which those tools can read, and receipts name it by absolute path.
     tools_use_workdir: bool = False
 
     @classmethod
@@ -75,6 +75,11 @@ class ToolOutputFilePolicy:
             auto_save_threshold_bytes=auto_save_threshold_bytes,
             tools_use_workdir=tools_use_workdir,
         )
+
+    @property
+    def saved_output_dir(self) -> Path:
+        """Return the workspace directory that holds automatically saved outputs."""
+        return self.workspace_root / _AUTO_SAVE_ROOT
 
 
 @dataclass(frozen=True)
@@ -291,6 +296,8 @@ def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _Va
         return raw_validation
 
     requested_path, relative_path = raw_validation
+    if policy.tools_use_workdir:
+        relative_path = Path(_AUTO_SAVE_ROOT, relative_path)
     try:
         candidate = resolve_relative_path_within_root_preserving_leaf(
             policy.workspace_root,
@@ -408,7 +415,7 @@ def _auto_output_relative_path(
 ) -> str:
     suffix = {"text": "txt", "json": "json", "binary": "bin"}[output_format]
     name = f"{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
-    return name if policy.tools_use_workdir else f"{SAVED_OUTPUT_DIRNAME}/{name}"
+    return name if policy.tools_use_workdir else f"{_AUTO_SAVE_ROOT}/{name}"
 
 
 def _receipt_path(policy: ToolOutputFilePolicy, validated_path: _ValidatedOutputPath) -> str:
