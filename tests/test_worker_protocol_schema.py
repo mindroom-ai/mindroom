@@ -75,7 +75,7 @@ def test_a_field_named_like_a_schema_keyword_still_changes_the_schema() -> None:
 def test_a_new_execution_channel_changes_the_digest(monkeypatch: pytest.MonkeyPatch) -> None:
     """A worker refuses an identity whose channel it does not know, so a new channel value is a wire change."""
     digest = _wire_schema_digest()
-    channels = Literal["matrix", "openai_compat", "headless", "mcp", "new"]
+    channels = Literal[worker_routing._ExecutionChannel, "new"]
     monkeypatch.setattr(worker_routing, "_ExecutionChannel", channels)
 
     assert _wire_schema_digest() != digest

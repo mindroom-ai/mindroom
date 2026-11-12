@@ -752,26 +752,26 @@ def _probes(output: bytes) -> list[str]:
     return [probe for probe in _PROBES if probe.encode() in output]
 
 
-def test_library_use_logs_only_warnings_to_stderr(tmp_path: Path) -> None:
-    """A program that imports headless runs and configures no logging gets MindRoom's warnings on stderr, only."""
-    completed = _library_program(tmp_path)
-
-    # Agno's loggers keep their own stdout handler, and the program's own structlog logger prints as before.
-    assert _probes(completed.stdout) == [*_AGNO, "caller_info"]
-    assert _probes(completed.stderr) == ["probe_warning", "probe_exception"]
-
-
 @pytest.mark.parametrize(
     ("before", "after", "stdout", "stderr"),
     [
+        # Agno's loggers keep their own stdout handler, and the program's own structlog logger prints as before.
+        pytest.param("", "", (*_AGNO, "caller_info"), _MINDROOM[2:], id="no-setup"),
         pytest.param(_STRUCTLOG_TO_STDOUT, "", _SEEN, (), id="structlog-before-import"),
+        pytest.param(
+            f"import mindroom.config.main\n{_STRUCTLOG_FACTORY}",
+            "",
+            _SEEN,
+            (),
+            id="factory-after-another-import",
+        ),
         pytest.param("", _STRUCTLOG_TO_STDOUT, _SEEN, (), id="structlog-after"),
         pytest.param("", _STRUCTLOG_FACTORY, _SEEN, (), id="factory-after"),
         # Without a logger factory of the program's, MindRoom's records stay with `logging`.
         pytest.param("", _STRUCTLOG_PROCESSORS, (*_AGNO, "caller_info"), _MINDROOM[2:], id="processors-after"),
         pytest.param("", _STRUCTLOG_GENERIC, (*_AGNO, "caller_info", "caller_msg"), _MINDROOM[2:], id="generic-after"),
         # The program's stdlib loggers decide; Python's default shows warnings and errors.
-        pytest.param("", _STRUCTLOG_STDLIB, _AGNO, ("probe_warning", "probe_exception"), id="stdlib-after"),
+        pytest.param("", _STRUCTLOG_STDLIB, _AGNO, _MINDROOM[2:], id="stdlib-after"),
         pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _SEEN[1:], (), id="logging"),
         pytest.param(
             "",
@@ -789,15 +789,7 @@ def test_library_use_follows_the_programs_logging(
     stdout: tuple[str, ...],
     stderr: tuple[str, ...],
 ) -> None:
-    """The program's own loggers print as they would without MindRoom, and its setup decides about MindRoom's."""
+    """The program's own structlog loggers stay on structlog, and its setup decides where MindRoom's records go."""
     completed = _library_program(tmp_path, before=before, after=after)
 
     assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(stdout), list(stderr))
-
-
-def test_library_logging_leaves_a_structlog_setup_made_after_another_import(tmp_path: Path) -> None:
-    """A program that configured structlog after importing another MindRoom module keeps that setup."""
-    before = f"import mindroom.config.main\n{_STRUCTLOG_FACTORY}"
-    completed = _library_program(tmp_path, before=before)
-
-    assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(_SEEN), [])
