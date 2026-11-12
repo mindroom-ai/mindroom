@@ -76,6 +76,7 @@ def _tool(entry: ToolTraceEntry, state: Literal["running", "done", "error"], cal
 def _activity(*, task: str = "Write it all down.") -> _SubagentActivity:
     return _SubagentActivity(
         delegation_id="del-1",
+        subagent_id="del-1",
         parent_delegation_id=None,
         caller_agent_name="lead",
         root_caller_agent_name="lead",
@@ -97,6 +98,7 @@ def _scripted_runs() -> list[SubagentSnapshot]:
     listed = replace(listing, type="tool_call_completed", result_preview="v1.0\nv2.0")
     running = make_snapshot(
         delegation_id="del-1",
+        subagent_id="del-1",
         caller_agent_name="lead",
         root_caller_agent_name="lead",
         agent_name="researcher",
@@ -119,6 +121,7 @@ def _scripted_runs() -> list[SubagentSnapshot]:
         ),
         make_snapshot(
             delegation_id="del-2",
+            subagent_id="del-2",
             parent_delegation_id="del-1",
             caller_agent_name="researcher",
             root_caller_agent_name="lead",
