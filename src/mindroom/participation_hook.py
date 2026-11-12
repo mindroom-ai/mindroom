@@ -3,8 +3,8 @@
 An agent that already took part in a thread decides whether to reply again. The decision is asked of the configured
 judgment backend first, which reads tool calls and files as placeholders; when that backend abstains or cannot read
 the conversation, the reply's own model answers a decision request: the reply's request with the decision prompt
-appended to its exact messages and tool selection disabled, so the decision carries the reply's tools and settings, such as deferred tool
-search and native compaction, and the provider's prompt cache serves the reply that follows.
+appended to its exact messages and tool selection disabled, so the decision carries the reply's tools and settings,
+such as deferred tool search and native compaction, and the provider's prompt cache serves the reply that follows.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
+from mindroom.llm.media import rendered_label
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import complete
 from mindroom.logging_config import get_logger
@@ -70,9 +71,12 @@ def parse_decision(content: str) -> ParticipationDecision:
 
 
 # Earlier messages carry ``format_attachment_annotation``'s list and the current one ``format_attachments_prompt``'s
-# block. A judge reads only the kinds they name, since a file name can carry private text.
-_ANNOTATED_FILE = r'\S+ \((image|audio|video|file)(?:, "[^"\n]*")?\)'
-_ANNOTATION = re.compile(rf"\[attachments: {_ANNOTATED_FILE}(?:, {_ANNOTATED_FILE})*\]")
+# block. A judge reads only the kinds they name, since a file name can carry private text. An annotation follows its
+# message's body on the line before it, which for a file sent without a caption is the file's name.
+_ANNOTATED_FILE = r'\S+ \((image|audio|video|file)(?:, "([^"\n]*)")?\)'
+_ANNOTATION = re.compile(
+    rf"(^|\n|<!\[CDATA\[)(?:((?:(?!<!\[CDATA\[)[^\n])*)\n)?(\[attachments: {_ANNOTATED_FILE}(?:, {_ANNOTATED_FILE})*\])",
+)
 _LISTED_FILE = r"- \S+ \((image|audio|video|file)\b[^\n]*\)"
 _CURRENT_FILES = re.compile(
     rf"Attachments sent with the current message \(use tool calls to inspect or process them by ID\):(?:\n{_LISTED_FILE})+",
@@ -88,6 +92,15 @@ _MEDIA_KINDS = {"images": "image", "audio": "audio", "videos": "video", "files":
 
 def _sent(kinds: Sequence[str]) -> str:
     return " ".join(_SENT[kind] for kind in dict.fromkeys(kinds))
+
+
+def _annotation_placeholder(match: re.Match[str]) -> str:
+    files = re.findall(_ANNOTATED_FILE, match[3])
+    placeholder = _sent([kind for kind, _ in files])
+    body = match[2]
+    if body is not None and not any(name and name in rendered_label(body) for _, name in files):
+        placeholder = f"{body}\n{placeholder}"
+    return match[1] + placeholder
 
 
 def _used(names: Sequence[object]) -> str:
@@ -107,10 +120,7 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
         if not isinstance(message.content, str | None):
             # Content blocks can hold media or provider data no placeholder describes.
             return "unreadable_content"
-        text, annotations = _ANNOTATION.subn(
-            lambda match: _sent(re.findall(_ANNOTATED_FILE, match[0])),
-            message.content or "",
-        )
+        text, annotations = _ANNOTATION.subn(_annotation_placeholder, message.content or "")
         text, listings = _CURRENT_FILES.subn(
             lambda match: _sent(re.findall(rf"^{_LISTED_FILE}", match[0], re.MULTILINE)),
             text,

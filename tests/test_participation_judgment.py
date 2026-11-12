@@ -500,6 +500,44 @@ async def test_decisions_judge_reads_tool_calls_and_files_as_placeholders(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "body", "placeholder"),
+    [
+        ("user", "{name}", "[sent a file]"),
+        ("user", "Here it is.\n{name}", "[sent a file]"),
+        ("assistant", "\n\n{name}", "[sent a file]"),
+        ("assistant", "\n\n[audio message: {name}]", "[sent audio]"),
+    ],
+)
+async def test_an_uncaptioned_file_reaches_the_judge_without_its_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    body: str,
+    placeholder: str,
+) -> None:
+    """A file sent without a caption has its name as its body, which must not reach the judge either."""
+    gate, _ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    name = 'tax "return" 2026.pdf'
+    kind = "audio" if "audio" in placeholder else "file"
+    text = f"{body.format(name=name)}\n{format_attachment_annotation([_record('att_file', kind, name)])}"
+    messages = [
+        Message(role="user", content=_msg("@alice:example.org", "Who has the latest copy?")),
+        Message(role=role, content=_msg("@bob:example.org", text) if role == "user" else text),
+        Message(role="user", content=_msg("@alice:example.org", "Thanks!")),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    await _reply(model, gate, messages)
+
+    wire = json.dumps(posted[0])
+    assert "tax" not in wire
+    assert "return" not in wire
+    assert placeholder in posted[0]["input"][1]["content"]
+    assert ("Here it is." in wire) is ("Here it is." in body)
+
+
+@pytest.mark.asyncio
 async def test_interrupted_tool_context_and_summaries_reach_the_judge_without_tool_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
