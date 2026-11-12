@@ -1,17 +1,14 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
-import pytest
-
-from mindroom.constants import EXACT_MENTIONS_KEY, REASONING_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
+    _chunk_mentions,
     _render_segment_html,
     _unclosed_fence_start,
-    _visible_mentions,
     segment_matrix_content,
 )
 
@@ -264,58 +261,9 @@ def test_mention_pills_survive_segmentation() -> None:
     mentioned = [part for part in parts if "@alice:localhost" in part["body"]]
     assert len(mentioned) == 1
     assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in mentioned[0]["formatted_body"]
-    # The mention ends the reply, so the last segment, which carries the reply's mentions, carries it too.
+    # m.mentions belongs to the event whose body carries the mention.
     assert mentioned[0]["m.mentions"] == {"user_ids": ["@alice:localhost"]}
-    assert not any(part["m.mentions"] for part in parts if part is not mentioned[0])
-
-
-@pytest.mark.parametrize("edit", [False, True])
-def test_a_split_reply_carries_its_mentions_on_its_last_segment(*, edit: bool) -> None:
-    """A mention early in a split reply wakes its target only once the whole reply has arrived."""
-    tail = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
-    body = f"@writer:localhost please review this.\n\n{tail}"
-    message = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": (
-            '<p><a href="https://matrix.to/#/@writer:localhost">@Writer</a> please review this.</p>'
-            + markdown_to_html(tail)
-        ),
-        "m.mentions": {"user_ids": ["@writer:localhost", "@absent:localhost"]},
-    }
-    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
-
-    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
-
-    assert segmented is not None
-    assert segmented.continuations
-    first = segmented.first["m.new_content"] if edit else segmented.first
-    assert "@writer:localhost" in first["body"]
-    assert '<a href="https://matrix.to/#/@writer:localhost">@Writer</a>' in first["formatted_body"]
-    # Earlier segments mention nobody, so no client matches the name and no receiver finds the pill in their text.
-    earlier = (segmented.first, first) if edit else (first,)
-    for part in (*earlier, *segmented.continuations[:-1]):
-        assert part["m.mentions"] == {}
-        assert part[EXACT_MENTIONS_KEY] is True
-    # Only mentions the reply's text carries, as for an unsplit reply's chunks.
-    assert segmented.continuations[-1]["m.mentions"] == {"user_ids": ["@writer:localhost"]}
-    assert EXACT_MENTIONS_KEY not in segmented.continuations[-1]
-
-
-def test_a_reply_that_sheds_only_its_reasoning_keeps_its_mentions_on_its_one_segment() -> None:
-    """Dropping internal metadata can leave one segment, which then carries the reply's mentions itself."""
-    message = build_message_content(
-        "Over to you, @writer:localhost.",
-        extra_content={"m.mentions": {"user_ids": ["@writer:localhost"]}, REASONING_CONTENT_KEY: "x" * 60_000},
-    )
-    content = build_matrix_edit_content(event_id="$placeholder", new_content=message)
-
-    segmented = segment_matrix_content(content, room_encrypted=False)
-
-    assert segmented is not None
-    assert segmented.continuations == ()
-    assert segmented.first["m.new_content"]["m.mentions"] == {"user_ids": ["@writer:localhost"]}
+    assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
 
 
 def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:
@@ -338,8 +286,8 @@ def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:
     assert '<a href="https://matrix.to/#/@alice:localhost2">@Alice Two</a>' in rendered
     assert rendered.count("<a ") == 2
     # The shorter ID must not be attributed to a chunk that names only the longer one.
-    assert _visible_mentions({**content, "body": "ping @alice:localhost2 again"}) == {"user_ids": ["@alice:localhost2"]}
-    assert _visible_mentions(content) == {"user_ids": ["@alice:localhost", "@alice:localhost2"]}
+    assert _chunk_mentions(content, "ping @alice:localhost2 again") == {"user_ids": ["@alice:localhost2"]}
+    assert _chunk_mentions(content, body) == {"user_ids": ["@alice:localhost", "@alice:localhost2"]}
 
 
 def test_pill_restoration_leaves_literal_code_text_alone() -> None:
@@ -361,7 +309,7 @@ def test_pill_restoration_leaves_literal_code_text_alone() -> None:
 
 
 def test_room_mention_travels_with_its_segment() -> None:
-    """The room flag goes out with the last segment, here the one whose body carries ``@room``."""
+    """The room flag follows the chunk whose body carries ``@room``."""
     lead = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
     body = f"{lead}\n\n@room please review."
     content = build_message_content(body, extra_content={"m.mentions": {"room": True}})
@@ -373,26 +321,26 @@ def test_room_mention_travels_with_its_segment() -> None:
     mentioned = [part for part in parts if "@room" in part["body"]]
     assert len(mentioned) == 1
     assert mentioned[0]["m.mentions"] == {"room": True}
-    assert not any(part["m.mentions"] for part in parts if part is not mentioned[0])
+    assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
 
 
-def test_a_split_edit_notifies_its_mentions_once() -> None:
-    """A split edit's outer mention delta moves to the last segment too, so a mention notifies once."""
+def test_edit_keeps_the_outer_mention_delta() -> None:
+    """An edit's outer m.mentions is the revision delta and stays verbatim."""
     body = _body() + "\n\nThanks @alice:localhost."
     mentions = {"user_ids": ["@alice:localhost"]}
     content = build_matrix_edit_content(
         event_id="$placeholder",
         new_content=build_message_content(body, extra_content={"m.mentions": mentions}),
     )
-    content["m.mentions"] = mentions
 
     segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
 
     assert segmented is not None
-    assert segmented.first["m.mentions"] == {}
-    assert segmented.first["m.new_content"]["m.mentions"] == {}
-    mentioned = [part for part in segmented.continuations if part["m.mentions"]]
-    assert mentioned == [segmented.continuations[-1]]
+    assert segmented.first["m.mentions"] == mentions
+    # The mention landed in a continuation, so the first chunk's resolved set is empty...
+    assert "m.mentions" not in segmented.first["m.new_content"]
+    mentioned = [part for part in segmented.continuations if "@alice:localhost" in part["body"]]
+    assert len(mentioned) == 1
     assert mentioned[0]["m.mentions"] == mentions
 
 
