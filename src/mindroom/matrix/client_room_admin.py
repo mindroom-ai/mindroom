@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, MutableMapping
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -850,6 +850,17 @@ async def get_room_membership(client: nio.AsyncClient, room_id: str, user_id: st
     return None
 
 
+async def names_canonical_parent(client: nio.AsyncClient, room_id: str, parent_id: str) -> bool:
+    """Return whether a room names `parent_id` as its canonical parent with `m.space.parent`."""
+    response = await client.room_get_state_event(room_id, "m.space.parent", parent_id)
+    return isinstance(response, nio.RoomGetStateEventResponse) and is_canonical_parent(response.content)
+
+
+def is_canonical_parent(content: Mapping[str, object]) -> bool:
+    """Return whether `m.space.parent` content names its room as the canonical parent."""
+    return content.get("canonical") is True and bool(content.get("via"))
+
+
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     """Get all rooms the client has joined."""
     response = await client.joined_rooms()
@@ -915,9 +926,11 @@ __all__ = [
     "get_room_membership",
     "get_room_name",
     "invite_to_room",
+    "is_canonical_parent",
     "join_room",
     "kick_from_room",
     "leave_room",
+    "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",

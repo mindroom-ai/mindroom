@@ -7653,12 +7653,15 @@ If the alias of a recorded room is deleted, the router restores it, and creates 
 
 ## Rooms Under a Room
 
-A room can list other rooms under it with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
+A room can list other rooms under it, its sub-rooms, with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
 The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
 A listed room they cannot join without an invitation, such as a private one, needs them invited.
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
+An agent or team with `matrix_message` that replies in a sub-room, or in a room with sub-rooms, is told the room above, the sub-rooms beside it, and its own sub-rooms, with their room IDs, so it can read them when asked.
+It names only rooms the person it answers is in, up to 15 beside and under the room, and counts the rest without naming them.
+The note stays in the thread's history like other turn context, so a later reply in that thread, to someone else, still has the rooms it named.
 Whether the router greets a room under a room it is invited into is described under [Welcome Messages](https://docs.mindroom.chat/configuration/router/#welcome-messages).
 
 ## Room Cleanup
