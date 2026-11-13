@@ -1409,6 +1409,12 @@ describe("ModelConfig", () => {
         edits: [{ ...endpoints, temperature: 0.2 }],
         saved: { temperature: 0.2 },
       },
+      {
+        outcome: "saves no extra_kwargs when it only removes a key",
+        start: { client_params: { base_url: "https://gateway.example/v1" } },
+        edits: [{ client_params: {} }],
+        saved: undefined,
+      },
     ])(
       "$outcome in More settings after the row's provider changed",
       async ({ start, edits, saved }) => {
@@ -1433,12 +1439,29 @@ describe("ModelConfig", () => {
     );
 
     it.each([
-      { edits: [], hint: "the provider key" },
-      { edits: [{ api_key: "sk-typed" }], hint: "its config.yaml key" },
+      {
+        setting: "an old api_key",
+        fields: { api_key: "sk-old" },
+        edits: [],
+        hint: "the provider key",
+      },
+      {
+        setting: "an old extra_kwargs.api_key",
+        fields: { extra_kwargs: { api_key: "sk-old" } },
+        edits: [],
+        hint: "the provider key",
+      },
+      {
+        setting: "an extra_kwargs.api_key set in this edit",
+        fields: { extra_kwargs: {} },
+        edits: [{ api_key: "sk-typed" }],
+        hint: "its config.yaml key",
+      },
     ])(
-      "says the model uses $hint after the row's provider changed",
-      ({ edits, hint }) => {
-        commitGateway({ api_key: "sk-old" });
+      "says the model uses $hint after the row's provider changed with $setting",
+      ({ fields, edits, hint }) => {
+        commitGateway({});
+        addModels({ gateway: { ...gateway, ...fields } });
         const { rerender } = render(<ModelConfig />);
         chooseProvider(editRow("gateway"), /Anthropic/i);
         fireEvent.click(
