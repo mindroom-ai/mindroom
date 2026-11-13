@@ -485,7 +485,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
-A null or empty `base_url`, `project_id`, or `region` never fails this check on any provider, since it sets nothing.
+A null, empty, or whitespace-only `base_url`, `project_id`, or `region` never fails this check on any provider, since it sets nothing.
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 `role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` to OpenAI's own API and as `system` to every other endpoint, including an OpenAI-compatible server such as vLLM or llama.cpp set as `provider: openai` with its `base_url`, so remove it.
 
