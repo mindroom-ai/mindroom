@@ -910,7 +910,7 @@ async def test_requests_carry_the_authored_headers_without_request_headers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a callback, a request carries exactly the headers the model's config authors, after a turn with one too."""
+    """Without a callback, a request carries the headers the model's config authors, not an earlier turn's callback ones."""
     wire = _model_server(monkeypatch, route, "done", "done")
     config = _header_config(route)
     await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage", request_headers=_run_headers)
