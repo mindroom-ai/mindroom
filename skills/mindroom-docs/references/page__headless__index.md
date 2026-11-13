@@ -78,7 +78,7 @@ def request_headers(run: HeadlessRun) -> dict[str, str]:
 | `HeadlessRun` field | Meaning |
 |---|---|
 | `agent_name` | The agent whose run sends the request. |
-| `subagent_id` | The subagent's ID, which its follow-ups keep; `None` for the lead agent. |
+| `subagent_id` | The subagent's ID; `None` for the lead agent. |
 | `parent_subagent_id` | The ID of the subagent that started this one; `None` for the lead agent and the lead's own subagents. |
 | `depth` | `0` for the lead agent, `1` for its subagents, and one more for each nested level. |
 

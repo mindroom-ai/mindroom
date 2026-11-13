@@ -40,9 +40,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 9. `request_headers` serves LLM gateways and proxies that attribute or limit spend per run, which need to tell the lead's requests from each subagent's.
    The callback is bound once for the turn in a context variable, which every subagent's run inherits, and the provider adapters read it as they send each model request, so a request belongs to the subagent running where it is sent, or else to the lead.
-   Reading it at send time covers every request a run makes, a compaction summary that history preparation sends before the run's first request included.
    The headers merge into each request's `extra_headers`, which the SDKs send over the client's default headers, so they win over every header the config authors; an OpenAI-family client is cached per model, so its default headers cannot carry per-run values.
-   Only the Chat Completions, Responses, and Anthropic adapters send them; the shared HTTP client, which also downloads media URLs for the model, never does, so a caller's credentials reach only the model endpoint.
 
 ## Rejected alternatives
 
