@@ -3403,6 +3403,7 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.response_turn",
     "mindroom.room_activity.note",
+    "mindroom.room_tree.note",
     "mindroom.runtime_resolution",
     "mindroom.skill_learning.capture",
     "mindroom.streaming",
@@ -4119,6 +4120,7 @@ visibility = [
     "mindroom.contacts.federation",
     "mindroom.contacts.flow",
     "mindroom.matrix.room_accounts",
+    "mindroom.room_tree.note",
 ]
 
 [[modules]]
@@ -4643,6 +4645,15 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.thread_summary",
     "mindroom.tool_system.agent_tools",
+]
+
+[[modules]]
+path = "mindroom.room_tree.note"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.hooks",
+    "mindroom.matrix.client_room_admin",
 ]
 
 [[modules]]
@@ -6832,9 +6843,11 @@ expose = [
     "get_room_membership",
     "get_room_name",
     "invite_to_room",
+    "is_canonical_parent",
     "join_room",
     "kick_from_room",
     "leave_room",
+    "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",

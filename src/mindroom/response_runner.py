@@ -99,6 +99,7 @@ from mindroom.response_turn import (
     collect_streamed_response_content,
 )
 from mindroom.room_activity.note import with_room_activity_note
+from mindroom.room_tree.note import with_room_tree
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -1682,6 +1683,13 @@ class ResponseRunner:
                 room_turn_offers(self.deps.runtime.config, name, "matrix_message") for name in agent_names
             ),
         )
+        team_turn_ctx = replace(
+            team_turn_ctx,
+            transient_enrichment_items=await with_room_tree(
+                team_turn_ctx.transient_enrichment_items,
+                runtime.tool_context,
+            ),
+        )
 
         def stream(
             _runtime: PreparedResponseRuntime,
@@ -2283,6 +2291,10 @@ class ResponseRunner:
                     knowledge_resolution.unavailable,
                 ),
                 compaction_lifecycle=compaction_lifecycle,
+            )
+            ctx = replace(
+                ctx,
+                transient_enrichment_items=await with_room_tree(ctx.transient_enrichment_items, runtime.tool_context),
             )
             transient_items = await with_room_activity_note(
                 ctx,
