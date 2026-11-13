@@ -8,8 +8,6 @@ import dataclasses
 import json
 import pickle
 import re
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -731,95 +729,3 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
         "OPENAI_API_KEY not set. Please set the OPENAI_API_KEY environment variable. "
         f"A `.env` file at {storage.resolve() / '.env'} works too."
     )
-
-
-# MindRoom's own records, the records MindRoom's tools write through Agno, and the program's own structlog record.
-_MINDROOM = ("probe_debug", "probe_info", "probe_warning", "probe_exception")
-_AGNO = ("agno_info", "agno_warning")
-# What a program sees when every probe it logs reaches it; only one setup also logs `caller_msg`.
-_SEEN = (*_MINDROOM, *_AGNO, "caller_info")
-_PROBES = (*_SEEN, "caller_msg")
-_STRUCTLOG_TO_STDOUT = (
-    "structlog.configure(processors=[structlog.processors.JSONRenderer()], "
-    "logger_factory=structlog.PrintLoggerFactory(sys.stdout), wrapper_class=structlog.make_filtering_bound_logger(0))"
-)
-_STRUCTLOG_PROCESSORS = "structlog.configure(processors=[structlog.processors.JSONRenderer()])"
-_STRUCTLOG_STDLIB = (
-    "structlog.configure(wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())"
-)
-_STRUCTLOG_FACTORY = "structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stdout))"
-# A generic wrapper passes every method name through, such as `msg`, which is no log level.
-_STRUCTLOG_GENERIC = (
-    'structlog.configure(wrapper_class=structlog.BoundLogger); structlog.get_logger("caller").msg("caller_msg")'
-)
-
-
-def _library_program(tmp_path: Path, *, before: str = "", after: str = "") -> subprocess.CompletedProcess[bytes]:
-    """Run a program that imports headless runs between ``before`` and ``after``, then logs each probe."""
-    program = f"""
-import logging, sys
-import structlog
-{before}
-from pathlib import Path
-from mindroom.headless import validate_config
-from mindroom.logging_config import get_logger
-{after}
-validate_config({_config()!r}, agent="coder", storage=Path({str(tmp_path / "storage")!r}))
-logger = get_logger("mindroom.probe")
-logger.debug("probe_debug")
-logger.info("probe_info")
-logger.warning("probe_warning")
-logger.exception("probe_exception")
-from agno.utils.log import log_info, log_warning
-log_info("agno_info")
-log_warning("agno_warning")
-structlog.get_logger("caller").info("caller_info")
-"""
-    return subprocess.run([sys.executable, "-c", program], capture_output=True, check=True, timeout=120)
-
-
-def _probes(output: bytes) -> list[str]:
-    return [probe for probe in _PROBES if probe.encode() in output]
-
-
-@pytest.mark.parametrize(
-    ("before", "after", "stdout", "stderr"),
-    [
-        # Agno's loggers keep their own stdout handler, and the program's own structlog logger prints as before.
-        pytest.param("", "", (*_AGNO, "caller_info"), _MINDROOM[2:], id="no-setup"),
-        pytest.param(_STRUCTLOG_TO_STDOUT, "", _SEEN, (), id="structlog-before-import"),
-        pytest.param(
-            f"import mindroom.config.main\n{_STRUCTLOG_FACTORY}",
-            "",
-            _SEEN,
-            (),
-            id="factory-after-another-import",
-        ),
-        pytest.param("", _STRUCTLOG_TO_STDOUT, _SEEN, (), id="structlog-after"),
-        pytest.param("", _STRUCTLOG_FACTORY, _SEEN, (), id="factory-after"),
-        # Without a logger factory of the program's, MindRoom's records stay with `logging`.
-        pytest.param("", _STRUCTLOG_PROCESSORS, (*_AGNO, "caller_info"), _MINDROOM[2:], id="processors-after"),
-        pytest.param("", _STRUCTLOG_GENERIC, (*_AGNO, "caller_info", "caller_msg"), _MINDROOM[2:], id="generic-after"),
-        # The program's stdlib loggers decide; Python's default shows warnings and errors.
-        pytest.param("", _STRUCTLOG_STDLIB, _AGNO, _MINDROOM[2:], id="stdlib-after"),
-        pytest.param("", "logging.basicConfig(level=logging.INFO, stream=sys.stdout)", _SEEN[1:], (), id="logging"),
-        pytest.param(
-            "",
-            "logging.basicConfig(level=logging.WARNING, stream=sys.stdout)",
-            (*_MINDROOM[2:], *_AGNO, "caller_info"),
-            (),
-            id="logging-warning",
-        ),
-    ],
-)
-def test_library_use_follows_the_programs_logging(
-    tmp_path: Path,
-    before: str,
-    after: str,
-    stdout: tuple[str, ...],
-    stderr: tuple[str, ...],
-) -> None:
-    """The program's own structlog loggers stay on structlog, and its setup decides where MindRoom's records go."""
-    completed = _library_program(tmp_path, before=before, after=after)
-
-    assert (_probes(completed.stdout), _probes(completed.stderr)) == (list(stdout), list(stderr))

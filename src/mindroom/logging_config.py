@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 __all__ = [
     "bound_log_context",
     "configure_default_logging",
-    "configure_library_logging",
     "current_log_file",
     "exception_frames",
     "get_logger",
@@ -182,41 +181,15 @@ _DEFAULT_PROCESSORS: list[Processor] = [
 ]
 
 
-# The structlog settings `configure_default_logging` installed last.
-_DEFAULT_CONFIG: dict[str, object] = {}
-
-
 def configure_default_logging() -> None:
     """Restore the logging a process uses until it calls `setup_logging`."""
     structlog.reset_defaults()
     structlog.configure(processors=_DEFAULT_PROCESSORS)
-    _DEFAULT_CONFIG.update(structlog.get_config())
 
 
 def uses_default_logging() -> bool:
-    """Return whether every structlog setting is still the one `configure_default_logging` installed."""
-    return structlog.get_config() == _DEFAULT_CONFIG
-
-
-def _library_logger_factory(*args: object) -> object:
-    """Wrap each MindRoom logger, which `get_logger` names after its module, around the stdlib logger of that name.
-
-    Every other logger, such as the program's own, gets structlog's own printer.
-    """
-    name = args[0] if args else None
-    if isinstance(name, str) and (name == "mindroom" or name.startswith("mindroom.")):
-        return logging.getLogger(name)
-    return structlog.PrintLogger()
-
-
-def configure_library_logging() -> None:
-    """Log through the stdlib `logging` of a program that runs MindRoom as a library, unless it configured structlog.
-
-    Until that program configures `logging`, Python shows only MindRoom's warnings and errors, on stderr. Only the
-    logger factory changes, so the program's own structlog loggers keep printing through the same processors.
-    """
-    if uses_default_logging():
-        structlog.configure(logger_factory=_library_logger_factory)
+    """Return whether the processors are still the ones `configure_default_logging` installed."""
+    return structlog.get_config()["processors"] is _DEFAULT_PROCESSORS
 
 
 def _normalize_log_level(level: str) -> str:

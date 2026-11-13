@@ -14,7 +14,6 @@ from mindroom.config.main import Config
 from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, memory_search, uses_knowledge_graph
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.entity_resolution import persist_offline_entity_accounts
-from mindroom.logging_config import configure_library_logging
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_turn import detached_turn_context
@@ -38,9 +37,6 @@ if TYPE_CHECKING:
 
 
 __all__ = ["HeadlessConfigError", "HeadlessResult", "run_turn", "validate_config"]
-
-# The importing program owns its output, so MindRoom logs through its `logging` unless it configured structlog itself.
-configure_library_logging()
 
 
 class HeadlessConfigError(ValueError):

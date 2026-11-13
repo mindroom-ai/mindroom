@@ -36,14 +36,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    The other workspace paths that the prompt and the tool descriptions name relatively, such as subagent profiles and delegation records, stay as they are, and the tool environment section names the workdir and the workspace by absolute path instead; rendering each of those overridable prompts and descriptions per channel would split templates that configs can override.
    A delegation receipt beside a workdir names the child's record by its absolute path, because that record lives in the child agent's workspace, which the caller's prompt does not name.
    Only saved outputs move: tools that keep files of their own in the workspace, such as `file_generation` or `google_drive`, keep it, so a workdir changes nothing for them.
-8. Importing `mindroom.headless` routes MindRoom's logs through the program's stdlib `logging` unless the program configured `structlog` first.
-   The import-time default, which subprocess entrypoints and the sandbox runner rely on, prints every level to stdout, so in another program it mixed MindRoom's debug lines, full prompts among them, into that program's output.
-   Changing that default would change what those processes log, and only importing the headless API tells library use apart from them.
-   Library logging changes only the logger factory, so that only MindRoom's loggers, which `get_logger` names under `mindroom`, become stdlib loggers, and the program's own loggers keep the processors they had.
-   structlog's settings are process-wide, and a later `structlog.configure` keeps every setting it leaves out, so processors that routed or filtered records would also have caught the program's own loggers, before and after its partial setup.
-   MindRoom's debug records are rendered before their stdlib logger drops them, which costs only time.
-   Agno's loggers keep their own handlers and levels, which a program that uses Agno may have set itself.
-9. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
+8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 
 ## Rejected alternatives
@@ -66,5 +59,4 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 - Agents run in standard mode only: minimal mode needs `mindroom run`'s API for `mindroom-agent`.
 - Under `file_access: workspace`, `file` and `coding` beside a workdir cannot reach the workspace's skills, subagent profiles, or delegation records while `storage` is outside the workdir; `shell` and `python`, being unconfined, and `file_access: unrestricted` still reach them.
 - Beside a workdir, the skills note still says editing the agent's own workspace skills with file tools is fine, which the previous limitation contradicts; leaving it out needs splitting a prompt that configs can override.
-- In library use, tools built on Agno, such as `python` and `file`, still print some lines to stdout through Agno's own handlers, which a program quiets through `logging`; they carry no prompts.
 - Tools that work on files of their own, such as `file_generation`, keep the workspace beside a workdir, and the workspace-relative paths their replies name do not resolve in the workdir.
