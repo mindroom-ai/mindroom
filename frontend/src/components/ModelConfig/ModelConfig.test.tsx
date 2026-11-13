@@ -703,27 +703,6 @@ describe("ModelConfig", () => {
     expect(within(row).queryByTitle("Copy API key")).toBeNull();
   });
 
-  it("changes provider with inline dropdown", async () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByText("openrouter"));
-
-    const row = screen.getByDisplayValue("openrouter").closest("tr");
-    if (!row) throw new Error("row not found");
-
-    fireEvent.click(within(row).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /OpenAI/i }));
-
-    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-        ["models", "openrouter"],
-        expect.objectContaining({ provider: "openai" }),
-      );
-    });
-  });
-
   it("shows API key source labels", async () => {
     keyStatusByService["model:anthropic"] = {
       has_key: true,
@@ -1332,6 +1311,18 @@ describe("ModelConfig", () => {
       rerender(<ModelConfig />);
     }
 
+    // Switch the gateway row to Anthropic, then apply `edits` in More settings.
+    function switchGatewayAndEdit(edits: Record<string, unknown>[]) {
+      const { rerender } = render(<ModelConfig />);
+      chooseProvider(editRow("gateway"), /Anthropic/i);
+      fireEvent.click(
+        screen.getByRole("button", { name: /More settings for gateway/ }),
+      );
+      for (const extraKwargs of edits) {
+        editExtraKwargs(rerender, extraKwargs);
+      }
+    }
+
     function saveGatewayRow() {
       const row = screen.getByDisplayValue("gateway").closest("tr");
       if (!row) throw new Error("row not found");
@@ -1419,14 +1410,7 @@ describe("ModelConfig", () => {
       "$outcome in More settings after the row's provider changed",
       async ({ start, edits, saved }) => {
         commitGateway(start);
-        const { rerender } = render(<ModelConfig />);
-        chooseProvider(editRow("gateway"), /Anthropic/i);
-        fireEvent.click(
-          screen.getByRole("button", { name: /More settings for gateway/ }),
-        );
-        for (const extraKwargs of edits) {
-          editExtraKwargs(rerender, extraKwargs);
-        }
+        switchGatewayAndEdit(edits);
         saveGatewayRow();
 
         await waitFor(() => {
@@ -1462,14 +1446,7 @@ describe("ModelConfig", () => {
       ({ fields, edits, hint }) => {
         commitGateway({});
         addModels({ gateway: { ...gateway, ...fields } });
-        const { rerender } = render(<ModelConfig />);
-        chooseProvider(editRow("gateway"), /Anthropic/i);
-        fireEvent.click(
-          screen.getByRole("button", { name: /More settings for gateway/ }),
-        );
-        for (const extraKwargs of edits) {
-          editExtraKwargs(rerender, extraKwargs);
-        }
+        switchGatewayAndEdit(edits);
 
         const row = screen.getByDisplayValue("gateway").closest("tr");
         if (!row) throw new Error("row not found");
