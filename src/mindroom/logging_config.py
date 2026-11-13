@@ -163,6 +163,21 @@ def _redact_log_event_preserving_exc_info(
     return redacted
 
 
+def _hand_rendered_line_to_logger(
+    logger: object,
+    _method_name: str,
+    line: str,
+) -> str | tuple[tuple[str], dict[str, None]]:
+    """Hand a stdlib logger the rendered line without the exception, whose traceback the line already holds.
+
+    A program can set structlog's stdlib logger factory and keep these processors, and `logging.Logger.exception`
+    logs the current exception again unless it is told there is none.
+    """
+    if isinstance(logger, logging.Logger):
+        return (line,), {"exc_info": None}
+    return line
+
+
 # structlog's builtin console renderer prints Rich tracebacks with every frame's
 # locals: resolved config, credentials, subprocess environments. Processes that
 # never call `setup_logging`, such as subprocess entrypoints and the sandbox
@@ -178,6 +193,7 @@ _DEFAULT_PROCESSORS: list[Processor] = [
         colors=False,
         exception_formatter=_RedactingExceptionFormatter(structlog.dev.plain_traceback),
     ),
+    cast("Processor", _hand_rendered_line_to_logger),
 ]
 
 

@@ -19,6 +19,7 @@ import aiohttp
 import httpx
 import nio
 import pytest
+import structlog
 import uvicorn
 from agno.utils import log as agno_log
 from fastapi import FastAPI, WebSocket
@@ -606,6 +607,32 @@ def test_logged_tracebacks_omit_frame_locals(
     assert "_raise_with_credential_in_frame" in output
     assert "git failed with GIT_CONFIG_VALUE_0 configured" in output
     assert _FRAME_LOCAL_CREDENTIAL not in output
+
+
+@pytest.mark.parametrize(
+    "wrapper_class",
+    [structlog.stdlib.BoundLogger, structlog.BoundLogger],
+    ids=["stdlib-wrapper", "generic-wrapper"],
+)
+def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
+    capsys: pytest.CaptureFixture[str],
+    wrapper_class: type[structlog.BoundLoggerBase],
+) -> None:
+    """A program that hands MindRoom's records to stdlib loggers gets each traceback once."""
+    configure_default_logging()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+    structlog.configure(wrapper_class=wrapper_class, logger_factory=structlog.stdlib.LoggerFactory())
+
+    try:
+        _raise_secret_value_error()
+    except ValueError:
+        get_logger("tests.logging").exception("test_exception")
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert output.count("Traceback (most recent call last):") == 1
+    assert "_raise_secret_value_error" in output
+    assert "api-secret" not in output
 
 
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
