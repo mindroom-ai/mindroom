@@ -1321,16 +1321,16 @@ It answers only for an agent that keeps each person's connections apart, one who
 For any other agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent; it never answers with a Google service account either.
 It raises `LookupError` for a provider or agent the config does not have.
 While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent, and is `None` when the stored connection cannot be read and must first be reset in the dashboard.
-A refresh that fails for another reason, such as an unreachable provider, raises an error the route answers with 500 unless it catches it, and the next call tries again.
+A refresh that fails for another reason, such as an unreachable provider, raises `OAuthProviderError` from `mindroom.plugin_api`, the base class of `OAuthConnectionRequired`, so a route that catches both catches `OAuthConnectionRequired` first; uncaught, it answers 500, and the next call tries again.
 
 ```python
 # routes.py
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from mindroom.plugin_api import OAuthConnectionRequired
+from mindroom.plugin_api import OAuthConnectionRequired, OAuthProviderError
 from mindroom.plugin_http import ClientUser, client_user_oauth_access_token, require_client_user
 
 router = APIRouter()
@@ -1347,6 +1347,9 @@ async def file_name(
     except OAuthConnectionRequired as needed:
         # The client opens the link, the caller signs in, and the client asks again.
         return {"connect_url": needed.connect_url}
+    except OAuthProviderError:
+        # The refresh failed for a reason a retry may fix, such as an unreachable provider.
+        raise HTTPException(503, "Acme Drive is unavailable; try again shortly.") from None
     async with httpx.AsyncClient() as client:
         answer = await client.get(
             "https://api.acme.example/files",
@@ -1356,7 +1359,7 @@ async def file_name(
     return {"name": answer.json()["name"]}
 ```
 
-A plugin that uses `client_user_oauth_access_token` or `OAuthConnectionRequired` states `"mindroom_plugin_api": "1.30"` in its manifest.
+A plugin that uses `client_user_oauth_access_token`, `OAuthConnectionRequired`, or `OAuthProviderError` states `"mindroom_plugin_api": "1.30"` in its manifest.
 
 ### Websocket routes
 

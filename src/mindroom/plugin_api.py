@@ -86,7 +86,13 @@ from mindroom.hooks import (
 from mindroom.llm.provider import ModelProvider
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.oauth import OAuthConsentGroup, OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+from mindroom.oauth import (
+    OAuthConsentGroup,
+    OAuthDiscoveryConfig,
+    OAuthProvider,
+    OAuthProviderError,
+    oauth_runtime_bootstrapper,
+)
 from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
@@ -209,6 +215,7 @@ __all__ = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "OAuthProviderError",
     "PluginContext",
     "PluginLifecycle",
     "PublicFetchError",

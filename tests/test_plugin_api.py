@@ -92,6 +92,7 @@ _EXPORTS = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "OAuthProviderError",
     "PluginContext",
     "PluginLifecycle",
     "PublicFetchError",
@@ -361,7 +362,14 @@ _SIGNATURES = {
 
 # Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
 # pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
-_ANNOTATION_TYPES = ["Config", "OAuthConnectionRequired", "RuntimePaths", "ToolTraceEntry", "WorkerServiceError"]
+_ANNOTATION_TYPES = [
+    "Config",
+    "OAuthConnectionRequired",
+    "OAuthProviderError",
+    "RuntimePaths",
+    "ToolTraceEntry",
+    "WorkerServiceError",
+]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
 _ENUM_MEMBERS = {
@@ -647,7 +655,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 30), "5957c96fba4f471281c9a22f88f97f41bd9c807fa3545773d012e8e660dcabc1")
+_PINNED_VERSION = ((1, 30), "f973e4b76683a1b3c247675a96e73c899606f6c7df70af51143c070e5a262e60")
 
 
 def _is_enum(obj: object) -> bool:

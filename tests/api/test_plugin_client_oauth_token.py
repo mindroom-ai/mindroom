@@ -23,9 +23,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
-from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.service import lookup_oauth_connect_token
-from mindroom.plugin_api import OAuthConnectionRequired
+from mindroom.plugin_api import OAuthConnectionRequired, OAuthProviderError
 from mindroom.plugin_http import ClientUser, client_user_oauth_access_token
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
