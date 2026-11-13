@@ -305,7 +305,7 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert "## Custom Identity" in _role(agent)
@@ -378,7 +378,7 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
     assert OPENAI_COMPAT_HISTORY_GUIDANCE not in _role(matrix_agent)
@@ -557,6 +557,8 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -578,6 +580,8 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -604,6 +608,8 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -634,6 +640,8 @@ def test_tool_execution_environment_reports_file_access(
             worker_routed_tool_names=worker_routed,
             worker_scope=None,
             file_access=file_access,
+            workdir=None,
+            workspace_root=tmp_path,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
             shared_directories=(),
@@ -702,6 +710,8 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         worker_routed_tool_names=(),
         worker_scope=None,
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),

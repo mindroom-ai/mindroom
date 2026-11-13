@@ -10,6 +10,7 @@ from mindroom.error_handling import (
     minimal_mode_failure_message,
 )
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     TOKENS_PER_MINUTE,
     AuthenticationFailed,
@@ -22,6 +23,8 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.errors import classify_provider_error, missing_api_key_error
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 
 @pytest.mark.parametrize(
@@ -213,6 +216,31 @@ def test_missing_provider_key_without_public_url_names_dashboard() -> None:
 
     assert "Open the MindRoom dashboard, choose **Connect your AI provider**" in message
     assert "OPENROUTER_API_KEY" not in message
+
+
+def test_headless_missing_key_reply_keeps_the_error_its_own_sentence(tmp_path: Path) -> None:
+    """A headless run's reply ends the provider's own text before naming the `.env` file, whatever it ended with."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_tool_execution_identity(
+        channel="headless",
+        agent_name="coder",
+        runtime_paths=runtime_paths,
+        requester_id="@alice:localhost",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="headless:1",
+    )
+    error = AuthenticationFailed(
+        "Azure OpenAI authentication not configured. Please provide one of: azure_ad_token_provider",
+        provider="Azure",
+        status_code=401,
+        code=MISSING_API_KEY,
+    )
+    with detached_tool_scope(identity):
+        message = get_user_friendly_error_message(error, runtime_paths=runtime_paths)
+
+    assert f"azure_ad_token_provider. A `.env` file at {tmp_path / '.env'} works too." in message
 
 
 def test_rejected_provider_key_is_still_an_authentication_failure() -> None:

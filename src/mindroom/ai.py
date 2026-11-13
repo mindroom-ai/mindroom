@@ -802,7 +802,7 @@ async def _prepare_agent_and_prompt(
                 plugins=current_plugins(config, runtime_paths),
                 include_interactive_questions=ctx.include_interactive_questions,
                 tool_function_filter=ctx.tool_function_filter,
-                include_openai_compat_guidance=ctx.include_openai_compat_guidance,
+                outside_matrix=ctx.outside_matrix,
                 execution_identity=execution_identity,
                 delegation_depth=ctx.delegation_depth,
                 refresh_scheduler=ctx.refresh_scheduler,
@@ -909,11 +909,11 @@ async def _prepare_agent_and_prompt(
         config=config,
         resolved_runtime_model=runtime_model,
         compaction_lifecycle=ctx.compaction_lifecycle,
-        current_sender_id=None if ctx.include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
+        current_sender_id=None if ctx.outside_matrix else ctx.current_sender_id or ctx.requester_id,
         current_timestamp_ms=ctx.current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=ctx.current_prompt_is_structured,
-        include_openai_compat_guidance=ctx.include_openai_compat_guidance,
+        outside_matrix=ctx.outside_matrix,
         pipeline_timing=pipeline_timing,
     )
     system_messages = await _system_messages_after_compaction(

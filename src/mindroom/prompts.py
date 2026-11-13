@@ -30,6 +30,7 @@ __all__ = [
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
+    "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
     "INLINE_MEDIA_FALLBACK_PROMPT",
     "INTERACTIVE_QUESTION_PROMPT",
@@ -69,7 +70,7 @@ __all__ = [
 _MATRIX_CONVERSATION_GUIDE = 'In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender\'s full Matrix ID and their stable identity. The optional `display_name` attribute is the sender\'s current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message\'s local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.'
 _MATRIX_MENTION_GUIDE = "When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill."
 
-# Universal identity context template for all agents
+# The agent's identity in a Matrix chatroom.
 AGENT_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
 You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.
 You are powered by the {{model_provider}} model: {{model_id}}.
@@ -102,6 +103,14 @@ OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent exposed through the OpenAI-compatible API as model `{agent_name}`.
 You are powered by the {model_provider} model: {model_id}.
 {openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
+
+"""
+
+# The agent's identity in a headless run, which answers one prompt from another program, with no conversation history.
+HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+You are {display_name}, the MindRoom agent `{agent_name}`, answering a prompt from another program.
+You are powered by the {model_provider} model: {model_id}.
+Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
 
 """
 
@@ -735,6 +744,9 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE": frozenset({"memory_path"}),
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
             {"included_lines", "total_lines", "max_entrypoint_lines", "max_entrypoint_tokens", "memory_path"},
+        ),
+        "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {"agent_name", "display_name", "model_provider", "model_id"},
         ),
         "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "PROMPT_CURATION_PROMPT_TEMPLATE": frozenset(

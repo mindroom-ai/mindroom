@@ -591,7 +591,11 @@ def _build_managed_tool_init_kwargs(
     """
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    saved_outputs = (SharedDirectoryRoot(path=saved_output_dir, writable=False),) if saved_output_dir else ()
+    saved_outputs = (
+        (SharedDirectoryRoot(path=saved_output_dir, writable=False, label="the saved tool outputs directory"),)
+        if saved_output_dir
+        else ()
+    )
 
     def path_tool_roots() -> tuple[SharedDirectoryRoot, ...]:
         # Shared directories change during a response, so path tools resolve them on each call.

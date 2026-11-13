@@ -36,6 +36,13 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "compact receipt. "
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
+# Beside a workdir, the path is below the saved outputs, which tools working in the workdir open by absolute path.
+_WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
+    "Optional MindRoom-managed path relative to your saved tool outputs directory. "
+    "If set, the full supported tool output is written to this file there and the tool returns only a compact "
+    "receipt naming it by absolute path. "
+    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+)
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
@@ -227,19 +234,20 @@ def _error_receipt(error: str) -> dict[str, object]:
     }
 
 
-def _output_path_schema() -> dict[str, object]:
-    return {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-        "default": None,
-        "description": _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
-    }
+def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
 
-
-def with_optional_output_path(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property."""
+    With ``tools_use_workdir``, the path is described as relative to the saved tool outputs, where such a policy puts it.
+    """
     finished = dict(parameters)
     properties = dict(finished.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
+    properties[OUTPUT_PATH_ARGUMENT] = {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
+        "description": _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION
+        if tools_use_workdir
+        else _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
+    }
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
     required = finished.get("required")
@@ -607,7 +615,7 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
         return function
     return replace(
         function,
-        parameters=with_optional_output_path(function.parameters),
+        parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
         strict=False,
         entrypoint=_handling_output_files(function.entrypoint, policy, tool_name=function.name),
     )

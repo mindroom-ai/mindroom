@@ -397,7 +397,7 @@ class ResponseTurnContext:
     reusable_build: AgentBuild | None = None
 
     @property
-    def include_openai_compat_guidance(self) -> bool:
+    def outside_matrix(self) -> bool:
         """Whether the turn answers the OpenAI-compatible API or a headless run, which omit Matrix sender attribution."""
         return self.execution_identity is not None and self.execution_identity.channel in ("openai_compat", "headless")
 

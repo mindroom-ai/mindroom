@@ -198,7 +198,7 @@ The instance chart refuses dedicated Kubernetes workers because RBAC cannot conf
 
 | Value | Path tools may use |
 |---|---|
-| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined; in a [headless run](../headless.md#files) with a `workdir`, `file` and `coding` use that directory instead of the workspace and may read the agent's saved tool outputs, and the other path tools keep the workspace |
+| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined; in a [headless run](../headless.md#files) with a `workdir`, `file` and `coding` use that directory instead of the workspace and may read the agent's saved tool outputs, and the other path tools keep the workspace; a `browser` in the primary process also uploads and opens files by absolute path from its own [artifact directory](../tools/web-scraping-and-browser.md#browser-configuration), `browser/` in the agent's state root unless `output_dir` names another |
 | `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
 
 Every tool, including plugin tools, must declare one of these file access classes when it registers, so no tool silently defaults to taking no paths.
