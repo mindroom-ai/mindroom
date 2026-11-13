@@ -248,6 +248,21 @@ async def test_a_listed_room_that_names_another_room_above_it_is_left_out() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_room_moved_under_this_one_shows_under_it_while_the_room_above_still_lists_it() -> None:
+    """A room both list sits under the one it names as canonical parent, so a listing left behind loses it nothing."""
+    client = _client(
+        _room(DESIGN, "design", children={ROOM, PLANNING}),
+        _room(ROOM, "release-prep", children={PLANNING}),
+        _room(PLANNING, "planning"),
+        canonical={(ROOM, DESIGN), (PLANNING, ROOM)},
+    )
+
+    note = await _room_tree_note(client, ROOM, can_read=_readable(DESIGN, ROOM, PLANNING))
+
+    assert note == _note(DESIGN_LINE, HERE_LINE, "    - 'planning' (!planning:localhost)")
+
+
+@pytest.mark.asyncio
 async def test_a_room_above_that_is_nested_itself_is_not_called_the_main_room() -> None:
     """The note shows one level up, so a room above with its own room above is the room above, not the main room."""
     client = _design_tree(_room("!top:localhost", "top", children={DESIGN}), canonical={(DESIGN, "!top:localhost")})

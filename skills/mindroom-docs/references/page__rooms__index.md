@@ -91,7 +91,7 @@ They leave a listed room when the room above takes it off its list, unless it is
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
 An agent or team with `matrix_message` that replies in a room under a room, or in a room that lists rooms, is told the room above, the rooms beside it, and the rooms it lists, with their room IDs, so it can read them when asked.
-It names only rooms the person it answers is in, up to 15, and counts the rest without naming them.
+It names only rooms the person it answers is in, up to 15 beside and under the room, and counts the rest without naming them.
 Whether the router greets a room under a room it is invited into is described under [Welcome Messages](https://docs.mindroom.chat/configuration/router/#welcome-messages).
 
 ## Room Cleanup
