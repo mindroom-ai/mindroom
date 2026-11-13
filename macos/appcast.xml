@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.11.318</title>
+            <pubDate>Fri, 13 Nov 2026 04:43:57 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>2842</sparkle:version>
+            <sparkle:shortVersionString>2026.11.318</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.11.318
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Tell an agent in a room tree which rooms sit around its room (#3995)](https://github.com/mindroom-ai/mindroom/commit/8c731de99) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.11.318/MindRoom.zip" length="74831698" type="application/octet-stream" sparkle:edSignature="j1OdIeDbAXBI2QnK3sbMW8CS0ZCfzg6Y8RA7ldbQXZdI6sValvrfi591jlKDM1cSVrPz1TjdoZxeS7d3ecJLDg=="/>
+        </item>
+        <item>
             <title>2026.11.33</title>
             <pubDate>Sun, 01 Nov 2026 14:43:07 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
