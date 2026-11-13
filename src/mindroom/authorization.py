@@ -255,6 +255,7 @@ def is_sender_allowed_for_agent_oauth_connection(
     membership_index: AgentReplyMembershipIndex,
     *,
     requester_owned: bool,
+    require_resolved_membership: bool = False,
 ) -> bool:
     """Check whether a requester may connect or reset one of an agent's OAuth accounts.
 
@@ -263,6 +264,8 @@ def is_sender_allowed_for_agent_oauth_connection(
     holds only the requester's own credentials, so anyone who may use the agent may manage it,
     as on the Connections portal. Callers must resolve the credentials to the authenticated
     requester's own user or user-agent target before relying on either requester rule.
+    ``require_resolved_membership`` raises ``ReplyMembershipPendingError``, as for
+    ``is_sender_allowed_for_responder``, only when the answer waits on unresolved room grants.
     """
     agent = config.agents.get(agent_name)
     if not sender_id or agent is None:
@@ -278,7 +281,15 @@ def is_sender_allowed_for_agent_oauth_connection(
         requester_owned
         and try_parse_historical_matrix_user_id(sender_id) is not None
         and is_human_requester_id(sender_id, config, runtime_paths)
-        and is_sender_allowed_for_responder(sender_id, agent_name, None, config, runtime_paths, membership_index)
+        and is_sender_allowed_for_responder(
+            sender_id,
+            agent_name,
+            None,
+            config,
+            runtime_paths,
+            membership_index,
+            require_resolved_membership=require_resolved_membership,
+        )
     )
 
 

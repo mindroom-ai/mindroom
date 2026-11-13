@@ -121,7 +121,7 @@ class _Runtime:
     config: Config
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
-    refreshes: int = 0
+    room_reads: int = 0
     """How many times the grants were read from the rooms."""
     client: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(
@@ -137,7 +137,7 @@ class _Runtime:
 
     async def refresh_agent_reply_memberships_when_needed(self) -> None:
         if self.agent_reply_memberships.needs_refresh(self.config):
-            self.refreshes += 1
+            self.room_reads += 1
             await self.agent_reply_memberships.refresh(
                 self.config,
                 self.runtime_paths,
@@ -290,11 +290,15 @@ def _credentials(
 
 @pytest.mark.asyncio
 async def test_client_user_oauth_access_token_returns_callers_own_token(tmp_path: Path) -> None:
-    """The caller gets the token of the connection the agent's tools use for them."""
+    """The caller gets the token of the connection the agent's tools use for them.
+
+    The agent's access names Alice, so no room is read, though another agent's room grants are not read yet.
+    """
     deployment = _deployment(tmp_path)
     deployment.connect(deployment.target("assistant", ALICE), _credentials("alice-token"))
 
     assert await deployment.token(ALICE) == "alice-token"
+    assert deployment.runtime.room_reads == 0
 
 
 @pytest.mark.parametrize("agent_name", ["helper", "notes"], ids=["worker_scope_user", "private"])
@@ -370,7 +374,7 @@ async def test_client_user_oauth_access_token_refuses_shared_agent(
     with pytest.raises(PermissionError):
         await deployment.token(ALICE, agent_name="team")
 
-    assert (opened, refreshes) == ([], [])
+    assert (opened, refreshes, deployment.runtime.room_reads) == ([], [], 0)
 
 
 @pytest.mark.asyncio
@@ -387,7 +391,7 @@ async def test_client_user_oauth_access_token_refuses_unscoped_agent(
     with pytest.raises(PermissionError):
         await deployment.token(ALICE, agent_name="lobby")
 
-    assert (opened, refreshes) == ([], [])
+    assert (opened, refreshes, deployment.runtime.room_reads) == ([], [], 0)
 
 
 @pytest.mark.parametrize("agent_name", ["assistant", "notes"], ids=["worker_scope_user_agent", "private"])
@@ -407,7 +411,7 @@ async def test_client_user_oauth_access_token_refuses_caller_whose_access_was_re
     with pytest.raises(PermissionError):
         await deployment.token(ALICE, agent_name=agent_name)
 
-    assert (opened, refreshes) == ([], [])
+    assert (opened, refreshes, deployment.runtime.room_reads) == ([], [], 0)
 
 
 @pytest.mark.asyncio
@@ -415,47 +419,80 @@ async def test_client_user_oauth_access_token_refuses_agent_the_caller_may_not_u
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Alice may not use Bob's agent, so she gets a refusal, not a link to connect an account she could never use."""
+    """Alice may not use Bob's agent, so she gets a refusal, not a link to connect an account she could never use.
+
+    The agent's access names people, not rooms, so no room is read for her, however often she asks and though a room
+    another agent's access rests on cannot be read.
+    """
     deployment = _deployment(tmp_path)
+    deployment.runtime.client.joined_rooms.return_value = nio.JoinedRoomsError("Unavailable")
     opened = _record_store_opens(monkeypatch)
 
-    with pytest.raises(PermissionError):
-        await deployment.token(ALICE, agent_name="bobs")
+    for _ in range(3):
+        with pytest.raises(PermissionError):
+            await deployment.token(ALICE, agent_name="bobs")
 
-    assert opened == []
+    assert (opened, deployment.runtime.room_reads) == ([], 0)
     with pytest.raises(OAuthConnectionRequired):
         await deployment.token(BOB, agent_name="bobs")
 
 
 @pytest.mark.asyncio
 async def test_client_user_oauth_access_token_reads_room_grants_that_need_it_first(tmp_path: Path) -> None:
-    """Alice may use the lounge's agent as a member of the lounge, which the runtime has not read yet; it is read first."""
+    """Alice may use the lounge's agent as a member of the lounge, which the runtime has not read yet; it is read first.
+
+    Once read, the grants stay current, so her next request reads no room again.
+    """
     deployment = _deployment(tmp_path)
     deployment.connect(deployment.target("lounge", ALICE), _credentials("alice-token"))
-    deployment.connect(deployment.target("lounge", BOB), _credentials("bob-token"))
     assert deployment.runtime.agent_reply_memberships.needs_refresh(deployment.config)
 
     assert await deployment.token(ALICE, agent_name="lounge") == "alice-token"
-
-    assert deployment.runtime.refreshes == 1
-    assert not deployment.runtime.agent_reply_memberships.needs_refresh(deployment.config)
-    with pytest.raises(PermissionError):
-        await deployment.token(BOB, agent_name="lounge")
+    assert deployment.runtime.room_reads == 1
+    assert await deployment.token(ALICE, agent_name="lounge") == "alice-token"
+    assert deployment.runtime.room_reads == 1
 
 
 @pytest.mark.asyncio
-async def test_client_user_oauth_access_token_answers_503_while_access_cannot_be_decided(tmp_path: Path) -> None:
-    """Without the runtime's router, or while the room grants cannot be read, access is unknown, not refused."""
+async def test_client_user_oauth_access_token_refuses_non_member_after_reading_room_grants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bob may use the lounge's agent only as a member of the lounge; once the lounge is read, he is refused."""
     deployment = _deployment(tmp_path)
+    deployment.connect(deployment.target("lounge", BOB), _credentials("bob-token"))
+    opened = _record_store_opens(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await deployment.token(BOB, agent_name="lounge")
+
+    assert (opened, deployment.runtime.room_reads) == ([], 1)
+
+
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_answers_503_while_access_cannot_be_decided(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Access that rests on a room no one can read now, or without the runtime's router, is unknown, not refused.
+
+    An answer that needs no room is still given without the runtime: Alice's access to `assistant` names her.
+    """
+    deployment = _deployment(tmp_path)
+    deployment.connect(deployment.target("lounge", ALICE), _credentials("alice-lounge-token"))
+    deployment.connect(deployment.target("assistant", ALICE), _credentials("alice-token"))
     deployment.runtime.client.joined_rooms.return_value = nio.JoinedRoomsError("Unavailable")
+    opened = _record_store_opens(monkeypatch)
 
     with pytest.raises(HTTPException) as unreadable:
         await deployment.token(ALICE, agent_name="lounge")
+    assert (unreadable.value.status_code, opened, deployment.runtime.room_reads) == (503, [], 1)
+
     ensure_app_state(deployment.request.app).embedded = None
     with pytest.raises(HTTPException) as without_bots:
-        await deployment.token(ALICE)
-
-    assert (unreadable.value.status_code, without_bots.value.status_code) == (503, 503)
+        await deployment.token(ALICE, agent_name="lounge")
+    assert (without_bots.value.status_code, opened) == (503, [])
+    assert await deployment.token(ALICE) == "alice-token"
 
 
 @pytest.mark.asyncio
@@ -463,15 +500,19 @@ async def test_client_user_oauth_access_token_refuses_bot_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bot account the agent converses with may not connect its accounts, as its connect link would show, so no token."""
+    """A bot account the agent converses with may not connect its accounts, as its connect link would show, so no token.
+
+    No room grant could change that, so no room is read for it, even for an agent whose access rests on a room.
+    """
     deployment = _deployment(tmp_path)
     deployment.serve({**AGENTS, "assistant": {**AGENTS["assistant"], "access": {"users": [ALICE, BOB, BRIDGE_BOT]}}})
     opened = _record_store_opens(monkeypatch)
 
-    with pytest.raises(PermissionError):
-        await deployment.token(BRIDGE_BOT)
+    for agent_name in ("assistant", "lounge"):
+        with pytest.raises(PermissionError):
+            await deployment.token(BRIDGE_BOT, agent_name=agent_name)
 
-    assert opened == []
+    assert (opened, deployment.runtime.room_reads) == ([], 0)
 
 
 @pytest.mark.asyncio
