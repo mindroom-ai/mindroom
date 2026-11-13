@@ -23,7 +23,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Callable, Coroutine, Iterable
     from pathlib import Path
 
 AGENT = "@mindroom_general:localhost"
@@ -77,7 +77,7 @@ def _client(*rooms: nio.MatrixRoom, canonical: Iterable[tuple[str, str]] = ()) -
     return client
 
 
-def _readable(*room_ids: str) -> Callable[[str], Awaitable[bool]]:
+def _readable(*room_ids: str) -> Callable[[str], Coroutine[object, object, bool]]:
     async def can_read(room_id: str) -> bool:
         return room_id in room_ids
 

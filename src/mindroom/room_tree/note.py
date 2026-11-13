@@ -19,7 +19,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import names_canonical_parent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
 
     import nio
 
@@ -70,7 +70,7 @@ async def _room_tree_note(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    can_read: Callable[[str], Awaitable[bool]],
+    can_read: Callable[[str], Coroutine[object, object, bool]],
 ) -> str | None:
     """Return the tree around ``room_id``: the room above it, the rooms beside it, and the rooms under it.
 
@@ -146,10 +146,11 @@ async def _place(
     client: nio.AsyncClient,
     listed: nio.MatrixRoom,
     listers: Sequence[nio.MatrixRoom],
-    can_read: Callable[[str], Awaitable[bool]],
+    can_read: Callable[[str], Coroutine[object, object, bool]],
 ) -> tuple[nio.MatrixRoom, bool] | None:
-    """Return the first of ``listers`` that lists ``listed`` and that it names as canonical parent, with whether the
-    requester may read ``listed``; None when it names none of them.
+    """Return where ``listed`` sits and whether the requester may read it, or None when it sits under none.
+
+    It sits under the first of ``listers`` that lists it and that it names as its canonical parent.
     """
     for lister in listers:
         if listed.room_id in lister.children and await names_canonical_parent(client, listed.room_id, lister.room_id):
