@@ -8484,6 +8484,7 @@ depends_on = [
     "mindroom.room_thread_modes",
     "mindroom.terminal.client",
     "mindroom.terminal.session",
+    "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
 ]
 

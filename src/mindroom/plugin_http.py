@@ -41,7 +41,7 @@ from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserve
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.oauth.service import current_oauth_access_token
+from mindroom.oauth.service import current_oauth_access_token, oauth_provider_service_account_configured
 from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
@@ -61,6 +61,7 @@ from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
@@ -662,29 +663,41 @@ async def client_user_oauth_access_token(
 
     ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
     the request; a route never builds one from request data, which would let its caller name someone else. It raises
-    ``PermissionError`` before reading anything unless ``user`` may use the agent and connect its accounts, as the
-    Connections portal and the agent's connect links decide, unless ``user`` is a person or a configured bot account
-    rather than one of MindRoom's own accounts, and unless the agent's ``worker_scope`` is ``user`` or ``user_agent``,
-    which keeps a connection for each person alone: a ``shared`` or unscoped agent's connection, like a service
-    account, serves everyone who uses the agent. Like the Connections portal it decides access on the room grants as
-    MindRoom holds them and reads no room itself, so right after a start or a change to an agent's room grants, a
-    caller the agent admits only as a member of a room is refused until MindRoom has read that room; a route may tell
-    them to try again. A token about to expire is refreshed first, as the agent's tools refresh it. It raises
-    ``LookupError`` for a provider or agent the config does not have, ``OAuthConnectionRequired`` while ``user`` has
-    no usable connection, whose ``connect_url`` signs them in for this agent, or is ``None`` while the stored
-    connection cannot be read and must first be reset, as the Connections portal's Reset connection does, and
-    ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix. It answers 503 while the
-    API is served without MindRoom's bots, whose room grants an agent's access may rely on.
+    ``LookupError`` for a provider or agent the config does not have, or a provider none of the agent's tools uses, as
+    the agent's reset links and the Connections portal refuse it. It raises ``PermissionError`` before reading
+    anything when the provider's tools act as a service account; when ``user`` may not use the agent or connect its
+    accounts, as the Connections portal and the agent's connect links decide; when ``user`` is one of MindRoom's own
+    accounts rather than a person or a configured bot account; and when the agent's ``worker_scope`` is not ``user``
+    or ``user_agent``, the scopes that keep a connection for each person alone: a ``shared`` or unscoped agent's
+    connection, like a service account, serves everyone who uses the agent. Like the Connections portal it decides
+    access on the room grants as MindRoom holds them and reads no room itself, so right after a start or a change to
+    an agent's room grants, a caller the agent admits only as a member of a room is refused until MindRoom has read
+    that room; a route may tell them to try again. A token about to expire is refreshed first, as the agent's tools
+    refresh it. It raises ``OAuthConnectionRequired`` while ``user`` has no usable connection, whose ``connect_url``
+    signs them in for this agent, or is ``None`` while the stored connection cannot be read and must first be reset,
+    as the Connections portal's Reset connection does, and ``OAuthProviderError`` when a refresh fails for another
+    reason, which a retry may fix. It answers 503 while the API is served without MindRoom's bots, whose room grants
+    an agent's access may rely on.
     """
     context = plugin_context(request)
     config, paths = context.config, context.runtime_paths
-    provider = config_plugins(config, paths).oauth_providers.get(provider_id)
+    plugins = config_plugins(config, paths)
+    provider = plugins.oauth_providers.get(provider_id)
     if provider is None:
         msg = f"No OAuth provider {provider_id!r} is configured"
         raise LookupError(msg)
     if agent_name not in config.agents:
         msg = f"No agent {agent_name!r} is configured"
         raise LookupError(msg)
+    # The agent's reset links and the Connections portal offer only the providers its tools use, as here.
+    agent_tool_names = resolve_agent_tools(config, agent_name, plugins.tools).tool_names
+    if provider_id not in {plugins.tools.entries[tool_name].auth_provider for tool_name in agent_tool_names}:
+        msg = f"Agent {agent_name!r} has no tool that uses OAuth provider {provider_id!r}"
+        raise LookupError(msg)
+    # The provider's tools then act as the service account, for everyone, and the portal offers no personal connection.
+    if oauth_provider_service_account_configured(provider, paths):
+        msg = f"OAuth provider {provider_id!r} uses a service account, which serves everyone"
+        raise PermissionError(msg)
     requester_id = resolve_human_requester_alias(user.user_id, config, paths)
     memberships = _bound(ensure_app_state(request.app).embedded).agent_reply_memberships
     # The portal lists only agents the requester may converse with, and a connect link completes only for a requester

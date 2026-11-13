@@ -51,6 +51,7 @@ from tests.oauth_test_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.api.app_state import EmbeddedRuntime
@@ -73,17 +74,55 @@ PROVIDER = "acme_drive"
 TOKEN_URL = "https://accounts.example.com/oauth/token"  # noqa: S105
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105
 ALICE_AND_BOB = {"users": [ALICE, BOB]}
+# The plugin's tools, one for each of its providers, which every agent but `writer` holds; `assistant` also holds
+# the built-in Google Drive tools.
+TOOLS = ["acme_files", "acme_repos"]
 # Alice and Bob may use every agent but `bobs`, and `lounge` only as members of the room `lounge`. `team` and `lobby`
 # share their connections among everyone who uses them; the others keep each person's apart.
 AGENTS = {
-    "assistant": {"display_name": "Assistant", "worker_scope": "user_agent", "access": ALICE_AND_BOB},
-    "helper": {"display_name": "Helper", "worker_scope": "user", "access": ALICE_AND_BOB},
-    "notes": {"display_name": "Notes", "private": {"per": "user_agent"}, "access": ALICE_AND_BOB},
-    "bobs": {"display_name": "Bob's", "worker_scope": "user_agent", "access": {"users": [BOB]}},
-    "lounge": {"display_name": "Lounge", "worker_scope": "user_agent", "rooms": ["lounge"]},
-    "team": {"display_name": "Team", "worker_scope": "shared", "access": ALICE_AND_BOB},
-    "lobby": {"display_name": "Lobby", "access": ALICE_AND_BOB},
+    "assistant": {
+        "display_name": "Assistant",
+        "worker_scope": "user_agent",
+        "access": ALICE_AND_BOB,
+        "tools": [*TOOLS, "google_drive"],
+    },
+    "helper": {"display_name": "Helper", "worker_scope": "user", "access": ALICE_AND_BOB, "tools": TOOLS},
+    "notes": {"display_name": "Notes", "private": {"per": "user_agent"}, "access": ALICE_AND_BOB, "tools": TOOLS},
+    "bobs": {"display_name": "Bob's", "worker_scope": "user_agent", "access": {"users": [BOB]}, "tools": TOOLS},
+    "lounge": {"display_name": "Lounge", "worker_scope": "user_agent", "rooms": ["lounge"], "tools": TOOLS},
+    "team": {"display_name": "Team", "worker_scope": "shared", "access": ALICE_AND_BOB, "tools": TOOLS},
+    "lobby": {"display_name": "Lobby", "access": ALICE_AND_BOB, "tools": TOOLS},
+    # Holds no tool of either provider.
+    "writer": {"display_name": "Writer", "worker_scope": "user_agent", "access": ALICE_AND_BOB},
 }
+TOOLS_MODULE = """
+from mindroom.plugin_api import SetupType, ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+
+class AcmeTools(Toolkit):
+    @tool
+    def ping(self) -> str:
+        \"\"\"Answer pong.\"\"\"
+        return "pong"
+
+
+def _register(name, provider_id):
+    @register_tool_with_metadata(
+        name=name,
+        file_access=ToolFileAccess.NONE,
+        display_name=name,
+        description=f"Uses {provider_id}",
+        category=ToolCategory.PRODUCTIVITY,
+        setup_type=SetupType.OAUTH,
+        auth_provider=provider_id,
+    )
+    def factory():
+        return AcmeTools
+
+
+_register("acme_files", "acme_drive")
+_register("acme_repos", "acme_code")
+"""
 OAUTH_MODULE = """
 from mindroom.plugin_api import OAuthProvider
 
@@ -164,10 +203,10 @@ class _Deployment:
             config=self.config,
         ).worker_target
 
-    def serve(self, agents: dict[str, Any]) -> None:
-        """Serve a config with ``agents`` from the API, as an operator's config save does."""
+    def serve(self, agents: dict[str, Any], *, default_tools: Sequence[str] = ()) -> None:
+        """Serve a config with ``agents`` and ``default_tools`` from the API, as an operator's config save does."""
         state = require_api_state(self.request.app)
-        config = _config(self.runtime_paths, agents)
+        config = _config(self.runtime_paths, agents, default_tools=default_tools)
         state.snapshot = ApiSnapshot(state.snapshot.generation + 1, self.runtime_paths, runtime_config=config)
 
     def connect(
@@ -200,13 +239,14 @@ class _Deployment:
         return await client_user_oauth_access_token(self.request, ClientUser(user_id), provider_id, agent_name)
 
 
-def _config(paths: RuntimePaths, agents: dict[str, Any]) -> Config:
+def _config(paths: RuntimePaths, agents: dict[str, Any], *, default_tools: Sequence[str] = ()) -> Config:
     return bind_runtime_paths(
         Config(
             agents=agents,
             plugins=["./plugins/drive"],
             authorization={"aliases": {ALICE: [ALICE_BRIDGED]}},
             bot_accounts=[BRIDGE_BOT],
+            defaults={"tools": list(default_tools)},
         ),
         paths,
     )
@@ -215,8 +255,10 @@ def _config(paths: RuntimePaths, agents: dict[str, Any]) -> Config:
 def _deployment(tmp_path: Path, **env: str) -> _Deployment:
     plugin = tmp_path / "plugins" / "drive"
     plugin.mkdir(parents=True)
-    (plugin / "mindroom.plugin.json").write_text(json.dumps({"name": "drive", "oauth_module": "oauth.py"}))
+    manifest = {"name": "drive", "oauth_module": "oauth.py", "tools_module": "tools.py"}
+    (plugin / "mindroom.plugin.json").write_text(json.dumps(manifest))
     (plugin / "oauth.py").write_text(OAUTH_MODULE)
+    (plugin / "tools.py").write_text(TOOLS_MODULE)
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
@@ -577,12 +619,7 @@ async def test_client_user_oauth_access_token_unknown_provider_or_agent(tmp_path
         await deployment.token(ALICE, agent_name="no_such_agent")
 
 
-@pytest.mark.asyncio
-async def test_client_user_oauth_access_token_ignores_service_account(tmp_path: Path) -> None:
-    """With a Google service account configured, the caller still gets only their own connection or a connect prompt."""
-    service_account = tmp_path / "service-account.json"
-    service_account.write_text(json.dumps({"type": "service_account", "client_email": "robot@example.com"}))
-    deployment = _deployment(tmp_path, GOOGLE_SERVICE_ACCOUNT_FILE=str(service_account))
+def _connect_alice_to_google_drive(deployment: _Deployment) -> None:
     google_drive = deployment.provider("google_drive")
     deployment.connect(
         deployment.target("assistant", ALICE),
@@ -595,6 +632,73 @@ async def test_client_user_oauth_access_token_ignores_service_account(tmp_path: 
         provider_id="google_drive",
     )
 
+
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_answers_a_built_in_providers_tool(tmp_path: Path) -> None:
+    """The agent's built-in Google Drive tools use Alice's own Google Drive connection, so she gets its token."""
+    deployment = _deployment(tmp_path)
+    _connect_alice_to_google_drive(deployment)
+
     assert await deployment.token(ALICE, provider_id="google_drive") == "alice-google-token"
-    with pytest.raises(OAuthConnectionRequired):
-        await deployment.token(BOB, provider_id="google_drive")
+
+
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_refuses_provider_whose_tools_use_a_service_account(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a Google service account configured, the agent's Google tools act as it, for everyone, not as Alice.
+
+    The Connections portal then offers no personal connection, so neither her stored one nor a link is answered, and
+    never the service account's.
+    """
+    service_account = tmp_path / "service-account.json"
+    service_account.write_text(json.dumps({"type": "service_account", "client_email": "robot@example.com"}))
+    deployment = _deployment(tmp_path, GOOGLE_SERVICE_ACCOUNT_FILE=str(service_account))
+    _connect_alice_to_google_drive(deployment)
+    opened = _record_store_opens(monkeypatch)
+    minted = _record_links_minted(monkeypatch)
+
+    for user_id in (ALICE, BOB):
+        with pytest.raises(PermissionError):
+            await deployment.token(user_id, provider_id="google_drive")
+
+    assert (opened, minted, deployment.runtime.room_reads) == ([], [], 0)
+
+
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_refuses_provider_no_tool_of_the_agent_uses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider none of the agent's tools uses is unknown to that agent, as to its reset links and the portal.
+
+    A connection made for it would serve no tool, and the portal would never show it to disconnect or reset.
+    """
+    deployment = _deployment(tmp_path)
+    opened = _record_store_opens(monkeypatch)
+    minted = _record_links_minted(monkeypatch)
+
+    with pytest.raises(LookupError, match="writer"):
+        await deployment.token(ALICE, agent_name="writer")
+
+    assert (opened, minted, deployment.runtime.room_reads) == ([], [], 0)
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [[{"acme_files": {"defer": True}}], []],
+    ids=["deferred", "from_defaults"],
+)
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_counts_every_tool_the_agent_holds(
+    tmp_path: Path,
+    tools: list[object],
+) -> None:
+    """A tool the agent loads only when a turn asks for it, or takes from `defaults.tools`, still uses the provider."""
+    deployment = _deployment(tmp_path)
+    writer = {**AGENTS["writer"], "tools": tools}
+    deployment.serve({**AGENTS, "writer": writer}, default_tools=() if tools else ["acme_files"])
+    deployment.connect(deployment.target("writer", ALICE), _credentials("alice-token"))
+
+    assert await deployment.token(ALICE, agent_name="writer") == "alice-token"
