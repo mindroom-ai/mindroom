@@ -45,7 +45,7 @@ from mindroom.oauth.service import current_oauth_access_token
 from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
@@ -696,6 +696,11 @@ async def client_user_oauth_access_token(
         )
     ):
         msg = f"The caller may not use agent {agent_name!r}"
+        raise PermissionError(msg)
+    # A responder admits its own account, and anyone may connect a private agent's accounts, but a private agent's
+    # instances belong only to people and bot accounts, as building its target requires.
+    if not is_access_checked_requester_id(requester_id, config, paths):
+        msg = "The caller is one of MindRoom's own accounts, which keeps no connection of its own"
         raise PermissionError(msg)
     target = build_connection_agent_target(config, paths, requester_id, agent_name)
     identity = target.execution_identity
