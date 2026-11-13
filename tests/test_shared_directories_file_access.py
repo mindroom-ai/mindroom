@@ -59,7 +59,10 @@ def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> No
 
     assert tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
     assert tool.read_file_chunk(str(share / "summary.md"), 1, 1) == "shared world"
-    assert "only read" in tool.save_file("x", str(share / "new.md"))
+    assert (
+        tool.save_file("x", str(share / "new.md"))
+        == f"Error: {share / 'new.md'} is in a shared directory you can only read."
+    )
     assert "only read" in tool.delete_file(str(share / "summary.md"))
     assert not (share / "new.md").exists()
     assert (share / "summary.md").exists()

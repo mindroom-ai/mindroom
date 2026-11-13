@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import json
 import pickle
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.headless import HeadlessConfigError, run_turn, validate_config
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers import model_http_client
+from mindroom.providers.errors import missing_api_key_error
 from mindroom.shell.output_capture import ShellOutputDestination
 from tests.conftest import install_model_providers, requires_linux
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
@@ -447,7 +449,7 @@ async def test_saved_outputs_are_read_only_under_workspace_access(
     storage = tmp_path / "storage"
     await run_turn(_config(), agent="coder", prompt="go", storage=storage, workdir=workdir)
 
-    assert "you can only read" in _last_tool_result(provider.requests[3])
+    assert "is in the saved tool outputs directory you can only read." in _last_tool_result(provider.requests[3])
     (saved,) = (storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs").iterdir()
     assert saved.read_text().startswith("1\n2\n")
 
@@ -580,3 +582,150 @@ async def test_subagent_redirect_receipt_names_the_saved_file(
     assert receipt["path"] == str(saved.resolve())
     assert saved.read_text().startswith("the child's answer")
     assert _files(workdir) == []
+
+
+_PROFILE = "---\ndescription: A helper\n---\nYou are HELPER-PROFILE.\n"
+
+
+@dataclasses.dataclass
+class _FollowsTheWorkspacePath(ScriptedProvider):
+    """Save a profile at the workspace the prompt names, run it, and read the child's record the receipt names.
+
+    Without a workspace path in the prompt, the profile path stays relative, as the profile description reads.
+    """
+
+    root: str = ""
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        if not self.requests:
+            found = re.search(r"Your workspace, [^`]* is `([^`]+)`", _sent(request, "system"))
+            self.root = f"{found.group(1)}/" if found else ""
+            path = f"{self.root}subagents/helper.md"
+            self.steps = [[("save_file", {"contents": _PROFILE, "file_name": path})], *self.steps]
+        if len(self.requests) == 3:
+            record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
+            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
+        async for event in super().stream(request):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_a_profile_and_a_record_are_found_where_the_prompt_says(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside a workdir the prompt names the workspace, so a profile `file` saves there runs and its record reads."""
+    provider = _FollowsTheWorkspacePath(steps=[[("run_subagent", {"task": "go", "profile": "helper"})], "ran", "done"])
+    provider.install(monkeypatch)
+    storage = tmp_path / "storage"
+    config = _config(delegate_to=["coder"], file_access="unrestricted")
+    await run_turn(config, agent="coder", prompt="go", storage=storage, workdir=workdir)
+
+    assert provider.root == f"{storage.resolve() / 'agents' / 'coder' / 'workspace'}/"
+    assert "You are HELPER-PROFILE." in _sent(provider.requests[2], "system")
+    assert _last_tool_result(provider.requests[3]).startswith("ran")
+    assert json.loads(_last_tool_result(provider.requests[4]))["status"] == "completed"
+    assert _files(workdir) == []
+
+
+@dataclasses.dataclass
+class _ReadsTheReceiptRecord(ScriptedProvider):
+    """Delegate, then read the child's record where the receipt names it, as a model would."""
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        if len(self.requests) == 2:
+            record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
+            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
+        async for event in super().stream(request):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_another_agents_record_is_found_where_the_receipt_says(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside a workdir, a receipt names another agent's record by its path in that agent's workspace."""
+    provider = _ReadsTheReceiptRecord(
+        steps=[[("run_subagent", {"agent_name": "helper", "task": "go"})], "helped", "done"],
+    )
+    provider.install(monkeypatch)
+    config = _config(delegate_to=["helper"], file_access="unrestricted")
+    config["agents"]["helper"] = {"display_name": "Helper"}
+    await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
+
+    assert json.loads(_last_tool_result(provider.requests[3]))["status"] == "completed"
+    assert _files(workdir) == []
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File access names the workdir for `file` and `coding`, and output paths are relative to the saved outputs."""
+    provider = _install(monkeypatch, "done")
+    await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
+
+    system = _sent(provider.requests[0], "system")
+    assert "(`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
+    assert f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; " in system
+    assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
+    (save_file,) = (tool for tool in provider.requests[0].tools if tool.name == "save_file")
+    description = save_file.parameters["properties"]["mindroom_output_path"]["description"]
+    assert description.startswith("Optional MindRoom-managed path relative to your saved tool outputs directory.")
+
+
+@pytest.mark.asyncio
+async def test_the_identity_names_no_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A headless agent is told it answers a program, not that the OpenAI-compatible API exposes it."""
+    provider = _install(monkeypatch, "done")
+    await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage")
+
+    system = _sent(provider.requests[0], "system")
+    assert "You are Coder, the MindRoom agent `coder`, answering a prompt from another program." in system
+    assert "OpenAI-compatible" not in system
+
+
+@pytest.mark.asyncio
+async def test_an_authored_matrix_identity_still_opens_the_headless_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator's own Matrix identity prompt still applies headless, without a Matrix ID or an API to name."""
+    provider = _install(monkeypatch, "done")
+    config = _config()
+    template = "I am {display_name} ({matrix_id}).\n{openai_compat_history_guidance}"
+    config["prompts"] = {"AGENT_IDENTITY_CONTEXT_TEMPLATE": template}
+    await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage")
+
+    system = _sent(provider.requests[0], "system")
+    assert "I am Coder (not available in a headless run)." in system
+    assert "You are Coder, the MindRoom agent `coder`, answering a prompt from another program." in system
+    assert "OpenAI-compatible" not in system
+
+
+@pytest.mark.asyncio
+async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no dashboard to open, the reply names the key's variable and the `.env` file that may hold it."""
+
+    async def no_key() -> None:
+        error = missing_api_key_error("OPENAI_API_KEY", provider="OpenAI")
+        raise error
+
+    install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(no_key)]])})
+    storage = tmp_path / "storage"
+    result = await run_turn(_config(), agent="coder", prompt="go", storage=storage)
+
+    assert result.failed
+    assert result.text == (
+        "[coder] 🔑 No AI provider key is set up yet, so I can't reply. "
+        "OPENAI_API_KEY not set. Please set the OPENAI_API_KEY environment variable. "
+        f"A `.env` file at {storage.resolve() / '.env'} works too."
+    )

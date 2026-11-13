@@ -37,7 +37,7 @@ from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
+from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -866,12 +866,14 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
+    workdir: Path | None,
+    workspace_root: Path,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
     pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
-    """Describe effective per-tool execution routing and file access to the model."""
+    """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
 
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
@@ -880,10 +882,21 @@ def _render_tool_execution_environment(
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
     file_access_description = {
-        "workspace": "agent workspace and attachments only",
+        "workspace": "agent workspace and attachments only"
+        if workdir is None
+        else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
+        "other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if workdir is not None:
+        # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
+        file_access_lines.append(
+            f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; "
+            "code that `python` runs uses this process's current directory, so give it absolute paths. "
+            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+            f"is `{workspace_root}`; name files there by absolute path.",
+        )
     if shared_directories:
         file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
     if pending_shared_directory_invitations:
@@ -1051,41 +1064,45 @@ def _render_agent_identity_context(
     *,
     model_provider: str,
     model_id: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
+    headless: bool,
 ) -> str:
-    openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
-    if include_openai_compat_guidance:
+    """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
+    if outside_matrix:
+        # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
+        openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
+        prompt_name = (
+            "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
+        )
         return openai_compat_identity(
             config.prompts,
-            openai_identity=render_prompt_template(
-                config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            openai_identity=config.render_prompt(
+                prompt_name,
                 agent_name=agent_name,
                 display_name=display_name,
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            matrix_identity=render_prompt_template(
-                config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            matrix_identity=config.render_prompt(
+                "AGENT_IDENTITY_CONTEXT_TEMPLATE",
                 display_name=display_name,
-                matrix_id="not available in OpenAI-compatible API",
+                matrix_id="not available in a headless run" if headless else "not available in OpenAI-compatible API",
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            openai_prompt_name="OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
+            openai_prompt_name=prompt_name,
             matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
 
-    matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
-    return build_agent_identity_context(
+    return config.render_prompt(
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE",
         display_name=display_name,
-        matrix_id=matrix_id,
+        matrix_id=entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id,
         model_provider=model_provider,
         model_id=model_id,
-        include_openai_compat_guidance=False,
-        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-        openai_compat_history_guidance=openai_compat_history_guidance,
+        openai_compat_history_guidance="",
     )
 
 
@@ -1391,7 +1408,8 @@ def _build_agent_role_context(
     agent_runtime: ResolvedAgentRuntime,
     *,
     model_name: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
+    headless: bool,
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
@@ -1415,6 +1433,8 @@ def _build_agent_role_context(
                 worker_routed_tool_names=worker_routed_tool_names,
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
+                workdir=current_tool_workdir(),
+                workspace_root=agent_runtime.workspace.root,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     tools=tools,
@@ -1448,7 +1468,8 @@ def _build_agent_role_context(
             runtime_paths,
             model_provider=model_provider,
             model_id=model_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
+            outside_matrix=outside_matrix,
+            headless=headless,
         )
 
     context_documents: list[_PreloadChunk] = []
@@ -1649,7 +1670,7 @@ def create_agent(
     model: TurnModel,
     plugins: ConfigPlugins,
     include_interactive_questions: bool = True,
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
     disable_runtime_capabilities: bool = False,
     tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
@@ -1682,8 +1703,8 @@ def create_agent(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        outside_matrix: Whether the turn answers outside Matrix, through the OpenAI-compatible
+            API or a headless run, so the identity names no Matrix ID.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         tool_function_filter: Optional policy applied to each fully resolved
@@ -1825,7 +1846,8 @@ def create_agent(
         runtime_paths,
         agent_runtime,
         model_name=model_name,
-        include_openai_compat_guidance=include_openai_compat_guidance,
+        outside_matrix=outside_matrix,
+        headless=execution_identity is not None and execution_identity.channel == "headless",
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,

@@ -907,7 +907,7 @@ async def prepare_agent_execution_context(
     current_timestamp_ms: float | None,
     current_event_id: str | None,
     current_prompt_is_structured: bool,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call.
@@ -917,7 +917,7 @@ async def prepare_agent_execution_context(
     """
     agent_name = ctx.entity_label
     response_sender = None
-    if not include_openai_compat_guidance:
+    if not outside_matrix:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
     offered = PreparedTools(functions=build.spec.functions).specs()
