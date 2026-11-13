@@ -591,9 +591,9 @@ _PROFILE = "---\ndescription: A helper\n---\nYou are HELPER-PROFILE.\n"
 
 @dataclasses.dataclass
 class _FollowsTheWorkspacePath(ScriptedProvider):
-    """Save a profile, run it, and read the child's record, at the workspace the prompt names, as a model would.
+    """Save a profile at the workspace the prompt names, run it, and read the child's record the receipt names.
 
-    Without a workspace path in the prompt, the paths stay relative, as the profile and record descriptions read.
+    Without a workspace path in the prompt, the profile path stays relative, as the profile description reads.
     """
 
     root: str = ""
@@ -605,9 +605,8 @@ class _FollowsTheWorkspacePath(ScriptedProvider):
             path = f"{self.root}subagents/helper.md"
             self.steps = [[("save_file", {"contents": _PROFILE, "file_name": path})], *self.steps]
         if len(self.requests) == 3:
-            record = re.search(r"record: coder:(\S+)", _last_tool_result(request))
-            path = f"{self.root}{record.group(1) if record else ''}/run.json"
-            self.steps.insert(0, [("read_file", {"file_name": path})])
+            record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
+            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
         async for event in super().stream(request):
             yield event
 
@@ -629,6 +628,37 @@ async def test_a_profile_and_a_record_are_found_where_the_prompt_says(
     assert "You are HELPER-PROFILE." in _sent(provider.requests[2], "system")
     assert _last_tool_result(provider.requests[3]).startswith("ran")
     assert json.loads(_last_tool_result(provider.requests[4]))["status"] == "completed"
+    assert _files(workdir) == []
+
+
+@dataclasses.dataclass
+class _ReadsTheReceiptRecord(ScriptedProvider):
+    """Delegate, then read the child's record where the receipt names it, as a model would."""
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        if len(self.requests) == 2:
+            record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
+            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
+        async for event in super().stream(request):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_another_agents_record_is_found_where_the_receipt_says(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside a workdir, a receipt names another agent's record by its path in that agent's workspace."""
+    provider = _ReadsTheReceiptRecord(
+        steps=[[("run_subagent", {"agent_name": "helper", "task": "go"})], "helped", "done"],
+    )
+    provider.install(monkeypatch)
+    config = _config(delegate_to=["helper"], file_access="unrestricted")
+    config["agents"]["helper"] = {"display_name": "Helper"}
+    await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
+
+    assert json.loads(_last_tool_result(provider.requests[3]))["status"] == "completed"
     assert _files(workdir) == []
 
 

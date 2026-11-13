@@ -26,6 +26,7 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
 from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
+from mindroom.tool_system.output_files import current_tool_workdir
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     parse_tool_execution_identity_payload,
@@ -186,8 +187,15 @@ class DelegationRecordHandle:
         return f"{self.locator.child_agent_name}:{self.scoped_path}"
 
     def to_receipt(self) -> str:
-        """Render a concise caller-visible record reference."""
-        return f"Delegation {self.locator.delegation_id} record: {self._record_reference}"
+        """Render a concise caller-visible record reference.
+
+        Beside a workdir the caller's tools resolve relative paths there, so the record is named by its absolute path in
+        the child's workspace.
+        """
+        reference = (
+            self._record_reference if current_tool_workdir() is None else str(self.child_workspace / self.scoped_path)
+        )
+        return f"Delegation {self.locator.delegation_id} record: {reference}"
 
 
 @dataclass(frozen=True)

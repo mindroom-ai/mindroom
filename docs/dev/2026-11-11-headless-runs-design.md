@@ -34,6 +34,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    Under `file_access: workspace`, `file` and `coding` get that one directory as an extra read-only root, which keeps their confinement as narrow as possible while they can still read what the receipts name.
    The system prompt leaves out its notes on saving outputs and skills into the workspace, because the tools would resolve those relative paths in the workdir.
    The other workspace paths that the prompt and the tool descriptions name relatively, such as subagent profiles and delegation records, stay as they are, and the tool environment section names the workdir and the workspace by absolute path instead; rendering each of those overridable prompts and descriptions per channel would split templates that configs can override.
+   A delegation receipt beside a workdir names the child's record by its absolute path, because that record lives in the child agent's workspace, which the caller's prompt does not name.
    Only saved outputs move: tools that keep files of their own in the workspace, such as `file_generation` or `google_drive`, keep it, so a workdir changes nothing for them.
 8. Importing `mindroom.headless` routes MindRoom's logs through the program's stdlib `logging` unless the program configured `structlog` first.
    The import-time default, which subprocess entrypoints and the sandbox runner rely on, prints every level to stdout, so in another program it mixed MindRoom's debug lines, full prompts among them, into that program's output.
