@@ -742,8 +742,9 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
 
 
 # A model on each route that sends a run's request headers, with headers its config authors under the names they set.
-_AUTHORED_HEADERS = {"x-run": "authored", "x-static": "kept"}
-_AUTHORED_EXTRA_HEADERS = {"x-depth": "authored", "x-extra": "kept"}
+# Authored in other letter cases than the callback's names, which still name the same headers.
+_AUTHORED_HEADERS = {"X-Run": "authored", "x-static": "kept"}
+_AUTHORED_EXTRA_HEADERS = {"X-Depth": "authored", "x-extra": "kept"}
 _OPENAI_ROUTE = {
     "provider": "openai",
     "id": "gpt-6-astra",
