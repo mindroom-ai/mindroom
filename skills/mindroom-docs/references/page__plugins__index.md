@@ -1322,6 +1322,7 @@ For any other agent it raises `PermissionError` before reading anything, because
 It raises `LookupError` for a provider or agent the config does not have.
 While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent, and is `None` when the stored connection cannot be read and must first be reset in the dashboard.
 A refresh that fails for another reason, such as an unreachable provider, raises `OAuthProviderError` from `mindroom.plugin_api`, the base class of `OAuthConnectionRequired`, so a route that catches both catches `OAuthConnectionRequired` first; uncaught, it answers 500, and the next call tries again.
+A grant the caller revoked at the provider itself still returns its stored token until that token expires, so a route handles the provider's own refusal, such as a 401, as the example does.
 
 ```python
 # routes.py
@@ -1356,6 +1357,10 @@ async def file_name(
             params={"id": file_id},
             headers={"Authorization": f"Bearer {token}"},
         )
+    if answer.status_code in (401, 403):
+        # Acme Drive refused the token, as it does once the caller revoked access there.
+        raise HTTPException(502, "Acme Drive refused the request.")
+    answer.raise_for_status()
     return {"name": answer.json()["name"]}
 ```
 

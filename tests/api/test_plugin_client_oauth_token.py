@@ -30,7 +30,12 @@ from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, publish_test_plugins
-from tests.oauth_test_utils import publish_oauth_credentials, rotated_token_response, serve_token_endpoint
+from tests.oauth_test_utils import (
+    corrupt_oauth_credential_payload,
+    publish_oauth_credentials,
+    rotated_token_response,
+    serve_token_endpoint,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,9 +50,11 @@ ROOM = "!room:example.com"
 PROVIDER = "acme_drive"
 TOKEN_URL = "https://accounts.example.com/oauth/token"  # noqa: S105
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105
-# One agent keeps each person's connections apart; the other two share theirs among everyone who uses them.
+# The first three agents keep each person's connections apart; the other two share theirs among everyone who uses them.
 AGENTS = {
     "assistant": {"display_name": "Assistant", "worker_scope": "user_agent"},
+    "helper": {"display_name": "Helper", "worker_scope": "user"},
+    "notes": {"display_name": "Notes", "private": {"per": "user_agent"}},
     "team": {"display_name": "Team", "worker_scope": "shared"},
     "lobby": {"display_name": "Lobby"},
 }
@@ -174,6 +181,21 @@ async def test_client_user_oauth_access_token_returns_callers_own_token(tmp_path
     assert await deployment.token(ALICE) == "alice-token"
 
 
+@pytest.mark.parametrize("agent_name", ["helper", "notes"], ids=["worker_scope_user", "private"])
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_answers_each_agent_that_keeps_connections_per_person(
+    tmp_path: Path,
+    agent_name: str,
+) -> None:
+    """An agent with `worker_scope: user`, or a private one, keeps each person's connection apart, so each gets theirs."""
+    deployment = _deployment(tmp_path)
+    deployment.connect(deployment.target(agent_name, ALICE), _credentials("alice-token"))
+    deployment.connect(deployment.target(agent_name, BOB), _credentials("bob-token"))
+
+    assert await deployment.token(ALICE, agent_name=agent_name) == "alice-token"
+    assert await deployment.token(BOB, agent_name=agent_name) == "bob-token"
+
+
 @pytest.mark.asyncio
 async def test_client_user_oauth_access_token_never_reads_another_users_connection(tmp_path: Path) -> None:
     """Only Bob connected; Alice is asked to connect her own account for this agent, with a link that is hers."""
@@ -191,6 +213,20 @@ async def test_client_user_oauth_access_token_never_reads_another_users_connecti
     link = lookup_oauth_connect_token(deployment.provider(), deployment.runtime_paths, query["connect_token"][0])
     assert link.requester_id == ALICE
     assert link.binding.worker_key == deployment.target("assistant", ALICE).worker_key
+
+
+@pytest.mark.asyncio
+async def test_client_user_oauth_access_token_unreadable_connection_asks_for_a_reset(tmp_path: Path) -> None:
+    """A stored connection that cannot be read gets no sign-in link: it must first be reset in the dashboard."""
+    deployment = _deployment(tmp_path)
+    deployment.connect(deployment.target("assistant", ALICE), _credentials("alice-token"))
+    (database,) = tmp_path.rglob("acme_drive_oauth_credentials.sqlite3")
+    corrupt_oauth_credential_payload(database, b"not a credential payload")
+
+    with pytest.raises(OAuthConnectionRequired) as raised:
+        await deployment.token(ALICE)
+
+    assert (raised.value.reset_required, raised.value.connect_url) == (True, None)
 
 
 @pytest.mark.asyncio

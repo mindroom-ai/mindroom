@@ -1,8 +1,8 @@
 """The plugin API exports exactly the supported plugin entry points, pinned together with `PLUGIN_API_VERSION`.
 
 Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name, an enum
-member, a documented method or property, or a manifest field, renaming, reordering, or changing the kind of a
-parameter, or changing a constant's value breaks them; update this pin together with the plugin docs and the fleet,
+member, a documented method, property, or exception attribute, or a manifest field, renaming, reordering, or changing
+the kind of a parameter, or changing a constant's value breaks them; update this pin together with the plugin docs and the fleet,
 and bump `PLUGIN_API_VERSION` as docs/plugins.md says.
 """
 
@@ -540,6 +540,10 @@ _MEMBERS = {
     },
 }
 
+# The attributes docs/plugins.md has a route read on an exception it catches, by owning class; each instance sets them,
+# so `_MEMBERS` cannot pin them.
+_EXCEPTION_ATTRIBUTES = {"mindroom.plugin_api.OAuthConnectionRequired": ["connect_url"]}
+
 # Plugins compare with these values, and docs/hooks.md writes the event names as literals in `@hook(...)`.
 _CONSTANTS = {
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND": "active_thread_follow_up",
@@ -655,7 +659,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 30), "f973e4b76683a1b3c247675a96e73c899606f6c7df70af51143c070e5a262e60")
+_PINNED_VERSION = ((1, 30), "0a7b1fbbec98d32b5440476028736a3bbc5cd8cd2d56818f7bc0b3e9fd26d73c")
 
 
 def _is_enum(obj: object) -> bool:
@@ -716,6 +720,15 @@ def test_each_documented_method_and_property_keeps_its_name_and_parameters() -> 
     assert shapes == _MEMBERS
 
 
+def test_each_documented_exception_attribute_is_set() -> None:
+    """A route reads these attributes of an exception it catches, as the docs show, so renaming one breaks it."""
+    attributes = {
+        owner: [name for name in names if name in vars(pkgutil.resolve_name(owner)("message"))]
+        for owner, names in _EXCEPTION_ATTRIBUTES.items()
+    }
+    assert attributes == _EXCEPTION_ATTRIBUTES
+
+
 def test_each_exported_constant_keeps_its_value() -> None:
     """A plugin that compares with a constant's value, or writes it as a literal, breaks when the value changes."""
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
@@ -766,6 +779,7 @@ def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
         _SIGNATURES,
         _ENUM_MEMBERS,
         _MEMBERS,
+        _EXCEPTION_ATTRIBUTES,
         _CONSTANTS,
         _MANIFEST,
         _HTTP_EXPORTS,
