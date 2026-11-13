@@ -1109,9 +1109,9 @@ Add and edit models with provider, model ID, host URL, and advanced settings, an
 A row's **Save** only updates the draft; click **Save All Changes** to write model changes to `config.yaml`.
 The add-model dropdown does not have a preset for every supported provider, but the dashboard keeps any provider already in the configuration.
 A model's **More settings** section appears below the table while its row is being edited, and **Cancel** on the row also reverts More settings changes made since the last save.
-Saving a row whose provider changed keeps the model's provider-neutral fields, such as its display name, icon, context window, and pricing, and the `extra_kwargs` keys set in More settings during that edit.
-It drops every other `extra_kwargs` key, including sampling options such as `temperature` and `max_tokens`, and the model's existing API key, so re-set the options you need in More settings, and paste or reuse a key, before saving.
-Switching back to the original provider before saving keeps everything.
+Saving a row whose provider changed keeps the model's provider-neutral fields, such as its display name, icon, context window, and pricing, and only the `extra_kwargs` values changed in More settings during that edit.
+It drops every other `extra_kwargs` key, even one More settings still shows, including sampling options such as `temperature` and `max_tokens`, and the model's existing API key, so after saving, edit the row again and add back the options you need in More settings.
+Switching back to the original provider before saving keeps the model's saved settings.
 See [Models](https://docs.mindroom.chat/configuration/models/) for providers and fields.
 
 ### Usage
