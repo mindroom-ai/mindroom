@@ -11,10 +11,9 @@ import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
-import httpx2
 import nio
 import pytest
 
@@ -30,14 +29,17 @@ from mindroom.providers import model_http_client
 from mindroom.providers.errors import missing_api_key_error
 from mindroom.shell.output_capture import ShellOutputDestination
 from tests.conftest import install_model_providers, requires_linux
-from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
+from tests.providers.anthropic_family_support import claude_message
 from tests.providers.family_support import FAMILIES
-from tests.providers.golden_support import Wire, httpx2_transport, pipeline_provider, streamed_reply
+from tests.providers.golden_support import Wire, pipeline_provider, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+    import httpx2
 
     from mindroom.llm.provider import StreamEvent
 
@@ -741,29 +743,20 @@ async def test_a_missing_provider_key_names_the_variable_and_the_env_file(
 
 # A model on each route that sends a run's request headers, with headers its config authors under the names they set.
 _AUTHORED_HEADERS = {"x-run": "authored", "x-static": "kept"}
+_AUTHORED_EXTRA_HEADERS = {"x-depth": "authored", "x-extra": "kept"}
+_OPENAI_ROUTE = {
+    "provider": "openai",
+    "id": "gpt-6-astra",
+    "api_key": "test-key",
+    "extra_kwargs": {
+        "base_url": "https://gateway.example/v1",
+        "default_headers": _AUTHORED_HEADERS,
+        "extra_headers": _AUTHORED_EXTRA_HEADERS,
+    },
+}
 _HEADER_ROUTES: dict[str, dict[str, Any]] = {
-    "chat": {
-        "provider": "openai",
-        "api": "chat_completions",
-        "id": "gpt-6-astra",
-        "api_key": "test-key",
-        "extra_kwargs": {
-            "base_url": "https://gateway.example/v1",
-            "default_headers": _AUTHORED_HEADERS,
-            "extra_headers": {"x-depth": "authored", "x-extra": "kept"},
-        },
-    },
-    "responses": {
-        "provider": "openai",
-        "api": "responses",
-        "id": "gpt-6-astra",
-        "api_key": "test-key",
-        "extra_kwargs": {
-            "base_url": "https://gateway.example/v1",
-            "default_headers": _AUTHORED_HEADERS,
-            "extra_headers": {"x-depth": "authored", "x-extra": "kept"},
-        },
-    },
+    "chat": {**_OPENAI_ROUTE, "api": "chat_completions"},
+    "responses": {**_OPENAI_ROUTE, "api": "responses"},
     "anthropic": {
         "provider": "anthropic",
         "id": "claude-sonnet-5-5",
@@ -771,7 +764,7 @@ _HEADER_ROUTES: dict[str, dict[str, Any]] = {
         "extra_kwargs": {
             "base_url": "https://gateway.example",
             "default_headers": _AUTHORED_HEADERS,
-            "request_params": {"extra_headers": {"x-depth": "authored", "x-extra": "kept"}},
+            "request_params": {"extra_headers": _AUTHORED_EXTRA_HEADERS},
         },
     },
 }
@@ -786,8 +779,7 @@ def _wire_reply(route: str, reply: _Reply, number: int) -> httpx.Response:
     if route == "chat":
         message: dict[str, Any] = {"role": "assistant", "content": text or None}
         if call is not None:
-            function = {"name": call[0], "arguments": json.dumps(call[1])}
-            message["tool_calls"] = [{"id": f"call_{number}", "type": "function", "function": function}]
+            message["tool_calls"] = [tool_call(call[0], f"call_{number}", **call[1])]
         choice = {"index": 0, "message": message, "finish_reason": "stop" if call is None else "tool_calls"}
         usage = {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49}
         body = {"id": "chatcmpl-1", "object": "chat.completion", "created": 1, "model": "gpt-6-astra"}
@@ -819,18 +811,10 @@ def _wire_reply(route: str, reply: _Reply, number: int) -> httpx.Response:
         if call is None
         else {"type": "tool_use", "id": f"toolu_{number}", "name": call[0], "input": call[1]}
     )
-    return streamed_reply(
-        {
-            "id": f"msg_{number}",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-5-5",
-            "content": [block],
-            "stop_reason": "end_turn" if call is None else "tool_use",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 40, "output_tokens": 9},
-        },
-    )
+    stop_reason = "end_turn" if call is None else "tool_use"
+    message = claude_message([block], stop_reason=stop_reason, usage={"input_tokens": 40, "output_tokens": 9})
+    message["id"] = f"msg_{number}"
+    return streamed_reply(message)
 
 
 def _model_server(monkeypatch: pytest.MonkeyPatch, route: str, *replies: _Reply | Callable[[str], _Reply]) -> Wire:
@@ -906,11 +890,13 @@ async def test_request_headers_follow_the_run(route: str, tmp_path: Path, monkey
 
     assert result.text == "done"
     runs = [_sent_run(request) for request in wire.requests]
-    lead, child, nested = ("coder", "lead", "-", "0"), runs[1], runs[2]
-    child_id = child[1]
-    assert child == ("helper", child_id, "-", "1")
-    assert nested == ("coder", nested[1], child_id, "2")
-    assert len({"lead", child_id, nested[1]}) == 3
+    child_id, nested_id = runs[1][1], runs[2][1]
+    lead, child, nested = (
+        ("coder", "lead", "-", "0"),
+        ("helper", child_id, "-", "1"),
+        ("coder", nested_id, child_id, "2"),
+    )
+    assert len({"lead", child_id, nested_id}) == 3
     assert runs == [lead, child, nested, child, lead, child, lead]
     assert {(request.headers["x-static"], request.headers["x-extra"]) for request in wire.requests} == {
         ("kept", "kept"),
@@ -971,22 +957,11 @@ async def test_compaction_request_carries_headers(tmp_path: Path, monkeypatch: p
 @pytest.mark.asyncio
 async def test_headers_not_sent_to_other_hosts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A media URL the route does not send is downloaded without the run's headers, which only the model request reads."""
-    downloads: list[httpx2.Request] = []
-
-    def media_server(request: httpx2.Request) -> httpx.Response:
-        downloads.append(request)
-        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4\n%%EOF\n")
-
-    pool = httpx2.AsyncClient(transport=httpx2_transport(media_server))
-    monkeypatch.setattr(model_http_client, "_loop_client", lambda: pool)
+    media = Wire(httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4\n%%EOF\n"))
+    monkeypatch.setattr(model_http_client, "_loop_client", lambda: media.client)
     family = FAMILIES["openai_chat"]
     wire = Wire(family.reply())
-    reads: list[str] = []
-
-    def headers() -> dict[str, str]:
-        reads.append("read")
-        return {"x-run": "lead"}
-
+    headers = Mock(return_value={"x-run": "lead"})
     file = File(url="https://media.example/report.pdf")
     with bind_request_headers(headers):
         await complete(
@@ -994,7 +969,7 @@ async def test_headers_not_sent_to_other_hosts(tmp_path: Path, monkeypatch: pyte
             ModelRequest(messages=[Message(role="user", content="Read it.", files=[file])]),
         )
 
-    (download,) = downloads
+    (download,) = media.requests
     assert (download.url.host, download.headers.get("x-run")) == ("media.example", None)
     assert [request.headers.get("x-run") for request in wire.requests] == ["lead"]
-    assert reads == ["read"]
+    headers.assert_called_once_with()
