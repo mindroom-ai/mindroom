@@ -34,12 +34,15 @@ PLANNING = "!planning:localhost"
 NOTES = "!notes:localhost"
 PRIVATE = "!private:localhost"
 SPACE = "!space:localhost"
-HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to your Matrix tools."
+HEADER = (
+    "Sub-rooms around this one, each under the room it is in. "
+    "To read one, pass its room ID as room_id to your Matrix tools."
+)
 DESIGN_LINE = "- 'design' (!design:localhost), main room"
 PLANNING_LINE = "  - 'planning' (!planning:localhost)"
 HERE_LINE = "  - 'release-prep' (!room:localhost), you are here"
 NOTES_LINE = "    - 'notes' (!notes:localhost)"
-HIDDEN_ONE = "1 more nested room is hidden because the person you are answering has no access to it."
+HIDDEN_ONE = "1 more sub-room is hidden because the person you are answering has no access to it."
 TARGET = EnrichmentItem(key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, text="You are responding in Matrix room !room.")
 
 
@@ -158,8 +161,8 @@ async def test_rooms_the_requester_cannot_read_or_the_agent_is_not_in_are_only_c
         PLANNING_LINE,
         HERE_LINE,
         NOTES_LINE,
-        "2 more nested rooms are hidden because the person you are answering has no access to them.",
-        "1 more nested room is not shown.",
+        "2 more sub-rooms are hidden because the person you are answering has no access to them.",
+        "1 more sub-room is not shown.",
     )
 
 
@@ -229,7 +232,7 @@ async def test_a_big_tree_names_its_own_sub_rooms_and_first_rooms_beside_it_and_
     assert NOTES_LINE in note
     assert "'sibling 13'" in note
     assert "'sibling 14'" not in note
-    assert note.endswith("'sibling 13' (!sibling13:localhost)\n3 more nested rooms are not shown.")
+    assert note.endswith("'sibling 13' (!sibling13:localhost)\n3 more sub-rooms are not shown.")
     assert {call.args[0] for call in can_read.await_args_list} == {DESIGN, ROOM, NOTES} | {
         sibling.room_id for sibling in siblings[:14]
     }

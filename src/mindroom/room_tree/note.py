@@ -31,7 +31,10 @@ _ROOM_TREE_ENRICHMENT_KEY = "room_tree"
 _MAX_LISTED = 15
 # Access checks run one at a time under the client's crypto lock, so a slow homeserver drops the note, not the reply.
 _TIMEOUT_SECONDS = 5.0
-_HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to your Matrix tools."
+_HEADER = (
+    "Sub-rooms around this one, each under the room it is in. "
+    "To read one, pass its room ID as room_id to your Matrix tools."
+)
 _NO_ACCESS = "the person you are answering has no access to"
 _HERE = ", you are here"
 
@@ -175,8 +178,8 @@ def _joined(rooms: Mapping[str, nio.MatrixRoom], room_ids: Collection[str]) -> l
 
 def _left_out_line(count: int, reason: str) -> str:
     if count == 1:
-        return f"1 more nested room is {reason}."
-    return f"{count} more nested rooms are {reason}."
+        return f"1 more sub-room is {reason}."
+    return f"{count} more sub-rooms are {reason}."
 
 
 def _sort_key(room: nio.MatrixRoom) -> tuple[str, str]:
