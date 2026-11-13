@@ -88,6 +88,7 @@ _EXPORTS = [
     "MessageTarget",
     "ModelProvider",
     "ModelScope",
+    "OAuthConnectionRequired",
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
@@ -360,7 +361,7 @@ _SIGNATURES = {
 
 # Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
 # pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
-_ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry", "WorkerServiceError"]
+_ANNOTATION_TYPES = ["Config", "OAuthConnectionRequired", "RuntimePaths", "ToolTraceEntry", "WorkerServiceError"]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
 _ENUM_MEMBERS = {
@@ -596,6 +597,7 @@ _HTTP_EXPORTS = [
     "client_origins",
     "client_rooms",
     "client_stream",
+    "client_user_oauth_access_token",
     "plugin_context",
     "plugin_origin_url",
     "require_client_user",
@@ -625,6 +627,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.client_origins": "(connection)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
     "mindroom.plugin_http.client_stream": "(websocket, room_id, *, admit)",
+    "mindroom.plugin_http.client_user_oauth_access_token": "(request, user, provider_id, agent_name)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.plugin_origin_url": "(connection, label)",
     "mindroom.plugin_http.require_client_user": "(request)",
@@ -644,7 +647,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 29), "2a27f954cc71341be4367c00b61358be1f8238ec9a9c98b44383a80352f2fe3f")
+_PINNED_VERSION = ((1, 30), "5957c96fba4f471281c9a22f88f97f41bd9c807fa3545773d012e8e660dcabc1")
 
 
 def _is_enum(obj: object) -> bool:

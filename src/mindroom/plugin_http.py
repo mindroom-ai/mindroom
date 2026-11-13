@@ -28,17 +28,23 @@ from mindroom.api.config_lifecycle import (
     rebind_current_request_snapshot,
     require_api_state,
 )
+from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.api.plugin_routes import published_plugins
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.entity_directory import entity_directory
 from mindroom.hooks.types import format_hook_source
 from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.service import current_oauth_access_token
 from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
@@ -81,6 +87,7 @@ __all__ = [
     "client_origins",
     "client_rooms",
     "client_stream",
+    "client_user_oauth_access_token",
     "plugin_context",
     "plugin_origin_url",
     "require_client_user",
@@ -642,6 +649,54 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
         return latest.runtime_config if latest.runtime_paths == snapshot.runtime_paths else None
 
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
+
+
+async def client_user_oauth_access_token(
+    request: Request,
+    user: ClientUser,
+    provider_id: str,
+    agent_name: str,
+) -> str:
+    """Return a current access token of ``user``'s own connection to ``provider_id``, as ``agent_name``'s tools use it for them.
+
+    ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
+    the request; a route never builds one from request data, which would let its caller name someone else. Only an
+    agent whose ``worker_scope`` is ``user`` or ``user_agent`` keeps a connection for each person alone, so for any
+    other agent it raises ``PermissionError`` before reading anything: a ``shared`` or unscoped agent's connection, like
+    a service account, serves everyone who uses the agent. A token about to expire is refreshed first, as the agent's
+    tools refresh it. It raises ``LookupError`` for a provider or agent the config does not have,
+    ``OAuthConnectionRequired`` while ``user`` has no usable connection, with a ``connect_url`` for them and this
+    agent, and ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix.
+    """
+    context = plugin_context(request)
+    config, paths = context.config, context.runtime_paths
+    provider = config_plugins(config, paths).oauth_providers.get(provider_id)
+    if provider is None:
+        msg = f"No OAuth provider {provider_id!r} is configured"
+        raise LookupError(msg)
+    if agent_name not in config.agents:
+        msg = f"No agent {agent_name!r} is configured"
+        raise LookupError(msg)
+    requester_id = resolve_human_requester_alias(user.user_id, config, paths)
+    target = build_connection_agent_target(config, paths, requester_id, agent_name)
+    identity = target.execution_identity
+    if target.worker_scope not in {"user", "user_agent"} or identity is None or identity.requester_id != requester_id:
+        msg = f"Agent {agent_name!r} keeps no connection for one person alone"
+        raise PermissionError(msg)
+    credential_context = resolve_oauth_credential_context(
+        provider,
+        paths,
+        get_runtime_credentials_manager(paths),
+        target,
+        config=config,
+    )
+
+    def refresh_failed(error: OAuthProviderError) -> OAuthProviderError:
+        del error  # The credential lifecycle logged it, and its cause may quote the provider.
+        return OAuthProviderError(f"{provider.display_name} authorization could not be refreshed; try again shortly.")
+
+    token, _ = await asyncio.to_thread(current_oauth_access_token, credential_context, refresh_failed)
+    return token
 
 
 async def worker_relay(connection: HTTPConnection | PluginContext, target: ResolvedWorkerTarget) -> WorkerRelay:

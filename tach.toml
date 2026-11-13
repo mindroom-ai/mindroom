@@ -1577,6 +1577,7 @@ visibility = [
     "mindroom.mcp.manager",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
+    "mindroom.plugin_http",
     "mindroom.slack.watch_delivery",
     "mindroom.slack.watches",
 ]
@@ -8464,6 +8465,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
     "mindroom.api.plugin_origins",
     "mindroom.api.plugin_routes",
     "mindroom.constants",
@@ -8472,6 +8474,7 @@ depends_on = [
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.reserved_content",
     "mindroom.matrix.room_power",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.origins",
     "mindroom.plugin_context",
     "mindroom.plugin_worker_relay",

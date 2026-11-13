@@ -245,7 +245,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.29",
+  "mindroom_plugin_api": "1.30",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1309,6 +1309,54 @@ async def run(
 ```
 
 A plugin that uses `terminals()` states `"mindroom_plugin_api": "1.27"` in its manifest.
+
+### The caller's own connections
+
+A route that acts in a service as its caller, such as reading a file from their cloud drive, gets an access token of the caller's own connection with `await client_user_oauth_access_token(request, user, provider_id, agent_name)` from `mindroom.plugin_http`.
+It returns a current token of the connection to the [OAuth provider](#oauth-providers) `provider_id` that the tools of the agent `agent_name` use for that person, refreshing one about to expire first.
+Pass as `user` the `ClientUser` a dependency such as `require_client_user` or `require_room_member` returned, never one built from request data, which would let a caller read someone else's connection.
+Use the token in the route itself, and never return it to the client or log it.
+
+It answers only for an agent that keeps each person's connections apart, one whose [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) is `user` or `user_agent`, as a private agent's always is.
+For any other agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent; it never answers with a Google service account either.
+It raises `LookupError` for a provider or agent the config does not have.
+While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent, and is `None` when the stored connection cannot be read and must first be reset in the dashboard.
+A refresh that fails for another reason, such as an unreachable provider, raises an error the route answers with 500 unless it catches it, and the next call tries again.
+
+```python
+# routes.py
+from typing import Annotated
+
+import httpx
+from fastapi import APIRouter, Depends, Request
+
+from mindroom.plugin_api import OAuthConnectionRequired
+from mindroom.plugin_http import ClientUser, client_user_oauth_access_token, require_client_user
+
+router = APIRouter()
+
+
+@router.get("/files/{file_id}")
+async def file_name(
+    request: Request,
+    file_id: str,
+    user: Annotated[ClientUser, Depends(require_client_user)],
+) -> dict[str, str | None]:
+    try:
+        token = await client_user_oauth_access_token(request, user, "acme_drive", "assistant")
+    except OAuthConnectionRequired as needed:
+        # The client opens the link, the caller signs in, and the client asks again.
+        return {"connect_url": needed.connect_url}
+    async with httpx.AsyncClient() as client:
+        answer = await client.get(
+            "https://api.acme.example/files",
+            params={"id": file_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return {"name": answer.json()["name"]}
+```
+
+A plugin that uses `client_user_oauth_access_token` or `OAuthConnectionRequired` states `"mindroom_plugin_api": "1.30"` in its manifest.
 
 ### Websocket routes
 
