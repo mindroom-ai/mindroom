@@ -1044,8 +1044,8 @@ def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
 
 @pytest.mark.parametrize("blank", [None, "", " ", "\t\n"])
 def test_a_blank_endpoint_project_or_region_is_dropped_at_both_levels(blank: str | None) -> None:
-    """A null, empty, or whitespace-only ``base_url``, ``project_id``, or ``region`` sets nothing."""
-    settings = dict.fromkeys(("base_url", "project_id", "region"), blank)
+    """A null, empty, or whitespace-only ``base_url``, ``project_id``, ``region``, ``location``, or ``aws_region`` sets nothing."""
+    settings = dict.fromkeys(("base_url", "project_id", "region", "location", "aws_region"), blank)
 
     model = ModelConfig(provider="vertexai_claude", id="m", extra_kwargs={**settings, "client_params": settings})
 
@@ -1055,7 +1055,7 @@ def test_a_blank_endpoint_project_or_region_is_dropped_at_both_levels(blank: str
 @pytest.mark.parametrize("value", [" us-east5 ", False, 0, []])
 def test_any_other_project_or_region_is_kept_as_authored(value: object) -> None:
     """Only a blank string counts as unset; any other value, even a falsy one, reaches the route as authored."""
-    settings = dict.fromkeys(("project_id", "region"), value)
+    settings = dict.fromkeys(("project_id", "region", "location", "aws_region"), value)
 
     model = ModelConfig(provider="vertexai_claude", id="m", extra_kwargs={**settings, "client_params": settings})
 
