@@ -44,6 +44,12 @@ import {
   SERVICE_NAME_CHARACTERS,
   SERVICE_NAME_PATTERN,
 } from "@/lib/serviceNames";
+import {
+  getPathValue,
+  isPlainObject,
+  setPathValue,
+  type ConfigPath,
+} from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
 import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { ProviderLogo } from "./ProviderLogos";
@@ -180,6 +186,16 @@ function getOpenAIBaseUrl(modelConfig: {
   const trimmed = baseUrl.trim();
   return trimmed || null;
 }
+
+/** The `extra_kwargs` keys that set a model's endpoint and the key, headers, and auth token sent to it. */
+const PROVIDER_KEY_PATHS: Record<string, ConfigPath> = {
+  base_url: ["base_url"],
+  "client_params.base_url": ["client_params", "base_url"],
+  "client_params.api_key": ["client_params", "api_key"],
+  default_headers: ["default_headers"],
+  "client_params.default_headers": ["client_params", "default_headers"],
+  auth_token: ["auth_token"],
+};
 
 function isValidHttpUrl(value: string): boolean {
   try {
@@ -460,6 +476,9 @@ export function ModelConfig() {
     loadedConfig: typeof loadedConfig;
   } | null>(null);
   const editingRowId = editingStart?.draft.modelName ?? null;
+  // The provider keys More settings changed during this row edit; a provider
+  // change drops the rest, which belong to the old provider.
+  const [keysSetInEdit, setKeysSetInEdit] = useState<string[]>([]);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
@@ -674,6 +693,7 @@ export function ModelConfig() {
   const finishEditingRow = () => {
     setRowDraft(null);
     setEditingStart(null);
+    setKeysSetInEdit([]);
   };
 
   const cancelEditingRow = () => {
@@ -873,7 +893,25 @@ export function ModelConfig() {
       delete nextModelConfig.icon;
     }
 
-    const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    let nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    if (providerChanged) {
+      // Drop the old provider's config.yaml key, and each provider key More
+      // settings did not set during this edit.
+      for (const [key, path] of Object.entries(PROVIDER_KEY_PATHS)) {
+        if (!keysSetInEdit.includes(key)) {
+          nextExtraKwargs = setPathValue(nextExtraKwargs, path, undefined);
+        }
+      }
+      const clientParams = nextExtraKwargs.client_params;
+      if (
+        isPlainObject(clientParams) &&
+        Object.keys(clientParams).length === 0
+      ) {
+        delete nextExtraKwargs.client_params;
+      }
+      delete nextModelConfig.api_key;
+      delete nextExtraKwargs.api_key;
+    }
     if (rowDraft.provider === "openai") {
       // More settings may have edited extra_kwargs; keep its base_url unless
       // the row's own Base URL input changed.
@@ -885,20 +923,7 @@ export function ModelConfig() {
         }
       }
     } else {
-      // A provider change drops the old provider's endpoint but keeps one More
-      // settings set during this edit.
-      if (
-        providerChanged &&
-        nextExtraKwargs.base_url === editingStart?.config.extra_kwargs?.base_url
-      ) {
-        delete nextExtraKwargs.base_url;
-      }
       delete nextModelConfig.api;
-    }
-    if (providerChanged) {
-      // A config.yaml key belongs to the old provider; never send it to the new one.
-      delete nextModelConfig.api_key;
-      delete nextExtraKwargs.api_key;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -1878,9 +1903,20 @@ export function ModelConfig() {
               value={models[editingRowId]}
               path={["models", editingRowId]}
               exclude={modelEditorFields(rowDraft.provider)}
-              onFieldChange={(key, next) =>
-                updateConfigValue(["models", editingRowId, key], next)
-              }
+              onFieldChange={(key, next) => {
+                if (key === "extra_kwargs") {
+                  const previous = models[editingRowId].extra_kwargs;
+                  const changed = Object.entries(PROVIDER_KEY_PATHS)
+                    .filter(
+                      ([, keyPath]) =>
+                        JSON.stringify(getPathValue(previous, keyPath)) !==
+                        JSON.stringify(getPathValue(next, keyPath)),
+                    )
+                    .map(([providerKey]) => providerKey);
+                  setKeysSetInEdit((current) => [...current, ...changed]);
+                }
+                updateConfigValue(["models", editingRowId, key], next);
+              }}
             />
           )}
 
