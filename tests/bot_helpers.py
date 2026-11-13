@@ -205,12 +205,15 @@ def install_sub_room(client: AsyncMock, agent_id: str, room_id: str = "!test:loc
         event_type: str,
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
-        if (state_room_id, event_type, state_key) == (room_id, "m.space.parent", design.room_id):
+        if event_type == "m.space.parent" and (state_room_id, state_key) in {
+            (room_id, design.room_id),
+            (planning.room_id, design.room_id),
+        }:
             return nio.RoomGetStateEventResponse(
                 {"via": ["localhost"], "canonical": True},
                 event_type,
                 state_key,
-                room_id,
+                state_room_id,
             )
         return nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
 

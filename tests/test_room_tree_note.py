@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY
 from mindroom.hooks import EnrichmentItem
 from mindroom.message_target import MessageTarget
+from mindroom.room_tree import note as room_tree_note
 from mindroom.room_tree.note import _room_tree_note, with_room_tree
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -32,7 +34,7 @@ PLANNING = "!planning:localhost"
 NOTES = "!notes:localhost"
 PRIVATE = "!private:localhost"
 SPACE = "!space:localhost"
-HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to matrix_message or matrix_room."
+HEADER = "Nested rooms around this one. To read one, pass its room ID as room_id to your Matrix tools."
 DESIGN_LINE = "- 'design' (!design:localhost), main room"
 PLANNING_LINE = "  - 'planning' (!planning:localhost)"
 HERE_LINE = "  - 'release-prep' (!room:localhost), you are here"
@@ -82,15 +84,28 @@ def _readable(*room_ids: str) -> Callable[[str], Awaitable[bool]]:
     return can_read
 
 
-def _design_tree(*extra: nio.MatrixRoom, design_children: Iterable[str] = ()) -> MagicMock:
-    """Return a client in `design`, which lists `release-prep` (this room) and `planning`; `notes` is under this room."""
+def _design_tree(
+    *extra: nio.MatrixRoom,
+    design_children: Iterable[str] = (),
+    canonical: Iterable[tuple[str, str]] = (),
+) -> MagicMock:
+    """Return a client in `design`, which lists `release-prep` (this room) and `planning`; `notes` is under this room.
+
+    Every room `design` and this room list names its lister back as canonical parent, as do the pairs of `canonical`.
+    """
     return _client(
         _room(DESIGN, "design", children={ROOM, PLANNING, *design_children}),
         _room(ROOM, "release-prep", children={NOTES}),
         _room(PLANNING, "planning"),
         _room(NOTES, "notes"),
         *extra,
-        canonical={(ROOM, DESIGN)},
+        canonical={
+            (ROOM, DESIGN),
+            (PLANNING, DESIGN),
+            (NOTES, ROOM),
+            *((child, DESIGN) for child in design_children),
+            *canonical,
+        },
     )
 
 
@@ -193,26 +208,74 @@ async def test_spaces_are_neither_above_a_room_nor_among_its_sub_rooms() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_big_tree_names_its_first_rooms_and_counts_the_rest() -> None:
-    """At most 15 rooms beside and under this one are checked and named; rooms past them are never checked."""
+async def test_a_big_tree_names_its_own_sub_rooms_and_first_rooms_beside_it_and_counts_the_rest() -> None:
+    """At most 15 rooms beside and under this one are checked and named, its own sub-rooms first.
+
+    Rooms past them are never checked.
+    """
     siblings = [_room(f"!sibling{index:02}:localhost", f"sibling {index:02}") for index in range(17)]
     client = _client(
         _room(DESIGN, "design", children={ROOM, *(sibling.room_id for sibling in siblings)}),
-        _room(ROOM, "release-prep"),
+        _room(ROOM, "release-prep", children={NOTES}),
+        _room(NOTES, "notes"),
         *siblings,
-        canonical={(ROOM, DESIGN)},
+        canonical={(ROOM, DESIGN), (NOTES, ROOM), *((sibling.room_id, DESIGN) for sibling in siblings)},
     )
     can_read = AsyncMock(return_value=True)
 
     note = await _room_tree_note(client, ROOM, can_read=can_read)
 
     assert note is not None
-    assert "'sibling 14'" in note
-    assert "'sibling 15'" not in note
-    assert note.endswith("'sibling 14' (!sibling14:localhost)\n2 more nested rooms are not shown.")
-    assert {call.args[0] for call in can_read.await_args_list} == {DESIGN, ROOM} | {
-        sibling.room_id for sibling in siblings[:15]
+    assert NOTES_LINE in note
+    assert "'sibling 13'" in note
+    assert "'sibling 14'" not in note
+    assert note.endswith("'sibling 13' (!sibling13:localhost)\n3 more nested rooms are not shown.")
+    assert {call.args[0] for call in can_read.await_args_list} == {DESIGN, ROOM, NOTES} | {
+        sibling.room_id for sibling in siblings[:14]
     }
+
+
+@pytest.mark.asyncio
+async def test_a_listed_room_that_names_another_room_above_it_is_left_out() -> None:
+    """A listing left behind after a move is no sub-room relation, as in MindRoom Chat, so it is neither named nor counted."""
+    moved = "!moved:localhost"
+    client = _design_tree(_room(moved, "moved"))
+    client.rooms[ROOM].children.add(moved)
+
+    note = await _room_tree_note(client, ROOM, can_read=_readable(DESIGN, ROOM, PLANNING, NOTES, moved))
+
+    assert note == _note(DESIGN_LINE, PLANNING_LINE, HERE_LINE, NOTES_LINE)
+
+
+@pytest.mark.asyncio
+async def test_a_room_above_that_is_nested_itself_is_not_called_the_main_room() -> None:
+    """The note shows one level up, so a room above with its own room above is the room above, not the main room."""
+    client = _design_tree(_room("!top:localhost", "top", children={DESIGN}), canonical={(DESIGN, "!top:localhost")})
+
+    note = await _room_tree_note(client, ROOM, can_read=_readable(DESIGN, ROOM, PLANNING, NOTES))
+
+    assert note == _note("- 'design' (!design:localhost), room above", PLANNING_LINE, HERE_LINE, NOTES_LINE)
+
+
+@pytest.mark.asyncio
+async def test_the_note_keeps_a_room_the_agent_leaves_while_it_reads() -> None:
+    """A sync drops a room the agent leaves from ``client.rooms``; the note already holds the room and finishes."""
+    client = _design_tree()
+    read_state = client.room_get_state_event.side_effect
+
+    async def leave_design_while_reading(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        client.rooms.pop(DESIGN, None)
+        return await read_state(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = leave_design_while_reading
+
+    note = await _room_tree_note(client, ROOM, can_read=_readable(DESIGN, ROOM, PLANNING, NOTES))
+
+    assert note == _note(DESIGN_LINE, PLANNING_LINE, HERE_LINE, NOTES_LINE)
 
 
 def _context(tmp_path: Path, client: MagicMock) -> ToolRuntimeContext:
@@ -276,6 +339,24 @@ async def test_a_turn_that_cannot_message_rooms_gets_no_tree(tmp_path: Path) -> 
 
     assert await with_room_tree((other,), _context(tmp_path, client)) == (other,)
     client.room_get_state_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_homeserver_leaves_the_turn_without_a_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Access checks run one at a time, so the note gives up after a bound rather than hold the reply."""
+    monkeypatch.setattr(room_tree_note, "_TIMEOUT_SECONDS", 0.01)
+    client = _design_tree()
+
+    async def hang(*_args: object) -> None:
+        await asyncio.Event().wait()
+
+    client.room_get_state_event = AsyncMock(side_effect=hang)
+
+    async with asyncio.timeout(2):
+        assert await with_room_tree((TARGET,), _context(tmp_path, client)) == (TARGET,)
 
 
 @pytest.mark.asyncio
