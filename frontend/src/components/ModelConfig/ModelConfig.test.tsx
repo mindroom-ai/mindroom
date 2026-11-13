@@ -428,94 +428,149 @@ describe("ModelConfig", () => {
   }
 
   it.each([
-    { api_key: "sk-openai-config", extra_kwargs: { temperature: 0.2 } },
-    { extra_kwargs: { api_key: "sk-openai-config", temperature: 0.2 } },
     {
-      extra_kwargs: {
-        client_params: { api_key: "sk-openai-config" },
-        temperature: 0.2,
+      provider: "openai",
+      target: /DeepSeek/i,
+      saved: "deepseek",
+      fields: {
+        api_key: "sk-old",
+        extra_kwargs: {
+          temperature: 0.2,
+          max_tokens: 1024,
+          client_params: { api_key: "sk-old", timeout: 30 },
+        },
+      },
+    },
+    {
+      provider: "openai",
+      target: /OpenRouter/i,
+      saved: "openrouter",
+      fields: {
+        extra_kwargs: {
+          api_key: "sk-old",
+          organization: "org-old",
+          extra_headers: { "x-gateway": "old" },
+          default_query: { key: "old" },
+          client_params: {
+            default_query: { key: "old" },
+            auth_token: "old-token",
+            access_token: "old-token",
+          },
+        },
+      },
+    },
+    {
+      provider: "anthropic",
+      target: /OpenAI/i,
+      saved: "openai",
+      fields: {
+        extra_kwargs: {
+          base_url: "https://gateway.example/anthropic",
+          auth_token: "old-token",
+          default_headers: { "x-gateway": "old" },
+          client_params: {
+            base_url: "https://gateway.example/v1",
+            default_headers: { "x-gateway": "old" },
+          },
+        },
+      },
+    },
+    {
+      provider: "vertexai_claude",
+      target: /Anthropic/i,
+      saved: "anthropic",
+      fields: {
+        extra_kwargs: {
+          project_id: "old-project",
+          region: "us-east5",
+          client_params: { credentials: { token: "old-token" } },
+        },
+      },
+    },
+    {
+      provider: "bedrock_claude",
+      target: /Anthropic/i,
+      saved: "anthropic",
+      fields: {
+        extra_kwargs: {
+          aws_access_key: "old-access",
+          aws_secret_key: "old-secret",
+          aws_session_token: "old-session",
+          aws_profile: "old-profile",
+          aws_region: "us-west-2",
+        },
+      },
+    },
+    {
+      provider: "azure",
+      target: /OpenAI/i,
+      saved: "openai",
+      fields: {
+        extra_kwargs: {
+          azure_endpoint: "https://old.openai.azure.com",
+          api_version: "2024-10-21",
+          azure_deployment: "old-deployment",
+          azure_ad_token: "old-token",
+        },
+      },
+    },
+    {
+      provider: "google",
+      target: /Vertex AI Claude/i,
+      saved: "vertexai_claude",
+      fields: {
+        extra_kwargs: {
+          vertexai: true,
+          project_id: "old-project",
+          location: "eu",
+        },
       },
     },
   ])(
-    "drops config.yaml API keys when changing provider (%o)",
-    async (keyFields) => {
-      addKeyedOpenAIModel(keyFields);
+    "drops the old provider's settings when changing from $provider to $saved",
+    async ({ provider, target, saved, fields }) => {
+      addModels({
+        switched: {
+          provider,
+          id: "old-model",
+          display_name: "Switched",
+          context_window: 16384,
+          ...fields,
+        },
+      });
       render(<ModelConfig />);
-      const row = editRow("keyed");
-      chooseProvider(row, /DeepSeek/i);
+      const row = editRow("switched");
+      chooseProvider(row, target);
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
         expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-          ["models", "keyed"],
+          ["models", "switched"],
           {
-            provider: "deepseek",
-            id: "gpt-6-astra",
-            extra_kwargs: { temperature: 0.2 },
+            provider: saved,
+            id: "old-model",
+            display_name: "Switched",
+            context_window: 16384,
           },
         );
       });
     },
   );
 
-  it.each([
-    {
-      provider: /OpenAI/i,
-      extraKwargs: { base_url: "https://gateway.example/v1", temperature: 0.2 },
-      saved: { provider: "openai", extra_kwargs: { temperature: 0.2 } },
-    },
-    {
-      provider: /DeepSeek/i,
-      extraKwargs: {
-        client_params: { base_url: "https://gateway.example/v1", timeout: 30 },
-      },
-      saved: {
-        provider: "deepseek",
-        extra_kwargs: { client_params: { timeout: 30 } },
-      },
-    },
-    {
-      provider: /OpenAI/i,
-      extraKwargs: {
-        client_params: { base_url: "https://gateway.example/v1" },
-      },
-      saved: { provider: "openai" },
-    },
-    {
-      provider: /OpenAI/i,
-      extraKwargs: {
-        default_headers: { "x-gateway": "old" },
-        auth_token: "old-token",
-        client_params: { default_headers: { "x-gateway": "old" }, timeout: 30 },
-      },
-      saved: {
-        provider: "openai",
-        extra_kwargs: { client_params: { timeout: 30 } },
-      },
-    },
-  ])(
-    "drops the old provider's endpoint, headers, and auth token when changing provider (%o)",
-    async ({ provider, extraKwargs, saved }) => {
-      addModels({
-        gateway: {
-          provider: "anthropic",
-          id: "claude-sonnet-5-5",
-          extra_kwargs: extraKwargs,
-        },
-      });
-      render(<ModelConfig />);
-      const row = editRow("gateway");
-      chooseProvider(row, provider);
-      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+  it("keeps the Base URL when the provider is switched away and back before saving", async () => {
+    render(<ModelConfig />);
+    const row = editRow("openai_local");
+    chooseProvider(row, /Anthropic/i);
+    chooseProvider(row, /OpenAI/i);
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
-      await waitFor(() => {
-        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-          ["models", "gateway"],
-          { id: "claude-sonnet-5-5", ...saved },
-        );
-      });
-    },
-  );
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        mockStore.config.models.openai_local,
+      );
+    });
+  });
 
   it("clears a saved dashboard key when changing provider", async () => {
     addKeyedOpenAIModel({});
@@ -646,27 +701,6 @@ describe("ModelConfig", () => {
     expect(within(row).getByText("Config key")).toBeTruthy();
     expect(within(row).queryByText("Provider key")).toBeNull();
     expect(within(row).queryByTitle("Copy API key")).toBeNull();
-  });
-
-  it("changes provider with inline dropdown", async () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByText("openrouter"));
-
-    const row = screen.getByDisplayValue("openrouter").closest("tr");
-    if (!row) throw new Error("row not found");
-
-    fireEvent.click(within(row).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /OpenAI/i }));
-
-    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-        ["models", "openrouter"],
-        expect.objectContaining({ provider: "openai" }),
-      );
-    });
   });
 
   it("shows API key source labels", async () => {
@@ -1277,6 +1311,18 @@ describe("ModelConfig", () => {
       rerender(<ModelConfig />);
     }
 
+    // Switch the gateway row to Anthropic, then apply `edits` in More settings.
+    function switchGatewayAndEdit(edits: Record<string, unknown>[]) {
+      const { rerender } = render(<ModelConfig />);
+      chooseProvider(editRow("gateway"), /Anthropic/i);
+      fireEvent.click(
+        screen.getByRole("button", { name: /More settings for gateway/ }),
+      );
+      for (const extraKwargs of edits) {
+        editExtraKwargs(rerender, extraKwargs);
+      }
+    }
+
     function saveGatewayRow() {
       const row = screen.getByDisplayValue("gateway").closest("tr");
       if (!row) throw new Error("row not found");
@@ -1323,17 +1369,27 @@ describe("ModelConfig", () => {
         },
       },
       {
+        outcome: "keeps an API key it sets",
+        start: {},
+        edits: [{ api_key: "sk-typed" }],
+        saved: { api_key: "sk-typed" },
+      },
+      {
         outcome: "keeps the headers it changes and drops the old ones",
         start: {
           default_headers: { "x-gateway": "old" },
           auth_token: "old-token",
-          client_params: { default_headers: { "x-gateway": "old" } },
+          client_params: {
+            default_headers: { "x-gateway": "old", authorization: "old" },
+          },
         },
         edits: [
           {
             default_headers: { "x-gateway": "old" },
             auth_token: "old-token",
-            client_params: { default_headers: { "x-gateway": "new" } },
+            client_params: {
+              default_headers: { "x-gateway": "new", authorization: "old" },
+            },
           },
         ],
         saved: { client_params: { default_headers: { "x-gateway": "new" } } },
@@ -1344,18 +1400,17 @@ describe("ModelConfig", () => {
         edits: [{ ...endpoints, temperature: 0.2 }],
         saved: { temperature: 0.2 },
       },
+      {
+        outcome: "saves no extra_kwargs when it only removes a key",
+        start: { client_params: { base_url: "https://gateway.example/v1" } },
+        edits: [{ client_params: {} }],
+        saved: undefined,
+      },
     ])(
       "$outcome in More settings after the row's provider changed",
       async ({ start, edits, saved }) => {
         commitGateway(start);
-        const { rerender } = render(<ModelConfig />);
-        chooseProvider(editRow("gateway"), /Anthropic/i);
-        fireEvent.click(
-          screen.getByRole("button", { name: /More settings for gateway/ }),
-        );
-        for (const extraKwargs of edits) {
-          editExtraKwargs(rerender, extraKwargs);
-        }
+        switchGatewayAndEdit(edits);
         saveGatewayRow();
 
         await waitFor(() => {
@@ -1364,6 +1419,40 @@ describe("ModelConfig", () => {
             { ...gateway, provider: "anthropic", extra_kwargs: saved },
           );
         });
+      },
+    );
+
+    it.each([
+      {
+        setting: "an old api_key",
+        fields: { api_key: "sk-old" },
+        edits: [],
+        hint: "the provider key",
+      },
+      {
+        setting: "an old extra_kwargs.api_key",
+        fields: { extra_kwargs: { api_key: "sk-old" } },
+        edits: [],
+        hint: "the provider key",
+      },
+      {
+        setting: "an extra_kwargs.api_key set in this edit",
+        fields: { extra_kwargs: {} },
+        edits: [{ api_key: "sk-typed" }],
+        hint: "its config.yaml key",
+      },
+    ])(
+      "says the model uses $hint after the row's provider changed with $setting",
+      ({ fields, edits, hint }) => {
+        commitGateway({});
+        addModels({ gateway: { ...gateway, ...fields } });
+        switchGatewayAndEdit(edits);
+
+        const row = screen.getByDisplayValue("gateway").closest("tr");
+        if (!row) throw new Error("row not found");
+        expect(
+          within(row).getByText(new RegExp(`will use ${hint}`)),
+        ).toBeTruthy();
       },
     );
 
