@@ -21379,7 +21379,7 @@ Cancelling the call, directly or through `asyncio.timeout`, stops the turn, its 
 
 `request_headers` adds headers to model requests per run, for LLM gateways and proxies that attribute or limit spend per run, such as LiteLLM, Portkey, or Helicone.
 The lead agent and each subagent are separate runs, and a `continue_subagent` follow-up belongs to the run it continues.
-MindRoom calls the function with the `HeadlessRun` that sends each model request, compaction summaries included, as it sends that request; it runs on the event loop, so keep it quick and free of blocking calls.
+MindRoom calls the function with the `HeadlessRun` sending a model request, compaction summaries included, as it sends that request; it runs on the event loop, so keep it quick and free of blocking calls.
 The headers it returns win over headers of the same name that the model's config sets.
 Only the agents' own model requests carry them; media downloads for the model, embeddings, the model calls [Mem0](https://docs.mindroom.chat/memory/) makes to store a memory, and requests that tools make do not.
 Models on the `google` and `ollama` providers send no request headers; reach a gateway in front of them through an `openai` model with the gateway's `base_url` instead.

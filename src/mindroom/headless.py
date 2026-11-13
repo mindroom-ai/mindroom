@@ -222,7 +222,8 @@ async def run_turn(
     """Run ``agent``'s reply to ``prompt`` on this event loop, as ``requester_id`` or else the first administrator.
 
     MindRoom keeps its state under ``storage``. ``workdir``, when set, is where the file and shell tools of the agent
-    and its subagents work. ``request_headers``, when set, gives the headers each model request of a run carries.
+    and its subagents work. ``request_headers``, when set, gives the headers a run's OpenAI-family and Claude model
+    requests carry.
     Cancelling the call cancels the turn and its running tool calls.
     """
     validated, runtime_paths, workdir, requester = _validated(

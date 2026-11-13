@@ -39,7 +39,7 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
 9. `request_headers` serves LLM gateways and proxies that attribute or limit spend per run, which need to tell the lead's requests from each subagent's.
-   The callback is bound once for the turn in a context variable, which every subagent's run inherits, and the provider adapters read it as they send each model request, so a request belongs to the subagent running where it is sent, or else to the lead.
+   The callback is bound once for the turn in a context variable, which every subagent's run inherits, and the Chat Completions, Responses, and Anthropic adapters read it as they send each model request, so a request belongs to the subagent running where it is sent, or else to the lead.
    The headers merge into each request's `extra_headers`, which the SDKs send over the client's default headers, so they win over every header the config authors; an OpenAI-family client is cached per model, so its default headers cannot carry per-run values.
 
 ## Rejected alternatives

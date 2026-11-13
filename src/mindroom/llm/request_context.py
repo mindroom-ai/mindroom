@@ -92,7 +92,7 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
 
 @contextmanager
 def bind_request_headers(headers: Callable[[], Mapping[str, str]]) -> Iterator[None]:
-    """Bind the headers every model request sent in this context carries, which ``headers`` returns as each is sent."""
+    """Bind the headers of the OpenAI-family and Claude model requests sent in this context, read as each is sent."""
     token = _REQUEST_HEADERS.set(headers)
     try:
         yield
