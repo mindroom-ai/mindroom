@@ -159,3 +159,35 @@ jobs:
             echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee "$dir/diag.json"
           done
           POLICY=1 PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "${ARGS[@]}" 2>&1 | grep -E '^policy'
+      - name: Probe the browser tool on real plain-HTTP sites
+        if: always()
+        run: |
+          cat > /tmp/tool_probe.py <<'PY'
+          import asyncio, json, sys, tempfile
+          from pathlib import Path
+          from mindroom.constants import resolve_primary_runtime_paths
+          from mindroom.custom_tools.browser import BrowserTools
+
+          async def main():
+              label, exe = sys.argv[1:3]
+              for url in ["http://neverssl.com/", "http://httpforever.com/", "http://example.com/"]:
+                  with tempfile.TemporaryDirectory() as d:
+                      paths = resolve_primary_runtime_paths(
+                          config_path=Path(d) / "config.yaml", storage_path=Path(d) / "storage",
+                          process_env={"BROWSER_EXECUTABLE_PATH": exe},
+                      )
+                      tool = BrowserTools(paths)
+                      try:
+                          result = json.loads(await tool.browser(action="open", targetUrl=url))
+                          print(label, url, "OK", result.get("url"), result.get("title"))
+                      except Exception as e:
+                          print(label, url, "ERR", type(e).__name__, str(e).splitlines()[0])
+                      finally:
+                          await tool.aclose()
+          asyncio.run(main())
+          PY
+          sudo rm -f /etc/opt/chrome/policies/managed/diag.json /etc/chromium/policies/managed/diag.json
+          uv run --no-sync python /tmp/tool_probe.py tool-chrome157 "$(command -v google-chrome)" 2>&1 | grep -E '^tool-'
+          uv run --no-sync python /tmp/tool_probe.py tool-chromium157 "$(command -v chromium)" 2>&1 | grep -E '^tool-'
+          echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee /etc/opt/chrome/policies/managed/diag.json
+          uv run --no-sync python /tmp/tool_probe.py tool-chrome157-policy "$(command -v google-chrome)" 2>&1 | grep -E '^tool-'
