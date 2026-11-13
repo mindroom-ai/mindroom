@@ -7,6 +7,7 @@ import socket
 from typing import TYPE_CHECKING, Any
 
 import httpx2
+from httpx2._client import _is_https_redirect
 from httpx2._utils import get_environment_proxies
 
 if TYPE_CHECKING:
@@ -23,6 +24,29 @@ _TRANSPORT_OPTIONS: dict[str, Any] = {
         if hasattr(socket, name)
     ],
 }
+# The redirected request's headers that name its new host and describe the body it sends again, beside a fresh
+# request's headers.
+_TARGET_AND_BODY_HEADERS = frozenset({"host", "content-type", "content-length", "transfer-encoding"})
+
+
+class _PooledClient(httpx2.AsyncClient):
+    """One event loop's pooled client, which follows redirects but sends one to another origin no header of its own."""
+
+    def _redirect_headers(self, request: httpx2.Request, url: httpx2.URL, method: str) -> httpx2.Headers:
+        """Return the request's headers for a redirect within its origin, else a fresh request's.
+
+        httpx2 drops only ``Authorization`` on a redirect to another origin, but model requests also carry keys in
+        headers such as ``x-api-key`` and ``api-key``, and headers their config or caller set. A redirect from a host's
+        HTTP port to its HTTPS port reaches the same server, so it keeps them, as httpx2 keeps ``Authorization`` there.
+        """
+        headers = super()._redirect_headers(request, url, method)
+        if url.origin == request.url.origin or _is_https_redirect(request.url, url):
+            return headers
+        fresh = httpx2.Headers(self.headers)
+        fresh.update({name: value for name, value in headers.items() if name in _TARGET_AND_BODY_HEADERS})
+        return fresh
+
+
 _LOOP_CLIENTS: dict[asyncio.AbstractEventLoop, httpx2.AsyncClient] = {}
 
 
@@ -40,7 +64,7 @@ def _loop_client() -> httpx2.AsyncClient:
             for key, url in get_environment_proxies().items()
         }
         transport = httpx2.AsyncHTTPTransport(**_TRANSPORT_OPTIONS)
-        client = _LOOP_CLIENTS[loop] = httpx2.AsyncClient(transport=transport, mounts=mounts, follow_redirects=True)
+        client = _LOOP_CLIENTS[loop] = _PooledClient(transport=transport, mounts=mounts, follow_redirects=True)
     return client
 
 

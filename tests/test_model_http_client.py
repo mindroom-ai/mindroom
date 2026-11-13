@@ -7,9 +7,11 @@ import gc
 import json
 import os
 import socket
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx2
 import pytest
 import pytest_asyncio
 
@@ -21,8 +23,13 @@ from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph.store import _GraphLoop, run_on_loop
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.request_context import bind_request_headers
 from mindroom.orchestrator import _finish_runtime_shutdown
-from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
+from mindroom.providers.model_http_client import (
+    MODEL_HTTP_CLIENT,
+    aclose_model_http_client,
+    closing_model_connections,
+)
 from mindroom.providers.registry import build_model_provider
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.providers.family_support import FAMILIES
@@ -46,7 +53,9 @@ _REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
 class _ModelsServer:
     """A keep-alive server that streams a finished reply to every model request and answers anything else empty.
 
-    Each stream is a chunked body whose terminating chunk follows its last event.
+    Each stream is a chunked body whose terminating chunk follows its last event. With ``redirect`` set to a status
+    and a URL, it answers each request outside ``/moved`` with that redirect to the URL's ``/moved`` copy of its path.
+    ``headers`` holds the lowercased header names of each request, in order.
     """
 
     def __init__(self) -> None:
@@ -54,6 +63,8 @@ class _ModelsServer:
         self.connections = 0
         self.peer: tuple[str, int] = ("", 0)
         self.closed = asyncio.Event()
+        self.redirect: tuple[int, str] | None = None
+        self.headers: list[set[str]] = []
 
     async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
@@ -63,10 +74,18 @@ class _ModelsServer:
                 head = (await reader.readuntil(b"\r\n\r\n")).decode()
                 request_line, *header_lines = head.split("\r\n")
                 headers = dict(line.lower().split(": ", 1) for line in header_lines if ": " in line)
+                self.headers.append(set(headers))
                 await reader.readexactly(int(headers.get("content-length", "0")))
-                path = request_line.split(" ")[1]
+                target = request_line.split(" ")[1]
+                path = target.partition("?")[0]
                 stream = next((body for end, body in _STREAMS.items() if path.endswith(end)), None)
-                if stream is None:
+                if self.redirect is not None and not path.startswith("/moved"):
+                    status, url = self.redirect
+                    writer.write(
+                        b"HTTP/1.1 %d Redirect\r\nLocation: %s/moved%s\r\nContent-Length: 0\r\n\r\n"
+                        % (status, url.encode(), target.encode()),
+                    )
+                elif stream is None:
                     body = json.dumps(_EMPTY_PAGE).encode()
                     status = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
                     writer.write(status % len(body) + body)
@@ -79,8 +98,8 @@ class _ModelsServer:
             writer.close()
 
 
-@pytest_asyncio.fixture
-async def server() -> AsyncIterator[_ModelsServer]:
+@asynccontextmanager
+async def _serving() -> AsyncIterator[_ModelsServer]:
     """Serve models for one test, then close the connections its models pooled."""
     models_server = _ModelsServer()
     listener = await asyncio.start_server(models_server.serve, "127.0.0.1", 0)
@@ -88,6 +107,20 @@ async def server() -> AsyncIterator[_ModelsServer]:
     yield models_server
     await aclose_model_http_client()
     listener.close()
+
+
+@pytest_asyncio.fixture
+async def server() -> AsyncIterator[_ModelsServer]:
+    """Serve models for one test."""
+    async with _serving() as models_server:
+        yield models_server
+
+
+@pytest_asyncio.fixture
+async def other_server() -> AsyncIterator[_ModelsServer]:
+    """Serve models for one test on a second port, so on another origin than ``server``."""
+    async with _serving() as models_server:
+        yield models_server
 
 
 def _provider(tmp_path: Path, provider: str, base_url: str, api: str | None = None) -> ModelProvider:
@@ -258,3 +291,96 @@ async def test_runtime_shutdown_closes_pooled_model_connections(tmp_path: Path, 
         stall_detector=None,
     )
     await asyncio.wait_for(server.closed.wait(), timeout=5)
+
+
+# A model request's own headers: the key its SDK sends, a header its config authors, and a header its run binds.
+_OWN_HEADERS = {"x-api-key", "api-key", "authorization", "x-config", "x-run"}
+_BODY_HEADERS = {"content-type", "content-length", "transfer-encoding"}
+
+
+def _model_with_headers(tmp_path: Path, route: str, url: str) -> ModelProvider:
+    """Build a Claude or Azure OpenAI model sending to ``url`` with its key and a header its config authors."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    if route == "anthropic":
+        extra_kwargs = {"api_key": "test", "default_headers": {"x-config": "set"}, "client_params": {"base_url": url}}
+    else:
+        extra_kwargs = {"api_key": "test", "azure_endpoint": url, "extra_headers": {"x-config": "set"}}
+    model = ModelConfig(provider=route, id="test-model", extra_kwargs=extra_kwargs)
+    config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)
+    return build_model_provider(config, runtime_paths)
+
+
+async def _send_with_run_headers(provider: ModelProvider) -> None:
+    with bind_request_headers(lambda: {"x-run": "run"}):
+        await _send(provider)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [307, 302])
+@pytest.mark.parametrize(("route", "key"), [("anthropic", "x-api-key"), ("azure", "api-key")])
+async def test_a_redirect_to_another_origin_gets_only_a_fresh_request_s_headers(
+    tmp_path: Path,
+    server: _ModelsServer,
+    other_server: _ModelsServer,
+    route: str,
+    key: str,
+    status: int,
+) -> None:
+    """A model request redirected to another origin sends it no key and no header its config or run set.
+
+    The other origin gets only the headers any request from the client carries and the ones describing the body.
+    """
+    server.redirect = (status, other_server.url)
+    await _send_with_run_headers(_model_with_headers(tmp_path, route, server.url))
+    assert server.headers[0] & _OWN_HEADERS == {key, "x-config", "x-run"}
+    (redirected,) = other_server.headers
+    assert redirected - _BODY_HEADERS == {"host", "accept", "accept-encoding", "connection", "user-agent"}
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_within_the_origin_keeps_the_request_s_own_headers(
+    tmp_path: Path,
+    server: _ModelsServer,
+) -> None:
+    """A model request redirected to another path of its own origin sends there every header it sent first."""
+    server.redirect = (307, server.url)
+    await _send_with_run_headers(_model_with_headers(tmp_path, "anthropic", server.url))
+    assert [names & _OWN_HEADERS for names in server.headers] == [{"x-api-key", "x-config", "x-run"}] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_upgrade_to_https_keeps_the_request_s_own_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redirect from a host's plain HTTP port to its HTTPS port reaches the same server, so it keeps every header."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        if request.url.scheme == "http":
+            return httpx2.Response(308, headers={"location": str(request.url.copy_with(scheme="https"))})
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_STREAMS["/messages"])
+
+    monkeypatch.setattr(httpx2, "AsyncHTTPTransport", lambda **_: httpx2.MockTransport(respond))
+    try:
+        await _send_with_run_headers(_model_with_headers(tmp_path, "anthropic", "http://models.example"))
+    finally:
+        await aclose_model_http_client()
+    own = {"x-api-key", "x-config", "x-run"}
+    assert [(request.url.scheme, set(request.headers) & _OWN_HEADERS) for request in sent] == [
+        ("http", own),
+        ("https", own),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_download_follows_a_redirect_to_another_origin(
+    server: _ModelsServer,
+    other_server: _ModelsServer,
+) -> None:
+    """Media URLs, which remote media downloads through the models' client, still follow a redirect to another origin."""
+    server.redirect = (302, other_server.url)
+    async with MODEL_HTTP_CLIENT.stream("GET", f"{server.url}/media.png") as response:
+        await response.aread()
+    assert (response.status_code, response.url) == (200, f"{other_server.url}/moved/media.png")
