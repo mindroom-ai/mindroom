@@ -98,7 +98,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v7
-      - run: uv python install 3.13 && uv sync --all-extras
+      - run: uv python install 3.13 && uv sync --all-extras && uv pip install playwright==1.65.1 && uv pip show playwright | head -2
+      - name: Run the four failing tests with Playwright 1.65.1
+        run: |
+          google-chrome --version
+          MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" uv run --no-sync pytest -n 0 --no-cov -q \
+            "tests/test_browser_tool.py::test_computer_browser_upstream_preserves_http_and_local_preview" \
+            "tests/test_browser_tool.py::test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80" \
+            "tests/test_browser_tool.py::test_primary_browser_uses_scheme_proxies_beside_an_unused_socks_all_proxy" \
+            "tests/test_browser_tool.py::test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_primary" 2>&1 | tail -15
       - name: Probe the browser tool on real plain-HTTP sites
         if: always()
         run: |
