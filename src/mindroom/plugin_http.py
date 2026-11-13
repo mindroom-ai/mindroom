@@ -663,13 +663,18 @@ async def client_user_oauth_access_token(
     ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
     the request; a route never builds one from request data, which would let its caller name someone else. It raises
     ``PermissionError`` before reading anything unless ``user`` may use the agent and connect its accounts, as the
-    Connections portal and the agent's connect links decide, and unless the agent's ``worker_scope`` is ``user`` or
-    ``user_agent``, which keeps a connection for each person alone: a ``shared`` or unscoped agent's connection, like a
-    service account, serves everyone who uses the agent. A token about to expire is refreshed first, as the agent's
-    tools refresh it. It raises ``LookupError`` for a provider or agent the config does not have,
-    ``OAuthConnectionRequired`` while ``user`` has no usable connection, with a ``connect_url`` for them and this
-    agent, and ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix. It answers 503
-    while the API is served without MindRoom's bots, whose room grants an agent's access may rely on.
+    Connections portal and the agent's connect links decide, unless ``user`` is a person or a configured bot account
+    rather than one of MindRoom's own accounts, and unless the agent's ``worker_scope`` is ``user`` or ``user_agent``,
+    which keeps a connection for each person alone: a ``shared`` or unscoped agent's connection, like a service
+    account, serves everyone who uses the agent. Like the Connections portal it decides access on the room grants as
+    MindRoom holds them and reads no room itself, so right after a start or a change to an agent's room grants, a
+    caller the agent admits only as a member of a room is refused until MindRoom has read that room; a route may tell
+    them to try again. A token about to expire is refreshed first, as the agent's tools refresh it. It raises
+    ``LookupError`` for a provider or agent the config does not have, ``OAuthConnectionRequired`` while ``user`` has
+    no usable connection, whose ``connect_url`` signs them in for this agent, or is ``None`` while the stored
+    connection cannot be read and must first be reset, as the Connections portal's Reset connection does, and
+    ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix. It answers 503 while the
+    API is served without MindRoom's bots, whose room grants an agent's access may rely on.
     """
     context = plugin_context(request)
     config, paths = context.config, context.runtime_paths

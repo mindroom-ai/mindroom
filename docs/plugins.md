@@ -1322,11 +1322,14 @@ Pass as `user` the `ClientUser` a dependency such as `require_client_user` or `r
 Use the token in the route itself, and never return it to the client or log it.
 
 It answers only a caller who may use the agent by its [access rules](authorization.md#responder-access) and connect its accounts, as the Connections portal and the agent's connect links require, so a caller an operator removed from the agent no longer gets a token there, though their connection stays stored.
+Like the Connections portal, it decides on the room grants as MindRoom holds them and reads no room itself, so right after MindRoom starts or an agent's room grants change, a caller the agent admits only as a member of a room is refused with `PermissionError` until MindRoom has read that room; a route may tell such a caller to try again shortly.
 It also answers only for an agent that keeps each person's connections apart, one whose [worker scope](deployment/sandbox-proxy.md#worker-scopes) is `user` or `user_agent`, as a private agent's always is.
 For any other caller or agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent; it never answers with a Google service account either.
 It answers 503 with `Room membership is unavailable.` while the API is served without MindRoom's bots, as outside `mindroom run`.
 It raises `LookupError` for a provider or agent the config does not have.
-While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent, and is `None` when the stored connection cannot be read and must first be reset in the dashboard.
+While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent.
+Its `connect_url` is `None` when the stored connection cannot be read: the caller first resets it with **Reset connection** on that service in the [Connections portal](connections-portal.md#what-the-portal-shows), or through the reset link the agent gives when it has [`oauth_connections`](oauth-framework.md#oauth_connections), and then connects again.
+Whether a caller can open the portal depends on how the deployment signs people in there, from MindRoom Chat or a trusted upstream (see [Open It From MindRoom Chat](connections-portal.md#open-it-from-mindroom-chat)).
 A refresh that fails for another reason, such as an unreachable provider, raises `OAuthProviderError` from `mindroom.plugin_api`, the base class of `OAuthConnectionRequired`, so a route that catches both catches `OAuthConnectionRequired` first; uncaught, it answers 500, and the next call tries again.
 A grant the caller revoked at the provider itself still returns its stored token until that token expires, so a route handles the provider's own refusal, such as a 401, as the example does.
 
@@ -1348,15 +1351,23 @@ async def file_name(
     request: Request,
     file_id: str,
     user: Annotated[ClientUser, Depends(require_client_user)],
-) -> dict[str, str | None]:
+) -> dict[str, str]:
     try:
         token = await client_user_oauth_access_token(request, user, "acme_drive", "assistant")
     except OAuthConnectionRequired as needed:
+        if needed.connect_url is None:
+            # The stored connection cannot be read, so no link can replace it until the caller resets it.
+            return {"reset_required": "Reset your Acme Drive connection in MindRoom's Connections page, then try again."}
         # The client opens the link, the caller signs in, and the client asks again.
         return {"connect_url": needed.connect_url}
     except OAuthProviderError:
         # The refresh failed for a reason a retry may fix, such as an unreachable provider.
         raise HTTPException(503, "Acme Drive is unavailable; try again shortly.") from None
+    except PermissionError:
+        # The caller may not use the agent, or the agent shares its connections.
+        raise HTTPException(403, "You cannot use Acme Drive through this agent.") from None
+    except LookupError:
+        raise HTTPException(404, "Acme Drive or the agent is not configured.") from None
     async with httpx.AsyncClient() as client:
         answer = await client.get(
             "https://api.acme.example/files",
