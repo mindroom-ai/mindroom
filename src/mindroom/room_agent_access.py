@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from fastapi.requests import HTTPConnection
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.api.app_state import EmbeddedRuntime
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_http import RoomPower
@@ -59,14 +60,18 @@ _ACCESS_TIMEOUT_SECONDS = 20
 _ACCESS_UNAVAILABLE = "Agent access is unavailable; try again."
 
 
-def _may_converse(
+def may_converse(
     requester_id: str,
     agent_name: str,
-    room_id: str,
+    room_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> bool:
+    """Return whether the agent's access rules let ``requester_id`` converse with it, in ``room_id`` when given.
+
+    It answers 503 while a grant the answer depends on awaits the room memberships.
+    """
     try:
         return is_sender_allowed_for_responder(
             requester_id,
@@ -156,7 +161,7 @@ async def admit_room_agent(
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
     await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
-    if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
+    if not may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
 
@@ -189,7 +194,7 @@ async def _admitted_agents(
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
         with _leaving_out(name, room_id, leave_out=rooms_known):
-            if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
+            if may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
                 admitted.append((name, user_id))
     return admitted
 
@@ -360,6 +365,40 @@ def _workspace(
     )
 
 
+def _access_runtime(connection: HTTPConnection, config: Config) -> EmbeddedRuntime:
+    """Return the runtime whose room grants decide agent access under ``config``, the config the API serves.
+
+    It answers 503 while the router is not running or the runtime has not applied ``config``'s membership policy.
+    """
+    runtime = ensure_app_state(connection.app).embedded
+    router = runtime.agent_bot(ROUTER_AGENT_NAME) if runtime is not None else None
+    if (
+        runtime is None
+        or router is None
+        or router.client is None
+        or not router.running
+        # The runtime's grants follow its own config; a refresh under another membership policy would replace them.
+        or agent_reply_membership_policy_changed(router.config, config)
+    ):
+        raise HTTPException(503, _ACCESS_UNAVAILABLE)
+    return runtime
+
+
+async def current_agent_memberships(connection: HTTPConnection, config: Config) -> AgentReplyMembershipIndex:
+    """Return the runtime's room grants for an access check under ``config``, refreshed first when they need it.
+
+    It answers 503 as ``room_agent_workspaces`` does: while the router is not running, while the runtime has not
+    applied ``config``'s membership policy, or when the refresh does not end in time.
+    """
+    runtime = _access_runtime(connection, config)
+    try:
+        async with asyncio.timeout(_ACCESS_TIMEOUT_SECONDS):
+            await runtime.refresh_agent_reply_memberships_when_needed()
+    except TimeoutError:
+        raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
+    return runtime.agent_reply_memberships
+
+
 async def room_agent_workspaces(
     connection: HTTPConnection,
     user_id: str,
@@ -376,18 +415,9 @@ async def room_agent_workspaces(
     """
     snapshot = bind_current_request_snapshot(connection)
     config = snapshot.runtime_config
-    runtime = ensure_app_state(connection.app).embedded
-    router = runtime.agent_bot(ROUTER_AGENT_NAME) if runtime is not None else None
-    if (
-        config is None
-        or runtime is None
-        or router is None
-        or router.client is None
-        or not router.running
-        # The runtime's grants follow its own config; a refresh under another membership policy would replace them.
-        or agent_reply_membership_policy_changed(router.config, config)
-    ):
+    if config is None:
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
+    runtime = _access_runtime(connection, config)
     runtime_paths = snapshot.runtime_paths
     listing = agent_user_id is None
     try:
