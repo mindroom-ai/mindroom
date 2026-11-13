@@ -192,28 +192,29 @@ function changedPaths(
   previous: Record<string, unknown>,
   next: Record<string, unknown>,
 ): ConfigPath[] {
-  return [...new Set([...Object.keys(previous), ...Object.keys(next)])].flatMap(
-    (key): ConfigPath[] => {
-      const [before, after] = [previous[key], next[key]];
-      if (isPlainObject(before) && isPlainObject(after)) {
-        return changedPaths(before, after).map((path) => [key, ...path]);
-      }
-      return JSON.stringify(before) === JSON.stringify(after) ? [] : [[key]];
-    },
-  );
+  return Object.keys({ ...previous, ...next }).flatMap((key): ConfigPath[] => {
+    const [before, after] = [previous[key], next[key]];
+    if (isPlainObject(before) && isPlainObject(after)) {
+      return changedPaths(before, after).map((path) => [key, ...path]);
+    }
+    return JSON.stringify(before) === JSON.stringify(after) ? [] : [[key]];
+  });
 }
 
-/** The `extra_kwargs` a provider change keeps: the values More settings set at `paths` during the row edit. */
-function keptExtraKwargs(
-  extraKwargs: Record<string, unknown>,
+/** The model a provider change saves: no config.yaml key, and only the `extra_kwargs` More settings set at `paths` during the row edit. */
+function keptOnProviderChange(
+  modelConfig: ModelConfigType,
   paths: ConfigPath[],
-): Record<string, unknown> {
-  return paths
-    .filter((path) => getPathValue(extraKwargs, path) !== undefined)
-    .reduce(
-      (kept, path) => setPathValue(kept, path, getPathValue(extraKwargs, path)),
-      {},
-    );
+): ModelConfigType {
+  const { api_key: _apiKey, ...kept } = modelConfig;
+  const extraKwargs = modelConfig.extra_kwargs;
+  if (extraKwargs) {
+    kept.extra_kwargs = paths.reduce<Record<string, unknown>>((next, path) => {
+      const value = getPathValue(extraKwargs, path);
+      return value === undefined ? next : setPathValue(next, path, value);
+    }, {});
+  }
+  return kept;
 }
 
 function isValidHttpUrl(value: string): boolean {
@@ -894,7 +895,9 @@ export function ModelConfig() {
     }
 
     const nextModelConfig = {
-      ...originalModelConfig,
+      ...(providerChanged
+        ? keptOnProviderChange(originalModelConfig, pathsSetInEdit)
+        : originalModelConfig),
       provider: rowDraft.provider as ProviderType,
       id: targetModelId,
     };
@@ -912,12 +915,7 @@ export function ModelConfig() {
       delete nextModelConfig.icon;
     }
 
-    let nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
-    if (providerChanged) {
-      // extra_kwargs and the config.yaml key belong to the old provider.
-      nextExtraKwargs = keptExtraKwargs(nextExtraKwargs, pathsSetInEdit);
-      delete nextModelConfig.api_key;
-    }
+    const nextExtraKwargs = { ...(nextModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
       // More settings may have edited extra_kwargs; keep its base_url unless
       // the row's own Base URL input changed.
@@ -1196,8 +1194,8 @@ export function ModelConfig() {
     const currentModelConfig = currentModelName
       ? models[currentModelName]
       : undefined;
-    // Saving under another provider drops the saved key and the config.yaml
-    // key, unless More settings set extra_kwargs.api_key during this edit.
+    // Saving under another provider drops the saved key and saves the model
+    // keptOnProviderChange keeps.
     const providerChanged =
       currentModelConfig !== undefined &&
       currentModelConfig.provider !== draft.provider;
@@ -1209,14 +1207,7 @@ export function ModelConfig() {
     const providerFallbackKey = providerKeys[draft.provider];
     const usesConfigKey = hasConfigApiKey(
       providerChanged
-        ? {
-            ...currentModelConfig,
-            api_key: null,
-            extra_kwargs: keptExtraKwargs(
-              currentModelConfig.extra_kwargs ?? {},
-              pathsSetInEdit,
-            ),
-          }
+        ? keptOnProviderChange(currentModelConfig, pathsSetInEdit)
         : currentModelConfig,
     );
     const currentStatus = currentModelName
