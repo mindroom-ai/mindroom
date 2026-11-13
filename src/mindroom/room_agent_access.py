@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 from fastapi import HTTPException
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
+from mindroom.agent_reply_membership import agent_reply_membership_policy_changed
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from fastapi.requests import HTTPConnection
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.api.app_state import EmbeddedRuntime
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -57,17 +58,20 @@ _STATIC_RUNNER_AGENT_STORAGE_ENV = "MINDROOM_STATIC_RUNNER_AGENT_STORAGE"
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
 _ACCESS_UNAVAILABLE = "Agent access is unavailable; try again."
-_MEMBERSHIP_UNRESOLVED = "Responder membership policy is unresolved."
 
 
-def _may_converse(
+def may_converse(
     requester_id: str,
     agent_name: str,
-    room_id: str,
+    room_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> bool:
+    """Return whether the agent's access rules let ``requester_id`` converse with it, in ``room_id`` when given.
+
+    It answers 503 while a grant the answer depends on awaits the room memberships.
+    """
     try:
         return is_sender_allowed_for_responder(
             requester_id,
@@ -79,7 +83,7 @@ def _may_converse(
             require_resolved_membership=True,
         )
     except ReplyMembershipPendingError:
-        raise HTTPException(503, _MEMBERSHIP_UNRESOLVED) from None
+        raise HTTPException(503, "Responder membership policy is unresolved.") from None
 
 
 @contextmanager
@@ -157,7 +161,7 @@ async def admit_room_agent(
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
     await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
-    if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
+    if not may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
 
@@ -190,7 +194,7 @@ async def _admitted_agents(
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
         with _leaving_out(name, room_id, leave_out=rooms_known):
-            if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
+            if may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
                 admitted.append((name, user_id))
     return admitted
 
@@ -380,37 +384,19 @@ def _access_runtime(connection: HTTPConnection, config: Config) -> EmbeddedRunti
     return runtime
 
 
-async def decide_with_room_grants(
-    connection: HTTPConnection,
-    config: Config,
-    decide: Callable[[AgentReplyMembershipIndex], bool],
-) -> bool:
-    """Return ``decide``'s answer under the runtime's room grants, read from the rooms first only when it needs them.
+async def current_agent_memberships(connection: HTTPConnection, config: Config) -> AgentReplyMembershipIndex:
+    """Return the runtime's room grants for an access check under ``config``, refreshed first when they need it.
 
-    ``decide`` raises ``ReplyMembershipPendingError`` when its answer waits on room grants not resolved under
-    ``config``, the config the API serves, as ``is_sender_allowed_for_responder`` does with
-    ``require_resolved_membership``. Only then are the grants refreshed when they need it, through the runtime's one
-    refresh, and ``decide`` asked again; an answer that needs no room grant reads no room, and is given even while
-    the runtime is away. It answers 503 as ``room_agent_workspaces`` does while the grants cannot be refreshed or stay
-    unresolved.
+    It answers 503 as ``room_agent_workspaces`` does: while the router is not running, while the runtime has not
+    applied ``config``'s membership policy, or when the refresh does not end in time.
     """
-    runtime = ensure_app_state(connection.app).embedded
-    # Without the runtime no room grant is known, so only an answer that needs none is given.
-    memberships = runtime.agent_reply_memberships if runtime is not None else AgentReplyMembershipIndex()
-    try:
-        return decide(memberships)
-    except ReplyMembershipPendingError:
-        pass
     runtime = _access_runtime(connection, config)
     try:
         async with asyncio.timeout(_ACCESS_TIMEOUT_SECONDS):
             await runtime.refresh_agent_reply_memberships_when_needed()
     except TimeoutError:
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
-    try:
-        return decide(runtime.agent_reply_memberships)
-    except ReplyMembershipPendingError:
-        raise HTTPException(503, _MEMBERSHIP_UNRESOLVED) from None
+    return runtime.agent_reply_memberships
 
 
 async def room_agent_workspaces(

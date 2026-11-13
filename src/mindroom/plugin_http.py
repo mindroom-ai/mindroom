@@ -30,7 +30,7 @@ from mindroom.api.config_lifecycle import (
 )
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.api.plugin_routes import published_plugins
-from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection, is_sender_allowed_for_responder
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -48,7 +48,8 @@ from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.room_agent_access import (
     AgentWorkspace,
-    decide_with_room_grants,
+    current_agent_memberships,
+    may_converse,
     room_agent_workspaces,
     room_execution_identity,
 )
@@ -72,7 +73,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
     from types import EllipsisType
 
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -667,21 +667,18 @@ async def client_user_oauth_access_token(
     """Return a current access token of ``user``'s own connection to ``provider_id``, as ``agent_name``'s tools use it for them.
 
     ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
-    the request; a route never builds one from request data, which would let its caller name someone else.
-
-    It decides in this order, and reads nothing an earlier refusal makes needless. It raises ``LookupError`` for a
-    provider or agent the config does not have. It raises ``PermissionError`` unless the agent's ``worker_scope`` is
-    ``user`` or ``user_agent``, which keeps a connection for each person alone: a ``shared`` or unscoped agent's
-    connection, like a service account, serves everyone who uses the agent. It raises ``PermissionError`` unless
-    ``user`` may use the agent and connect its accounts, as the Connections portal and the agent's connect links
-    decide; the runtime's room grants are read from the rooms first only when that answer depends on grants not
-    resolved under the served config, and then it answers 503 as ``RoomReader.agents()`` does while they cannot be:
-    the router is not running, the runtime has not applied the served config's room grants, or a room cannot be read.
-    Only then does it open ``user``'s own credential store, refreshing a token about to expire first, as the agent's
-    tools refresh it. It raises ``OAuthConnectionRequired`` while ``user`` has no usable connection, whose
-    ``connect_url`` signs them in for this agent, or is ``None`` while the stored connection cannot be read and must
-    first be reset on the dashboard, and ``OAuthProviderError`` when a token refresh fails for another reason, which
-    a retry may fix.
+    the request; a route never builds one from request data, which would let its caller name someone else. It raises
+    ``PermissionError`` before reading anything unless ``user`` may use the agent and connect its accounts, as the
+    Connections portal and the agent's connect links decide, and unless the agent's ``worker_scope`` is ``user`` or
+    ``user_agent``, which keeps a connection for each person alone: a ``shared`` or unscoped agent's connection, like a
+    service account, serves everyone who uses the agent. A token about to expire is refreshed first, as the agent's
+    tools refresh it. It raises ``LookupError`` for a provider or agent the config does not have,
+    ``OAuthConnectionRequired`` while ``user`` has no usable connection, whose ``connect_url`` signs them in for this
+    agent, or is ``None`` while the stored connection cannot be read and must first be reset on the dashboard, and
+    ``OAuthProviderError`` when a token refresh fails for another reason, which a retry may fix. Before it decides
+    access it brings the runtime's room grants current when they need it, and it answers 503 as
+    ``RoomReader.agents()`` does while it cannot: the router is not running, the runtime has not applied the served
+    config's room grants, or a grant still awaits the room memberships.
     """
     context = plugin_context(request)
     config, paths = context.config, context.runtime_paths
@@ -693,36 +690,26 @@ async def client_user_oauth_access_token(
         msg = f"No agent {agent_name!r} is configured"
         raise LookupError(msg)
     requester_id = resolve_human_requester_alias(user.user_id, config, paths)
-    target = build_connection_agent_target(config, paths, requester_id, agent_name)
-    identity = target.execution_identity
-    if target.worker_scope not in {"user", "user_agent"} or identity is None or identity.requester_id != requester_id:
-        msg = f"Agent {agent_name!r} keeps no connection for one person alone"
-        raise PermissionError(msg)
-
-    def may_use(memberships: AgentReplyMembershipIndex) -> bool:
-        # The portal lists only agents the requester may converse with, and a connect link completes only for a
-        # requester who may connect the agent's accounts; the token is the connection both would serve. The connect
-        # check comes first, so a refusal no room grant could change, such as a bot account's, is given without one.
-        return is_sender_allowed_for_agent_oauth_connection(
+    memberships = await current_agent_memberships(request, config)
+    # The portal lists only agents the requester may converse with, and a connect link completes only for a requester
+    # who may connect the agent's accounts; the token is the connection both would serve.
+    if not (
+        may_converse(requester_id, agent_name, None, config, paths, memberships)
+        and is_sender_allowed_for_agent_oauth_connection(
             requester_id,
             agent_name,
             config,
             paths,
             memberships,
             requester_owned=True,
-            require_resolved_membership=True,
-        ) and is_sender_allowed_for_responder(
-            requester_id,
-            agent_name,
-            None,
-            config,
-            paths,
-            memberships,
-            require_resolved_membership=True,
         )
-
-    if not await decide_with_room_grants(request, config, may_use):
+    ):
         msg = f"The caller may not use agent {agent_name!r}"
+        raise PermissionError(msg)
+    target = build_connection_agent_target(config, paths, requester_id, agent_name)
+    identity = target.execution_identity
+    if target.worker_scope not in {"user", "user_agent"} or identity is None or identity.requester_id != requester_id:
+        msg = f"Agent {agent_name!r} keeps no connection for one person alone"
         raise PermissionError(msg)
     credential_context = resolve_oauth_credential_context(
         provider,
