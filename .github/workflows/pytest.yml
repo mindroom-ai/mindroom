@@ -94,77 +94,66 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v7
-      - name: Inspect Chrome install and policies
-        run: |
-          set -x
-          google-chrome --version || true
-          chromium --version || true
-          command -v google-chrome chromium chromium-browser || true
-          ls -laR /etc/opt/chrome /etc/chromium /etc/chromium-browser 2>&1 || true
-          for f in $(ls /etc/opt/chrome/policies/*/*.json /etc/chromium/policies/*/*.json 2>/dev/null); do echo "== $f"; cat "$f"; done
-          B=$(readlink -f /opt/google/chrome/chrome); echo "$B"
-          strings "$B" | grep -E 'Https(First|Upgrade|Only)' | sort -u | head -80
       - run: uv python install 3.13 && uv sync --all-extras
       - name: Probe plain HTTP navigation
         run: |
           cat > /tmp/diag.py <<'PY'
-          import asyncio, json, os, sys, tempfile
+          import asyncio, json, os, sys, tempfile, time
           from playwright.async_api import async_playwright
           from tests.browser_egress_helpers import SquidLikeUpstream
 
-          EXE = sys.argv[1]
-
-          async def attempt(label, args, url, timeout=20000):
+          async def attempt(label, url, exe, args=(), prefs=None):
               squid = SquidLikeUpstream()
               proxy = await squid.start()
+              start = time.monotonic()
               async with async_playwright() as p:
                   with tempfile.TemporaryDirectory() as d:
+                      if prefs is not None:
+                          os.makedirs(os.path.join(d, "Default"))
+                          with open(os.path.join(d, "Default", "Preferences"), "w") as f:
+                              json.dump(prefs, f)
                       ctx = await p.chromium.launch_persistent_context(
-                          d, executable_path=EXE, headless=True, args=args, proxy={"server": proxy}
+                          d, executable_path=exe, headless=True, args=list(args), proxy={"server": proxy}
                       )
                       page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                      page.on("request", lambda r: print(label, "request", r.method, r.url, r.is_navigation_request()))
+                      page.on("request", lambda r: r.is_navigation_request() and print(label, "nav request", r.url))
                       page.on("requestfailed", lambda r: print(label, "requestfailed", r.url, r.failure))
-                      page.on("framenavigated", lambda f: print(label, "framenavigated", f.url))
                       try:
-                          resp = await page.goto(url, timeout=timeout)
+                          resp = await page.goto(url, timeout=20000)
                           print(label, "OK", resp and resp.status, page.url, await page.title())
                       except Exception as e:
                           print(label, "ERR", str(e).splitlines()[0])
-                          try:
-                              print(label, "BODY", (await page.inner_text("body"))[:800].replace("\n", " | "))
-                          except Exception as e2:
-                              print(label, "no body", e2)
-                      print(label, "squid requests", squid.requests)
-                      if label == "baseline":
-                          for u in ["chrome://version", "chrome://policy"]:
-                              pg = await ctx.new_page()
-                              await pg.goto(u)
-                              await pg.wait_for_timeout(1000)
-                              print(label, u, (await pg.inner_text("body"))[:4000].replace("\n", " | "))
-                          prefs = json.load(open(os.path.join(d, "Default", "Preferences")))
-                          print(label, "prefs https keys", {k: v for k, v in prefs.items() if "https" in k.lower()})
+                      targets = [r.decode() for r in squid.requests if b"8.8.8.8" in r or b"neverssl" in r or b"example" in r]
+                      print(label, "proxy saw", targets, f"{time.monotonic() - start:.1f}s")
                       await ctx.close()
               await squid.close()
 
           async def main():
-              await attempt("baseline", [], "http://8.8.8.8/plain")
-              await attempt("hostname", [], "http://allowed.example/plain")
-              await attempt("public-name", [], "http://neverssl.com/plain")
-              await attempt("flag-off", ["--disable-features=HttpsFirstBalancedModeAutoEnable"], "http://8.8.8.8/plain")
-              await attempt("flag-off-name", ["--disable-features=HttpsFirstBalancedModeAutoEnable"], "http://neverssl.com/plain")
+              chrome, chromium, bundled = sys.argv[1:4]
+              off = ["--disable-features=HttpsFirstBalancedModeAutoEnable"]
+              for label, url in [("ip", "http://8.8.8.8/plain"), ("example", "http://allowed.example/plain"), ("public-name", "http://neverssl.com/plain")]:
+                  await attempt(f"chrome157-{label}", url, chrome)
+              await attempt("chrome157-flag-off-ip", "http://8.8.8.8/plain", chrome, off)
+              await attempt("chrome157-flag-off-name", "http://neverssl.com/plain", chrome, off)
+              await attempt("chrome157-pref-off-ip", "http://8.8.8.8/plain", chrome, prefs={"https_only_mode_enabled": False})
+              await attempt("chrome157-pref-off-name", "http://neverssl.com/plain", chrome, prefs={"https_only_mode_enabled": False})
+              await attempt("chromium157-ip", "http://8.8.8.8/plain", chromium)
+              await attempt("chromium157-flag-off-ip", "http://8.8.8.8/plain", chromium, off)
+              await attempt("playwright-bundled-ip", "http://8.8.8.8/plain", bundled)
               if os.environ.get("POLICY"):
-                  await attempt("policy", [], "http://8.8.8.8/plain")
-                  await attempt("policy-name", [], "http://neverssl.com/plain")
+                  await attempt("policy-chrome157-ip", "http://8.8.8.8/plain", chrome)
+                  await attempt("policy-chrome157-name", "http://neverssl.com/plain", chrome)
+                  await attempt("policy-chromium157-ip", "http://8.8.8.8/plain", chromium)
           asyncio.run(main())
           PY
-          PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "$(command -v google-chrome)"
-          sudo mkdir -p /etc/opt/chrome/policies/managed
-          echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee /etc/opt/chrome/policies/managed/diag.json
-          POLICY=1 PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "$(command -v google-chrome)" 2>&1 | grep -E '^policy'
-          sudo rm /etc/opt/chrome/policies/managed/diag.json
-      - name: Run one failing test with Playwright debug logging
-        if: always()
-        run: |
-          DEBUG=pw:browser* MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
-            uv run --no-sync pytest "tests/test_browser_tool.py::test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80" -n 0 --no-cov -v 2>&1 | tail -150
+          uv run --no-sync playwright install chromium >/dev/null
+          BUNDLED=$(uv run --no-sync python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()")
+          "$BUNDLED" --version
+          readlink -f "$(command -v chromium)"; ls -la "$(command -v chromium)"
+          ARGS=("$(command -v google-chrome)" "$(command -v chromium)" "$BUNDLED")
+          PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "${ARGS[@]}"
+          for dir in /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do
+            sudo mkdir -p "$dir"
+            echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee "$dir/diag.json"
+          done
+          POLICY=1 PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "${ARGS[@]}" 2>&1 | grep -E '^policy'
