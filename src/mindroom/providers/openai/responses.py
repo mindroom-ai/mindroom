@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
@@ -172,7 +173,7 @@ class ResponsesAdapter:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Responses request and yield its deltas, usage, and finished turn."""
         timer = TurnTimer()
-        kwargs = await asyncio.to_thread(self._request_kwargs, request)
+        kwargs = with_request_headers(await asyncio.to_thread(self._request_kwargs, request))
         accumulator = ResponsesStream(
             provider=self.identity.provider,
             store=request_store(self.wire, request),

@@ -1,8 +1,8 @@
-"""The per-request logging context callers bind around one model request, and the JSON view of arbitrary values.
+"""The context callers bind around model requests, the logging context and the request headers, and a JSON view of values.
 
 Request telemetry (``LLM usage`` lines, the opt-in request log) attributes each provider request to the agent,
 session, and correlation id bound here; the context travels with the task, so stages wrapped around the
-adapter read it without being handed it.
+adapter read it without being handed it. The request headers travel the same way to the adapters that send them.
 """
 
 from __future__ import annotations
@@ -14,21 +14,27 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 __all__ = [
     "REQUEST_ATTRIBUTION_FIELDS",
     "JSONValue",
     "RequestAttribution",
     "bind_llm_request_log_context",
+    "bind_request_headers",
     "current_llm_request_log_context",
     "json_safe",
+    "with_request_headers",
 ]
 
 type _JSONScalar = str | int | float | bool | None
 type JSONValue = _JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 _REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
+_REQUEST_HEADERS: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
+    "mindroom_llm_request_headers",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -82,3 +88,25 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         yield
     finally:
         _REQUEST_CONTEXT.reset(token)
+
+
+@contextmanager
+def bind_request_headers(headers: Callable[[], Mapping[str, str]]) -> Iterator[None]:
+    """Bind the headers every model request sent in this context carries, which ``headers`` returns as each is sent."""
+    token = _REQUEST_HEADERS.set(headers)
+    try:
+        yield
+    finally:
+        _REQUEST_HEADERS.reset(token)
+
+
+def with_request_headers(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return one model request's SDK arguments with the bound headers over its own ``extra_headers``.
+
+    The SDKs send a request's ``extra_headers`` over the client's default headers, so the bound headers win over
+    every header the model's config authors. Without bound headers the arguments are returned as they are.
+    """
+    headers = _REQUEST_HEADERS.get()
+    if headers is None:
+        return kwargs
+    return {**kwargs, "extra_headers": {**(kwargs.get("extra_headers") or {}), **headers()}}

@@ -38,6 +38,11 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
    Only saved outputs move: tools that keep files of their own in the workspace, such as `file_generation` or `google_drive`, keep it, so a workdir changes nothing for them.
 8. `HeadlessResult.tool_calls` counts only the lead's calls in its final attempt, which the run metadata already carries.
    Counting subagent runs and their calls would need plumbing through delegation that only some callers need, and those callers see every request in their own model traffic.
+9. `request_headers` serves LLM gateways and proxies that attribute or limit spend per run, which need to tell the lead's requests from each subagent's.
+   The callback is bound once for the turn in a context variable, which every subagent's run inherits, and the provider adapters read it as they send each model request, so a request belongs to the subagent running where it is sent, or else to the lead.
+   Reading it at send time covers every request a run makes, a compaction summary that history preparation sends before the run's first request included.
+   The headers merge into each request's `extra_headers`, which the SDKs send over the client's default headers, so they win over every header the config authors; an OpenAI-family client is cached per model, so its default headers cannot carry per-run values.
+   Only the Chat Completions, Responses, and Anthropic adapters send them; the shared HTTP client, which also downloads media URLs for the model, never does, so a caller's credentials reach only the model endpoint.
 
 ## Rejected alternatives
 
@@ -53,6 +58,12 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
   Reading saved outputs needs only their directory.
 - Refusing Mem0 memory.
   It runs headless, and a caller that wants none can say so in its config.
+- Binding the request headers per model-request attempt, beside the request-log context.
+  History preparation runs before an attempt binds, and it compacts a follow-up's replayed session there, so that summary request would go without its run's headers.
+- Request headers on the shared HTTP client.
+  It also downloads media URLs, so the headers would reach third-party hosts.
+- Static `default_headers` on the model.
+  Every run of the turn would send the same headers, so a gateway would attribute subagents' spend to the lead.
 
 ## Limitations
 
@@ -60,3 +71,5 @@ Callers are scripts and CI jobs that hand an agent a task, evaluation harnesses 
 - Under `file_access: workspace`, `file` and `coding` beside a workdir cannot reach the workspace's skills, subagent profiles, or delegation records while `storage` is outside the workdir; `shell` and `python`, being unconfined, and `file_access: unrestricted` still reach them.
 - Beside a workdir, the skills note still says editing the agent's own workspace skills with file tools is fine, which the previous limitation contradicts; leaving it out needs splitting a prompt that configs can override.
 - Tools that work on files of their own, such as `file_generation`, keep the workspace beside a workdir, and the workspace-relative paths their replies name do not resolve in the workdir.
+- Mem0 stores a memory with a model call through its own client, which sends no request headers.
+- Models on the `google` and `ollama` providers send no request headers, because their adapters do not merge them; a gateway in front of either is reachable through an OpenAI-compatible provider instead.

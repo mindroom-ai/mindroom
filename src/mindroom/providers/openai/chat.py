@@ -14,6 +14,7 @@ import httpx2
 
 from mindroom.llm.messages import system_texts
 from mindroom.llm.provider import ToolCallReady
+from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
@@ -141,7 +142,7 @@ class ChatAdapter:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""
         timer = TurnTimer()
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
-        kwargs = await asyncio.to_thread(self._request_kwargs, request)
+        kwargs = with_request_headers(await asyncio.to_thread(self._request_kwargs, request))
         accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client()

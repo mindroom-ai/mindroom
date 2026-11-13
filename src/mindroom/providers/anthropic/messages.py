@@ -50,6 +50,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
     structured_output_tools,
 )
+from mindroom.llm.request_context import with_request_headers
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
 from mindroom.native_compaction import native_compaction_route
@@ -283,7 +284,7 @@ class ClaudeProvider:
         """
         timer = TurnTimer()
         client, body = await asyncio.to_thread(self._prepare, request)
-        kwargs = body.kwargs
+        kwargs = with_request_headers(body.kwargs)
         try:
             await request.on_send(sdk_request_body(kwargs, _SDK_OPTION_KEYS))
             manager = client.beta.messages.stream(**kwargs) if body.beta else client.messages.stream(**kwargs)
