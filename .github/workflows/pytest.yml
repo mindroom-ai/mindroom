@@ -87,6 +87,10 @@ jobs:
   diagnose-browser:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4]
     env:
       UV_PYTHON: "3.13"
     steps:
@@ -95,70 +99,6 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.13 && uv sync --all-extras
-      - name: Probe plain HTTP navigation
-        run: |
-          cat > /tmp/diag.py <<'PY'
-          import asyncio, json, os, sys, tempfile, time
-          from playwright.async_api import async_playwright
-          from tests.browser_egress_helpers import SquidLikeUpstream
-
-          async def attempt(label, url, exe, args=(), prefs=None):
-              squid = SquidLikeUpstream()
-              proxy = await squid.start()
-              start = time.monotonic()
-              async with async_playwright() as p:
-                  with tempfile.TemporaryDirectory() as d:
-                      if prefs is not None:
-                          os.makedirs(os.path.join(d, "Default"))
-                          with open(os.path.join(d, "Default", "Preferences"), "w") as f:
-                              json.dump(prefs, f)
-                      ctx = await p.chromium.launch_persistent_context(
-                          d, executable_path=exe, headless=True, args=list(args), proxy={"server": proxy}
-                      )
-                      page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                      page.on("request", lambda r: r.is_navigation_request() and print(label, "nav request", r.url))
-                      page.on("requestfailed", lambda r: print(label, "requestfailed", r.url, r.failure))
-                      try:
-                          resp = await page.goto(url, timeout=20000)
-                          print(label, "OK", resp and resp.status, page.url, await page.title())
-                      except Exception as e:
-                          print(label, "ERR", str(e).splitlines()[0])
-                      targets = [r.decode() for r in squid.requests if b"8.8.8.8" in r or b"neverssl" in r or b"example" in r]
-                      print(label, "proxy saw", targets, f"{time.monotonic() - start:.1f}s")
-                      await ctx.close()
-              await squid.close()
-
-          async def main():
-              chrome, chromium, bundled = sys.argv[1:4]
-              off = ["--disable-features=HttpsFirstBalancedModeAutoEnable"]
-              for label, url in [("ip", "http://8.8.8.8/plain"), ("example", "http://allowed.example/plain"), ("public-name", "http://neverssl.com/plain")]:
-                  await attempt(f"chrome157-{label}", url, chrome)
-              await attempt("chrome157-flag-off-ip", "http://8.8.8.8/plain", chrome, off)
-              await attempt("chrome157-flag-off-name", "http://neverssl.com/plain", chrome, off)
-              await attempt("chrome157-pref-off-ip", "http://8.8.8.8/plain", chrome, prefs={"https_only_mode_enabled": False})
-              await attempt("chrome157-pref-off-name", "http://neverssl.com/plain", chrome, prefs={"https_only_mode_enabled": False})
-              await attempt("chromium157-ip", "http://8.8.8.8/plain", chromium)
-              await attempt("chromium157-flag-off-ip", "http://8.8.8.8/plain", chromium, off)
-              if os.path.exists(bundled):
-                  await attempt("playwright-bundled-ip", "http://8.8.8.8/plain", bundled)
-              if os.environ.get("POLICY"):
-                  await attempt("policy-chrome157-ip", "http://8.8.8.8/plain", chrome)
-                  await attempt("policy-chrome157-name", "http://neverssl.com/plain", chrome)
-                  await attempt("policy-chromium157-ip", "http://8.8.8.8/plain", chromium)
-          asyncio.run(main())
-          PY
-          set +e
-          uv run --no-sync playwright install chromium 2>&1 | tail -3
-          BUNDLED=$(uv run --no-sync python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()")
-          "$BUNDLED" --version
-          readlink -f "$(command -v chromium)"; ls -la "$(command -v chromium)"
-          ARGS=("$(command -v google-chrome)" "$(command -v chromium)" "$BUNDLED")
-          PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "${ARGS[@]}"
-          for dir in /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do
-            sudo mkdir -p "$dir"
-            echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee "$dir/diag.json"
-          done
-          POLICY=1 PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "${ARGS[@]}" 2>&1 | grep -E '^policy'
       - name: Probe the browser tool on real plain-HTTP sites
         if: always()
         run: |
@@ -170,7 +110,7 @@ jobs:
 
           async def main():
               label, exe = sys.argv[1:3]
-              for url in ["http://neverssl.com/", "http://httpforever.com/", "http://example.com/"]:
+              for url in ["http://httpforever.com/", "http://example.com/"]:
                   with tempfile.TemporaryDirectory() as d:
                       paths = resolve_primary_runtime_paths(
                           config_path=Path(d) / "config.yaml", storage_path=Path(d) / "storage",
@@ -186,7 +126,8 @@ jobs:
                           await tool.aclose()
           asyncio.run(main())
           PY
-          sudo rm -f /etc/opt/chrome/policies/managed/diag.json /etc/chromium/policies/managed/diag.json
+          google-chrome --version; chromium --version
+          sudo mkdir -p /etc/opt/chrome/policies/managed
           uv run --no-sync python /tmp/tool_probe.py tool-chrome157 "$(command -v google-chrome)" 2>&1 | grep -E '^tool-'
           uv run --no-sync python /tmp/tool_probe.py tool-chromium157 "$(command -v chromium)" 2>&1 | grep -E '^tool-'
           echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee /etc/opt/chrome/policies/managed/diag.json
