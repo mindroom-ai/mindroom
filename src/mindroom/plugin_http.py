@@ -30,6 +30,7 @@ from mindroom.api.config_lifecycle import (
 )
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.api.plugin_routes import published_plugins
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection, is_sender_allowed_for_responder
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -660,13 +661,15 @@ async def client_user_oauth_access_token(
     """Return a current access token of ``user``'s own connection to ``provider_id``, as ``agent_name``'s tools use it for them.
 
     ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
-    the request; a route never builds one from request data, which would let its caller name someone else. Only an
-    agent whose ``worker_scope`` is ``user`` or ``user_agent`` keeps a connection for each person alone, so for any
-    other agent it raises ``PermissionError`` before reading anything: a ``shared`` or unscoped agent's connection, like
-    a service account, serves everyone who uses the agent. A token about to expire is refreshed first, as the agent's
+    the request; a route never builds one from request data, which would let its caller name someone else. It raises
+    ``PermissionError`` before reading anything unless ``user`` may use the agent and connect its accounts, as the
+    Connections portal and the agent's connect links decide, and unless the agent's ``worker_scope`` is ``user`` or
+    ``user_agent``, which keeps a connection for each person alone: a ``shared`` or unscoped agent's connection, like a
+    service account, serves everyone who uses the agent. A token about to expire is refreshed first, as the agent's
     tools refresh it. It raises ``LookupError`` for a provider or agent the config does not have,
     ``OAuthConnectionRequired`` while ``user`` has no usable connection, with a ``connect_url`` for them and this
-    agent, and ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix.
+    agent, and ``OAuthProviderError`` when a refresh fails for another reason, which a retry may fix. It answers 503
+    while the API is served without MindRoom's bots, whose room grants an agent's access may rely on.
     """
     context = plugin_context(request)
     config, paths = context.config, context.runtime_paths
@@ -678,6 +681,22 @@ async def client_user_oauth_access_token(
         msg = f"No agent {agent_name!r} is configured"
         raise LookupError(msg)
     requester_id = resolve_human_requester_alias(user.user_id, config, paths)
+    memberships = _bound(ensure_app_state(request.app).embedded).agent_reply_memberships
+    # The portal lists only agents the requester may converse with, and a connect link completes only for a requester
+    # who may connect the agent's accounts; the token is the connection both would serve.
+    if not (
+        is_sender_allowed_for_responder(requester_id, agent_name, None, config, paths, memberships)
+        and is_sender_allowed_for_agent_oauth_connection(
+            requester_id,
+            agent_name,
+            config,
+            paths,
+            memberships,
+            requester_owned=True,
+        )
+    ):
+        msg = f"The caller may not use agent {agent_name!r}"
+        raise PermissionError(msg)
     target = build_connection_agent_target(config, paths, requester_id, agent_name)
     identity = target.execution_identity
     if target.worker_scope not in {"user", "user_agent"} or identity is None or identity.requester_id != requester_id:

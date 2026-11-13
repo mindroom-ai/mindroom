@@ -1317,8 +1317,10 @@ It returns a current token of the connection to the [OAuth provider](#oauth-prov
 Pass as `user` the `ClientUser` a dependency such as `require_client_user` or `require_room_member` returned, never one built from request data, which would let a caller read someone else's connection.
 Use the token in the route itself, and never return it to the client or log it.
 
-It answers only for an agent that keeps each person's connections apart, one whose [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) is `user` or `user_agent`, as a private agent's always is.
-For any other agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent; it never answers with a Google service account either.
+It answers only a caller who may use the agent by its [access rules](https://docs.mindroom.chat/authorization/#responder-access) and connect its accounts, as the Connections portal and the agent's connect links require, so a caller an operator removed from the agent no longer gets a token there, though their connection stays stored.
+It also answers only for an agent that keeps each person's connections apart, one whose [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) is `user` or `user_agent`, as a private agent's always is.
+For any other caller or agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent; it never answers with a Google service account either.
+It answers 503 with `Room membership is unavailable.` while the API is served without MindRoom's bots, as outside `mindroom run`.
 It raises `LookupError` for a provider or agent the config does not have.
 While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent, and is `None` when the stored connection cannot be read and must first be reset in the dashboard.
 A refresh that fails for another reason, such as an unreachable provider, raises `OAuthProviderError` from `mindroom.plugin_api`, the base class of `OAuthConnectionRequired`, so a route that catches both catches `OAuthConnectionRequired` first; uncaught, it answers 500, and the next call tries again.
