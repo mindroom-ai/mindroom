@@ -861,12 +861,8 @@ class ModelConfig(BaseModel):
     def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Drop a null or blank endpoint, project, or region key; reject a wrongly typed ``client_params`` or ``base_url``.
 
-        The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family,
-        ``anthropic``, and ``vertexai_claude`` routes read their endpoint, and the ``openai`` route its API, from the
-        two ``base_url`` keys; ``vertexai_claude`` and ``google`` also read their project from ``project_id``. The
-        ``vertexai_claude`` route reads its region from ``region``, ``google`` from ``location``, and ``bedrock_claude``
-        from ``aws_region``. A dropped key sets nothing on any route, so the runtime env fills it where a route reads
-        one.
+        The providers that accept these keys pass ``client_params`` to their API client.
+        A dropped key sets nothing on any route, so the runtime env fills it where a route reads one.
         """
         if value is None:
             return None
