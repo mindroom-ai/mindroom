@@ -737,12 +737,12 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
 
 
 def _endpoint_settings(settings: Mapping[str, Any], field_name: str) -> dict[str, Any]:
-    """Return ``settings`` without a null or empty ``base_url``; reject a ``base_url`` that is not a string."""
+    """Return ``settings`` without a null or empty ``base_url``, ``project_id``, or ``region``; reject a non-string ``base_url``."""
     endpoint = settings.get("base_url")
     if endpoint is not None and not isinstance(endpoint, str):
         msg = f"{field_name}.base_url must be a string, not {type(endpoint).__name__}"
         raise ValueError(msg)
-    return {key: item for key, item in settings.items() if key != "base_url" or item}
+    return {key: item for key, item in settings.items() if key not in {"base_url", "project_id", "region"} or item}
 
 
 class ModelPricing(BaseModel):
@@ -850,11 +850,12 @@ class ModelConfig(BaseModel):
     @field_validator("extra_kwargs")
     @classmethod
     def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Reject a ``client_params`` that is not a mapping, or a ``base_url`` or ``client_params.base_url`` that is not a string.
+        """Drop a null or empty ``base_url``, ``project_id``, or ``region``; reject a wrongly typed ``client_params`` or ``base_url``.
 
         The providers that accept these keys pass ``client_params`` to their API client, and the OpenAI-family,
         ``anthropic``, and ``vertexai_claude`` routes read their endpoint, and the ``openai`` route its API, from the
-        two ``base_url`` keys. A null or empty ``base_url`` is dropped, so it sets no endpoint on any route.
+        two ``base_url`` keys; ``vertexai_claude`` also reads its project and region from ``project_id`` and
+        ``region``. A dropped key sets nothing on any route, so the runtime env fills it where a route reads one.
         """
         if value is None:
             return None

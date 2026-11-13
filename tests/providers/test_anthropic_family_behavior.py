@@ -1818,6 +1818,41 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     assert getattr(build_provider(model, env_file_paths).settings, setting) == value
 
 
+@pytest.mark.asyncio
+async def test_a_null_or_empty_vertex_project_or_region_falls_back_to_the_runtime_env(tmp_path: Path) -> None:
+    """A null or empty ``project_id`` or ``region``, top-level or in ``client_params``, sets neither."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_VERTEX_PROJECT_ID": "env-project", "CLOUD_ML_REGION": "us-east5"},
+    )
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    credentials = Credentials(token="unset-google-token")  # noqa: S106 - synthetic SDK credential
+    unset = ({"project_id": "", "region": ""}, {"project_id": None, "region": None})
+    with isolated_provider_environment():
+        providers = [
+            build_provider(
+                ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs),
+                runtime_paths,
+            )
+            for values in unset
+            for extra_kwargs in (
+                {**values, "client_params": {"credentials": credentials}},
+                {"client_params": {**values, "credentials": credentials}},
+            )
+        ]
+        for provider in providers:
+            await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
+
+    assert [str(sent.url) for sent in wire.requests] == [
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/env-project/locations/us-east5/publishers/anthropic/"
+        "models/claude-sonnet-5-5:streamRawPredict",
+    ] * len(providers)
+    assert {provider.identity.endpoint for provider in providers} == {
+        "https://us-east5-aiplatform.googleapis.com/v1|env-project|us-east5",
+    }
+
+
 def test_a_blank_exported_vertex_project_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Vertex SDK reads a blank project as unset and takes the credentials' project, so the build goes on."""
     config_path = tmp_path / "config.yaml"
