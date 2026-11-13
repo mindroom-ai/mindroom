@@ -13,7 +13,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY
-from mindroom.custom_tools import attachment_helpers
 from mindroom.hooks import EnrichmentItem
 from mindroom.message_target import MessageTarget
 from mindroom.room_tree.note import _room_tree_note, with_room_tree
@@ -39,8 +38,6 @@ PLANNING_LINE = "  - 'planning' (!planning:localhost)"
 HERE_LINE = "  - 'release-prep' (!room:localhost), you are here"
 NOTES_LINE = "    - 'notes' (!notes:localhost)"
 HIDDEN_ONE = "1 more nested room is hidden because the person you are answering has no access to it."
-# Captured at collection, before the suite-wide authorization bypass replaces it for each test.
-_REAL_REQUESTER_JOINED_TARGET_ROOM = attachment_helpers.requester_joined_target_room
 TARGET = EnrichmentItem(key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, text="You are responding in Matrix room !room.")
 
 
@@ -249,12 +246,9 @@ def _joined_members(members: dict[str, tuple[str, ...]]) -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_told_where_it_responds_gets_the_tree_of_rooms_the_requester_is_in(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_turn_told_where_it_responds_gets_the_tree_of_rooms_the_requester_is_in(tmp_path: Path) -> None:
     """The tree follows the room access the Matrix tools check, so it names no room the requester is not in."""
-    monkeypatch.setattr(attachment_helpers, "requester_joined_target_room", _REAL_REQUESTER_JOINED_TARGET_ROOM)
     client = _design_tree(_room(PRIVATE, "acquisition plans"), design_children={PRIVATE})
     client.joined_members = _joined_members(
         {DESIGN: (AGENT, ALICE), PLANNING: (AGENT, ALICE), NOTES: (AGENT, ALICE), PRIVATE: (AGENT,)},
