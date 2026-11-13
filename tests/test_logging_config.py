@@ -40,7 +40,7 @@ from mindroom.message_target import MessageTarget
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
     from typing import TextIO
 
@@ -633,6 +633,86 @@ def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
     assert output.count("Traceback (most recent call last):") == 1
     assert "_raise_secret_value_error" in output
     assert "api-secret" not in output
+
+
+@pytest.mark.parametrize(
+    "structlog_setup",
+    [
+        pytest.param(structlog.reset_defaults, id="structlog-defaults"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.stdlib.BoundLogger), id="stdlib-wrapper"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.BoundLogger), id="generic-wrapper"),
+        pytest.param(
+            lambda: structlog.configure(
+                wrapper_class=structlog.stdlib.BoundLogger,
+                logger_factory=lambda *args: logging.LoggerAdapter(logging.getLogger(*args)),
+            ),
+            id="logger-adapter",
+        ),
+        pytest.param(
+            lambda: structlog.configure(
+                processors=[structlog.processors.dict_tracebacks, structlog.processors.JSONRenderer()],
+            ),
+            id="own-processors",
+        ),
+    ],
+)
+def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    structlog_setup: Callable[[], None],
+) -> None:
+    """A program's structlog setup neither undoes the redaction of MindRoom's records nor adds a raw traceback."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    structlog_setup()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+
+    try:
+        _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
+    except ValueError:
+        get_logger("mindroom.example").exception("test_exception", api_key="api-secret")
+    get_logger("mindroom.example").info("test_info")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("Traceback (most recent call last):") == 1
+    assert "git failed with GIT_CONFIG_VALUE_0 configured" in captured.err
+    assert _FRAME_LOCAL_CREDENTIAL not in captured.err
+    assert "api-secret" not in captured.err
+    # The root logger stays at its default WARNING level.
+    assert "test_info" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        (logging.INFO, ["agno_info", "agno_warning", "mindroom_info"]),
+        (logging.WARNING, ["agno_warning"]),
+    ],
+)
+def test_library_logging_routes_agno_records_at_the_root_level(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: int,
+    expected: list[str],
+) -> None:
+    """MindRoom's and Agno's records reach the program's own handlers at its root level, even after Agno resets it."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+    logging.getLogger().setLevel(level)
+
+    # Agno's own Agent, Team, and Workflow runs reset its loggers to INFO this way.
+    agno_log.set_log_level_to_info()
+    agno_log.agent_logger.info("agno_info")
+    agno_log.agent_logger.warning("agno_warning")
+    get_logger("mindroom.example").debug("mindroom_debug")
+    get_logger("mindroom.example").info("mindroom_info")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    events = ["agno_info", "agno_warning", "mindroom_debug", "mindroom_info"]
+    assert [event for event in events if event in captured.err] == expected
 
 
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:

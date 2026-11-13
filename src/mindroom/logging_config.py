@@ -37,6 +37,7 @@ __all__ = [
     "setup_logging",
     "setup_subprocess_logging",
     "subprocess_logging_env",
+    "use_library_logging",
     "uses_default_logging",
 ]
 
@@ -120,15 +121,16 @@ def _scrub_request_record(record: logging.LogRecord) -> bool:
 
 
 class _AgnoLevelFilter(logging.Filter):
-    """Drop records below the level MindRoom resolved for one Agno logger."""
+    """Drop records below the level MindRoom resolved for one Agno logger, or without one, below the root logger's."""
 
-    def __init__(self, level: str) -> None:
+    def __init__(self, level: str | None) -> None:
         super().__init__()
-        self.levelno = logging.getLevelNamesMapping()[level]
+        self.levelno = None if level is None else logging.getLevelNamesMapping()[level]
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Keep only records at or above the resolved level."""
-        return record.levelno >= self.levelno
+        """Keep only records at or above the resolved level, or the root logger's level when none was resolved."""
+        levelno = logging.getLogger().getEffectiveLevel() if self.levelno is None else self.levelno
+        return record.levelno >= levelno
 
 
 class _RedactingExceptionFormatter:
@@ -170,8 +172,8 @@ def _hand_rendered_line_to_logger(
 ) -> str | tuple[tuple[str], dict[str, None]]:
     """Hand a stdlib logger the rendered line without the exception, whose traceback the line already holds.
 
-    A program can set structlog's stdlib logger factory and keep these processors, and `logging.Logger.exception`
-    logs the current exception again unless it is told there is none.
+    Library logging hands every line to a stdlib logger, and a program can also set structlog's stdlib logger factory
+    and keep these processors; `logging.Logger.exception` logs the current exception again unless told there is none.
     """
     if isinstance(logger, logging.Logger):
         return (line,), {"exc_info": None}
@@ -181,7 +183,7 @@ def _hand_rendered_line_to_logger(
 # structlog's builtin console renderer prints Rich tracebacks with every frame's
 # locals: resolved config, credentials, subprocess environments. Processes that
 # never call `setup_logging`, such as subprocess entrypoints and the sandbox
-# runner, log through these processors instead.
+# runner, log through these processors instead, and so does library logging.
 _DEFAULT_PROCESSORS: list[Processor] = [
     structlog.contextvars.merge_contextvars,
     structlog.processors.add_log_level,
@@ -195,6 +197,22 @@ _DEFAULT_PROCESSORS: list[Processor] = [
     ),
     cast("Processor", _hand_rendered_line_to_logger),
 ]
+
+
+# MindRoom's own processors for library logging, which skip each record below its stdlib logger's level first.
+_LIBRARY_PROCESSORS: list[Processor] = [structlog.stdlib.filter_by_level, *_DEFAULT_PROCESSORS]
+_library_logging = False
+
+
+def use_library_logging() -> None:
+    """Hand MindRoom's and Agno's records to stdlib logging, where the program's own logging setup decides what shows.
+
+    MindRoom's records keep `_DEFAULT_PROCESSORS`' rendering and redaction, whatever the program configures structlog
+    to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
+    """
+    global _library_logging
+    _library_logging = True
+    _route_agno_loggers_to_root(None)
 
 
 def configure_default_logging() -> None:
@@ -521,8 +539,8 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     return renderer_name
 
 
-def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
-    """Send Agno records through the configured handlers, so they share their format, level, and stream."""
+def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) -> None:
+    """Send Agno records through the root logger's handlers, at the level resolved in `loggers` or else the root's."""
     # AGNO_COMPAT: Agno library loggers bypass the host's logging configuration.
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
@@ -537,7 +555,8 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     # handlers or setting their own levels.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
     # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
-    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.
+    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level;
+    # tests/test_logging_config.py::test_library_logging_routes_agno_records_at_the_root_level.
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
     for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
@@ -548,7 +567,7 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
             if isinstance(log_filter, _AgnoLevelFilter):
                 agno_logger.removeFilter(log_filter)
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
-        level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
+        level = None if loggers is None else cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))
 
 
@@ -558,6 +577,21 @@ def exception_frames(error: BaseException) -> list[str]:
         f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
         for frame in traceback.extract_tb(error.__traceback__)
     ]
+
+
+class _Logger:
+    """A logger that follows structlog's configuration, or after `use_library_logging` MindRoom's own processors."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._configured_logger = structlog.get_logger(name)
+
+    def __getattr__(self, attribute: str) -> object:
+        if _library_logging:
+            # Built here rather than from structlog's configuration, which the program owns and may set to anything.
+            logger = structlog.stdlib.BoundLogger(logging.getLogger(self._name), _LIBRARY_PROCESSORS, {})
+            return getattr(logger, attribute)
+        return getattr(self._configured_logger, attribute)
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
@@ -570,7 +604,7 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
         Configured structlog logger
 
     """
-    return structlog.get_logger(name)
+    return cast("structlog.stdlib.BoundLogger", _Logger(name))
 
 
 def bound_log_context(**context: object) -> AbstractContextManager[None]:

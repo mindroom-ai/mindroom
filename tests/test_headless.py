@@ -8,6 +8,8 @@ import dataclasses
 import json
 import pickle
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,7 +19,7 @@ import httpx
 import nio
 import pytest
 
-from mindroom import headless
+from mindroom import headless, logging_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.headless import HeadlessConfigError, HeadlessRun, run_turn, validate_config
 from mindroom.llm.media import File
@@ -84,6 +86,12 @@ def _processes_running(marker: str) -> list[int]:
         if marker in command:
             pids.append(int(proc.name))
     return pids
+
+
+@pytest.fixture(autouse=True)
+def _structlog_logging_after_the_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A headless call switches the process to library logging; later tests on this worker log through structlog."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
 
 
 @pytest.fixture
@@ -505,6 +513,66 @@ def test_validate_config_returns_the_config_or_names_every_problem(tmp_path: Pat
         "no agent named 'ghost' is configured",
         "requester '@bob:localhost' is not in administrators",
     ]
+
+
+# A program that imports MindRoom as a library: argv is its structlog setup, a plugin directory, and a storage.
+_LIBRARY_PROGRAM = """
+import sys
+from pathlib import Path
+
+import structlog
+
+if sys.argv[1] == "structlog":
+    structlog.configure(wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())
+
+from mindroom.headless import HeadlessConfigError, validate_config
+from mindroom.logging_config import get_logger
+
+config = {
+    "administrators": ["@alice:localhost"],
+    "models": {"default": {"provider": "openai", "id": "scripted"}},
+    "agents": {"coder": {"display_name": "Coder"}},
+    "plugins": [sys.argv[2]],
+}
+try:
+    validate_config(config, agent="coder", storage=Path(sys.argv[3]))
+except HeadlessConfigError:
+    pass
+
+
+def fail(extra_header):
+    git_env = {"GIT_CONFIG_VALUE_0": extra_header}
+    raise ValueError(f"api_key=api-secret, git failed with {', '.join(git_env)} configured")
+
+
+# Only frame locals hold the credential, which no redaction rule recognizes; the traceback's source lines show its name.
+credential = "frame-local-" + "credential"
+try:
+    fail(credential)
+except ValueError:
+    get_logger("mindroom.example").exception("Request failed")
+get_logger("mindroom.example").info("Prompt sent")
+"""
+
+
+@pytest.mark.parametrize("structlog_setup", ["none", "structlog"])
+def test_a_library_program_gets_warnings_on_stderr_and_nothing_on_stdout(tmp_path: Path, structlog_setup: str) -> None:
+    """MindRoom's records reach stderr at WARNING and above, redacted and with one traceback, whatever structlog setup."""
+    completed = subprocess.run(
+        [sys.executable, "-c", _LIBRARY_PROGRAM, structlog_setup, _plugin(tmp_path), str(tmp_path / "storage")],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert completed.stdout == ""
+    assert completed.stderr.count("Loading non-bundled plugin") == 1
+    assert completed.stderr.count("Traceback (most recent call last):") == 1
+    assert "git failed with GIT_CONFIG_VALUE_0 configured" in completed.stderr
+    assert "api-secret" not in completed.stderr
+    assert "frame-local-credential" not in completed.stderr
+    assert "Prompt sent" not in completed.stderr
 
 
 @pytest.mark.asyncio

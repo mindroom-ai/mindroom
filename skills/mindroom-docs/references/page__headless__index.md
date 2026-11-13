@@ -119,3 +119,10 @@ Other tools that work on files, such as `file_generation`, `visualization`, `gma
 The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `file` and `coding` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
+
+## Logging
+
+Headless runs send MindRoom's log records to Python's `logging` module, under the `mindroom` logger, instead of printing them to stdout.
+Until your program configures `logging`, Python prints only warnings and errors, on stderr.
+To see more, configure it, for example with `logging.basicConfig(level=logging.INFO)`; `DEBUG` records include the full prompts sent to the model.
+Records keep credentials redacted and tracebacks without frame locals, and your program's structlog configuration does not change how they render.
