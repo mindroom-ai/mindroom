@@ -26,7 +26,7 @@ from mindroom.contacts.parties import agent_party
 from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_outcome
-from mindroom.matrix.client_room_admin import get_joined_rooms
+from mindroom.matrix.client_room_admin import get_joined_rooms, is_canonical_parent, names_canonical_parent
 from mindroom.matrix.invited_rooms_store import (
     forget_invited_room,
     invited_rooms_path,
@@ -893,7 +893,7 @@ class BotRoomLifecycle:
             # Kept as an accepted invitation is, and before the join, so a cleanup pass meanwhile never leaves it.
             await self._remember_invited_room(room_id)
             joined = await self._join_room_with_decrypt_notice_fence(room_id)
-            if joined and await _names_parent(self._client(), room_id, parent_id):
+            if joined and await names_canonical_parent(self._client(), room_id, parent_id):
                 self._logger().info("Joined listed room", room_id=room_id, parent_id=parent_id)
                 await self._room_joined(room_id)
                 return
@@ -924,7 +924,7 @@ class BotRoomLifecycle:
                     parent is not None
                     and room_id in parent.children
                     and room_id in await self._admitted_listed_rooms(parent_id)
-                    and await _names_parent(client, room_id, parent_id)
+                    and await names_canonical_parent(client, room_id, parent_id)
                 ):
                     self._logger().info(
                         "Keeping listed room taken out of the configuration",
@@ -948,7 +948,7 @@ class BotRoomLifecycle:
                 return
             client = self._client()
             listed = await _listed_rooms(client, parent_id)
-            if listed is None or room_id in listed or not await _names_parent(client, room_id, parent_id):
+            if listed is None or room_id in listed or not await names_canonical_parent(client, room_id, parent_id):
                 return
             self._logger().info("Leaving room taken off its parent's list", room_id=room_id, parent_id=parent_id)
             await self.deps.change_membership(room_id, "leave")
@@ -971,25 +971,14 @@ async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str]
     return listed
 
 
-async def _names_parent(client: nio.AsyncClient, room_id: str, parent_id: str) -> bool:
-    """Return whether a room names `parent_id` as its canonical parent with `m.space.parent`."""
-    response = await client.room_get_state_event(room_id, "m.space.parent", parent_id)
-    return isinstance(response, nio.RoomGetStateEventResponse) and _is_canonical_parent(response.content)
-
-
 async def _is_under_a_chat_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Return whether a room names a room that is not a Space as its canonical parent; an unreadable one counts as none."""
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         return False
     for event in response.events:
-        if event["type"] == "m.space.parent" and _is_canonical_parent(event["content"]):
+        if event["type"] == "m.space.parent" and is_canonical_parent(event["content"]):
             create = await client.room_get_state_event(event["state_key"], "m.room.create")
             if isinstance(create, nio.RoomGetStateEventResponse) and create.content.get("type") != "m.space":
                 return True
     return False
-
-
-def _is_canonical_parent(content: Mapping[str, object]) -> bool:
-    """Return whether `m.space.parent` content names its room as the canonical parent."""
-    return content.get("canonical") is True and bool(content.get("via"))
