@@ -83,3 +83,79 @@ jobs:
       #     flags: unittests
       #     name: codecov-umbrella
       #     token: ${{ secrets.CODECOV_TOKEN }}
+
+  diagnose-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_PYTHON: "3.13"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+      - name: Inspect Chrome install and policies
+        run: |
+          set -x
+          google-chrome --version || true
+          chromium --version || true
+          command -v google-chrome chromium chromium-browser || true
+          ls -laR /etc/opt/chrome /etc/chromium /etc/chromium-browser 2>&1 || true
+          find / -xdev -path '*polic*' -name '*.json' \( -path '*chrom*' -o -path '*chrome*' \) 2>/dev/null | while read -r f; do echo "== $f"; cat "$f"; done
+          B=$(readlink -f /opt/google/chrome/chrome); echo "$B"
+          strings "$B" | grep -E 'Https(First|Upgrade|Only)' | sort -u | head -80
+      - run: uv python install 3.13 && uv sync --all-extras
+      - name: Probe plain HTTP navigation
+        run: |
+          cat > /tmp/diag.py <<'PY'
+          import asyncio, json, os, sys, tempfile
+          from playwright.async_api import async_playwright
+          from tests.browser_egress_helpers import SquidLikeUpstream
+
+          EXE = sys.argv[1]
+
+          async def attempt(label, args, url):
+              squid = SquidLikeUpstream()
+              proxy = await squid.start()
+              async with async_playwright() as p:
+                  with tempfile.TemporaryDirectory() as d:
+                      ctx = await p.chromium.launch_persistent_context(
+                          d, executable_path=EXE, headless=True, args=args, proxy={"server": proxy}
+                      )
+                      page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                      page.on("request", lambda r: print(label, "request", r.method, r.url, r.is_navigation_request()))
+                      page.on("requestfailed", lambda r: print(label, "requestfailed", r.url, r.failure))
+                      page.on("framenavigated", lambda f: print(label, "framenavigated", f.url))
+                      try:
+                          resp = await page.goto(url, timeout=20000)
+                          print(label, "OK", resp and resp.status, page.url, await page.title())
+                      except Exception as e:
+                          print(label, "ERR", str(e).splitlines()[0])
+                          try:
+                              print(label, "BODY", (await page.inner_text("body"))[:800].replace("\n", " | "))
+                          except Exception as e2:
+                              print(label, "no body", e2)
+                      print(label, "squid requests", squid.requests)
+                      if label == "baseline":
+                          for u in ["chrome://version", "chrome://policy"]:
+                              pg = await ctx.new_page()
+                              await pg.goto(u)
+                              await pg.wait_for_timeout(1000)
+                              print(label, u, (await pg.inner_text("body"))[:4000].replace("\n", " | "))
+                          prefs = json.load(open(os.path.join(d, "Default", "Preferences")))
+                          print(label, "prefs https keys", {k: v for k, v in prefs.items() if "https" in k.lower()})
+                      await ctx.close()
+              await squid.close()
+
+          async def main():
+              await attempt("baseline", [], "http://8.8.8.8/plain")
+              await attempt("hostname", [], "http://allowed.example/plain")
+              await attempt("public-name", [], "http://neverssl.com/plain")
+          asyncio.run(main())
+          PY
+          PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "$(command -v google-chrome)"
+      - name: Run one failing test with Playwright debug logging
+        if: always()
+        run: |
+          DEBUG=pw:browser* MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
+            uv run --no-sync pytest "tests/test_browser_tool.py::test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80" -n 0 --no-cov -v 2>&1 | tail -150
