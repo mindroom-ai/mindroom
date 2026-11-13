@@ -249,7 +249,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.29",
+  "mindroom_plugin_api": "1.30",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -1313,6 +1313,78 @@ async def run(
 ```
 
 A plugin that uses `terminals()` states `"mindroom_plugin_api": "1.27"` in its manifest.
+
+### The caller's own connections
+
+A route that acts in a service as its caller, such as reading a file from their cloud drive, gets an access token of the caller's own connection with `await client_user_oauth_access_token(request, user, provider_id, agent_name)` from `mindroom.plugin_http`.
+It returns a current token of the connection to the [OAuth provider](#oauth-providers) `provider_id` that the tools of the agent `agent_name` use for that person, refreshing one about to expire first, so `provider_id` must be the `auth_provider` of one of the agent's tools, initial or deferred, its own or from `defaults.tools`.
+Pass as `user` the `ClientUser` a dependency such as `require_client_user` or `require_room_member` returned, never one built from request data, which would let a caller read someone else's connection.
+Use the token in the route itself, and never return it to the client or log it.
+
+It answers only a caller who may use the agent by its [access rules](authorization.md#responder-access) and connect its accounts, as the Connections portal and the agent's connect links require, so a caller an operator removed from the agent no longer gets a token there, though their connection stays stored.
+Like the Connections portal, it decides on the room grants as MindRoom holds them and reads no room itself, so right after MindRoom starts or an agent's room grants change, a caller the agent admits only as a member of a room is refused with `PermissionError` until MindRoom has read that room; a route may tell such a caller to try again shortly.
+It also answers only for an agent that keeps each person's connections apart, one whose [worker scope](deployment/sandbox-proxy.md#worker-scopes) is `user` or `user_agent`, as a private agent's always is.
+For any other caller or agent it raises `PermissionError` before reading anything, because the connection of a `shared` agent, or of an agent without a worker scope, serves everyone who uses that agent.
+It also raises `PermissionError` for a provider whose tools act as a service account, such as Google's while `GOOGLE_SERVICE_ACCOUNT_FILE` is set, for which the Connections portal offers no personal connection.
+It answers 503 with `Room membership is unavailable.` while the API is served without MindRoom's bots, as outside `mindroom run`.
+It raises `LookupError` for a provider or agent the config does not have, and when the agent has no tool that uses this provider, as the agent's reset links and the Connections portal do; so the connection a caller is sent to connect is one the portal lists under that agent, where they can disconnect or reset it.
+While the caller has no usable connection, such as before they connect, after they disconnect, or once the provider refused to refresh it, it raises `OAuthConnectionRequired` from `mindroom.plugin_api`, whose `connect_url` signs the caller in for this agent.
+Its `connect_url` is `None` when the stored connection cannot be read: the caller first resets it with **Reset connection** on that service in the [Connections portal](connections-portal.md#what-the-portal-shows), or through the reset link the agent gives when it has [`oauth_connections`](oauth-framework.md#oauth_connections), and then connects again.
+Whether a caller can open the portal depends on how the deployment signs people in there, from MindRoom Chat or a trusted upstream (see [Open It From MindRoom Chat](connections-portal.md#open-it-from-mindroom-chat)).
+A refresh that fails for another reason, such as an unreachable provider, raises `OAuthProviderError` from `mindroom.plugin_api`, the base class of `OAuthConnectionRequired`, so a route that catches both catches `OAuthConnectionRequired` first; uncaught, it answers 500, and the next call tries again.
+A grant the caller revoked at the provider itself still returns its stored token until that token expires, so a route handles the provider's own refusal, such as a 401, as the example does.
+
+```python
+# routes.py
+from typing import Annotated
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from mindroom.plugin_api import OAuthConnectionRequired, OAuthProviderError
+from mindroom.plugin_http import ClientUser, client_user_oauth_access_token, require_client_user
+
+router = APIRouter()
+
+
+@router.get("/files/{file_id}")
+async def file_name(
+    request: Request,
+    file_id: str,
+    user: Annotated[ClientUser, Depends(require_client_user)],
+) -> dict[str, str]:
+    try:
+        # One of the assistant's tools is registered with auth_provider="acme_drive".
+        token = await client_user_oauth_access_token(request, user, "acme_drive", "assistant")
+    except OAuthConnectionRequired as needed:
+        if needed.connect_url is None:
+            # The stored connection cannot be read, so no link can replace it until the caller resets it.
+            return {"reset_required": "Reset your Acme Drive connection in MindRoom's Connections page, then try again."}
+        # The client opens the link, the caller signs in, and the client asks again.
+        return {"connect_url": needed.connect_url}
+    except OAuthProviderError:
+        # The refresh failed for a reason a retry may fix, such as an unreachable provider.
+        raise HTTPException(503, "Acme Drive is unavailable; try again shortly.") from None
+    except PermissionError:
+        # The caller may not use the agent, or the agent shares its connections.
+        raise HTTPException(403, "You cannot use Acme Drive through this agent.") from None
+    except LookupError:
+        # The agent or the provider is not configured, or no tool of the agent uses Acme Drive.
+        raise HTTPException(404, "This agent offers no Acme Drive connection.") from None
+    async with httpx.AsyncClient() as client:
+        answer = await client.get(
+            "https://api.acme.example/files",
+            params={"id": file_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if answer.status_code in (401, 403):
+        # Acme Drive refused the token, as it does once the caller revoked access there.
+        raise HTTPException(502, "Acme Drive refused the request.")
+    answer.raise_for_status()
+    return {"name": answer.json()["name"]}
+```
+
+A plugin that uses `client_user_oauth_access_token`, `OAuthConnectionRequired`, or `OAuthProviderError` states `"mindroom_plugin_api": "1.30"` in its manifest.
 
 ### Websocket routes
 

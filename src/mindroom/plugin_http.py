@@ -28,17 +28,24 @@ from mindroom.api.config_lifecycle import (
     rebind_current_request_snapshot,
     require_api_state,
 )
+from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.api.plugin_routes import published_plugins
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection, is_sender_allowed_for_responder
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.entity_directory import entity_directory
 from mindroom.hooks.types import format_hook_source
 from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.service import current_oauth_access_token, oauth_provider_service_account_configured
 from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
+from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
@@ -54,6 +61,7 @@ from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
@@ -81,6 +89,7 @@ __all__ = [
     "client_origins",
     "client_rooms",
     "client_stream",
+    "client_user_oauth_access_token",
     "plugin_context",
     "plugin_origin_url",
     "require_client_user",
@@ -642,6 +651,94 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
         return latest.runtime_config if latest.runtime_paths == snapshot.runtime_paths else None
 
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
+
+
+async def client_user_oauth_access_token(
+    request: Request,
+    user: ClientUser,
+    provider_id: str,
+    agent_name: str,
+) -> str:
+    """Return a current access token of ``user``'s own connection to ``provider_id``, as ``agent_name``'s tools use it for them.
+
+    ``user`` is the ``ClientUser`` a dependency such as ``require_client_user`` or ``require_room_member`` resolved for
+    the request; a route never builds one from request data, which would let its caller name someone else. It raises
+    ``LookupError`` for a provider or agent the config does not have, or a provider none of the agent's tools uses, as
+    the agent's reset links and the Connections portal refuse it. It raises ``PermissionError`` before reading
+    anything when the provider's tools act as a service account; when ``user`` may not use the agent or connect its
+    accounts, as the Connections portal and the agent's connect links decide; when ``user`` is one of MindRoom's own
+    accounts rather than a person or a configured bot account; and when the agent's ``worker_scope`` is not ``user``
+    or ``user_agent``, the scopes that keep a connection for each person alone: a ``shared`` or unscoped agent's
+    connection, like a service account, serves everyone who uses the agent. Like the Connections portal it decides
+    access on the room grants as MindRoom holds them and reads no room itself, so right after a start or a change to
+    an agent's room grants, a caller the agent admits only as a member of a room is refused until MindRoom has read
+    that room; a route may tell them to try again. A token about to expire is refreshed first, as the agent's tools
+    refresh it. It raises ``OAuthConnectionRequired`` while ``user`` has no usable connection, whose ``connect_url``
+    signs them in for this agent, or is ``None`` while the stored connection cannot be read and must first be reset,
+    as the Connections portal's Reset connection does, and ``OAuthProviderError`` when a refresh fails for another
+    reason, which a retry may fix. It answers 503 while the API is served without MindRoom's bots, whose room grants
+    an agent's access may rely on.
+    """
+    context = plugin_context(request)
+    config, paths = context.config, context.runtime_paths
+    plugins = config_plugins(config, paths)
+    provider = plugins.oauth_providers.get(provider_id)
+    if provider is None:
+        msg = f"No OAuth provider {provider_id!r} is configured"
+        raise LookupError(msg)
+    if agent_name not in config.agents:
+        msg = f"No agent {agent_name!r} is configured"
+        raise LookupError(msg)
+    # The agent's reset links and the Connections portal offer only the providers its tools use, as here.
+    agent_tool_names = resolve_agent_tools(config, agent_name, plugins.tools).tool_names
+    if provider_id not in {plugins.tools.entries[tool_name].auth_provider for tool_name in agent_tool_names}:
+        msg = f"Agent {agent_name!r} has no tool that uses OAuth provider {provider_id!r}"
+        raise LookupError(msg)
+    # The provider's tools then act as the service account, for everyone, and the portal offers no personal connection.
+    if oauth_provider_service_account_configured(provider, paths):
+        msg = f"OAuth provider {provider_id!r} uses a service account, which serves everyone"
+        raise PermissionError(msg)
+    requester_id = resolve_human_requester_alias(user.user_id, config, paths)
+    memberships = _bound(ensure_app_state(request.app).embedded).agent_reply_memberships
+    # The portal lists only agents the requester may converse with, and a connect link completes only for a requester
+    # who may connect the agent's accounts; the token is the connection both would serve.
+    if not (
+        is_sender_allowed_for_responder(requester_id, agent_name, None, config, paths, memberships)
+        and is_sender_allowed_for_agent_oauth_connection(
+            requester_id,
+            agent_name,
+            config,
+            paths,
+            memberships,
+            requester_owned=True,
+        )
+    ):
+        msg = f"The caller may not use agent {agent_name!r}"
+        raise PermissionError(msg)
+    # A responder admits its own account, and anyone may connect a private agent's accounts, but a private agent's
+    # instances belong only to people and bot accounts, as building its target requires.
+    if not is_access_checked_requester_id(requester_id, config, paths):
+        msg = "The caller is one of MindRoom's own accounts, which keeps no connection of its own"
+        raise PermissionError(msg)
+    target = build_connection_agent_target(config, paths, requester_id, agent_name)
+    identity = target.execution_identity
+    if target.worker_scope not in {"user", "user_agent"} or identity is None or identity.requester_id != requester_id:
+        msg = f"Agent {agent_name!r} keeps no connection for one person alone"
+        raise PermissionError(msg)
+    credential_context = resolve_oauth_credential_context(
+        provider,
+        paths,
+        get_runtime_credentials_manager(paths),
+        target,
+        config=config,
+    )
+
+    def refresh_failed(error: OAuthProviderError) -> OAuthProviderError:
+        del error  # The credential lifecycle logged it, and its cause may quote the provider.
+        return OAuthProviderError(f"{provider.display_name} authorization could not be refreshed; try again shortly.")
+
+    token, _ = await asyncio.to_thread(current_oauth_access_token, credential_context, refresh_failed)
+    return token
 
 
 async def worker_relay(connection: HTTPConnection | PluginContext, target: ResolvedWorkerTarget) -> WorkerRelay:
