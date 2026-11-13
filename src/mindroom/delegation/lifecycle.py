@@ -107,6 +107,11 @@ class ChildRunObservation:
 _CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
 
 
+def running_child_run() -> ChildRunObservation | None:
+    """Return the child run running in this context, or None outside one."""
+    return _CHILD_RUN.get()
+
+
 def running_child_id() -> str | None:
     """Return the delegation id of the child turn running in this context, or None outside one."""
     observation = _CHILD_RUN.get()

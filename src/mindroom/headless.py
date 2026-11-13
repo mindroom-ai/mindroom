@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -13,7 +14,9 @@ from mindroom.ai import ai_response
 from mindroom.config.main import Config
 from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, memory_search, uses_knowledge_graph
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.delegation.lifecycle import running_child_run
 from mindroom.entity_resolution import persist_offline_entity_accounts
+from mindroom.llm.request_context import bind_request_headers
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_turn import detached_turn_context
@@ -30,13 +33,13 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
 
-__all__ = ["HeadlessConfigError", "HeadlessResult", "run_turn", "validate_config"]
+__all__ = ["HeadlessConfigError", "HeadlessResult", "HeadlessRun", "run_turn", "validate_config"]
 
 
 class HeadlessConfigError(ValueError):
@@ -61,6 +64,33 @@ class HeadlessResult:
     # The tool calls the agent itself made in the attempt that ended the turn; a subagent's calls are not counted.
     tool_calls: int
     run_metadata: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class HeadlessRun:
+    """One run within a headless turn that sends model requests: the lead agent's, or a subagent's."""
+
+    agent_name: str
+    # The subagent's ID, which its follow-ups keep; None for the lead.
+    subagent_id: str | None
+    # The ID of the subagent that started this one; None for the lead and the lead's own subagents.
+    parent_subagent_id: str | None
+    # 0 for the lead, 1 for its subagents, and one more for each nested level.
+    depth: int
+
+
+def _running_run(lead: str) -> HeadlessRun:
+    """Return the run whose model request is being sent in this context: a running subagent, else the lead."""
+    observation = running_child_run()
+    if observation is None:
+        return HeadlessRun(agent_name=lead, subagent_id=None, parent_subagent_id=None, depth=0)
+    child, parent = observation.child, observation.parent
+    return HeadlessRun(
+        agent_name=child.child_agent_name,
+        subagent_id=child.subagent_id,
+        parent_subagent_id=None if parent is None else parent.child.subagent_id,
+        depth=child.depth,
+    )
 
 
 # How many headless turns each event loop is running; the last one to end closes the loop's pooled model connections.
@@ -187,11 +217,14 @@ async def run_turn(
     storage: Path,
     workdir: Path | None = None,
     requester_id: str | None = None,
+    request_headers: Callable[[HeadlessRun], Mapping[str, str]] | None = None,
 ) -> HeadlessResult:
     """Run ``agent``'s reply to ``prompt`` on this event loop, as ``requester_id`` or else the first administrator.
 
     MindRoom keeps its state under ``storage``. ``workdir``, when set, is where the file and shell tools of the agent
-    and its subagents work. Cancelling the call cancels the turn and its running tool calls.
+    and its subagents work. ``request_headers``, when set, gives the headers a run's OpenAI-family and Claude model
+    requests carry.
+    Cancelling the call cancels the turn and its running tool calls.
     """
     validated, runtime_paths, workdir, requester = _validated(
         config,
@@ -227,7 +260,10 @@ async def run_turn(
         model_name=model.model_name,
         prompt=prompt,
     )
-    with detached_requester_context(authority), detached_tool_scope(identity), tool_workdir(workdir):
+    headers = (
+        nullcontext() if request_headers is None else bind_request_headers(lambda: request_headers(_running_run(agent)))
+    )
+    with detached_requester_context(authority), detached_tool_scope(identity), tool_workdir(workdir), headers:
         result = await _closing_connections_after_last_turn(
             ai_response(replace(turn, show_tool_calls=False), runtime_paths, validated),
         )

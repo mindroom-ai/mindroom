@@ -462,3 +462,4 @@ _.sign_out  # Plugin testing API, called by plugins' tests (src/mindroom/plugin_
 _.fire  # Plugin testing API, called by plugins' tests (src/mindroom/plugin_testing.py)
 _.get_code  # importlib loader method the import system calls (src/mindroom/tool_system/plugin_imports.py)
 _.create_module  # importlib loader method the import system calls (src/mindroom/tool_system/plugin_imports.py)
+_.parent_subagent_id  # Public HeadlessRun field that request_headers callers read (src/mindroom/headless.py)
