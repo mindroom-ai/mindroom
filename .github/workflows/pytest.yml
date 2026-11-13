@@ -139,14 +139,16 @@ jobs:
               await attempt("chrome157-pref-off-name", "http://neverssl.com/plain", chrome, prefs={"https_only_mode_enabled": False})
               await attempt("chromium157-ip", "http://8.8.8.8/plain", chromium)
               await attempt("chromium157-flag-off-ip", "http://8.8.8.8/plain", chromium, off)
-              await attempt("playwright-bundled-ip", "http://8.8.8.8/plain", bundled)
+              if os.path.exists(bundled):
+                  await attempt("playwright-bundled-ip", "http://8.8.8.8/plain", bundled)
               if os.environ.get("POLICY"):
                   await attempt("policy-chrome157-ip", "http://8.8.8.8/plain", chrome)
                   await attempt("policy-chrome157-name", "http://neverssl.com/plain", chrome)
                   await attempt("policy-chromium157-ip", "http://8.8.8.8/plain", chromium)
           asyncio.run(main())
           PY
-          uv run --no-sync playwright install chromium >/dev/null
+          set +e
+          uv run --no-sync playwright install chromium 2>&1 | tail -3
           BUNDLED=$(uv run --no-sync python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()")
           "$BUNDLED" --version
           readlink -f "$(command -v chromium)"; ls -la "$(command -v chromium)"
