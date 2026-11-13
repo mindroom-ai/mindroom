@@ -101,7 +101,7 @@ jobs:
           chromium --version || true
           command -v google-chrome chromium chromium-browser || true
           ls -laR /etc/opt/chrome /etc/chromium /etc/chromium-browser 2>&1 || true
-          find / -xdev -path '*polic*' -name '*.json' \( -path '*chrom*' -o -path '*chrome*' \) 2>/dev/null | while read -r f; do echo "== $f"; cat "$f"; done
+          for f in $(ls /etc/opt/chrome/policies/*/*.json /etc/chromium/policies/*/*.json 2>/dev/null); do echo "== $f"; cat "$f"; done
           B=$(readlink -f /opt/google/chrome/chrome); echo "$B"
           strings "$B" | grep -E 'Https(First|Upgrade|Only)' | sort -u | head -80
       - run: uv python install 3.13 && uv sync --all-extras
@@ -114,7 +114,7 @@ jobs:
 
           EXE = sys.argv[1]
 
-          async def attempt(label, args, url):
+          async def attempt(label, args, url, timeout=20000):
               squid = SquidLikeUpstream()
               proxy = await squid.start()
               async with async_playwright() as p:
@@ -127,7 +127,7 @@ jobs:
                       page.on("requestfailed", lambda r: print(label, "requestfailed", r.url, r.failure))
                       page.on("framenavigated", lambda f: print(label, "framenavigated", f.url))
                       try:
-                          resp = await page.goto(url, timeout=20000)
+                          resp = await page.goto(url, timeout=timeout)
                           print(label, "OK", resp and resp.status, page.url, await page.title())
                       except Exception as e:
                           print(label, "ERR", str(e).splitlines()[0])
@@ -151,9 +151,18 @@ jobs:
               await attempt("baseline", [], "http://8.8.8.8/plain")
               await attempt("hostname", [], "http://allowed.example/plain")
               await attempt("public-name", [], "http://neverssl.com/plain")
+              await attempt("flag-off", ["--disable-features=HttpsFirstBalancedModeAutoEnable"], "http://8.8.8.8/plain")
+              await attempt("flag-off-name", ["--disable-features=HttpsFirstBalancedModeAutoEnable"], "http://neverssl.com/plain")
+              if os.environ.get("POLICY"):
+                  await attempt("policy", [], "http://8.8.8.8/plain")
+                  await attempt("policy-name", [], "http://neverssl.com/plain")
           asyncio.run(main())
           PY
           PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "$(command -v google-chrome)"
+          sudo mkdir -p /etc/opt/chrome/policies/managed
+          echo '{"HttpsOnlyMode": "disallowed"}' | sudo tee /etc/opt/chrome/policies/managed/diag.json
+          POLICY=1 PYTHONPATH=$PWD uv run --no-sync python /tmp/diag.py "$(command -v google-chrome)" 2>&1 | grep -E '^policy'
+          sudo rm /etc/opt/chrome/policies/managed/diag.json
       - name: Run one failing test with Playwright debug logging
         if: always()
         run: |
