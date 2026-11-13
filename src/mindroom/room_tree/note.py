@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
@@ -52,10 +52,12 @@ async def with_room_tree(items: Sequence[EnrichmentItem], context: ToolRuntimeCo
             note = await _room_tree_note(
                 context.client,
                 context.room_id,
+                # The default refuses the agent's contact rooms, which the note never needs to name.
                 can_read=partial(room_access_allowed, context),
             )
     except Exception as error:  # The note never costs the reply; a cancelled turn still stops.
-        logger.warning("Room tree note unavailable", room_id=context.room_id, error_type=type(error).__name__)
+        cause = error.exceptions[0] if isinstance(error, ExceptionGroup) else error
+        logger.warning("Room tree note unavailable", room_id=context.room_id, error_type=type(cause).__name__)
         return items
     if note is None:
         return items
@@ -95,7 +97,6 @@ async def _room_tree_note(
     # The room's own sub-rooms take the cap first, so a crowded room above never pushes them out. A room both list is
     # tried under this room first, then under the room above, and sits under the one it names as canonical parent.
     checked = [*_joined(rooms, child_ids), *_joined(rooms, sibling_ids - child_ids)][:_MAX_LISTED]
-    listers = [lister for lister in (room, parent) if lister is not None]
     # Spaces the agent is in are no sub-rooms, so only the other listed rooms count as left out.
     listed_ids = sibling_ids | child_ids
     spaces = {listed_id for listed_id in listed_ids if listed_id in rooms and _chat_room(rooms, listed_id) is None}
@@ -104,12 +105,12 @@ async def _room_tree_note(
     async with asyncio.TaskGroup() as group:
         room_read = group.create_task(can_read(room_id))
         parent_read = group.create_task(can_read(parent_id) if parent_id is not None else _false())
-        place_reads = [group.create_task(_place(client, listed, listers, can_read)) for listed in checked]
+        place_reads = [group.create_task(_place(client, listed, room, parent, can_read)) for listed in checked]
     room_readable, parent_readable = room_read.result(), parent_read.result()
-    places = [(listed, read.result()) for listed, read in zip(checked, place_reads, strict=True)]
-    placed = [(listed, place) for listed, place in places if place is not None]
-    named = {listed.room_id: lister for listed, (lister, readable) in placed if readable}
-    if not room_readable or not (parent_readable or named):
+    places = [read.result() for read in place_reads]
+    children = [listed for listed, place in zip(checked, places, strict=True) if place == "under_room"]
+    siblings = [listed for listed, place in zip(checked, places, strict=True) if place == "under_parent"]
+    if not room_readable or not (parent_readable or children or siblings):
         return None
     lines = [_HEADER]
     depth = 0
@@ -119,13 +120,11 @@ async def _room_tree_note(
             f"{_line(parent, 0)}, {label}" if parent_readable else f"- {label}, hidden because {_NO_ACCESS} it",
         )
         depth = 1
-    named_siblings = [listed for listed in checked if named.get(listed.room_id) is parent]
-    for peer in sorted([*named_siblings, room], key=_sort_key):
+    for peer in sorted([*siblings, room], key=_sort_key):
         lines.append(_line(peer, depth) + (_HERE if peer is room else ""))
         if peer is room:
-            children = [listed for listed in checked if named.get(listed.room_id) is room]
             lines.extend(_line(child, depth + 1) for child in sorted(children, key=_sort_key))
-    refused = len(placed) - len(named)
+    refused = places.count("hidden")
     if refused:
         lines.append(_left_out_line(refused, f"hidden because {_NO_ACCESS} {'it' if refused == 1 else 'them'}"))
     if unchecked:
@@ -148,16 +147,23 @@ async def _canonical_parent(client: nio.AsyncClient, room_id: str) -> nio.Matrix
 async def _place(
     client: nio.AsyncClient,
     listed: nio.MatrixRoom,
-    listers: Sequence[nio.MatrixRoom],
+    room: nio.MatrixRoom,
+    parent: nio.MatrixRoom | None,
     can_read: Callable[[str], Coroutine[object, object, bool]],
-) -> tuple[nio.MatrixRoom, bool] | None:
-    """Return where ``listed`` sits and whether the requester may read it, or None when it sits under none.
+) -> Literal["under_room", "under_parent", "hidden"] | None:
+    """Return where the note shows ``listed``, or None when it names neither room as its canonical parent.
 
-    It sits under the first of ``listers`` that lists it and that it names as its canonical parent.
+    ``under_room`` and ``under_parent`` name the room it sits under; ``hidden`` means the requester may not read it.
     """
-    for lister in listers:
-        if listed.room_id in lister.children and await names_canonical_parent(client, listed.room_id, lister.room_id):
-            return lister, await can_read(listed.room_id)
+    listers: list[tuple[nio.MatrixRoom | None, Literal["under_room", "under_parent"]]]
+    listers = [(room, "under_room"), (parent, "under_parent")]
+    for lister, place in listers:
+        if (
+            lister is not None
+            and listed.room_id in lister.children
+            and await names_canonical_parent(client, listed.room_id, lister.room_id)
+        ):
+            return place if await can_read(listed.room_id) else "hidden"
     return None
 
 

@@ -146,6 +146,37 @@ async def test_a_room_with_sub_rooms_names_them_under_itself() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_top_room_names_only_the_sub_rooms_the_requester_can_read() -> None:
+    """With no room above, a private sub-room is still only counted, never named beside the room."""
+    client = _design_tree(_room(PRIVATE, "acquisition plans"), design_children={PRIVATE})
+
+    note = await _room_tree_note(client, DESIGN, can_read=_readable(DESIGN, ROOM, PLANNING))
+
+    assert note == _note(
+        "- 'design' (!design:localhost), you are here",
+        PLANNING_LINE,
+        "  - 'release-prep' (!room:localhost)",
+        "1 more sub-room is hidden because the person you are answering has no access to it.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_top_room_leaves_out_a_listing_left_behind() -> None:
+    """With no room above, a listed room naming another room as canonical parent is neither named nor counted."""
+    moved = "!moved:localhost"
+    client = _design_tree(_room(moved, "moved"), canonical={(moved, PLANNING)})
+    client.rooms[DESIGN].children.add(moved)
+
+    note = await _room_tree_note(client, DESIGN, can_read=_readable(DESIGN, ROOM, PLANNING, moved))
+
+    assert note == _note(
+        "- 'design' (!design:localhost), you are here",
+        PLANNING_LINE,
+        "  - 'release-prep' (!room:localhost)",
+    )
+
+
+@pytest.mark.asyncio
 async def test_rooms_the_requester_cannot_read_or_the_agent_is_not_in_are_only_counted() -> None:
     """The agent knows the name of a private room the requester is not in, and the note keeps it to a count."""
     client = _design_tree(
