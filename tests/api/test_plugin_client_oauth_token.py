@@ -9,25 +9,22 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-import nio
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, require_api_state
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.matrix.state import update_matrix_state
 from mindroom.oauth import credential_store
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
@@ -40,7 +37,6 @@ from mindroom.plugin_http import ClientUser, client_user_oauth_access_token
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from tests.access_schema_support import joined_members_response
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 from tests.oauth_test_utils import (
     corrupt_oauth_credential_payload,
@@ -66,20 +62,17 @@ BOB = "@bob:example.com"
 # A bridge's bot account, which may converse with agents but is no person.
 BRIDGE_BOT = "@bridgebot:example.com"
 ROOM = "!room:example.com"
-# The managed room `lounge`, whose members the agent `lounge` answers; Alice is joined, Bob is not.
-LOUNGE = "!lounge:example.com"
 PROVIDER = "acme_drive"
 TOKEN_URL = "https://accounts.example.com/oauth/token"  # noqa: S105
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105
 ALICE_AND_BOB = {"users": [ALICE, BOB]}
-# Alice and Bob may use every agent but `bobs` and `lounge`, which only the lounge's members may use. `team` and
-# `lobby` share their connections among everyone who uses them; the others keep each person's apart.
+# Alice and Bob may use every agent but `bobs`. `team` and `lobby` share their connections among everyone who uses
+# them; the others keep each person's apart.
 AGENTS = {
     "assistant": {"display_name": "Assistant", "worker_scope": "user_agent", "access": ALICE_AND_BOB},
     "helper": {"display_name": "Helper", "worker_scope": "user", "access": ALICE_AND_BOB},
     "notes": {"display_name": "Notes", "private": {"per": "user_agent"}, "access": ALICE_AND_BOB},
     "bobs": {"display_name": "Bob's", "worker_scope": "user_agent", "access": {"users": [BOB]}},
-    "lounge": {"display_name": "Lounge", "worker_scope": "user_agent", "rooms": ["lounge"]},
     "team": {"display_name": "Team", "worker_scope": "shared", "access": ALICE_AND_BOB},
     "lobby": {"display_name": "Lobby", "access": ALICE_AND_BOB},
 }
@@ -114,37 +107,6 @@ def register_oauth_providers(settings, runtime_paths):
 """
 
 
-@dataclass
-class _Runtime:
-    """What `mindroom run` lends the API: its running router, and its room grants, which it reads when they need it."""
-
-    config: Config
-    runtime_paths: RuntimePaths
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
-    refreshes: int = 0
-    """How many times the grants were read from the rooms."""
-    client: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(
-            joined_rooms=AsyncMock(return_value=nio.JoinedRoomsResponse([LOUNGE])),
-            joined_members=AsyncMock(return_value=joined_members_response(LOUNGE, ALICE)),
-        ),
-    )
-
-    def agent_bot(self, name: str) -> SimpleNamespace | None:
-        if name != ROUTER_AGENT_NAME:
-            return None
-        return SimpleNamespace(running=True, client=self.client, config=self.config)
-
-    async def refresh_agent_reply_memberships_when_needed(self) -> None:
-        if self.agent_reply_memberships.needs_refresh(self.config):
-            self.refreshes += 1
-            await self.agent_reply_memberships.refresh(
-                self.config,
-                self.runtime_paths,
-                cast("nio.AsyncClient", self.client),
-            )
-
-
 @dataclass(frozen=True)
 class _Deployment:
     """A MindRoom whose API serves the plugin ``drive``, which brings the provider ``acme_drive``, and ``AGENTS``."""
@@ -153,7 +115,6 @@ class _Deployment:
     runtime_paths: RuntimePaths
     request: Request
     """A request one of the plugin's routes serves."""
-    runtime: _Runtime
 
     def target(self, agent_name: str, requester_id: str) -> ResolvedWorkerTarget:
         """Return the worker target the agent's tools use in a turn for ``requester_id``."""
@@ -183,11 +144,10 @@ class _Deployment:
         ).worker_target
 
     def serve(self, agents: dict[str, Any]) -> None:
-        """Serve and run a config with ``agents``, as an operator's config save and the reload after it do."""
+        """Serve a config with ``agents`` from the API, as an operator's config save does."""
         state = require_api_state(self.request.app)
         config = _config(self.runtime_paths, agents)
         state.snapshot = ApiSnapshot(state.snapshot.generation + 1, self.runtime_paths, runtime_config=config)
-        self.runtime.config = config
 
     def connect(
         self,
@@ -247,14 +207,12 @@ def _deployment(tmp_path: Path, **env: str) -> _Deployment:
     for client_service in ("acme_drive_oauth_client", "acme_code_oauth_client"):
         manager.save_credentials(client_service, {"client_id": "acme-client", "client_secret": "acme-secret"})
     manager.save_credentials("google_oauth_client", {"client_id": "google-client", "client_secret": "google-secret"})
-    update_matrix_state(paths, lambda state: state.add_room("lounge", LOUNGE, "#lounge:example.com", "Lounge"))
     app = FastAPI()
     state = ensure_app_state(app)
     state.api_state = ApiState(threading.Lock(), ApiSnapshot(1, paths, runtime_config=config))
-    runtime = _Runtime(config, paths)
-    state.embedded = cast("EmbeddedRuntime", runtime)
-    request = Request({"type": "http", "app": app, PLUGIN_NAME_SCOPE_KEY: "drive"})
-    return _Deployment(config, paths, request, runtime)
+    # The runtime's grants by room membership; the agents here grant access by user ID alone.
+    state.embedded = cast("EmbeddedRuntime", SimpleNamespace(agent_reply_memberships=AgentReplyMembershipIndex()))
+    return _Deployment(config, paths, Request({"type": "http", "app": app, PLUGIN_NAME_SCOPE_KEY: "drive"}))
 
 
 def _record_store_opens(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -425,37 +383,6 @@ async def test_client_user_oauth_access_token_refuses_agent_the_caller_may_not_u
     assert opened == []
     with pytest.raises(OAuthConnectionRequired):
         await deployment.token(BOB, agent_name="bobs")
-
-
-@pytest.mark.asyncio
-async def test_client_user_oauth_access_token_reads_room_grants_that_need_it_first(tmp_path: Path) -> None:
-    """Alice may use the lounge's agent as a member of the lounge, which the runtime has not read yet; it is read first."""
-    deployment = _deployment(tmp_path)
-    deployment.connect(deployment.target("lounge", ALICE), _credentials("alice-token"))
-    deployment.connect(deployment.target("lounge", BOB), _credentials("bob-token"))
-    assert deployment.runtime.agent_reply_memberships.needs_refresh(deployment.config)
-
-    assert await deployment.token(ALICE, agent_name="lounge") == "alice-token"
-
-    assert deployment.runtime.refreshes == 1
-    assert not deployment.runtime.agent_reply_memberships.needs_refresh(deployment.config)
-    with pytest.raises(PermissionError):
-        await deployment.token(BOB, agent_name="lounge")
-
-
-@pytest.mark.asyncio
-async def test_client_user_oauth_access_token_answers_503_while_access_cannot_be_decided(tmp_path: Path) -> None:
-    """Without the runtime's router, or while the room grants cannot be read, access is unknown, not refused."""
-    deployment = _deployment(tmp_path)
-    deployment.runtime.client.joined_rooms.return_value = nio.JoinedRoomsError("Unavailable")
-
-    with pytest.raises(HTTPException) as unreadable:
-        await deployment.token(ALICE, agent_name="lounge")
-    ensure_app_state(deployment.request.app).embedded = None
-    with pytest.raises(HTTPException) as without_bots:
-        await deployment.token(ALICE)
-
-    assert (unreadable.value.status_code, without_bots.value.status_code) == (503, 503)
 
 
 @pytest.mark.asyncio
