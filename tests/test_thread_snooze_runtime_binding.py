@@ -360,6 +360,47 @@ async def test_live_events_during_a_restore_win_over_its_older_snapshot(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_snooze_due_while_every_bot_restarts_still_wakes_once(tmp_path: Path) -> None:
+    """A reload that stops every bot in a room, with a snooze coming due meanwhile, still wakes it once after."""
+    state = nio.RoomGetStateResponse(events=[_snooze_source()], room_id=ROOM)
+    router, code = _bot(ROOM), _bot(ROOM)
+    for bot in (router, code):
+        bot.client.room_get_state = AsyncMock(return_value=state)
+    bots: dict[str, Any] = {"router": router, "code": code}
+    coordinator = _coordinator(_config(tmp_path), bots)
+    await coordinator.restore_room(router, ROOM)
+    await coordinator.restore_room(code, ROOM)
+    runtime = coordinator._runtime
+    runtime._clock = lambda: UNTIL
+
+    # The reload stops both bots, and the snooze comes due before their replacements start.
+    router.running = code.running = False
+    await runtime._wake_due()
+    assert _tracked(coordinator) == {}
+
+    new_router, new_code = _bot(ROOM), _bot(ROOM)
+    for bot in (new_router, new_code):
+        bot.client.room_get_state = AsyncMock(return_value=state)
+    bots.update(router=new_router, code=new_code)
+    await coordinator.restore_room(new_router, ROOM)
+    await coordinator.restore_room(new_code, ROOM)
+
+    with (
+        patch(f"{_MODULE}.get_thread_tag_content", new=AsyncMock(side_effect=[_snooze_source()["content"], None])),
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
+        patch(
+            f"{_MODULE}.remove_thread_tag",
+            new=AsyncMock(return_value=ThreadTagsState(room_id=ROOM, thread_root_id=ROOT)),
+        ),
+    ):
+        await runtime._wake_due()
+
+    new_router.hook_context.send_message.assert_awaited_once()
+    new_code.hook_context.send_message.assert_not_awaited()
+    assert _tracked(coordinator) == {}
+
+
+@pytest.mark.asyncio
 async def test_live_event_from_a_person_tracks_and_a_removal_forgets(tmp_path: Path) -> None:
     """A live snooze tag event from sync indexes the snooze, and its removal drops it."""
     coordinator = _coordinator(_config(tmp_path), {})

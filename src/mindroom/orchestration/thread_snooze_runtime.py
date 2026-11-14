@@ -189,7 +189,9 @@ class ThreadSnoozeRuntimeCoordinator:
         """Read a thread tag through the first joined bot; None when it is absent or no bot is joined."""
         joined = next(self._joined_bots(room_id), None)
         if joined is None:
-            # No bot sees the room, so its snoozes are gone for us; the next bot to join reads its state again.
+            # No running bot sees the room, so its snoozes are gone for us; the next bot to start or join reads its
+            # state again, even if bots restored from stored rooms see each other and no sync repeats the snooze.
+            self._restored_rooms.discard(room_id)
             return None
         try:
             return await get_thread_tag_content(joined[1], room_id, thread_root_id, tag)
