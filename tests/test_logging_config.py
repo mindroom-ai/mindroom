@@ -715,6 +715,19 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     assert [event for event in events if event in captured.err] == expected
 
 
+def test_library_logging_keeps_what_the_program_sets_on_agno_after_the_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each headless call switches to library logging, and only the first reroutes Agno's loggers."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    handler = logging.NullHandler()
+    agno_log.agent_logger.addHandler(handler)
+    logging_config.use_library_logging()
+
+    assert agno_log.agent_logger.handlers == [handler]
+
+
 def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.MonkeyPatch) -> None:
     """A debug record that nothing shows, such as one holding a full prompt, is never rendered or redacted."""
     monkeypatch.setattr(logging_config, "_library_logging", False)

@@ -211,6 +211,9 @@ def use_library_logging() -> None:
     to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
     """
     global _library_logging
+    # Once only, so later calls keep whatever the program has since set on Agno's loggers.
+    if _library_logging:
+        return
     _library_logging = True
     _route_agno_loggers_to_root(None)
 
