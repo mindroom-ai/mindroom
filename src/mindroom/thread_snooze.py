@@ -65,8 +65,13 @@ def snooze_from_state_event(
     source: Mapping[str, object],
     *,
     is_bot: Callable[[str], bool],
+    is_mindroom_account: Callable[[str], bool],
 ) -> tuple[str, Snooze | None] | None:
-    """Read a raw thread tag state event as a snooze, a removal, or neither."""
+    """Read a raw thread tag state event as a snooze, a removal, or neither.
+
+    ``is_bot`` names every bot, which is never mentioned; ``is_mindroom_account`` names the accounts MindRoom runs,
+    the only ones trusted to write a snooze on behalf of the person it names.
+    """
     if source.get("type") != THREAD_TAGS_EVENT_TYPE:
         return None
     parsed_state_key = parse_thread_tag_state_key(source.get("state_key"))
@@ -82,9 +87,9 @@ def snooze_from_state_event(
     if until is None:
         return thread_root_id, None
 
-    # A person may only name themselves; a bot writes on behalf of the person it names.
+    # A person may only name themselves; a MindRoom account writes on behalf of the person it names.
     sender = source.get("sender")
-    sender_vouches = sender == record.set_by or (isinstance(sender, str) and is_bot(sender))
+    sender_vouches = sender == record.set_by or (isinstance(sender, str) and is_mindroom_account(sender))
     mention = record.set_by if sender_vouches and not is_bot(record.set_by) else None
     return thread_root_id, Snooze(
         room_id=room_id,

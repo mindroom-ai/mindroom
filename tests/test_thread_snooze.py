@@ -27,8 +27,19 @@ BOT = "@mindroom_router:x"
 UNTIL = datetime(2026, 11, 14, 8, tzinfo=UTC)
 
 
+BRIDGE = "@signalbot:x"
+
+
 def _is_bot(user_id: str) -> bool:
+    return user_id.startswith("@mindroom_") or user_id == BRIDGE
+
+
+def _is_mindroom_account(user_id: str) -> bool:
     return user_id.startswith("@mindroom_")
+
+
+def _parse(source: dict[str, object]) -> tuple[str, Snooze | None] | None:
+    return snooze_from_state_event(ROOM, source, is_bot=_is_bot, is_mindroom_account=_is_mindroom_account)
 
 
 def _source(
@@ -50,7 +61,7 @@ def _source(
 
 def test_state_event_from_its_own_sender_mentions_that_person() -> None:
     """A person who snoozes a thread is mentioned when it wakes."""
-    assert snooze_from_state_event(ROOM, _source(), is_bot=_is_bot) == (
+    assert _parse(_source()) == (
         ROOT,
         Snooze(room_id=ROOM, thread_root_id=ROOT, until=UNTIL, note="check CI", mention=PERSON),
     )
@@ -58,7 +69,7 @@ def test_state_event_from_its_own_sender_mentions_that_person() -> None:
 
 def test_state_event_naming_someone_else_mentions_nobody() -> None:
     """A person cannot make the wake message mention someone else."""
-    parsed = snooze_from_state_event(ROOM, _source(sender=OTHER_PERSON), is_bot=_is_bot)
+    parsed = _parse(_source(sender=OTHER_PERSON))
     assert parsed is not None
     _, snooze = parsed
     assert snooze is not None
@@ -67,17 +78,36 @@ def test_state_event_naming_someone_else_mentions_nobody() -> None:
 
 def test_state_event_written_by_a_bot_vouches_for_the_requester() -> None:
     """A bot writes the snooze for the person who asked, so that person is mentioned."""
-    parsed = snooze_from_state_event(ROOM, _source(sender=BOT), is_bot=_is_bot)
+    parsed = _parse(_source(sender=BOT))
     assert parsed is not None
     _, snooze = parsed
     assert snooze is not None
     assert snooze.mention == PERSON
 
 
+def test_state_event_written_by_a_bridge_bot_vouches_for_nobody() -> None:
+    """Only MindRoom's own accounts write on behalf of the person they name; a bridge bot cannot."""
+    parsed = _parse(_source(sender=BRIDGE))
+    assert parsed is not None
+    _, snooze = parsed
+    assert snooze is not None
+    assert snooze.mention is None
+
+
+def test_state_event_naming_a_bridge_bot_mentions_nobody() -> None:
+    """A bridge bot is never the person to mention, even when it set the snooze itself."""
+    content = {"set_by": BRIDGE, "set_at": "2026-11-13T08:00:00+00:00", "data": {"until": UNTIL.isoformat()}}
+    parsed = _parse(_source(sender=BRIDGE, content=content))
+    assert parsed is not None
+    _, snooze = parsed
+    assert snooze is not None
+    assert snooze.mention is None
+
+
 def test_state_event_set_by_a_bot_mentions_nobody() -> None:
     """A snooze an agent set for itself mentions nobody."""
     content = {"set_by": BOT, "set_at": "2026-11-13T08:00:00+00:00", "data": {"until": UNTIL.isoformat()}}
-    parsed = snooze_from_state_event(ROOM, _source(sender=BOT, content=content), is_bot=_is_bot)
+    parsed = _parse(_source(sender=BOT, content=content))
     assert parsed is not None
     _, snooze = parsed
     assert snooze is not None
@@ -96,7 +126,7 @@ def test_state_event_set_by_a_bot_mentions_nobody() -> None:
 )
 def test_removed_or_invalid_snooze_event_drops_the_thread(content: dict[str, object]) -> None:
     """A tombstone or an unreadable wake time removes the thread from the index."""
-    assert snooze_from_state_event(ROOM, _source(content=content), is_bot=_is_bot) == (ROOT, None)
+    assert _parse(_source(content=content)) == (ROOT, None)
 
 
 @pytest.mark.parametrize(
@@ -110,7 +140,7 @@ def test_removed_or_invalid_snooze_event_drops_the_thread(content: dict[str, obj
 )
 def test_other_tags_and_other_event_types_are_not_snoozes(source: dict[str, object]) -> None:
     """Only snoozed thread tag state events concern the runtime."""
-    assert snooze_from_state_event(ROOM, source, is_bot=_is_bot) is None
+    assert _parse(source) is None
 
 
 def test_wake_message_body() -> None:

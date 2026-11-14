@@ -81,7 +81,12 @@ class ThreadSnoozeRuntimeCoordinator:
 
     def observe_state_event(self, room_id: str, source: Mapping[str, object]) -> None:
         """Index or drop the snooze a raw thread tag state event sets or removes; ignore any other event."""
-        parsed = snooze_from_state_event(room_id, source, is_bot=self._is_bot)
+        parsed = snooze_from_state_event(
+            room_id,
+            source,
+            is_bot=self._is_bot,
+            is_mindroom_account=self._is_mindroom_account,
+        )
         if parsed is None:
             return
         thread_root_id, snooze = parsed
@@ -121,6 +126,10 @@ class ThreadSnoozeRuntimeCoordinator:
 
     def _is_bot(self, user_id: str) -> bool:
         return not is_human_requester_id(user_id, self.config_provider(), self.runtime_paths)
+
+    def _is_mindroom_account(self, user_id: str) -> bool:
+        """Return whether MindRoom runs this account: an agent, team, the router, or the internal user."""
+        return self._is_bot(user_id) and user_id not in self.config_provider().bot_accounts
 
     def _joined_bots(self, room_id: str) -> Iterator[tuple[AgentBot, nio.AsyncClient]]:
         """Yield the bots joined to a room with their clients, the router first and the rest by name."""

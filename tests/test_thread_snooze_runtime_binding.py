@@ -197,6 +197,26 @@ async def test_live_event_from_a_person_tracks_and_a_removal_forgets(tmp_path: P
     assert _tracked(coordinator) == {}
 
 
+def test_live_event_from_a_configured_bot_account_mentions_nobody(tmp_path: Path) -> None:
+    """A configured non-MindRoom bot, such as a bridge, cannot make the wake message mention someone."""
+    bridge = "@signalbot:localhost"
+    config = bind_runtime_paths(
+        Config(agents={"code": AgentConfig(display_name="Code")}, bot_accounts=[bridge]),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+    code_id = entity_ids(config, runtime_paths_for(config))["code"].full_id
+    coordinator = _coordinator(config, {})
+
+    coordinator.observe_state_event(ROOM, _snooze_source(sender=bridge, set_by="@alice:localhost"))
+    assert _tracked(coordinator)[ROOM, ROOT].mention is None
+
+    coordinator.observe_state_event(ROOM, _snooze_source(sender=code_id, set_by="@alice:localhost"))
+    assert _tracked(coordinator)[ROOM, ROOT].mention == "@alice:localhost"
+
+    coordinator.observe_state_event(ROOM, _snooze_source(sender=code_id, set_by=bridge))
+    assert _tracked(coordinator)[ROOM, ROOT].mention is None
+
+
 def test_tool_snooze_mentions_a_person_and_not_a_bot(tmp_path: Path) -> None:
     """A snooze set for a person mentions them on wake; one set for an agent mentions nobody."""
     config = _config(tmp_path)
