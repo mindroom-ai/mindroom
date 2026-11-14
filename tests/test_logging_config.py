@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import logging.config
 import os
+import pickle
 import socket
 import subprocess
 import sys
@@ -635,6 +637,15 @@ def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
     assert "api-secret" not in output
 
 
+def _give_agno_its_console_handlers() -> None:
+    """Give Agno's loggers the console handler Agno installs on import, writing to this test's stdout."""
+    for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
+        # Agno leaves a logger that already has handlers or a level as it is.
+        agno_logger.handlers.clear()
+        agno_logger.setLevel(logging.NOTSET)
+        agno_log.build_logger(agno_logger.name)
+
+
 @pytest.mark.parametrize(
     "structlog_setup",
     [
@@ -698,6 +709,7 @@ def test_library_logging_routes_agno_records_at_the_root_level(
 ) -> None:
     """MindRoom's and Agno's records reach the program's own handlers at its root level, even after Agno resets it."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
+    _give_agno_its_console_handlers()
     logging_config.use_library_logging()
     logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
     logging.getLogger().setLevel(level)
@@ -706,8 +718,8 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     agno_log.set_log_level_to_info()
     agno_log.agent_logger.info("agno_info")
     agno_log.agent_logger.warning("agno_warning")
-    get_logger("tests.library").debug("mindroom_debug")
-    get_logger("tests.library").info("mindroom_info")
+    get_logger("tests.library").debug("mindroom_%s", "debug")
+    get_logger("tests.library").info("mindroom_%s", "info")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -715,17 +727,32 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     assert [event for event in events if event in captured.err] == expected
 
 
-def test_library_logging_keeps_what_the_program_sets_on_agno_after_the_first_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each headless call switches to library logging, and only the first reroutes Agno's loggers."""
+def test_library_logging_keeps_the_handlers_a_program_sets_on_agno(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only Agno's own console handler gives way, whether the program set its handlers before or after a call."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
+    _give_agno_its_console_handlers()
+    before = logging.NullHandler()
+    agno_log.agent_logger.addHandler(before)
+    # A program can also silence a logger by removing Agno's handler.
+    agno_log.workflow_logger.handlers.clear()
+    # On a terminal, Agno's handler is a Rich one.
+    agno_log.team_logger.handlers[:] = [agno_log.ColoredRichHandler()]
     logging_config.use_library_logging()
-    handler = logging.NullHandler()
-    agno_log.agent_logger.addHandler(handler)
+    after = logging.NullHandler()
+    agno_log.team_logger.addHandler(after)
     logging_config.use_library_logging()
 
-    assert agno_log.agent_logger.handlers == [handler]
+    assert (agno_log.agent_logger.handlers, agno_log.agent_logger.propagate) == ([before], False)
+    assert (agno_log.team_logger.handlers, agno_log.team_logger.propagate) == ([after], True)
+    assert (agno_log.workflow_logger.handlers, agno_log.workflow_logger.propagate) == ([], False)
+
+
+def test_a_logger_survives_pickling_and_copying() -> None:
+    """A logger pickles and copies by its name, as structlog's own loggers do."""
+    logger = get_logger("tests.library")
+
+    for clone in (pickle.loads(pickle.dumps(logger)), copy.copy(logger), copy.deepcopy(logger)):  # noqa: S301
+        clone.info("copied")
 
 
 def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.MonkeyPatch) -> None:

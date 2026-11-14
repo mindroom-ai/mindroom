@@ -545,10 +545,10 @@ def fail(extra_header):
     raise ValueError(f"api_key=api-secret, git failed with {', '.join(git_env)} configured")
 
 
-# Only frame locals hold the credential, which no redaction rule recognizes; the traceback's source lines show its name.
-credential = "frame-local-" + "credential"
+# Only `fail`'s frame locals hold this value, which no redaction rule matches; the source lines show its name.
+header = "frame-local-" + "header"
 try:
-    fail(credential)
+    fail(header)
 except ValueError:
     get_logger("mindroom.example").exception("Request failed")
 get_logger("mindroom.example").info("Prompt sent")
@@ -571,7 +571,7 @@ def test_a_library_program_gets_warnings_on_stderr_and_nothing_on_stdout(tmp_pat
     assert completed.stderr.count("Traceback (most recent call last):") == 1
     assert "git failed with GIT_CONFIG_VALUE_0 configured" in completed.stderr
     assert "api-secret" not in completed.stderr
-    assert "frame-local-credential" not in completed.stderr
+    assert "frame-local-header" not in completed.stderr
     assert "Prompt sent" not in completed.stderr
 
 

@@ -21512,10 +21512,10 @@ All tools run with the calling process's permissions, and `shell` and `python` c
 
 ## Logging
 
-Headless runs send MindRoom's log records to Python's `logging` module, under the `mindroom` logger, instead of printing them to stdout.
+Headless runs send MindRoom's log records to Python's `logging` module, under the `mindroom` and `agno` loggers, instead of printing them to stdout.
 Until your program configures `logging`, Python prints only warnings and errors, on stderr.
 To see more, configure it, for example with `logging.basicConfig(level=logging.INFO)`; `DEBUG` records include the full prompts sent to the model.
-Records keep credentials redacted and tracebacks without frame locals, and your program's structlog configuration does not change how they render.
+Your program's structlog configuration applies to its own records, not to MindRoom's.
 
 # MCP Gateway
 

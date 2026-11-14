@@ -200,7 +200,11 @@ _DEFAULT_PROCESSORS: list[Processor] = [
 
 
 # MindRoom's own processors for library logging, which skip each record below its stdlib logger's level first.
-_LIBRARY_PROCESSORS: list[Processor] = [structlog.stdlib.filter_by_level, *_DEFAULT_PROCESSORS]
+_LIBRARY_PROCESSORS: list[Processor] = [
+    structlog.stdlib.filter_by_level,
+    structlog.stdlib.PositionalArgumentsFormatter(),
+    *_DEFAULT_PROCESSORS,
+]
 _library_logging = False
 
 
@@ -211,11 +215,8 @@ def use_library_logging() -> None:
     to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
     """
     global _library_logging
-    # Once only, so later calls keep whatever the program has since set on Agno's loggers.
-    if _library_logging:
-        return
     _library_logging = True
-    _route_agno_loggers_to_root(None)
+    _route_agno_console_to_root()
 
 
 def configure_default_logging() -> None:
@@ -542,8 +543,8 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     return renderer_name
 
 
-def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) -> None:
-    """Send Agno records through the root logger's handlers, at the level resolved in `loggers` or else the root's."""
+def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
+    """Send Agno records through the configured handlers, so they share their format, level, and stream."""
     # AGNO_COMPAT: Agno library loggers bypass the host's logging configuration.
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
@@ -570,8 +571,30 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]] | None) ->
             if isinstance(log_filter, _AgnoLevelFilter):
                 agno_logger.removeFilter(log_filter)
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
-        level = None if loggers is None else cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
+        level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))
+
+
+def _route_agno_console_to_root() -> None:
+    """Replace the console handler Agno gives its loggers with the root logger's handlers, keeping the program's own.
+
+    This is library logging's form of the AGNO_COMPAT workaround in `_route_agno_loggers_to_root`.
+    """
+    from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
+
+    for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
+        console = [
+            handler
+            for handler in agno_logger.handlers
+            if isinstance(handler, agno_log.ColoredRichHandler)
+            or (isinstance(handler, logging.StreamHandler) and handler.stream in (sys.stdout, sys.__stdout__))
+        ]
+        for handler in console:
+            agno_logger.removeHandler(handler)
+        # A logger with handlers the program set keeps sending its records only to them.
+        if console and not agno_logger.handlers:
+            agno_logger.propagate = True
+            agno_logger.addFilter(_AgnoLevelFilter(None))
 
 
 def exception_frames(error: BaseException) -> list[str]:
@@ -588,6 +611,10 @@ class _Logger:
     def __init__(self, name: str) -> None:
         self._name = name
         self._configured_logger = structlog.get_logger(name)
+
+    def __reduce__(self) -> tuple[type[_Logger], tuple[str]]:
+        """Pickle and copy by name, since `__getattr__` cannot serve a copy whose attributes are not set yet."""
+        return _Logger, (self._name,)
 
     def __getattr__(self, attribute: str) -> object:
         if _library_logging:
