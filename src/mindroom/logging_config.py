@@ -10,6 +10,7 @@ import logging.handlers
 import os
 import queue
 import sys
+import threading
 import traceback
 from datetime import UTC, datetime
 from io import StringIO
@@ -224,6 +225,8 @@ _LIBRARY_PROCESSORS: list[Processor] = [
     *_DEFAULT_PROCESSORS,
 ]
 _library_logging = False
+# Concurrent first headless calls would each see Agno's console handler and add a handler of their own.
+_AGNO_CONSOLE_SWAP_LOCK = threading.Lock()
 
 
 def use_library_logging() -> None:
@@ -604,21 +607,25 @@ def _route_agno_console_to_root() -> None:
     """
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
-    for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
-        if not isinstance(agno_logger, logging.Logger) or agno_logger.propagate or len(agno_logger.handlers) != 1:
-            continue
-        (handler,) = agno_logger.handlers
-        # Agno's `build_logger` gives a terminal its Rich handler and anything else this stdout one, neither with a
-        # filter or a level of its own.
-        agnos = isinstance(handler, agno_log.ColoredRichHandler) or (
-            type(handler) is logging.StreamHandler
-            and handler.stream in (sys.stdout, sys.__stdout__)
-            and handler.formatter is not None
-            and handler.formatter._fmt == "%(levelname)-7s %(message)s"
-        )
-        if agnos and not handler.filters and handler.level == logging.NOTSET:
-            agno_logger.removeHandler(handler)
-            agno_logger.addHandler(_AgnoRecordsToRoot(agno_logger))
+    with _AGNO_CONSOLE_SWAP_LOCK:
+        for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
+            if not isinstance(agno_logger, logging.Logger) or agno_logger.propagate or len(agno_logger.handlers) != 1:
+                continue
+            (handler,) = agno_logger.handlers
+            # Agno's `build_logger` gives a terminal its Rich handler and anything else this stream handler, both on
+            # stdout and neither with a filter or a level of its own.
+            agnos = (
+                isinstance(handler, agno_log.ColoredRichHandler)
+                and handler.console.file in (sys.stdout, sys.__stdout__)
+            ) or (
+                type(handler) is logging.StreamHandler
+                and handler.stream in (sys.stdout, sys.__stdout__)
+                and handler.formatter is not None
+                and handler.formatter._fmt == "%(levelname)-7s %(message)s"
+            )
+            if agnos and not handler.filters and handler.level == logging.NOTSET:
+                agno_logger.removeHandler(handler)
+                agno_logger.addHandler(_AgnoRecordsToRoot(agno_logger))
 
 
 def exception_frames(error: BaseException) -> list[str]:

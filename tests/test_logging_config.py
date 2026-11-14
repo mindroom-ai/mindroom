@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import io
 import json
 import logging
 import logging.config
@@ -26,6 +27,7 @@ import uvicorn
 from agno.utils import log as agno_log
 from fastapi import FastAPI, WebSocket
 from mem0 import AsyncMemory
+from rich.console import Console
 
 from mindroom import logging_config
 from mindroom.constants import RuntimePaths
@@ -749,6 +751,10 @@ def _own_stdout_handler(logger: logging.Logger) -> None:
     logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stdout), "own %(message)s")]
 
 
+def _rich_handler_on_own_console(logger: logging.Logger) -> None:
+    logger.handlers[:] = [agno_log.ColoredRichHandler(console=Console(file=io.StringIO()))]
+
+
 def _filter_on_agnos_handler(logger: logging.Logger) -> None:
     logger.handlers[0].addFilter(lambda _record: False)
 
@@ -774,6 +780,7 @@ def _own_stderr_handler_in_agnos_format(logger: logging.Logger) -> None:
         pytest.param(_propagating, "WARNING agent_warning\n", "root agent_warning\n", id="propagating"),
         pytest.param(_own_stdout_handler, "own agent_warning\n", "", id="own-stdout-handler"),
         pytest.param(_own_plain_stdout_handler, "agent_warning\n", "", id="own-plain-stdout-handler"),
+        pytest.param(_rich_handler_on_own_console, "", "", id="rich-handler-on-own-console"),
         pytest.param(_filter_on_agnos_handler, "", "", id="filter-on-agnos-handler"),
         pytest.param(_level_on_agnos_handler, "", "", id="level-on-agnos-handler"),
         pytest.param(_own_stderr_handler_in_agnos_format, "", "WARNING agent_warning\n", id="own-agno-format"),
