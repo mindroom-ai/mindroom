@@ -410,9 +410,18 @@ class AttachmentTools(Toolkit):
         )
 
     def views(self, path: str) -> bool:
-        """Return whether view_file finds ``path`` as a file it may read; a worker resolves its own paths, so yes there."""
+        """Return whether view_file finds ``path`` as a file it may read.
+
+        A worker resolves the path itself, under workspace access only inside the workspace view_file sends it to.
+        """
         if self._workspace_in_worker:
-            return True
+            requested = Path(path)
+            workspace = self._tool_output_workspace_root
+            return (
+                self._file_access == "unrestricted"
+                or not requested.is_absolute()
+                or (workspace is not None and requested.is_relative_to(workspace))
+            )
         try:
             resolve_agent_file(path, workspace_root=self._view_root, file_access=self._file_access, field_name="path")
         except ValueError:

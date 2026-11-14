@@ -803,7 +803,7 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
 
 
 def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
-    """Views resolves a path as view_file does: inside the workspace under workspace access, anywhere in a worker."""
+    """A path view_file finds lies inside the workspace under workspace access, a worker's included."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "plot.png").write_bytes(b"png")
@@ -815,7 +815,16 @@ def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
     assert tool.views(str(workspace / "plot.png"))
     assert not tool.views(str(outside))
     assert not tool.views("missing.png")
-    assert AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True).views(str(outside))
+    in_worker = AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True)
+    assert in_worker.views("only-in-the-worker.png")
+    assert in_worker.views(str(workspace / "plot.png"))
+    assert not in_worker.views(str(outside))
+    unrestricted = AttachmentTools(
+        tool_output_workspace_root=workspace,
+        workspace_in_worker=True,
+        file_access="unrestricted",
+    )
+    assert unrestricted.views(str(outside))
 
 
 @pytest.mark.asyncio
