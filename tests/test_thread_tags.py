@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -20,15 +21,19 @@ from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
     SetThreadTagsIfEmptyResult,
+    ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
+    ThreadTagsPermissionError,
     ThreadTagsState,
     coerce_tag_name,
+    get_thread_tag_content,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
     set_thread_tag,
     set_thread_tags_if_empty,
+    snooze_until,
 )
 
 if TYPE_CHECKING:
@@ -2152,3 +2157,115 @@ async def test_enumerate_room_thread_root_ids_roots_past_the_cap_on_the_final_pa
 
     assert thread_root_ids == ["$thread-0:localhost", "$thread-1:localhost"]
     assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_snoozed_tag_stores_until_in_utc() -> None:
+    """The snoozed tag stores its wake time normalized to UTC."""
+    current_events: dict[str, dict[str, object]] = {}
+    client = _tag_writer_client("@alice:localhost", current_events)
+    client.joined_members.return_value = _joined_members_response("@alice:localhost")
+
+    state = await set_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        set_by="@alice:localhost",
+        data={"until": "2026-11-14T09:00:00+01:00"},
+    )
+
+    assert state.tags["snoozed"].data == {"until": "2026-11-14T08:00:00+00:00"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [None, {}, {"until": "tomorrow"}, {"until": 5}])
+async def test_snoozed_tag_requires_a_timestamp(data: dict[str, object] | None) -> None:
+    """The snoozed tag fails without a valid until timestamp, before any Matrix I/O."""
+    client = AsyncMock()
+
+    with pytest.raises(ThreadTagsError, match=r"snoozed\.data\.until must be an ISO-8601 timestamp\."):
+        await set_thread_tag(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "snoozed",
+            set_by="@alice:localhost",
+            data=data,
+        )
+
+    client.room_get_state_event.assert_not_awaited()
+
+
+def test_snooze_until_reads_naive_values_as_utc() -> None:
+    """Naive stored values are read as UTC; absent records give None."""
+    record = ThreadTagRecord(
+        set_by="@alice:localhost",
+        set_at=datetime(2026, 11, 13, tzinfo=UTC),
+        data={"until": "2026-11-14T08:00:00"},
+    )
+    assert snooze_until(record) == datetime(2026, 11, 14, 8, tzinfo=UTC)
+    assert snooze_until(None) is None
+    assert snooze_until(record.model_copy(update={"data": {}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "soon"}})) is None
+
+
+@pytest.mark.asyncio
+async def test_insufficient_power_is_a_permission_error() -> None:
+    """Insufficient power raises the dedicated subclass of ThreadTagsError."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={"@mindroom_general:localhost": 0},
+    )
+
+    with pytest.raises(ThreadTagsPermissionError):
+        await _write_operation(client, "set")
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_reads_one_state_event() -> None:
+    """One tag is read with a single state-event request."""
+    content = _tag_record_content(data={"until": "2026-11-14T08:00:00+00:00"})
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=content,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
+    )
+
+    result = await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+    assert result == content
+    client.room_get_state_event.assert_awaited_once_with(
+        "!room:localhost",
+        THREAD_TAGS_EVENT_TYPE,
+        '["$root","snoozed"]',
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_returns_none_when_absent() -> None:
+    """M_NOT_FOUND and empty content both mean no tag."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="nope", status_code="M_NOT_FOUND")
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
+
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
+    )
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_raises_on_other_errors() -> None:
+    """Any other error response is a ThreadTagsError."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="boom", status_code="M_UNKNOWN")
+
+    with pytest.raises(ThreadTagsError, match="boom"):
+        await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")

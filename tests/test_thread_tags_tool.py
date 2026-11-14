@@ -1658,3 +1658,27 @@ async def test_thread_tag_mutations_reject_resolved_before_matrix_io(method_name
     assert "thread lifecycle state" in payload["message"]
     mock_set.assert_not_awaited()
     mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["tag", "untag"])
+async def test_tag_thread_refuses_snoozed(method_name: str) -> None:
+    """The snoozed tag is lifecycle state owned by thread_snooze."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.thread_tags.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_tags.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        method = tool.tag_thread if method_name == "tag" else tool.untag_thread
+        payload = json.loads(await method("snoozed"))
+
+    assert payload["status"] == "error"
+    assert payload["message"] == (
+        "Tag 'snoozed' is thread lifecycle state and cannot be changed with thread_tags. "
+        "Use thread_snooze when that capability is explicitly configured."
+    )
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()

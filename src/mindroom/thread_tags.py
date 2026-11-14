@@ -25,7 +25,8 @@ logger = get_logger(__name__)
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 RESOLVED_THREAD_TAG = "resolved"
-AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({RESOLVED_THREAD_TAG})
+SNOOZED_THREAD_TAG = "snoozed"
+AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG})
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
@@ -40,19 +41,23 @@ __all__ = [
     "AUTOMATIC_THREAD_TAG_EXCLUSIONS",
     "COERCED_TAG_MAX_LENGTH",
     "RESOLVED_THREAD_TAG",
+    "SNOOZED_THREAD_TAG",
     "THREAD_TAGS_EVENT_TYPE",
     "SetThreadTagsIfEmptyResult",
     "ThreadTagRecord",
     "ThreadTagsError",
     "ThreadTagsListing",
+    "ThreadTagsPermissionError",
     "ThreadTagsState",
     "coerce_tag_name",
+    "get_thread_tag_content",
     "get_thread_tags",
     "list_tagged_threads",
     "normalize_tag_name",
     "remove_thread_tag",
     "set_thread_tag",
     "set_thread_tags_if_empty",
+    "snooze_until",
 ]
 
 type _ThreadTagMutationKey = tuple[str, str]
@@ -74,6 +79,10 @@ _thread_tag_mutation_locks: WeakValueDictionary[_ThreadTagMutationKey, asyncio.L
 
 class ThreadTagsError(RuntimeError):
     """Raised when thread tag state cannot be read or written."""
+
+
+class ThreadTagsPermissionError(ThreadTagsError):
+    """Raised when a Matrix account lacks the power level to write thread tags."""
 
 
 class ThreadTagRecord(BaseModel):
@@ -351,11 +360,21 @@ def _normalize_due_tag_data(normalized_data: dict[str, Any]) -> None:
     normalized_data["deadline"] = deadline.isoformat()
 
 
+def _normalize_snoozed_tag_data(normalized_data: dict[str, Any]) -> None:
+    """Normalize the snoozed-tag schema, which requires its wake time."""
+    until = _parse_timestamp(normalized_data.get("until"))
+    if until is None:
+        msg = "snoozed.data.until must be an ISO-8601 timestamp."
+        raise ThreadTagsError(msg)
+    normalized_data["until"] = until.astimezone(UTC).isoformat()
+
+
 _PREDEFINED_TAG_DATA_NORMALIZERS: dict[str, Callable[[dict[str, Any]], None]] = {
     "blocked": _normalize_blocked_tag_data,
     "waiting": _normalize_waiting_tag_data,
     "priority": _normalize_priority_tag_data,
     "due": _normalize_due_tag_data,
+    SNOOZED_THREAD_TAG: _normalize_snoozed_tag_data,
 }
 
 
@@ -556,7 +575,7 @@ def _raise_insufficient_power_level(
         f"Insufficient Matrix power level for {subject_label} to send {THREAD_TAGS_EVENT_TYPE} "
         f"state events in {room_id}: {user_id} has {user_power_level}, requires {required_power_level}."
     )
-    raise ThreadTagsError(msg)
+    raise ThreadTagsPermissionError(msg)
 
 
 async def _assert_requester_joined_room(
@@ -615,6 +634,11 @@ async def _assert_user_can_write_thread_tags(
     )
 
 
+def _observed_root_ids(thread_root_id: str, tag: str) -> set[str]:
+    """Return the root a tag event marks as manually tagged; lifecycle tags mark none."""
+    return set() if tag in AUTOMATIC_THREAD_TAG_EXCLUSIONS else {thread_root_id}
+
+
 async def _get_room_thread_tags_snapshot(
     client: nio.AsyncClient,
     room_id: str,
@@ -640,7 +664,7 @@ async def _get_room_thread_tags_snapshot(
             continue
 
         thread_root_id, tag = parsed_state_key
-        observed_thread_root_ids.add(thread_root_id)
+        observed_thread_root_ids.update(_observed_root_ids(thread_root_id, tag))
         if not content:
             per_tag_tombstones_by_thread.setdefault(thread_root_id, set()).add(tag)
             continue
@@ -724,6 +748,40 @@ async def _assert_thread_tags_write_allowed(
         subject_label="the requester",
         user_id=normalized_requester_user_id,
     )
+
+
+def snooze_until(record: ThreadTagRecord | None) -> datetime | None:
+    """Return the wake time of a snoozed record in UTC, or None when absent or invalid."""
+    if record is None:
+        return None
+    until = _parse_timestamp(record.data.get("until"))
+    return None if until is None else until.astimezone(UTC)
+
+
+async def get_thread_tag_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    tag: str,
+) -> dict[str, Any] | None:
+    """Read one tag's state event content, or None when the tag is not set."""
+    response = await client.room_get_state_event(
+        room_id,
+        THREAD_TAGS_EVENT_TYPE,
+        _thread_tag_state_key(thread_root_id, tag),
+    )
+    if isinstance(response, nio.RoomGetStateEventError):
+        if response.status_code == "M_NOT_FOUND":
+            return None
+        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: {response}"
+        raise ThreadTagsError(msg)
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: {response}"
+        raise ThreadTagsError(msg)
+    content = response.content
+    if not isinstance(content, dict) or not content:
+        return None
+    return cast("dict[str, Any]", content)
 
 
 async def get_thread_tags(
@@ -860,7 +918,9 @@ async def set_thread_tags_if_empty(
     async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
         snapshot = await _get_room_thread_tags_snapshot(client, room_id)
         existing_state = snapshot.tag_state.get(normalized_thread_root_id)
-        if existing_state is not None and existing_state.tags:
+        if existing_state is not None and any(
+            tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS for tag in existing_state.tags
+        ):
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=True,
                 applied_tags=(),

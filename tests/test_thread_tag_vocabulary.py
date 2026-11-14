@@ -30,7 +30,7 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE, ThreadTagsError
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE, ThreadTagsError, set_thread_tags_if_empty
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -544,3 +544,64 @@ def test_format_with_counts_lists_ranked_tags() -> None:
 def test_format_with_counts_without_tags_falls_back() -> None:
     """An absent snapshot formats as the empty-vocabulary placeholder."""
     assert format_tag_vocabulary_with_counts(None) == "(no reusable short tags in use yet)"
+
+
+def test_vocabulary_leaves_out_snoozed(tmp_path: Path) -> None:
+    """Snoozed is lifecycle state and never reaches the model vocabulary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    _write_snapshot_file(
+        runtime_paths,
+        _ROOM_A,
+        built_at=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
+        tags=[{"tag": "snoozed", "count": 5}, {"tag": "bug", "count": 3}],
+    )
+
+    snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
+
+    assert snapshot is not None
+    assert snapshot.tags == (_TagUsage(tag="bug", count=3),)
+
+
+@pytest.mark.asyncio
+async def test_thread_with_only_a_snoozed_tag_still_gets_automatic_tags() -> None:
+    """A thread holding only lifecycle tags counts as untagged for automatic tags."""
+    current_events: dict[str, dict[str, object]] = {
+        _tag_state_event("$root:localhost", "snoozed")["state_key"]: {  # type: ignore[index]
+            "set_by": "@user:localhost",
+            "set_at": "2026-07-01T00:00:00+00:00",
+            "data": {"until": "2026-11-14T08:00:00+00:00"},
+        },
+    }
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"users": {"@mindroom_general:localhost": 50}, "state_default": 50},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id=_ROOM_A,
+    )
+
+    async def room_get_state(room_id: str) -> nio.RoomGetStateResponse:
+        events = [
+            {"type": THREAD_TAGS_EVENT_TYPE, "state_key": key, "content": content}
+            for key, content in current_events.items()
+        ]
+        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+
+    async def room_put_state(**kwargs: object) -> nio.RoomPutStateResponse:
+        current_events[kwargs["state_key"]] = kwargs["content"]  # type: ignore[index]
+        return nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id=_ROOM_A)
+
+    client.room_get_state.side_effect = room_get_state
+    client.room_put_state.side_effect = room_put_state
+
+    result = await set_thread_tags_if_empty(
+        client,
+        _ROOM_A,
+        "$root:localhost",
+        ["bug"],
+        set_by="@mindroom_general:localhost",
+    )
+
+    assert result.had_existing_tags is False
+    assert result.applied_tags == ("bug",)
