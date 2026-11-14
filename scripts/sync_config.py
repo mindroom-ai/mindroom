@@ -62,7 +62,8 @@ def saas_config() -> dict:
     config.pop("mcp_servers")
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
     config["defaults"]["tools"].remove("update_awareness")
-    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp"}
+    # Hosted tenants get thread_snooze only when someone adds it to an agent.
+    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp", "thread_snooze"}
     for agent in config["agents"].values():
         agent["tools"] = [
             tool

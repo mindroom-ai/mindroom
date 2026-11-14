@@ -106,7 +106,8 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert "update_awareness" not in yaml.dump(generated)
     # `script` would run in the primary pod, and tenants cannot log in to matrix-mcp.
     assert "mcp_servers" not in generated
-    assert not {"script", "mcp_matrix_mcp"} & {
+    # Hosted tenants get thread_snooze only when someone adds it.
+    assert not {"script", "mcp_matrix_mcp", "thread_snooze"} & {
         tool["name"] if isinstance(tool, dict) else tool for tool in generated["agents"]["mind"]["tools"]
     }
     # Hosted agents learn workspace skills by default.
