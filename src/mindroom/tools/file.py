@@ -543,7 +543,9 @@ def with_view_file_hint(toolkits: Sequence[AdaptedToolkit]) -> list[AdaptedToolk
 async def _name_view_file(call: ToolCall, call_next: ToolNext) -> object:
     result = await call_next(call.arguments)
     file_name = call.arguments.get("file_name")
-    if not isinstance(file_name, str):
+    # view_file finds a relative path where read_file does; shared directories and saved outputs, which only read_file
+    # reaches, go by absolute path.
+    if not isinstance(file_name, str) or Path(file_name).is_absolute():
         return result
     mime_type = named_mime_type(file_name)
     if mime_type is not None and result == _image_read_error(file_name, mime_type):

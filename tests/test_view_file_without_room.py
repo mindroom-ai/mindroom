@@ -164,6 +164,30 @@ async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
 
 
 @pytest.mark.asyncio
+async def test_read_file_names_view_file_only_for_a_relative_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared directories and saved outputs, which view_file cannot reach, go by absolute path and get no hint."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "board.png").write_bytes(image_bytes())
+    file_name = str(workdir / "board.png")
+    provider = ScriptedProvider(steps=[[("read_file", {"file_name": file_name})], "done"])
+    provider.install(monkeypatch)
+
+    await run_turn(
+        _headless_config("file", "attachments"),
+        agent="coder",
+        prompt="look",
+        storage=tmp_path / "storage",
+        workdir=workdir,
+    )
+
+    assert _tool_result(provider.requests[1]) == f"Error reading file: {file_name} is an image (image/png), not text."
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("entry", "saved", "offered"),
     [
