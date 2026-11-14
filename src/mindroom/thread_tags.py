@@ -54,6 +54,7 @@ __all__ = [
     "get_thread_tags",
     "list_tagged_threads",
     "normalize_tag_name",
+    "parse_thread_tag_state_key",
     "remove_thread_tag",
     "set_thread_tag",
     "set_thread_tags_if_empty",
@@ -419,7 +420,7 @@ def _thread_tag_state_key(thread_root_id: str, tag: str) -> str:
     return json.dumps([thread_root_id, tag], separators=(",", ":"))
 
 
-def _parse_thread_tag_state_key(state_key: object) -> tuple[str, str] | None:
+def parse_thread_tag_state_key(state_key: object) -> tuple[str, str] | None:
     """Parse one per-tag state key into its thread root and tag name."""
     if not isinstance(state_key, str):
         return None
@@ -659,7 +660,7 @@ async def _get_room_thread_tags_snapshot(
         content = event.get("content")
         if not isinstance(content, Mapping):
             continue
-        parsed_state_key = _parse_thread_tag_state_key(event.get("state_key"))
+        parsed_state_key = parse_thread_tag_state_key(event.get("state_key"))
         if parsed_state_key is None:
             continue
 
