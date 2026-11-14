@@ -1262,6 +1262,8 @@ agents:
         defer: true
       - name: thread_resolution
         defer: true
+      - name: thread_snooze
+        defer: true
       - name: compact_context
         defer: true
       - name: callback_manager

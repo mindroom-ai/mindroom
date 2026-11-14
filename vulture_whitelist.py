@@ -463,5 +463,3 @@ _.fire  # Plugin testing API, called by plugins' tests (src/mindroom/plugin_test
 _.get_code  # importlib loader method the import system calls (src/mindroom/tool_system/plugin_imports.py)
 _.create_module  # importlib loader method the import system calls (src/mindroom/tool_system/plugin_imports.py)
 _.parent_subagent_id  # Public HeadlessRun field that request_headers callers read (src/mindroom/headless.py)
-_.snoozed  # Called by the thread snooze tool in the next change (src/mindroom/orchestration/thread_snooze_runtime.py)
-_.unsnoozed  # Called by the thread snooze tool in the next change (src/mindroom/orchestration/thread_snooze_runtime.py)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from nio import RoomGetEventError
@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_resolution import ThreadResolutionTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG, ThreadTagsError
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -275,3 +275,59 @@ async def test_thread_resolution_surfaces_state_errors(
     assert payload["action"] == action
     assert payload["thread_id"] == THREAD_ID
     assert payload["message"] == "state failed"
+
+
+def _state_with(*tags: str) -> MagicMock:
+    state = MagicMock()
+    state.tags = dict.fromkeys(tags, MagicMock())
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_fails", [False, True])
+async def test_resolve_thread_removes_an_existing_snooze(tmp_path: Path, remove_fails: bool) -> None:
+    """Resolving a snoozed thread ends its snooze, and a failed cleanup does not fail the resolve."""
+    orchestrator = MagicMock()
+    context = replace(_context(tmp_path), orchestrator=orchestrator)
+    remove = AsyncMock(side_effect=ThreadTagsError("nope") if remove_fails else None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.set_thread_tag",
+            new=AsyncMock(return_value=_state_with(RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG)),
+        ),
+        patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=remove),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+
+    assert payload["status"] == "ok"
+    remove.assert_awaited_once_with(
+        context.client,
+        ROOM_ID,
+        THREAD_ID,
+        SNOOZED_THREAD_TAG,
+        requester_user_id=context.requester_id,
+    )
+    if remove_fails:
+        orchestrator.thread_snooze.unsnoozed.assert_not_called()
+    else:
+        orchestrator.thread_snooze.unsnoozed.assert_called_once_with(ROOM_ID, THREAD_ID)
+
+
+@pytest.mark.asyncio
+async def test_resolve_thread_leaves_other_state_alone(tmp_path: Path) -> None:
+    """Without a snooze, resolving removes nothing."""
+    context = _context(tmp_path)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.set_thread_tag",
+            new=AsyncMock(return_value=_state_with(RESOLVED_THREAD_TAG)),
+        ),
+        patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        await ThreadResolutionTools().resolve_thread()
+
+    mock_remove.assert_not_awaited()

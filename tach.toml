@@ -2620,6 +2620,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_snooze"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.thread_tags"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",

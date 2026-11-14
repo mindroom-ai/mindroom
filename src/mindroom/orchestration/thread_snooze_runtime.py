@@ -75,7 +75,7 @@ class ThreadSnoozeRuntimeCoordinator:
         mention = None if self._is_bot(set_by) else set_by
         self._runtime.track(Snooze(room_id, thread_root_id, until, note, mention))
 
-    def unsnoozed(self, room_id: str, thread_root_id: str) -> None:  # privata: ignore - the thread snooze tool calls it
+    def unsnoozed(self, room_id: str, thread_root_id: str) -> None:
         """Drop a snooze this runtime just removed."""
         self._runtime.forget(room_id, thread_root_id)
 

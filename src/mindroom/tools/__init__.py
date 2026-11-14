@@ -154,6 +154,7 @@ from mindroom.tools.terminal import terminal_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools
+from mindroom.tools.thread_snooze import thread_snooze_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todo import todo_tools
