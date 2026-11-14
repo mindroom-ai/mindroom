@@ -727,24 +727,38 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     assert [event for event in events if event in captured.err] == expected
 
 
-def test_library_logging_keeps_the_handlers_a_program_sets_on_agno(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only Agno's own console handler gives way, whether the program set its handlers before or after a call."""
+def test_library_logging_leaves_the_program_its_own_agno_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only Agno's own console handler gives way; handlers the program sets on Agno's loggers keep their records."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
     _give_agno_its_console_handlers()
-    before = logging.NullHandler()
+    root = logging.StreamHandler(sys.stderr)
+    root.setFormatter(logging.Formatter("root %(message)s"))
+    logging.getLogger().addHandler(root)
+    # Set before the first headless call: a stdout handler of the program's own.
+    before = logging.StreamHandler(sys.stdout)
+    before.setFormatter(logging.Formatter("before %(message)s"))
     agno_log.agent_logger.addHandler(before)
-    # A program can also silence a logger by removing Agno's handler.
-    agno_log.workflow_logger.handlers.clear()
-    # On a terminal, Agno's handler is a Rich one.
-    agno_log.team_logger.handlers[:] = [agno_log.ColoredRichHandler()]
+    # On a terminal, Agno's console handler is a Rich one.
+    agno_log.workflow_logger.handlers[:] = [agno_log.ColoredRichHandler()]
     logging_config.use_library_logging()
-    after = logging.NullHandler()
+    # Set after it: a handler that takes INFO records while the root logger stays at WARNING.
+    after = logging.StreamHandler(sys.stderr)
+    after.setFormatter(logging.Formatter("after %(message)s"))
     agno_log.team_logger.addHandler(after)
+    agno_log.team_logger.propagate = False
     logging_config.use_library_logging()
 
-    assert (agno_log.agent_logger.handlers, agno_log.agent_logger.propagate) == ([before], False)
-    assert (agno_log.team_logger.handlers, agno_log.team_logger.propagate) == ([after], True)
-    assert (agno_log.workflow_logger.handlers, agno_log.workflow_logger.propagate) == ([], False)
+    agno_log.agent_logger.info("agent_info")
+    agno_log.agent_logger.warning("agent_warning")
+    agno_log.team_logger.info("team_info")
+    agno_log.workflow_logger.warning("workflow_warning")
+
+    captured = capsys.readouterr()
+    assert captured.out == "before agent_info\nbefore agent_warning\n"
+    assert captured.err == "root agent_warning\nafter team_info\nroot workflow_warning\n"
 
 
 def test_a_logger_survives_pickling_and_copying() -> None:

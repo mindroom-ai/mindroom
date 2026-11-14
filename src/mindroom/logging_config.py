@@ -121,16 +121,25 @@ def _scrub_request_record(record: logging.LogRecord) -> bool:
 
 
 class _AgnoLevelFilter(logging.Filter):
-    """Drop records below the level MindRoom resolved for one Agno logger, or without one, below the root logger's."""
+    """Drop records below the level MindRoom resolved for one Agno logger."""
 
-    def __init__(self, level: str | None) -> None:
+    def __init__(self, level: str) -> None:
         super().__init__()
-        self.levelno = None if level is None else logging.getLevelNamesMapping()[level]
+        self.levelno = logging.getLevelNamesMapping()[level]
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Keep only records at or above the resolved level, or the root logger's level when none was resolved."""
-        levelno = logging.getLogger().getEffectiveLevel() if self.levelno is None else self.levelno
-        return record.levelno >= levelno
+        """Keep only records at or above the resolved level."""
+        return record.levelno >= self.levelno
+
+
+class _AgnoRecordsToRoot(logging.Handler):
+    """Hand an Agno record to the root logger's handlers when it is at or above the root logger's level."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Pass the record on, checking the root level here since Agno's own runs reset its loggers' levels."""
+        root = logging.getLogger()
+        if record.levelno >= root.getEffectiveLevel():
+            root.handle(record)
 
 
 class _RedactingExceptionFormatter:
@@ -576,25 +585,23 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
 
 
 def _route_agno_console_to_root() -> None:
-    """Replace the console handler Agno gives its loggers with the root logger's handlers, keeping the program's own.
+    """Swap the console handler Agno gives its loggers for one that hands records to the root logger's handlers.
 
-    This is library logging's form of the AGNO_COMPAT workaround in `_route_agno_loggers_to_root`.
+    This is library logging's form of the AGNO_COMPAT workaround in `_route_agno_loggers_to_root`. Handlers, levels, and
+    propagation the program set on Agno's loggers stay as they are.
     """
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
     for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
-        console = [
-            handler
-            for handler in agno_logger.handlers
-            if isinstance(handler, agno_log.ColoredRichHandler)
-            or (isinstance(handler, logging.StreamHandler) and handler.stream in (sys.stdout, sys.__stdout__))
-        ]
-        for handler in console:
-            agno_logger.removeHandler(handler)
-        # A logger with handlers the program set keeps sending its records only to them.
-        if console and not agno_logger.handlers:
-            agno_logger.propagate = True
-            agno_logger.addFilter(_AgnoLevelFilter(None))
+        for handler in list(agno_logger.handlers):
+            # Agno's `build_logger` gives a terminal its Rich handler and anything else this stdout one.
+            if isinstance(handler, agno_log.ColoredRichHandler) or (
+                type(handler) is logging.StreamHandler
+                and handler.formatter is not None
+                and handler.formatter._fmt == "%(levelname)-7s %(message)s"
+            ):
+                agno_logger.removeHandler(handler)
+                agno_logger.addHandler(_AgnoRecordsToRoot())
 
 
 def exception_frames(error: BaseException) -> list[str]:
