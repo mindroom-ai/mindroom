@@ -28,9 +28,9 @@ def _parse_until(until: object) -> datetime | str:
         return _NOT_A_DATETIME
     try:
         parsed = datetime.fromisoformat(text)
-    except ValueError:
+        parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return _NOT_A_DATETIME
-    parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     if parsed <= datetime.now(UTC):
         return "until must be in the future."
     return parsed

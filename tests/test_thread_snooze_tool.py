@@ -119,6 +119,7 @@ async def test_snooze_thread_writes_the_tag_and_tells_the_runtime(tmp_path: Path
         ("2099-11-14", "until must be an ISO-8601 datetime."),
         ("", "until must be an ISO-8601 datetime."),
         (12345, "until must be an ISO-8601 datetime."),
+        ("9999-12-31T23:59:59-01:00", "until must be an ISO-8601 datetime."),
     ],
 )
 async def test_snooze_thread_refuses_a_past_time_and_a_non_timestamp(

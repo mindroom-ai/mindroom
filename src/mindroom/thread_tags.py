@@ -196,6 +196,17 @@ def _parse_timestamp(value: object) -> datetime | None:
     return parsed
 
 
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp into UTC, or None when it is invalid or falls outside the UTC range."""
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return None
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError:
+        return None
+
+
 def _parse_power_level(value: object) -> int | None:
     """Return one Matrix power level value when it is a real integer."""
     if type(value) is not int:
@@ -363,11 +374,11 @@ def _normalize_due_tag_data(normalized_data: dict[str, Any]) -> None:
 
 def _normalize_snoozed_tag_data(normalized_data: dict[str, Any]) -> None:
     """Normalize the snoozed-tag schema, which requires its wake time."""
-    until = _parse_timestamp(normalized_data.get("until"))
+    until = _parse_utc_timestamp(normalized_data.get("until"))
     if until is None:
         msg = "snoozed.data.until must be an ISO-8601 timestamp."
         raise ThreadTagsError(msg)
-    normalized_data["until"] = until.astimezone(UTC).isoformat()
+    normalized_data["until"] = until.isoformat()
 
 
 _PREDEFINED_TAG_DATA_NORMALIZERS: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -755,8 +766,7 @@ def snooze_until(record: ThreadTagRecord | None) -> datetime | None:
     """Return the wake time of a snoozed record in UTC, or None when absent or invalid."""
     if record is None:
         return None
-    until = _parse_timestamp(record.data.get("until"))
-    return None if until is None else until.astimezone(UTC)
+    return _parse_utc_timestamp(record.data.get("until"))
 
 
 async def get_thread_tag_content(

@@ -2269,3 +2269,50 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
     with pytest.raises(ThreadTagsError, match="boom"):
         await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+
+_OVERFLOWING_UNTILS = ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+async def test_snoozed_tag_whose_until_overflows_utc_is_dropped(until: str) -> None:
+    """A wake time that cannot be expressed in UTC drops that tag, not the room's other tags."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-root:localhost", "resolved"),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "snoozed",
+            content=_tag_record_content(data={"until": until}),
+        ),
+    )
+
+    state = await get_thread_tags(client, "!room:localhost", "$thread-root:localhost")
+    listing = await list_tagged_threads(client, "!room:localhost")
+
+    assert state is not None
+    assert list(state.tags) == ["resolved"]
+    assert list(listing.tag_state["$thread-root:localhost"].tags) == ["resolved"]
+
+
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+def test_snooze_until_is_none_when_until_overflows_utc(until: str) -> None:
+    """The latest and earliest representable UTC times still parse; one step beyond them is invalid."""
+    record = ThreadTagRecord(set_by="@alice:localhost", set_at=datetime(2026, 11, 13, tzinfo=UTC), data={})
+    assert snooze_until(record.model_copy(update={"data": {"until": until}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "9999-12-31T22:59:59-01:00"}})) == datetime(
+        9999,
+        12,
+        31,
+        23,
+        59,
+        59,
+        tzinfo=UTC,
+    )
+    assert snooze_until(record.model_copy(update={"data": {"until": "0001-01-01T01:00:00+01:00"}})) == datetime(
+        1,
+        1,
+        1,
+        tzinfo=UTC,
+    )
