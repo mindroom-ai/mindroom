@@ -14,6 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_snooze import (
+    SNOOZE_RETRY_DELAY,
     THREAD_SNOOZE_CONTENT_KEY,
     Snooze,
     SnoozeClear,
@@ -58,6 +59,9 @@ class ThreadSnoozeRuntimeCoordinator:
     _loop: SupervisedLoop = field(init=False)
     _restored_rooms: set[str] = field(default_factory=set, init=False)
     _restore_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    _restore_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    # Threads whose tag a live event touched while their room's state was being read; that snapshot is older.
+    _live_during_restore: dict[str, set[str]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Create the snooze index and its supervised wake loop."""
@@ -69,7 +73,12 @@ class ThreadSnoozeRuntimeCoordinator:
         self._loop.start()
 
     async def stop(self) -> None:
-        """Stop the wake loop."""
+        """Stop the wake loop and any pending room restore retry."""
+        retries = list(self._restore_retries.values())
+        self._restore_retries.clear()
+        for retry in retries:
+            retry.cancel()
+        await asyncio.gather(*retries, return_exceptions=True)
         await self._loop.stop()
 
     def snoozed(self, room_id: str, thread_root_id: str, *, until: datetime, note: str | None, set_by: str) -> None:
@@ -82,15 +91,24 @@ class ThreadSnoozeRuntimeCoordinator:
         self._runtime.forget(room_id, thread_root_id)
 
     def observe_state_event(self, room_id: str, source: Mapping[str, object]) -> None:
-        """Index or drop the snooze a raw thread tag state event sets or removes; ignore any other event."""
-        parsed = snooze_from_state_event(
+        """Index or drop the snooze a live raw thread tag state event sets or removes; ignore any other event."""
+        parsed = self._parse_state_event(room_id, source)
+        if parsed is None:
+            return
+        live_roots = self._live_during_restore.get(room_id)
+        if live_roots is not None:
+            live_roots.add(parsed[0])
+        self._apply_state_event(room_id, parsed)
+
+    def _parse_state_event(self, room_id: str, source: Mapping[str, object]) -> tuple[str, Snooze | None] | None:
+        return snooze_from_state_event(
             room_id,
             source,
             is_bot=self._is_bot,
             is_mindroom_account=self._is_mindroom_account,
         )
-        if parsed is None:
-            return
+
+    def _apply_state_event(self, room_id: str, parsed: tuple[str, Snooze | None]) -> None:
         thread_root_id, snooze = parsed
         if snooze is None:
             self._runtime.forget(room_id, thread_root_id)
@@ -107,18 +125,39 @@ class ThreadSnoozeRuntimeCoordinator:
                 return
             # No other bot synced this room, so tag changes made meanwhile reached no callback: read it again.
             self._restored_rooms.discard(room_id)
+            live_roots = self._live_during_restore[room_id] = set()
             try:
                 response = await client.room_get_state(room_id)
                 if not isinstance(response, nio.RoomGetStateResponse):
                     logger.warning("thread_snooze_room_state_unread", room_id=room_id, error=str(response))
+                    self._retry_restore_later(room_id)
                     return
                 for event in response.events:
-                    self.observe_state_event(room_id, event)
+                    parsed = self._parse_state_event(room_id, event)
+                    if parsed is not None and parsed[0] not in live_roots:
+                        self._apply_state_event(room_id, parsed)
                 self._restored_rooms.add(room_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("thread_snooze_restore_failed", agent=bot.agent_name, room_id=room_id)
+                self._retry_restore_later(room_id)
+            finally:
+                del self._live_during_restore[room_id]
+
+    def _retry_restore_later(self, room_id: str) -> None:
+        """Read the room's state again after the retry delay, unless a retry is already pending."""
+        if room_id not in self._restore_retries:
+            self._restore_retries[room_id] = asyncio.create_task(self._retry_restore(room_id))
+
+    async def _retry_restore(self, room_id: str) -> None:
+        await asyncio.sleep(SNOOZE_RETRY_DELAY.total_seconds())
+        self._restore_retries.pop(room_id, None)
+        joined = next(self._joined_bots(room_id), None)
+        if joined is None or room_id in self._restored_rooms:
+            # No bot sees the room anymore; the next bot to join restores it.
+            return
+        await self.restore_room(joined[0], room_id)
 
     def _still_watched(self, bot: AgentBot, room_id: str) -> bool:
         """Return whether the room is restored and another bot is joined to it, so its sync carries the room's tags."""
@@ -139,7 +178,7 @@ class ThreadSnoozeRuntimeCoordinator:
         for name in sorted(bots, key=lambda name: (name != ROUTER_AGENT_NAME, name)):
             bot = bots[name]
             client = bot.client
-            if client is not None and room_id in client.rooms:
+            if bot.running and client is not None and room_id in client.rooms:
                 yield bot, client
 
     async def _read_tag(self, room_id: str, thread_root_id: str, tag: str) -> dict[str, Any] | None:
@@ -206,12 +245,15 @@ class ThreadSnoozeRuntimeCoordinator:
         return "not_permitted"
 
     async def send_ended(self, snooze: Snooze) -> bool:
-        """Post the wake message into the thread as the first joined bot; False when it was not delivered."""
-        joined = next(self._joined_bots(snooze.room_id), None)
-        if joined is None:
-            return False
+        """Post the wake message into the thread through the first joined bot that delivers it; False when none did."""
+        for bot, _client in self._joined_bots(snooze.room_id):
+            if await self._send_ended_as(bot, snooze):
+                return True
+        return False
+
+    async def _send_ended_as(self, bot: AgentBot, snooze: Snooze) -> bool:
         try:
-            event_id = await joined[0].hook_context.send_message(
+            event_id = await bot.hook_context.send_message(
                 snooze.room_id,
                 wake_message_body(snooze.note),
                 snooze.thread_root_id,
@@ -224,9 +266,10 @@ class ThreadSnoozeRuntimeCoordinator:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # The runtime retries an undelivered wake message; it already removed the snooze, so nothing else would.
+            # The next bot, or the runtime's retry, sends it instead; the snooze is already removed, so nothing else would.
             logger.warning(
                 "thread_snooze_send_failed",
+                agent=bot.agent_name,
                 room_id=snooze.room_id,
                 thread_root_id=snooze.thread_root_id,
                 exc_info=True,

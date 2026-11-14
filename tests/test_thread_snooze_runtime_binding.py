@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -161,9 +161,18 @@ async def test_restore_reads_the_room_again_when_every_bot_left_it(tmp_path: Pat
     assert set(_tracked(coordinator)) == {(ROOM, "$new")}
 
 
+async def _await_restore_retries(coordinator: ThreadSnoozeRuntimeCoordinator) -> None:
+    """Run every scheduled restore retry, including the ones a failed retry schedules, to completion."""
+    for _ in range(10):
+        if not coordinator._restore_retries:
+            return
+        await asyncio.gather(*coordinator._restore_retries.values())
+    pytest.fail("restore retries did not settle")
+
+
 @pytest.mark.asyncio
-async def test_restore_reads_the_room_again_after_a_failed_read(tmp_path: Path) -> None:
-    """A room whose state could not be read is not marked restored, so the next join reads it."""
+async def test_failed_restore_is_retried_until_it_reads_the_room(tmp_path: Path) -> None:
+    """A room whose state could not be read is read again after the retry delay, without another join."""
     bot, other = _bot(ROOM), _bot(ROOM)
     bot.client.room_get_state = AsyncMock(
         side_effect=[
@@ -172,31 +181,90 @@ async def test_restore_reads_the_room_again_after_a_failed_read(tmp_path: Path) 
             nio.RoomGetStateResponse(events=[_snooze_source()], room_id=ROOM),
         ],
     )
+    other.client.room_get_state = bot.client.room_get_state
     coordinator = _coordinator(_config(tmp_path), {"router": bot, "code": other})
 
-    await coordinator.restore_room(bot, ROOM)
-    await coordinator.restore_room(bot, ROOM)
-    assert _tracked(coordinator) == {}
-    await coordinator.restore_room(bot, ROOM)
+    with patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)):
+        await coordinator.restore_room(bot, ROOM)
+        assert _tracked(coordinator) == {}
+        assert set(coordinator._restore_retries) == {ROOM}
+        await _await_restore_retries(coordinator)
 
+    assert bot.client.room_get_state.await_count == 3
     assert set(_tracked(coordinator)) == {(ROOM, ROOT)}
+    assert coordinator._restore_retries == {}
+
+
+@pytest.mark.asyncio
+async def test_restore_retry_stops_when_no_bot_is_joined_and_on_stop(tmp_path: Path) -> None:
+    """A retry gives up once every bot left the room, and stopping the coordinator cancels a pending retry."""
+    bot = _bot(ROOM)
+    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateError("boom"))
+    coordinator = _coordinator(_config(tmp_path), {"router": bot})
+
+    with patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)):
+        await coordinator.restore_room(bot, ROOM)
+        bot.client.rooms = {}
+        await _await_restore_retries(coordinator)
+    assert bot.client.room_get_state.await_count == 1
+
+    bot.client.rooms = {ROOM: MagicMock()}
+    await coordinator.restore_room(bot, ROOM)
+    await coordinator.restore_room(bot, ROOM)
+    [retry] = coordinator._restore_retries.values()
+    await coordinator.stop()
+    assert retry.cancelled()
+    assert coordinator._restore_retries == {}
 
 
 @pytest.mark.asyncio
 async def test_restore_that_fails_partway_leaves_the_room_unrestored(tmp_path: Path) -> None:
-    """A failure while indexing the room's events lets the next join read the room again."""
+    """A failure while indexing the room's events leaves it unrestored, so the retry reads it again."""
     bot, other = _bot(ROOM), _bot(ROOM)
     bot.client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse(events=[_snooze_source(), _snooze_source(root="$two")], room_id=ROOM),
     )
     coordinator = _coordinator(_config(tmp_path), {"router": bot, "code": other})
+    track = coordinator._runtime.track
 
-    with patch.object(coordinator, "observe_state_event", side_effect=[None, RuntimeError("boom")]):
+    with (
+        patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)),
+        patch.object(coordinator._runtime, "track", side_effect=[None, RuntimeError("boom"), track, track]),
+    ):
         await coordinator.restore_room(bot, ROOM)
-    await coordinator.restore_room(bot, ROOM)
+        assert ROOM not in coordinator._restored_rooms
+    with patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)):
+        await _await_restore_retries(coordinator)
 
     assert bot.client.room_get_state.await_count == 2
     assert set(_tracked(coordinator)) == {(ROOM, ROOT), (ROOM, "$two")}
+
+
+@pytest.mark.asyncio
+async def test_live_events_during_a_restore_win_over_its_older_snapshot(tmp_path: Path) -> None:
+    """A tag event that arrives while the room's state is being read is newer than that snapshot, so it stays."""
+    later = UNTIL.replace(hour=12)
+    snapshot = nio.RoomGetStateResponse(
+        events=[_snooze_source(), _snooze_source(root="$removed"), _snooze_source(root="$untouched")],
+        room_id=ROOM,
+    )
+    bot = _bot(ROOM)
+    coordinator = _coordinator(_config(tmp_path), {"router": bot})
+    moved = _snooze_source()
+    moved["content"] = {**moved["content"], "data": {"until": later.isoformat()}}  # type: ignore[dict-item]
+
+    async def room_get_state(_room_id: str) -> nio.RoomGetStateResponse:
+        coordinator.observe_state_event(ROOM, moved)
+        coordinator.observe_state_event(ROOM, _snooze_source(root="$removed", content={}))
+        return snapshot
+
+    bot.client.room_get_state = room_get_state
+    await coordinator.restore_room(bot, ROOM)
+
+    tracked = _tracked(coordinator)
+    assert set(tracked) == {(ROOM, ROOT), (ROOM, "$untouched")}
+    assert tracked[ROOM, ROOT].until == later
+    assert coordinator._live_during_restore == {}
 
 
 @pytest.mark.asyncio
@@ -478,6 +546,39 @@ async def test_send_ended_mentions_only_the_snoozer_and_wakes_no_agent(tmp_path:
         mentions=[],
         wake_mentioned=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_send_ended_falls_back_to_the_next_joined_bot(tmp_path: Path) -> None:
+    """A wake message the router cannot deliver goes out through the next joined bot."""
+    router, code, team = _bot(ROOM), _bot(ROOM), _bot(ROOM)
+    router.hook_context.send_message = AsyncMock(side_effect=RuntimeError("transport"))
+    code.hook_context.send_message = AsyncMock(return_value=None)
+    coordinator = _coordinator(_config(tmp_path), {"team": team, "code": code, "router": router})
+
+    assert await coordinator.send_ended(Snooze(ROOM, ROOT, UNTIL, None, PERSON)) is True
+
+    router.hook_context.send_message.assert_awaited_once()
+    code.hook_context.send_message.assert_awaited_once()
+    team.hook_context.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bots_that_are_not_running_are_skipped(tmp_path: Path) -> None:
+    """A stopped bot neither reads, clears, nor sends for a snooze, even while its client lists the room."""
+    router, code = _bot(ROOM), _bot(ROOM)
+    router.running = False
+    coordinator = _coordinator(_config(tmp_path), {"code": code, "router": router})
+
+    async def read(client: object, *_args: object) -> dict[str, Any] | None:
+        assert client is code.client
+        return None
+
+    with patch(f"{_MODULE}.get_thread_tag_content", new=read):
+        assert await coordinator.is_resolved(ROOM, ROOT) is False
+    assert await coordinator.send_ended(Snooze(ROOM, ROOT, UNTIL, None, None)) is True
+    router.hook_context.send_message.assert_not_awaited()
+    code.hook_context.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
