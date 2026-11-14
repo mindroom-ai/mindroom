@@ -10,7 +10,6 @@ import logging.handlers
 import os
 import queue
 import sys
-import threading
 import traceback
 from datetime import UTC, datetime
 from io import StringIO
@@ -133,25 +132,6 @@ class _AgnoLevelFilter(logging.Filter):
         return record.levelno >= self.levelno
 
 
-class _AgnoRecordsToRoot(logging.Handler):
-    """Hand an Agno logger's records at or above the root logger's level to the root logger's handlers."""
-
-    def __init__(self, agno_logger: logging.Logger) -> None:
-        super().__init__()
-        self._agno_logger = agno_logger
-
-    def emit(self, record: logging.LogRecord) -> None:
-        """Pass the record on while the program leaves the Agno logger as MindRoom set it up.
-
-        The level is checked here since Agno's own runs reset its loggers' levels.
-        """
-        if self._agno_logger.propagate or self._agno_logger.handlers != [self]:
-            return
-        root = logging.getLogger()
-        if record.levelno >= root.getEffectiveLevel():
-            root.handle(record)
-
-
 class _RedactingExceptionFormatter:
     """Render exceptions normally, then redact credential-bearing text."""
 
@@ -225,19 +205,16 @@ _LIBRARY_PROCESSORS: list[Processor] = [
     *_DEFAULT_PROCESSORS,
 ]
 _library_logging = False
-# Concurrent first headless calls would each see Agno's console handler and add a handler of their own.
-_AGNO_CONSOLE_SWAP_LOCK = threading.Lock()
 
 
 def use_library_logging() -> None:
-    """Hand MindRoom's and Agno's records to stdlib logging, where the program's own logging setup decides what shows.
+    """Hand MindRoom's records to stdlib logging, where the program's own logging setup decides what shows.
 
     MindRoom's records keep `_DEFAULT_PROCESSORS`' rendering and redaction, whatever the program configures structlog
     to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
     """
     global _library_logging
     _library_logging = True
-    _route_agno_console_to_root()
 
 
 def configure_default_logging() -> None:
@@ -569,8 +546,7 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     # AGNO_COMPAT: Agno library loggers bypass the host's logging configuration.
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
-    # skip the JSON renderer and redaction, leave the knowledge refresh child as plain stderr lines, and
-    # print to the stdout of a program that runs headless turns.
+    # skip the JSON renderer and redaction, and leave the knowledge refresh child as plain stderr lines.
     # The loggers keep the INFO level Agno sets on them, and propagated records skip the root level, so a
     # logger filter enforces the resolved level instead.
     # Upstream issue: https://github.com/agno-agi/agno/issues/4097, closed after Agno 2.0 added
@@ -581,10 +557,7 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     # handlers or setting their own levels.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
     # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
-    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level;
-    # tests/test_logging_config.py::test_library_logging_routes_agno_records_at_the_root_level;
-    # tests/test_logging_config.py::test_library_logging_reroutes_only_an_agno_logger_as_agno_set_it_up;
-    # tests/test_logging_config.py::test_library_logging_steps_aside_when_the_program_sets_up_agno_after_a_call.
+    # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
     for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
@@ -597,35 +570,6 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
         level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))
-
-
-def _route_agno_console_to_root() -> None:
-    """Swap the console handler of each Agno logger still as Agno set it up for one that hands records to the root.
-
-    This is library logging's form of the AGNO_COMPAT workaround in `_route_agno_loggers_to_root`. A logger the program
-    set up or replaced in any way keeps its setup, as does one the program sets up after this swap.
-    """
-    from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
-
-    with _AGNO_CONSOLE_SWAP_LOCK:
-        for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
-            if not isinstance(agno_logger, logging.Logger) or agno_logger.propagate or len(agno_logger.handlers) != 1:
-                continue
-            (handler,) = agno_logger.handlers
-            # Agno's `build_logger` gives a terminal its Rich handler and anything else this stream handler, both on
-            # stdout and neither with a filter or a level of its own.
-            agnos = (
-                isinstance(handler, agno_log.ColoredRichHandler)
-                and handler.console.file in (sys.stdout, sys.__stdout__)
-            ) or (
-                type(handler) is logging.StreamHandler
-                and handler.stream in (sys.stdout, sys.__stdout__)
-                and handler.formatter is not None
-                and handler.formatter._fmt == "%(levelname)-7s %(message)s"
-            )
-            if agnos and not handler.filters and handler.level == logging.NOTSET:
-                agno_logger.removeHandler(handler)
-                agno_logger.addHandler(_AgnoRecordsToRoot(agno_logger))
 
 
 def exception_frames(error: BaseException) -> list[str]:
@@ -662,7 +606,7 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
         name: Logger name (typically __name__)
 
     Returns:
-        Configured structlog logger
+        A structlog logger, which logs through MindRoom's own processors after `use_library_logging`
 
     """
     return cast("structlog.stdlib.BoundLogger", _Logger(name))

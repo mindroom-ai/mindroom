@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import io
 import json
 import logging
 import logging.config
@@ -27,7 +26,6 @@ import uvicorn
 from agno.utils import log as agno_log
 from fastapi import FastAPI, WebSocket
 from mem0 import AsyncMemory
-from rich.console import Console
 
 from mindroom import logging_config
 from mindroom.constants import RuntimePaths
@@ -639,15 +637,6 @@ def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
     assert "api-secret" not in output
 
 
-def _give_agno_its_console_handlers() -> None:
-    """Give Agno's loggers the console handler Agno installs on import, writing to this test's stdout."""
-    for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger):
-        # Agno leaves a logger that already has handlers or a level as it is.
-        agno_logger.handlers.clear()
-        agno_logger.setLevel(logging.NOTSET)
-        agno_log.build_logger(agno_logger.name)
-
-
 @pytest.mark.parametrize(
     "structlog_setup",
     [
@@ -699,153 +688,29 @@ def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does
 @pytest.mark.parametrize(
     ("level", "expected"),
     [
-        (logging.INFO, ["agno_info", "agno_warning", "mindroom_info"]),
-        (logging.WARNING, ["agno_warning"]),
+        (logging.DEBUG, ["mindroom_debug", "mindroom_info", "mindroom_warning"]),
+        (logging.WARNING, ["mindroom_warning"]),
     ],
 )
-def test_library_logging_routes_agno_records_at_the_root_level(
+def test_library_logging_follows_the_programs_logging_level(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     level: int,
     expected: list[str],
 ) -> None:
-    """MindRoom's and Agno's records reach the program's own handlers at its root level, even after Agno resets it."""
+    """MindRoom's records, `%`-style arguments filled in, reach the program's own handlers at its root level."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
-    _give_agno_its_console_handlers()
     logging_config.use_library_logging()
     logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
     logging.getLogger().setLevel(level)
 
-    # Agno's own Agent, Team, and Workflow runs reset its loggers to INFO this way.
-    agno_log.set_log_level_to_info()
-    agno_log.agent_logger.info("agno_info")
-    agno_log.agent_logger.warning("agno_warning")
-    get_logger("tests.library").debug("mindroom_%s", "debug")
-    get_logger("tests.library").info("mindroom_%s", "info")
+    for method in ("debug", "info", "warning"):
+        getattr(get_logger("tests.library"), method)("mindroom_%s", method)
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    events = ["agno_info", "agno_warning", "mindroom_debug", "mindroom_info"]
+    events = ["mindroom_debug", "mindroom_info", "mindroom_warning"]
     assert [event for event in events if event in captured.err] == expected
-
-
-def _formatted(handler: logging.Handler, fmt: str) -> logging.Handler:
-    handler.setFormatter(logging.Formatter(fmt))
-    return handler
-
-
-def _rich_console(logger: logging.Logger) -> None:
-    # On a terminal, Agno's console handler is a Rich one.
-    logger.handlers[:] = [agno_log.ColoredRichHandler()]
-
-
-def _handler_beside_agnos(logger: logging.Logger) -> None:
-    logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "beside %(message)s"))
-
-
-def _propagating(logger: logging.Logger) -> None:
-    logger.propagate = True
-
-
-def _own_stdout_handler(logger: logging.Logger) -> None:
-    logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stdout), "own %(message)s")]
-
-
-def _rich_handler_on_own_console(logger: logging.Logger) -> None:
-    logger.handlers[:] = [agno_log.ColoredRichHandler(console=Console(file=io.StringIO()))]
-
-
-def _filter_on_agnos_handler(logger: logging.Logger) -> None:
-    logger.handlers[0].addFilter(lambda _record: False)
-
-
-def _level_on_agnos_handler(logger: logging.Logger) -> None:
-    logger.handlers[0].setLevel(logging.ERROR)
-
-
-def _own_plain_stdout_handler(logger: logging.Logger) -> None:
-    logger.handlers[:] = [logging.StreamHandler(sys.stdout)]
-
-
-def _own_stderr_handler_in_agnos_format(logger: logging.Logger) -> None:
-    logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stderr), "%(levelname)-7s %(message)s")]
-
-
-@pytest.mark.parametrize(
-    ("program_setup", "expected_out", "expected_err"),
-    [
-        pytest.param(lambda _logger: None, "", "root agent_warning\n", id="as-agno-set-it-up"),
-        pytest.param(_rich_console, "", "root agent_warning\n", id="agno-rich-console"),
-        pytest.param(_handler_beside_agnos, "WARNING agent_warning\n", "beside agent_warning\n", id="handler-beside"),
-        pytest.param(_propagating, "WARNING agent_warning\n", "root agent_warning\n", id="propagating"),
-        pytest.param(_own_stdout_handler, "own agent_warning\n", "", id="own-stdout-handler"),
-        pytest.param(_own_plain_stdout_handler, "agent_warning\n", "", id="own-plain-stdout-handler"),
-        pytest.param(_rich_handler_on_own_console, "", "", id="rich-handler-on-own-console"),
-        pytest.param(_filter_on_agnos_handler, "", "", id="filter-on-agnos-handler"),
-        pytest.param(_level_on_agnos_handler, "", "", id="level-on-agnos-handler"),
-        pytest.param(_own_stderr_handler_in_agnos_format, "", "WARNING agent_warning\n", id="own-agno-format"),
-    ],
-)
-def test_library_logging_reroutes_only_an_agno_logger_as_agno_set_it_up(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    program_setup: Callable[[logging.Logger], None],
-    expected_out: str,
-    expected_err: str,
-) -> None:
-    """Agno's console handler gives way to the root's handlers only on a logger the program has not set up itself."""
-    monkeypatch.setattr(logging_config, "_library_logging", False)
-    _give_agno_its_console_handlers()
-    logging.getLogger().addHandler(_formatted(logging.StreamHandler(sys.stderr), "root %(message)s"))
-    program_setup(agno_log.agent_logger)
-    logging_config.use_library_logging()
-
-    agno_log.agent_logger.warning("agent_warning")
-
-    captured = capsys.readouterr()
-    assert (captured.out, captured.err) == (expected_out, expected_err)
-
-
-def _handler_after_the_call(logger: logging.Logger) -> None:
-    logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "after %(message)s"))
-
-
-@pytest.mark.parametrize(
-    ("program_setup", "expected_err"),
-    [
-        pytest.param(_handler_after_the_call, "after agent_info\nafter agent_warning\n", id="handler"),
-        pytest.param(_propagating, "root agent_info\nroot agent_warning\n", id="propagating"),
-    ],
-)
-def test_library_logging_steps_aside_when_the_program_sets_up_agno_after_a_call(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    program_setup: Callable[[logging.Logger], None],
-    expected_err: str,
-) -> None:
-    """An Agno logger the program sets up after a headless call sends its records only where the program routes them."""
-    monkeypatch.setattr(logging_config, "_library_logging", False)
-    _give_agno_its_console_handlers()
-    logging.getLogger().addHandler(_formatted(logging.StreamHandler(sys.stderr), "root %(message)s"))
-    logging_config.use_library_logging()
-    program_setup(agno_log.agent_logger)
-    logging_config.use_library_logging()
-
-    agno_log.agent_logger.info("agent_info")
-    agno_log.agent_logger.warning("agent_warning")
-
-    assert capsys.readouterr().err == expected_err
-
-
-def test_library_logging_leaves_an_agno_logger_adapter_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A program can hand Agno a logger adapter through `configure_agno_logging`, which has no handlers to swap."""
-    monkeypatch.setattr(logging_config, "_library_logging", False)
-    adapter = logging.LoggerAdapter(logging.getLogger("tests.agno"), {})
-    monkeypatch.setattr(agno_log, "agent_logger", adapter)
-
-    logging_config.use_library_logging()
-
-    assert agno_log.agent_logger is adapter
 
 
 def test_a_logger_survives_pickling_and_copying() -> None:
