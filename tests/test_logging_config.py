@@ -727,38 +727,93 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     assert [event for event in events if event in captured.err] == expected
 
 
-def test_library_logging_leaves_the_program_its_own_agno_handlers(
+def _formatted(handler: logging.Handler, fmt: str) -> logging.Handler:
+    handler.setFormatter(logging.Formatter(fmt))
+    return handler
+
+
+def _rich_console(logger: logging.Logger) -> None:
+    # On a terminal, Agno's console handler is a Rich one.
+    logger.handlers[:] = [agno_log.ColoredRichHandler()]
+
+
+def _handler_beside_agnos(logger: logging.Logger) -> None:
+    logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "beside %(message)s"))
+
+
+def _propagating(logger: logging.Logger) -> None:
+    logger.propagate = True
+
+
+def _own_stdout_handler(logger: logging.Logger) -> None:
+    logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stdout), "own %(message)s")]
+
+
+def _own_plain_stdout_handler(logger: logging.Logger) -> None:
+    logger.handlers[:] = [logging.StreamHandler(sys.stdout)]
+
+
+def _own_stderr_handler_in_agnos_format(logger: logging.Logger) -> None:
+    logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stderr), "%(levelname)-7s %(message)s")]
+
+
+@pytest.mark.parametrize(
+    ("program_setup", "expected_out", "expected_err"),
+    [
+        pytest.param(lambda _logger: None, "", "root agent_warning\n", id="as-agno-set-it-up"),
+        pytest.param(_rich_console, "", "root agent_warning\n", id="agno-rich-console"),
+        pytest.param(_handler_beside_agnos, "WARNING agent_warning\n", "beside agent_warning\n", id="handler-beside"),
+        pytest.param(_propagating, "WARNING agent_warning\n", "root agent_warning\n", id="propagating"),
+        pytest.param(_own_stdout_handler, "own agent_warning\n", "", id="own-stdout-handler"),
+        pytest.param(_own_plain_stdout_handler, "agent_warning\n", "", id="own-plain-stdout-handler"),
+        pytest.param(_own_stderr_handler_in_agnos_format, "", "WARNING agent_warning\n", id="own-agno-format"),
+    ],
+)
+def test_library_logging_reroutes_only_an_agno_logger_as_agno_set_it_up(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    program_setup: Callable[[logging.Logger], None],
+    expected_out: str,
+    expected_err: str,
+) -> None:
+    """Agno's console handler gives way to the root's handlers only on a logger the program has not set up itself."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    _give_agno_its_console_handlers()
+    logging.getLogger().addHandler(_formatted(logging.StreamHandler(sys.stderr), "root %(message)s"))
+    program_setup(agno_log.agent_logger)
+    logging_config.use_library_logging()
+
+    agno_log.agent_logger.warning("agent_warning")
+
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == (expected_out, expected_err)
+
+
+def test_library_logging_keeps_what_the_program_sets_on_agno_after_a_call(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Only Agno's own console handler gives way; handlers the program sets on Agno's loggers keep their records."""
+    """A handler the program adds to an Agno logger after a headless call takes its records, below the root level too."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
     _give_agno_its_console_handlers()
-    root = logging.StreamHandler(sys.stderr)
-    root.setFormatter(logging.Formatter("root %(message)s"))
-    logging.getLogger().addHandler(root)
-    # Set before the first headless call: a stdout handler of the program's own.
-    before = logging.StreamHandler(sys.stdout)
-    before.setFormatter(logging.Formatter("before %(message)s"))
-    agno_log.agent_logger.addHandler(before)
-    # On a terminal, Agno's console handler is a Rich one.
-    agno_log.workflow_logger.handlers[:] = [agno_log.ColoredRichHandler()]
     logging_config.use_library_logging()
-    # Set after it: a handler that takes INFO records while the root logger stays at WARNING.
-    after = logging.StreamHandler(sys.stderr)
-    after.setFormatter(logging.Formatter("after %(message)s"))
-    agno_log.team_logger.addHandler(after)
-    agno_log.team_logger.propagate = False
+    agno_log.agent_logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "after %(message)s"))
     logging_config.use_library_logging()
 
     agno_log.agent_logger.info("agent_info")
-    agno_log.agent_logger.warning("agent_warning")
-    agno_log.team_logger.info("team_info")
-    agno_log.workflow_logger.warning("workflow_warning")
 
-    captured = capsys.readouterr()
-    assert captured.out == "before agent_info\nbefore agent_warning\n"
-    assert captured.err == "root agent_warning\nafter team_info\nroot workflow_warning\n"
+    assert capsys.readouterr().err == "after agent_info\n"
+
+
+def test_library_logging_leaves_an_agno_logger_adapter_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A program can hand Agno a logger adapter through `configure_agno_logging`, which has no handlers to swap."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    adapter = logging.LoggerAdapter(logging.getLogger("tests.agno"), {})
+    monkeypatch.setattr(agno_log, "agent_logger", adapter)
+
+    logging_config.use_library_logging()
+
+    assert agno_log.agent_logger is adapter
 
 
 def test_a_logger_survives_pickling_and_copying() -> None:
