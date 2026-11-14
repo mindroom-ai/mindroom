@@ -16,6 +16,7 @@ from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_snooze import (
     THREAD_SNOOZE_CONTENT_KEY,
     Snooze,
+    SnoozeClear,
     SnoozeUnavailableError,
     ThreadSnoozeRuntime,
     snooze_from_state_event,
@@ -27,6 +28,7 @@ from mindroom.thread_tags import (
     ThreadTagRecord,
     ThreadTagsPermissionError,
     get_thread_tag_content,
+    get_thread_tags,
     remove_thread_tag,
     snooze_until,
 )
@@ -168,11 +170,25 @@ class ThreadSnoozeRuntimeCoordinator:
         """Return whether the thread carries the resolved tag."""
         return await self._read_tag(room_id, thread_root_id, RESOLVED_THREAD_TAG) is not None
 
-    async def clear(self, room_id: str, thread_root_id: str) -> bool:
-        """Remove the snooze through the first joined bot allowed to; False when none is."""
+    async def clear(self, room_id: str, thread_root_id: str, until: datetime) -> SnoozeClear:
+        """Remove the snooze waking at ``until`` through the first joined bot allowed to, leaving any other snooze.
+
+        Matrix has no compare-and-swap, so the snooze is read again right before its removal, which narrows the
+        window in which a person's replacement snooze could be erased.
+        """
         for bot, client in self._joined_bots(room_id):
             try:
-                await remove_thread_tag(client, room_id, thread_root_id, SNOOZED_THREAD_TAG)
+                state = await get_thread_tags(client, room_id, thread_root_id)
+                record = None if state is None else state.tags.get(SNOOZED_THREAD_TAG)
+                if snooze_until(record) != until:
+                    return "changed"
+                state = await remove_thread_tag(
+                    client,
+                    room_id,
+                    thread_root_id,
+                    SNOOZED_THREAD_TAG,
+                    expected_record=record,
+                )
             except ThreadTagsPermissionError:
                 logger.info("thread_snooze_clear_denied", agent=bot.agent_name, room_id=room_id)
                 continue
@@ -186,8 +202,8 @@ class ThreadSnoozeRuntimeCoordinator:
                     exc_info=True,
                 )
                 raise SnoozeUnavailableError(str(exc)) from exc
-            return True
-        return False
+            return "changed" if SNOOZED_THREAD_TAG in state.tags else "cleared"
+        return "not_permitted"
 
     async def send_ended(self, snooze: Snooze) -> bool:
         """Post the wake message into the thread as the first joined bot; False when it was not delivered."""

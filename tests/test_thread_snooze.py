@@ -12,6 +12,7 @@ import pytest
 from mindroom.thread_snooze import (
     SNOOZE_RETRY_DELAY,
     Snooze,
+    SnoozeClear,
     SnoozeUnavailableError,
     ThreadSnoozeRuntime,
     snooze_from_state_event,
@@ -164,7 +165,8 @@ class FakeDelivery:
 
     until: dict[tuple[str, str], datetime | None] = field(default_factory=dict)
     resolved: bool = False
-    clear_results: list[bool | Exception] = field(default_factory=list)
+    clear_results: list[SnoozeClear | Exception] = field(default_factory=list)
+    cleared_untils: list[datetime] = field(default_factory=list)
     send_results: list[bool] = field(default_factory=list)
     read_errors: int = 0
     calls: list[str] = field(default_factory=list)
@@ -185,10 +187,11 @@ class FakeDelivery:
         self.calls.append("is_resolved")
         return self.resolved
 
-    async def clear(self, room_id: str, thread_root_id: str) -> bool:  # noqa: ARG002
+    async def clear(self, room_id: str, thread_root_id: str, until: datetime) -> SnoozeClear:  # noqa: ARG002
         """Return or raise the next queued clear result."""
         self.calls.append("clear")
-        result = self.clear_results.pop(0) if self.clear_results else True
+        self.cleared_untils.append(until)
+        result = self.clear_results.pop(0) if self.clear_results else "cleared"
         if isinstance(result, Exception):
             raise result
         return result
@@ -223,8 +226,45 @@ async def test_due_snooze_is_cleared_then_announced() -> None:
     await runtime._wake_due()
 
     assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended"]
+    assert delivery.cleared_untils == [UNTIL]
     assert delivery.sent == [_snooze()]
     assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_snooze_replaced_before_the_clear_is_kept_and_rechecked() -> None:
+    """A snooze replaced between the read and the clear is not removed or announced; the next pass re-tracks it."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.clear_results = ["changed"]
+    runtime.track(_snooze())
+
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear"]
+    assert delivery.sent == []
+    assert runtime._next_due() == clock() + SNOOZE_RETRY_DELAY
+
+    later = UNTIL + timedelta(hours=2)
+    delivery.until[ROOM, ROOT] = later
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "current_until"]
+    assert delivery.sent == []
+    assert runtime._next_due() == later
+
+
+@pytest.mark.asyncio
+async def test_stale_snooze_replaced_before_the_clear_is_kept() -> None:
+    """A stale snooze replaced before its silent clear is kept for a re-check, not dropped."""
+    runtime, delivery, clock = _runtime(UNTIL + timedelta(hours=25))
+    delivery.clear_results = ["changed"]
+    runtime.track(_snooze())
+
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "clear"]
+    assert runtime._next_due() == clock() + SNOOZE_RETRY_DELAY
 
 
 @pytest.mark.asyncio
@@ -348,7 +388,7 @@ async def test_snooze_25_hours_late_but_moved_is_reindexed() -> None:
 async def test_stale_snooze_that_no_bot_may_clear_is_dropped_without_a_message() -> None:
     """A stale snooze no bot may remove is dropped, and no stale-cleared line claims it was removed."""
     runtime, delivery, _ = _runtime(UNTIL + timedelta(hours=25))
-    delivery.clear_results = [False]
+    delivery.clear_results = ["not_permitted"]
     runtime.track(_snooze())
 
     with patch("mindroom.thread_snooze.logger") as logger:
@@ -365,7 +405,7 @@ async def test_stale_snooze_that_no_bot_may_clear_is_dropped_without_a_message()
 async def test_no_bot_may_write_drops_without_a_message() -> None:
     """Without a bot that may remove the tag there is no message, now or later."""
     runtime, delivery, _ = _runtime(UNTIL)
-    delivery.clear_results = [False]
+    delivery.clear_results = ["not_permitted"]
     runtime.track(_snooze())
 
     await runtime._wake_due()
@@ -426,8 +466,84 @@ async def test_failed_send_retries_the_send_only() -> None:
     clock.now += SNOOZE_RETRY_DELAY
     await runtime._wake_due()
 
-    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended", "send_ended"]
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended", "is_resolved", "send_ended"]
     assert delivery.sent == [_snooze()]
+    assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_pending_send_is_dropped_when_the_thread_is_resolved_meanwhile() -> None:
+    """A wake message still waiting to be sent is given up once the thread is resolved."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.send_results = [False]
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    delivery.resolved = True
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended", "is_resolved"]
+    assert delivery.sent == []
+    assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_pending_send_waits_when_the_resolved_check_fails() -> None:
+    """A failed resolved check before a retried send tries again later instead of sending blind."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.send_results = [False]
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    async def unreadable(room_id: str, thread_root_id: str) -> bool:  # noqa: ARG001
+        delivery.calls.append("is_resolved")
+        msg = "read failed"
+        raise SnoozeUnavailableError(msg)
+
+    delivery.is_resolved = unreadable  # type: ignore[method-assign]
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended", "is_resolved"]
+    assert delivery.sent == []
+    assert runtime._next_due() == clock() + SNOOZE_RETRY_DELAY
+
+
+@pytest.mark.asyncio
+async def test_a_new_snooze_drops_the_pending_wake_message() -> None:
+    """Snoozing the thread again cancels the earlier snooze's wake message that is still waiting."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.send_results = [False]
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    later = UNTIL + timedelta(hours=2)
+    delivery.until[ROOM, ROOT] = later
+    runtime.track(_snooze(later))
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended"]
+    assert delivery.sent == []
+    assert runtime._pending_sends == {}
+    assert runtime._next_due() == later
+
+
+@pytest.mark.asyncio
+async def test_unreadable_snooze_past_the_stale_cutoff_is_dropped() -> None:
+    """A snooze whose room state stays unreadable is given up once it is more than 24 hours late."""
+    runtime, delivery, clock = _runtime(UNTIL + timedelta(hours=23))
+    delivery.read_errors = 100
+    runtime.track(_snooze())
+
+    await runtime._wake_due()
+    assert runtime._next_due() == clock() + SNOOZE_RETRY_DELAY
+
+    clock.now = UNTIL + timedelta(hours=24, seconds=1)
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "current_until"]
     assert runtime._next_due() is None
 
 

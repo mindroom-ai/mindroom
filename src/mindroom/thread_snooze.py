@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -35,6 +35,7 @@ __all__ = [
     "SNOOZE_STALE_AFTER",
     "THREAD_SNOOZE_CONTENT_KEY",
     "Snooze",
+    "SnoozeClear",
     "SnoozeDelivery",
     "SnoozeUnavailableError",
     "ThreadSnoozeRuntime",
@@ -43,6 +44,8 @@ __all__ = [
 ]
 
 type _ThreadKey = tuple[str, str]
+# The snooze was removed, no bot may remove it, or room state now holds a different snooze, which stays.
+type SnoozeClear = Literal["cleared", "not_permitted", "changed"]
 
 
 class SnoozeUnavailableError(RuntimeError):
@@ -119,8 +122,8 @@ class SnoozeDelivery(Protocol):
         """Return whether the thread carries the resolved tag."""
         ...
 
-    async def clear(self, room_id: str, thread_root_id: str) -> bool:
-        """Remove the snooze; False when no bot may write it."""
+    async def clear(self, room_id: str, thread_root_id: str, until: datetime) -> SnoozeClear:
+        """Remove the snooze only while room state still holds the one waking at ``until``."""
         ...
 
     async def send_ended(self, snooze: Snooze) -> bool:
@@ -150,8 +153,10 @@ class ThreadSnoozeRuntime:
         self._changed = asyncio.Event()
 
     def track(self, snooze: Snooze) -> None:
-        """Index a snooze, replacing any earlier one for the same thread."""
-        self._snoozes[snooze.room_id, snooze.thread_root_id] = _Entry(snooze, snooze.until)
+        """Index a snooze, replacing any earlier one and any wake message still waiting for the same thread."""
+        key = snooze.room_id, snooze.thread_root_id
+        self._snoozes[key] = _Entry(snooze, snooze.until)
+        self._pending_sends.pop(key, None)
         self._changed.set()
 
     def forget(self, room_id: str, thread_root_id: str) -> None:
@@ -177,9 +182,19 @@ class ThreadSnoozeRuntime:
                 try:
                     await self._wake(key, entry)
                 except SnoozeUnavailableError as exc:
+                    if self._snoozes.get(key) is not entry:
+                        continue
+                    if self._clock() - entry.snooze.until > SNOOZE_STALE_AFTER:
+                        logger.warning(
+                            "thread_snooze_stale_dropped",
+                            room_id=key[0],
+                            thread_root_id=key[1],
+                            error=str(exc),
+                        )
+                        del self._snoozes[key]
+                        continue
                     logger.warning("thread_snooze_wake_retry", room_id=key[0], thread_root_id=key[1], error=str(exc))
-                    if self._snoozes.get(key) is entry:
-                        entry.next_try = self._clock() + SNOOZE_RETRY_DELAY
+                    entry.next_try = self._clock() + SNOOZE_RETRY_DELAY
 
     async def run(self) -> None:
         """Wake due snoozes, then sleep until the next one or until the index changes."""
@@ -204,28 +219,37 @@ class ThreadSnoozeRuntime:
             return
 
         if self._clock() - snooze.until > SNOOZE_STALE_AFTER:
-            cleared = await self._delivery.clear(*key)
-            if cleared:
+            if await self._clear(key, entry):
                 logger.info("thread_snooze_stale_cleared", room_id=key[0], thread_root_id=key[1])
-            else:
-                logger.warning("thread_snooze_clear_not_permitted", room_id=key[0], thread_root_id=key[1])
-            self._drop(key, entry)
             return
 
         resolved = await self._delivery.is_resolved(*key)
         if self._snoozes.get(key) is not entry:
             return
-        if not await self._delivery.clear(*key):
-            logger.warning("thread_snooze_clear_not_permitted", room_id=key[0], thread_root_id=key[1])
-            self._drop(key, entry)
-            return
-        self._drop(key, entry)
-        if not resolved:
+        if await self._clear(key, entry) and not resolved:
             await self._send(key, snooze)
+
+    async def _clear(self, key: _ThreadKey, entry: _Entry) -> bool:
+        """Remove the snooze from room state; True when it was removed and the wake goes on."""
+        cleared = await self._delivery.clear(*key, entry.snooze.until)
+        if cleared == "changed":
+            # Room state holds another snooze now: keep the entry, and the next pass reads room state again.
+            logger.info("thread_snooze_changed_before_clear", room_id=key[0], thread_root_id=key[1])
+            if self._snoozes.get(key) is entry:
+                entry.next_try = self._clock() + SNOOZE_RETRY_DELAY
+            return False
+        self._drop(key, entry)
+        if cleared == "not_permitted":
+            logger.warning("thread_snooze_clear_not_permitted", room_id=key[0], thread_root_id=key[1])
+            return False
+        return True
 
     async def _send(self, key: _ThreadKey, snooze: Snooze) -> None:
         if await self._delivery.send_ended(snooze):
             self._pending_sends.pop(key, None)
+            return
+        if key in self._snoozes:
+            # The thread was snoozed again meanwhile, which cancels this wake message.
             return
         logger.warning("thread_snooze_send_retry", room_id=key[0], thread_root_id=key[1])
         self._pending_sends[key] = _Entry(snooze, self._clock() + SNOOZE_RETRY_DELAY)
@@ -234,6 +258,18 @@ class ThreadSnoozeRuntime:
         if self._clock() - entry.snooze.until > SNOOZE_STALE_AFTER:
             logger.info("thread_snooze_stale_send_dropped", room_id=key[0], thread_root_id=key[1])
             self._pending_sends.pop(key, None)
+            return
+        try:
+            resolved = await self._delivery.is_resolved(*key)
+        except SnoozeUnavailableError as exc:
+            logger.warning("thread_snooze_send_retry", room_id=key[0], thread_root_id=key[1], error=str(exc))
+            entry.next_try = self._clock() + SNOOZE_RETRY_DELAY
+            return
+        if self._pending_sends.get(key) is not entry:
+            return
+        if resolved:
+            logger.info("thread_snooze_resolved_send_dropped", room_id=key[0], thread_root_id=key[1])
+            del self._pending_sends[key]
             return
         await self._send(key, entry.snooze)
 

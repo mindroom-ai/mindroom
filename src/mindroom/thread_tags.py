@@ -979,8 +979,12 @@ async def remove_thread_tag(
     tag: str,
     *,
     requester_user_id: str | None = None,
+    expected_record: ThreadTagRecord | None = None,
 ) -> ThreadTagsState:
-    """Remove one tag from the persisted thread state."""
+    """Remove one tag from the persisted thread state.
+
+    With ``expected_record``, remove the tag only while it holds that exact value; otherwise return the state unchanged.
+    """
     normalized_thread_root_id = _require_non_empty_string(
         thread_root_id,
         field_name="thread_root_id",
@@ -992,7 +996,25 @@ async def remove_thread_tag(
             normalized_thread_root_id,
             tag,
             requester_user_id=requester_user_id,
+            expected_record=expected_record,
         )
+
+
+async def _get_thread_tags_after_removal(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    tag: str,
+    removed_state: ThreadTagsState | None,
+) -> ThreadTagsState | None:
+    """Read one thread's tags; once Matrix accepted a removal, a failed read answers with the state it left."""
+    try:
+        return await get_thread_tags(client, room_id, thread_root_id)
+    except ThreadTagsError:
+        if removed_state is None:
+            raise
+        logger.warning("Thread tag removal accepted but not verified", room_id=room_id, tag=tag)
+        return removed_state
 
 
 async def _remove_thread_tag_under_lock(
@@ -1002,6 +1024,7 @@ async def _remove_thread_tag_under_lock(
     tag: str,
     *,
     requester_user_id: str | None = None,
+    expected_record: ThreadTagRecord | None = None,
 ) -> ThreadTagsState:
     """Remove one tag while the caller holds the thread mutation lock."""
     normalized_thread_root_id = _require_non_empty_string(
@@ -1016,23 +1039,32 @@ async def _remove_thread_tag_under_lock(
         requester_user_id=requester_user_id,
     )
 
-    remove_written = False
+    # The state right after our last accepted removal; once set, a failed read no longer undoes the removal.
+    removed_state: ThreadTagsState | None = None
     for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
-        existing_state = await get_thread_tags(
+        existing_state = await _get_thread_tags_after_removal(
             client,
             room_id,
             normalized_thread_root_id,
+            normalized_tag,
+            removed_state,
         )
         if existing_state is None:
-            if remove_written:
+            if removed_state is not None:
                 return _empty_thread_tags_state(room_id, normalized_thread_root_id)
             msg = f"No thread tags state exists for {normalized_thread_root_id} in {room_id}."
             raise ThreadTagsError(msg)
-        if normalized_tag not in existing_state.tags:
-            if remove_written:
+        current_record = existing_state.tags.get(normalized_tag)
+        if current_record is None:
+            if removed_state is not None:
                 return existing_state
             msg = f"Thread tag {normalized_tag!r} is not set for {normalized_thread_root_id} in {room_id}."
             raise ThreadTagsError(msg)
+        if expected_record is None:
+            expected_record = current_record
+        elif not _thread_tag_records_match(expected_record, current_record):
+            # Someone wrote a new value for the tag; removing it would erase their write.
+            return existing_state
 
         await _put_thread_tag_state(
             client,
@@ -1042,12 +1074,16 @@ async def _remove_thread_tag_under_lock(
             None,
             error_prefix="Failed to update thread tags state",
         )
-        remove_written = True
+        removed_state = existing_state.model_copy(
+            update={"tags": {name: record for name, record in existing_state.tags.items() if name != normalized_tag}},
+        )
 
-        verified_state = await get_thread_tags(
+        verified_state = await _get_thread_tags_after_removal(
             client,
             room_id,
             normalized_thread_root_id,
+            normalized_tag,
+            removed_state,
         )
         if _verified_remove_state_matches(
             verified_state,

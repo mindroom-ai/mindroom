@@ -19,7 +19,13 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.thread_snooze import Snooze, SnoozeUnavailableError
-from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE, ThreadTagsError, ThreadTagsPermissionError
+from mindroom.thread_tags import (
+    THREAD_TAGS_EVENT_TYPE,
+    ThreadTagRecord,
+    ThreadTagsError,
+    ThreadTagsPermissionError,
+    ThreadTagsState,
+)
 from mindroom.thread_utils import history_mentioned_user_ids
 from tests.conftest import (
     bind_runtime_paths,
@@ -85,6 +91,17 @@ def _snooze_source(
         "origin_server_ts": 1,
         "content": content,
     }
+
+
+def _tag_state(*, until: datetime | None = UNTIL, resolved: bool = False) -> ThreadTagsState | None:
+    tags: dict[str, ThreadTagRecord] = {}
+    if until is not None:
+        tags["snoozed"] = ThreadTagRecord.model_validate(
+            {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "data": {"until": until.isoformat()}},
+        )
+    if resolved:
+        tags["resolved"] = ThreadTagRecord.model_validate({"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00"})
+    return ThreadTagsState(room_id=ROOM, thread_root_id=ROOT, tags=tags) if tags else None
 
 
 def _tracked(coordinator: ThreadSnoozeRuntimeCoordinator) -> dict[tuple[str, str], Snooze]:
@@ -305,10 +322,11 @@ async def test_a_non_matrix_exception_from_a_bot_call_is_unavailable(tmp_path: P
     ):
         await coordinator.current_until(ROOM, ROOT)
     with (
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
         patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(side_effect=KeyError("bad"))),
         pytest.raises(SnoozeUnavailableError),
     ):
-        await coordinator.clear(ROOM, ROOT)
+        await coordinator.clear(ROOM, ROOT, UNTIL)
 
 
 @pytest.mark.asyncio
@@ -318,15 +336,27 @@ async def test_clear_tries_the_router_first_then_another_joined_bot(tmp_path: Pa
     coordinator = _coordinator(_config(tmp_path), {"absent": absent, "code": code, "router": router})
     calls: list[object] = []
 
-    async def remove(client: object, room_id: str, thread_root_id: str, tag: str) -> None:
+    async def remove(
+        client: object,
+        room_id: str,
+        thread_root_id: str,
+        tag: str,
+        *,
+        expected_record: ThreadTagRecord,
+    ) -> ThreadTagsState:
         assert (room_id, thread_root_id, tag) == (ROOM, ROOT, "snoozed")
+        assert expected_record == _tag_state().tags["snoozed"]  # type: ignore[union-attr]
         calls.append(client)
         if client is router.client:
             msg = "power level"
             raise ThreadTagsPermissionError(msg)
+        return ThreadTagsState(room_id=ROOM, thread_root_id=ROOT)
 
-    with patch(f"{_MODULE}.remove_thread_tag", new=remove):
-        assert await coordinator.clear(ROOM, ROOT) is True
+    with (
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
+        patch(f"{_MODULE}.remove_thread_tag", new=remove),
+    ):
+        assert await coordinator.clear(ROOM, ROOT, UNTIL) == "cleared"
 
     assert calls == [router.client, code.client]
 
@@ -337,10 +367,13 @@ async def test_clear_is_false_when_no_bot_may_write(tmp_path: Path) -> None:
     router, code = _bot(ROOM), _bot(ROOM)
     coordinator = _coordinator(_config(tmp_path), {"code": code, "router": router})
 
-    with patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(side_effect=ThreadTagsPermissionError("no"))) as remove:
-        assert await coordinator.clear(ROOM, ROOT) is False
+    with (
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
+        patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(side_effect=ThreadTagsPermissionError("no"))) as remove,
+    ):
+        assert await coordinator.clear(ROOM, ROOT, UNTIL) == "not_permitted"
         assert remove.await_count == 2
-        assert await coordinator.clear("!elsewhere:localhost", ROOT) is False
+        assert await coordinator.clear("!elsewhere:localhost", ROOT, UNTIL) == "not_permitted"
         assert remove.await_count == 2
 
 
@@ -351,11 +384,65 @@ async def test_clear_raises_unavailable_on_other_tag_errors(tmp_path: Path) -> N
     coordinator = _coordinator(_config(tmp_path), {"code": code, "router": router})
 
     with (
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
         patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(side_effect=ThreadTagsError("down"))) as remove,
         pytest.raises(SnoozeUnavailableError),
     ):
-        await coordinator.clear(ROOM, ROOT)
+        await coordinator.clear(ROOM, ROOT, UNTIL)
     assert remove.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_leaves_a_snooze_that_changed_since_the_wake_read_it(tmp_path: Path) -> None:
+    """A snooze replaced or removed before the clear is not removed; clear reports the change."""
+    later = UNTIL.replace(hour=12)
+    coordinator = _coordinator(_config(tmp_path), {"router": _bot(ROOM)})
+
+    for state in (_tag_state(until=later), None):
+        with (
+            patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=state)),
+            patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock()) as remove,
+        ):
+            assert await coordinator.clear(ROOM, ROOT, UNTIL) == "changed"
+        remove.assert_not_awaited()
+
+    # Replaced between the re-read and the removal, which then keeps the new snooze.
+    with (
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
+        patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(return_value=_tag_state(until=later))),
+    ):
+        assert await coordinator.clear(ROOM, ROOT, UNTIL) == "changed"
+
+
+@pytest.mark.asyncio
+async def test_clear_counts_an_accepted_removal_whose_verification_read_fails(tmp_path: Path) -> None:
+    """Once Matrix accepted the removal, a failed read afterwards still lets the wake message go out."""
+    router = _bot(ROOM)
+    client = router.client
+    client.user_id = "@mindroom_router:localhost"
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            content={"users": {client.user_id: 100}, "state_default": 50},
+            event_type="m.room.power_levels",
+            state_key="",
+            room_id=ROOM,
+        ),
+    )
+    reads = 0
+
+    async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        nonlocal reads
+        reads += 1
+        if reads > 2:
+            return nio.RoomGetStateError("boom")
+        return nio.RoomGetStateResponse(events=[_snooze_source()], room_id=room_id)
+
+    client.room_get_state = room_get_state
+    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$x"}, ROOM))
+    coordinator = _coordinator(_config(tmp_path), {"router": router})
+
+    assert await coordinator.clear(ROOM, ROOT, UNTIL) == "cleared"
+    client.room_put_state.assert_awaited_once()
 
 
 @pytest.mark.asyncio
