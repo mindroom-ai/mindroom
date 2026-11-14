@@ -316,6 +316,47 @@ async def test_resolve_thread_removes_an_existing_snooze(tmp_path: Path, remove_
 
 
 @pytest.mark.asyncio
+async def test_resolve_thread_keeps_a_snooze_set_again_meanwhile(tmp_path: Path) -> None:
+    """A snooze written again while the resolve removes the old one stays indexed, so it still wakes."""
+    orchestrator = MagicMock()
+    context = replace(_context(tmp_path), orchestrator=orchestrator)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.set_thread_tag",
+            new=AsyncMock(return_value=_state_with(RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG)),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_resolution.remove_thread_tag",
+            new=AsyncMock(return_value=_state_with(RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG)),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+
+    assert payload["status"] == "ok"
+    orchestrator.thread_snooze.unsnoozed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reopen_thread_reports_a_resolve_written_again_meanwhile(tmp_path: Path) -> None:
+    """Reopen reports the state its removal left, which a concurrent resolve can keep resolved."""
+    context = _context(tmp_path)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.remove_thread_tag",
+            new=AsyncMock(return_value=_state_with(RESOLVED_THREAD_TAG)),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await ThreadResolutionTools().reopen_thread())
+
+    assert payload["status"] == "ok"
+    assert payload["resolved"] is True
+
+
+@pytest.mark.asyncio
 async def test_resolve_thread_leaves_other_state_alone(tmp_path: Path) -> None:
     """Without a snooze, resolving removes nothing."""
     context = _context(tmp_path)

@@ -124,7 +124,7 @@ class ThreadSnoozeTools(Toolkit):
         try:
             if await get_thread_tag_content(context.client, context.room_id, thread_id, SNOOZED_THREAD_TAG) is None:
                 return self._payload("error", action="unsnooze", thread_id=thread_id, message="Thread is not snoozed.")
-            await remove_thread_tag(
+            state = await remove_thread_tag(
                 context.client,
                 context.room_id,
                 thread_id,
@@ -133,12 +133,14 @@ class ThreadSnoozeTools(Toolkit):
             )
         except ThreadTagsError as exc:
             return self._payload("error", action="unsnooze", thread_id=thread_id, message=str(exc))
-        if context.orchestrator is not None:
+        # A snooze written again meanwhile survives the removal and must keep waking.
+        snoozed = SNOOZED_THREAD_TAG in state.tags
+        if context.orchestrator is not None and not snoozed:
             context.orchestrator.thread_snooze.unsnoozed(context.room_id, thread_id)
         return self._payload(
             "ok",
             action="unsnooze",
             room_id=context.room_id,
             thread_id=thread_id,
-            snoozed=False,
+            snoozed=snoozed,
         )

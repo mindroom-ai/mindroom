@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_snooze import ThreadSnoozeTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_tags import SNOOZED_THREAD_TAG, ThreadTagsError
+from mindroom.thread_tags import SNOOZED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -222,6 +222,35 @@ async def test_unsnooze_thread_removes_the_tag_and_tells_the_runtime(tmp_path: P
         requester_user_id="@user:localhost",
     )
     orchestrator.thread_snooze.unsnoozed.assert_called_once_with(ROOM_ID, THREAD_ID)
+
+
+@pytest.mark.asyncio
+async def test_unsnooze_thread_keeps_a_snooze_set_again_meanwhile(tmp_path: Path) -> None:
+    """A snooze written again during the unsnooze survives it, so the runtime keeps it indexed."""
+    orchestrator = MagicMock()
+    context = _context(tmp_path, orchestrator=orchestrator)
+    resnoozed = ThreadTagsState(
+        room_id=ROOM_ID,
+        thread_root_id=THREAD_ID,
+        tags={
+            SNOOZED_THREAD_TAG: ThreadTagRecord(
+                set_by="@other:localhost",
+                set_at=datetime(2026, 11, 13, tzinfo=UTC),
+                data={"until": "2099-11-15T08:00:00+00:00"},
+            ),
+        },
+    )
+
+    with (
+        patch(f"{_MODULE}.get_thread_tag_content", new=AsyncMock(return_value={"until": "x"})),
+        patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(return_value=resnoozed)),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await ThreadSnoozeTools().unsnooze_thread())
+
+    assert payload["status"] == "ok"
+    assert payload["snoozed"] is True
+    orchestrator.thread_snooze.unsnoozed.assert_not_called()
 
 
 @pytest.mark.asyncio

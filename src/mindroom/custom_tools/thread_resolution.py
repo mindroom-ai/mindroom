@@ -83,7 +83,7 @@ class ThreadResolutionTools(Toolkit):
     async def _end_snooze(context: ToolRuntimeContext, thread_id: str) -> None:
         """Drop the snooze of a thread that was just resolved; the resolve stands if that fails."""
         try:
-            await remove_thread_tag(
+            state = await remove_thread_tag(
                 context.client,
                 context.room_id,
                 thread_id,
@@ -98,7 +98,8 @@ class ThreadResolutionTools(Toolkit):
                 error=str(exc),
             )
             return
-        if context.orchestrator is not None:
+        # A snooze written again meanwhile survives the removal and must keep waking.
+        if context.orchestrator is not None and SNOOZED_THREAD_TAG not in state.tags:
             context.orchestrator.thread_snooze.unsnoozed(context.room_id, thread_id)
 
     async def reopen_thread(self, thread_id: str | None = None) -> str:
@@ -114,7 +115,7 @@ class ThreadResolutionTools(Toolkit):
             return resolved
         context, thread_id = resolved
         try:
-            await remove_thread_tag(
+            state = await remove_thread_tag(
                 context.client,
                 context.room_id,
                 thread_id,
@@ -128,5 +129,5 @@ class ThreadResolutionTools(Toolkit):
             action="reopen",
             room_id=context.room_id,
             thread_id=thread_id,
-            resolved=False,
+            resolved=RESOLVED_THREAD_TAG in state.tags,
         )
