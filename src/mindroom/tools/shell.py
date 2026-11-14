@@ -35,7 +35,11 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
-from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
+from mindroom.tool_system.output_files import (
+    ToolOutputFileHandled,
+    current_tool_output_file_request,
+    current_tool_workdir,
+)
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
@@ -90,6 +94,11 @@ _WORKSPACE_CWD_NOTE = (
     "(echoed as a `[cwd: ...]` first line in the result). Always use relative paths or "
     "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
     "to the workspace, while local execution maps it to the host home."
+)
+_WORKDIR_CWD_NOTE = (
+    "The command runs in the workdir as its working directory (echoed as a `[cwd: ...]` first line in the result), "
+    "so relative paths name files there. `$MINDROOM_AGENT_WORKSPACE` is your agent workspace, which holds your "
+    "skills, subagent profiles, saved tool outputs, and delegation records; use it for files meant for the workspace."
 )
 # Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
 # removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
@@ -215,7 +224,7 @@ def _shell_subprocess_env(
     env.update(workspace_home_contract)
     if workspace_dir is not None and not workspace_home_contract:
         # Local (non-worker) execution keeps the host HOME, but the workspace
-        # env var is still promised to agents, so export it from base_dir.
+        # env var is still promised to agents, so export it from workspace_dir.
         env["MINDROOM_AGENT_WORKSPACE"] = str(workspace_dir.expanduser().resolve())
 
     path_value = subprocess_path_with_prepends(
@@ -376,7 +385,7 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
             description="Path entries prepended to PATH for this agent's shell tool only.",
         ),
     ],
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT),
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shell",
     function_names=("run_shell_command",),
@@ -396,9 +405,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
+            tool_output_workspace_root: Path | None = None,
             allow_without_worker: bool = False,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
+            # Beside a workdir, ``base_dir`` is the workdir; ``$MINDROOM_AGENT_WORKSPACE`` stays the workspace.
+            self._beside_workdir = current_tool_workdir() is not None
+            self._workspace_dir = tool_output_workspace_root if self._beside_workdir else self.base_dir
             self._refuse_commands = shell_refuses_commands(runtime_paths, allow_without_worker=allow_without_worker)
 
             tools: list[Callable[..., object]] = []
@@ -422,9 +435,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
 
         def offered_function(self, function: ToolFunction) -> ToolFunction:
             """Describe ``run_shell_command`` with the working directory and the working method it runs under."""
-            notes = (
-                (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
-            )
+            cwd_note = _WORKDIR_CWD_NOTE if self._beside_workdir else _WORKSPACE_CWD_NOTE
+            notes = (cwd_note, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
             return replace(
                 function,
                 description="\n\n".join((function.description or "", *notes)).strip(),
@@ -439,7 +451,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 call_environment=current_tool_environment(),
                 base_process_env=self._base_process_env,
                 shell_path_prepend=self._shell_path_prepend,
-                workspace_dir=self.base_dir,
+                workspace_dir=self._workspace_dir,
                 process_environ=process_environ,
             )
 
