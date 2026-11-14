@@ -30,7 +30,12 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE, ThreadTagsError, set_thread_tags_if_empty
+from mindroom.thread_tags import (
+    THREAD_TAGS_EVENT_TYPE,
+    SetThreadTagsIfEmptyResult,
+    ThreadTagsError,
+    set_thread_tags_if_empty,
+)
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -562,16 +567,8 @@ def test_vocabulary_leaves_out_snoozed(tmp_path: Path) -> None:
     assert snapshot.tags == (_TagUsage(tag="bug", count=3),)
 
 
-@pytest.mark.asyncio
-async def test_thread_with_only_a_snoozed_tag_still_gets_automatic_tags() -> None:
-    """A thread holding only lifecycle tags counts as untagged for automatic tags."""
-    current_events: dict[str, dict[str, object]] = {
-        _tag_state_event("$root:localhost", "snoozed")["state_key"]: {  # type: ignore[index]
-            "set_by": "@user:localhost",
-            "set_at": "2026-07-01T00:00:00+00:00",
-            "data": {"until": "2026-11-14T08:00:00+00:00"},
-        },
-    }
+async def _set_tags_if_empty_over(current_events: dict[str, dict[str, object]]) -> SetThreadTagsIfEmptyResult:
+    """Run set_thread_tags_if_empty for one thread over the given tag state contents."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -595,7 +592,7 @@ async def test_thread_with_only_a_snoozed_tag_still_gets_automatic_tags() -> Non
     client.room_get_state.side_effect = room_get_state
     client.room_put_state.side_effect = room_put_state
 
-    result = await set_thread_tags_if_empty(
+    return await set_thread_tags_if_empty(
         client,
         _ROOM_A,
         "$root:localhost",
@@ -603,5 +600,35 @@ async def test_thread_with_only_a_snoozed_tag_still_gets_automatic_tags() -> Non
         set_by="@mindroom_general:localhost",
     )
 
-    assert result.had_existing_tags is False
-    assert result.applied_tags == ("bug",)
+
+def _tag_key(tag: str) -> str:
+    return _tag_state_event("$root:localhost", tag)["state_key"]  # type: ignore[return-value]
+
+
+@pytest.mark.asyncio
+async def test_thread_with_only_a_snoozed_tag_still_gets_automatic_tags() -> None:
+    """A snooze, set or removed, does not count as a manual tag for automatic tags."""
+    snoozed = {
+        "set_by": "@user:localhost",
+        "set_at": "2026-07-01T00:00:00+00:00",
+        "data": {"until": "2026-11-14T08:00:00+00:00"},
+    }
+    for content in (snoozed, {}):
+        result = await _set_tags_if_empty_over({_tag_key("snoozed"): content})
+
+        assert result.had_existing_tags is False
+        assert result.applied_tags == ("bug",)
+
+
+@pytest.mark.asyncio
+async def test_resolved_thread_gets_no_automatic_tags() -> None:
+    """A resolved thread keeps its tags, and a reopened one counts as manually tagged."""
+    resolved = {"set_by": "@user:localhost", "set_at": "2026-07-01T00:00:00+00:00"}
+
+    result = await _set_tags_if_empty_over({_tag_key("resolved"): resolved})
+    assert result.had_existing_tags is True
+    assert result.applied_tags == ()
+
+    result = await _set_tags_if_empty_over({_tag_key("resolved"): {}})
+    assert result.skipped_due_to_prior_mutation is True
+    assert result.applied_tags == ()

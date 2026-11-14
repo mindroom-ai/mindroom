@@ -636,8 +636,8 @@ async def _assert_user_can_write_thread_tags(
 
 
 def _observed_root_ids(thread_root_id: str, tag: str) -> set[str]:
-    """Return the root a tag event marks as manually tagged; lifecycle tags mark none."""
-    return set() if tag in AUTOMATIC_THREAD_TAG_EXCLUSIONS else {thread_root_id}
+    """Return the root a tag event marks as manually tagged; a snooze marks none."""
+    return set() if tag == SNOOZED_THREAD_TAG else {thread_root_id}
 
 
 async def _get_room_thread_tags_snapshot(
@@ -919,9 +919,7 @@ async def set_thread_tags_if_empty(
     async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
         snapshot = await _get_room_thread_tags_snapshot(client, room_id)
         existing_state = snapshot.tag_state.get(normalized_thread_root_id)
-        if existing_state is not None and any(
-            tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS for tag in existing_state.tags
-        ):
+        if existing_state is not None and any(tag != SNOOZED_THREAD_TAG for tag in existing_state.tags):
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=True,
                 applied_tags=(),
