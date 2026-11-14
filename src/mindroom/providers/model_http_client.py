@@ -24,13 +24,12 @@ _TRANSPORT_OPTIONS: dict[str, Any] = {
         if hasattr(socket, name)
     ],
 }
-# The redirected request's headers that name its new host and describe the body it sends again, beside a fresh
-# request's headers.
+# Beside a fresh request's headers, a redirect to another origin keeps its new host and the body headers httpx2 left.
 _TARGET_AND_BODY_HEADERS = frozenset({"host", "content-type", "content-length", "transfer-encoding"})
 
 
 class _PooledClient(httpx2.AsyncClient):
-    """One event loop's pooled client, which sends a redirect to another origin only a fresh request's headers."""
+    """One event loop's pooled client, which keeps a request's own headers from a redirect to another origin."""
 
     def _redirect_headers(self, request: httpx2.Request, url: httpx2.URL, method: str) -> httpx2.Headers:
         """Return the request's headers within its origin, else a fresh request's plus its host and body headers.
