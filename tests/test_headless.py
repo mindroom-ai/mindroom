@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import nio
 import pytest
+import structlog
 
 from mindroom import headless, logging_config
 from mindroom.constants import resolve_runtime_paths
@@ -573,6 +574,17 @@ def test_a_library_program_gets_warnings_on_stderr_and_nothing_on_stdout(tmp_pat
     assert "api-secret" not in completed.stderr
     assert "frame-local-header" not in completed.stderr
     assert "Prompt sent" not in completed.stderr
+
+
+def test_the_programs_own_structlog_loggers_keep_its_setup_after_a_headless_call(tmp_path: Path) -> None:
+    """MindRoom leaves structlog configured as the program set it, so the program's own loggers render through it."""
+    with structlog.testing.capture_logs() as program_records:
+        program_config = structlog.get_config()
+        validate_config(_config(), agent="coder", storage=tmp_path / "storage")
+        structlog.get_logger("program").info("program_event")
+
+        assert structlog.get_config() == program_config
+    assert program_records == [{"event": "program_event", "log_level": "info"}]
 
 
 @pytest.mark.asyncio
