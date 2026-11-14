@@ -27442,6 +27442,101 @@
       }
     ]
   },
+  "thread_snooze": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "snooze_thread",
+        "description": "Snooze the current or specified Matrix thread until a time, then bring it back with a message.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "until": {
+              "type": "string",
+              "description": "When to wake the thread, as an ISO-8601 datetime with a time part,\nfor example 2026-11-14T09:00:00+01:00. A value without an offset is UTC.\nIt must be in the future."
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional reminder that the wake message quotes."
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "until"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "unsnooze_thread",
+        "description": "Cancel the snooze of the current or specified Matrix thread.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "thread_summary": {
     "instructions": null,
     "guidance": null,

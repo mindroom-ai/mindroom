@@ -58,7 +58,6 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [location-enrich-plugin](https://github.com/mindroom-ai/location-enrich-plugin) | Hooks | Adds real-time GPS location from [Dawarich](https://dawarich.app/) to prompts, with place matching and movement classification. |
 | [response-audit-plugin](https://github.com/mindroom-ai/response-audit-plugin) | Hooks | Audits delivered answers with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and asks the agent to verify facts that no lookup supported. |
 | [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Hooks | Re-activates threads tagged `pending-restart` after a bot restart. |
-| [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Hooks and tools | Temporarily resolves a thread and wakes it at a specified time. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
