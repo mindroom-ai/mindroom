@@ -107,7 +107,7 @@ class SnoozeDelivery(Protocol):
     """Matrix work the runtime needs to wake one thread."""
 
     async def current_until(self, room_id: str, thread_root_id: str) -> datetime | None:
-        """Return the wake time now in room state, or None when the snooze is gone."""
+        """Return the wake time now in room state, or None when the snooze is gone or no bot can see the room."""
         ...
 
     async def is_resolved(self, room_id: str, thread_root_id: str) -> bool:
@@ -188,12 +188,6 @@ class ThreadSnoozeRuntime:
 
     async def _wake(self, key: _ThreadKey, entry: _Entry) -> None:
         snooze = entry.snooze
-        if self._clock() - snooze.until > SNOOZE_STALE_AFTER:
-            await self._delivery.clear(*key)
-            logger.info("thread_snooze_stale_cleared", room_id=key[0], thread_root_id=key[1])
-            self._drop(key, entry)
-            return
-
         current_until = await self._delivery.current_until(*key)
         if self._snoozes.get(key) is not entry:
             return
@@ -202,6 +196,15 @@ class ThreadSnoozeRuntime:
             return
         if current_until != snooze.until:
             self.track(replace(snooze, until=current_until))
+            return
+
+        if self._clock() - snooze.until > SNOOZE_STALE_AFTER:
+            cleared = await self._delivery.clear(*key)
+            if cleared:
+                logger.info("thread_snooze_stale_cleared", room_id=key[0], thread_root_id=key[1])
+            else:
+                logger.warning("thread_snooze_clear_not_permitted", room_id=key[0], thread_root_id=key[1])
+            self._drop(key, entry)
             return
 
         resolved = await self._delivery.is_resolved(*key)

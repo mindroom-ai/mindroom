@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -281,8 +282,53 @@ async def test_snooze_25_hours_late_is_cleared_without_a_message() -> None:
 
     await runtime._wake_due()
 
-    assert delivery.calls == ["clear"]
+    assert delivery.calls == ["current_until", "clear"]
+    assert delivery.sent == []
     assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_snooze_25_hours_late_but_already_gone_is_dropped_without_a_clear() -> None:
+    """A stale snooze that room state no longer holds is forgotten without touching room state."""
+    runtime, delivery, _ = _runtime(UNTIL + timedelta(hours=25))
+    delivery.until[ROOM, ROOT] = None
+    runtime.track(_snooze())
+
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until"]
+    assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_snooze_25_hours_late_but_moved_is_reindexed() -> None:
+    """A stale index entry whose snooze moved in room state waits for the new time instead of clearing it."""
+    later = UNTIL + timedelta(hours=26)
+    runtime, delivery, _ = _runtime(UNTIL + timedelta(hours=25))
+    delivery.until[ROOM, ROOT] = later
+    runtime.track(_snooze())
+
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until"]
+    assert runtime._next_due() == later
+
+
+@pytest.mark.asyncio
+async def test_stale_snooze_that_no_bot_may_clear_is_dropped_without_a_message() -> None:
+    """A stale snooze no bot may remove is dropped, and no stale-cleared line claims it was removed."""
+    runtime, delivery, _ = _runtime(UNTIL + timedelta(hours=25))
+    delivery.clear_results = [False]
+    runtime.track(_snooze())
+
+    with patch("mindroom.thread_snooze.logger") as logger:
+        await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "clear"]
+    assert delivery.sent == []
+    assert runtime._next_due() is None
+    assert "thread_snooze_stale_cleared" not in [call.args[0] for call in logger.info.call_args_list]
+    logger.warning.assert_called_once()
 
 
 @pytest.mark.asyncio

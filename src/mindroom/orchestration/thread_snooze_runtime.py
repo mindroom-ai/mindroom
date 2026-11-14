@@ -132,10 +132,11 @@ class ThreadSnoozeRuntimeCoordinator:
                 yield bot, client
 
     async def _read_tag(self, room_id: str, thread_root_id: str, tag: str) -> dict[str, Any] | None:
+        """Read a thread tag through the first joined bot; None when it is absent or no bot is joined."""
         joined = next(self._joined_bots(room_id), None)
         if joined is None:
-            msg = f"No bot is joined to {room_id}"
-            raise SnoozeUnavailableError(msg)
+            # No bot sees the room, so its snoozes are gone for us; the next bot to join reads its state again.
+            return None
         try:
             return await get_thread_tag_content(joined[1], room_id, thread_root_id, tag)
         except asyncio.CancelledError:
@@ -145,7 +146,7 @@ class ThreadSnoozeRuntimeCoordinator:
             raise SnoozeUnavailableError(str(exc)) from exc
 
     async def current_until(self, room_id: str, thread_root_id: str) -> datetime | None:
-        """Return the wake time now in room state, or None when the snooze is gone."""
+        """Return the wake time now in room state, or None when the snooze is gone or no bot is joined."""
         content = await self._read_tag(room_id, thread_root_id, SNOOZED_THREAD_TAG)
         if content is None:
             return None

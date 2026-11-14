@@ -13,12 +13,14 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import EXACT_MENTIONS_KEY
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.thread_snooze import Snooze, SnoozeUnavailableError
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE, ThreadTagsError, ThreadTagsPermissionError
+from mindroom.thread_utils import history_mentioned_user_ids
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -243,14 +245,33 @@ async def test_current_until_and_is_resolved_read_the_tags_through_a_joined_bot(
 
 
 @pytest.mark.asyncio
-async def test_reads_without_a_joined_bot_are_unavailable(tmp_path: Path) -> None:
-    """With no bot in the room the runtime retries later instead of treating the snooze as gone."""
+async def test_reads_without_a_joined_bot_find_no_snooze(tmp_path: Path) -> None:
+    """With no bot in the room the snooze counts as gone; the next bot to join reads the room's state again."""
     coordinator = _coordinator(_config(tmp_path), {"router": _bot()})
 
-    with pytest.raises(SnoozeUnavailableError):
-        await coordinator.current_until(ROOM, ROOT)
-    with pytest.raises(SnoozeUnavailableError):
-        await coordinator.is_resolved(ROOM, ROOT)
+    with patch(f"{_MODULE}.get_thread_tag_content", new=AsyncMock()) as read:
+        assert await coordinator.current_until(ROOM, ROOT) is None
+        assert await coordinator.is_resolved(ROOM, ROOT) is False
+    read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_due_snooze_in_a_room_every_bot_left_is_dropped_after_one_pass(tmp_path: Path) -> None:
+    """A due snooze in a room no bot is joined to is dropped at once: no retry, no clear, no message."""
+    router = _bot()
+    coordinator = _coordinator(_config(tmp_path), {"router": router})
+    coordinator.observe_state_event(ROOM, _snooze_source())
+    runtime = coordinator._runtime
+    runtime._clock = lambda: UNTIL
+
+    with patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock()) as remove:
+        await runtime._wake_due()
+
+    assert _tracked(coordinator) == {}
+    assert runtime._pending_sends == {}
+    assert runtime._next_due() is None
+    remove.assert_not_awaited()
+    router.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -403,6 +424,47 @@ async def test_wake_message_is_an_ordinary_text_message(tmp_path: Path) -> None:
     assert content["m.relates_to"]["rel_type"] == "m.thread"
     assert content["m.relates_to"]["event_id"] == ROOT
     assert content["io.mindroom.wake_mentioned"] is False
+
+
+@pytest.mark.asyncio
+async def test_wake_message_note_cannot_mention_the_room_or_an_agent(tmp_path: Path) -> None:
+    """A note naming @room, an agent, and spanning lines still mentions only the snoozer, on one line."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    code_id = entity_ids(config, runtime_paths)["code"].full_id
+    sent: list[dict[str, Any]] = []
+
+    async def send_message_result(
+        _client: object,
+        _room_id: str,
+        content: dict[str, Any],
+        **_kwargs: object,
+    ) -> DeliveredMatrixEvent:
+        sent.append(content)
+        return DeliveredMatrixEvent(event_id="$wake", content_sent=content)
+
+    conversation_reader = make_conversation_reader_mock()
+    conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest")
+    router = _bot(ROOM)
+    router.hook_context.send_message = build_hook_message_sender(
+        MagicMock(),
+        config,
+        runtime_paths,
+        conversation_reader=conversation_reader,
+    )
+    coordinator = _coordinator(config, {"router": router})
+    note = f"@room ask @code and Code\nand {code_id} again"
+    with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
+        assert await coordinator.send_ended(Snooze(ROOM, ROOT, UNTIL, note, PERSON)) is True
+
+    [content] = sent
+    # Names in the note may render as pills, but the mention list is exact and names only the snoozer.
+    assert content["m.mentions"] == {"user_ids": [PERSON]}
+    assert content[EXACT_MENTIONS_KEY] is True
+    assert history_mentioned_user_ids(content, config, runtime_paths) == [PERSON]
+    assert "\n" not in content["body"]
+    assert content["body"].startswith("⏰ Snooze ended: @room ask ")
+    assert content["body"].endswith(f"and Code and {code_id} again")
 
 
 @pytest.mark.asyncio
