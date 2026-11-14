@@ -182,7 +182,7 @@ Unmapped keys and unauthenticated callers can use every available model but cann
 ## Limitations
 
 - **Fewer tools than in Matrix**: `/v1` hides tool functions matched by a required [tool approval](tool-approval.md#tools-that-cannot-pause-for-approval) rule, including script rules, because approval cards need a Matrix room.
-  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, `attachments`, and `todo`.
+  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, and `todo`, and every [`attachments`](attachments.md#viewing-content) function but `view_file`.
 - **No requester-private agents**: see [Model selection](#model-selection).
 - **Partial token usage**: only non-streaming responses report `usage`.
   It counts the turn's final model run, summed over the leader and members for teams, with cached input included in `prompt_tokens`, so tokens spent on earlier internal attempts in the same turn are not counted.
