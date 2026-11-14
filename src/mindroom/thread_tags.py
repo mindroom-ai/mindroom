@@ -1052,13 +1052,14 @@ async def _remove_thread_tag_under_lock(
             removed_state,
         )
         if existing_state is None:
-            if removed_state is not None:
+            if removed_state is not None or expected_record is not None:
                 return _empty_thread_tags_state(room_id, normalized_thread_root_id)
             msg = f"No thread tags state exists for {normalized_thread_root_id} in {room_id}."
             raise ThreadTagsError(msg)
         current_record = existing_state.tags.get(normalized_tag)
         if current_record is None:
-            if removed_state is not None:
+            # Gone after our removal, or before a conditional removal that then has nothing left to do.
+            if removed_state is not None or expected_record is not None:
                 return existing_state
             msg = f"Thread tag {normalized_tag!r} is not set for {normalized_thread_root_id} in {room_id}."
             raise ThreadTagsError(msg)

@@ -2430,3 +2430,32 @@ async def test_remove_thread_tag_counts_an_accepted_removal_whatever_the_verific
 
     client.room_put_state.assert_awaited_once()
     assert state.tags == {}
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_with_an_expected_record_returns_when_the_tag_is_already_gone() -> None:
+    """A conditional remove of a tag someone already removed writes nothing and raises nothing."""
+    current_events = {
+        _thread_tag_state_key("$thread-root:localhost", "resolved"): _tag_record_content(),
+    }
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert list(state.tags) == ["resolved"]
+
+    current_events.clear()
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert state.tags == {}
+    client.room_put_state.assert_not_awaited()
