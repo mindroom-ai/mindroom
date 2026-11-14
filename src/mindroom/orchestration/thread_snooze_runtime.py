@@ -91,25 +91,33 @@ class ThreadSnoozeRuntimeCoordinator:
             self._runtime.track(snooze)
 
     async def restore_room(self, bot: AgentBot, room_id: str) -> None:
-        """Index the snoozes in a room's state the first time any bot joins it in this process."""
+        """Index the snoozes in a room's state when a bot joins it and no other bot has been watching it."""
         client = bot.client
-        if client is None or room_id in self._restored_rooms:
+        if client is None or self._still_watched(bot, room_id):
             return
         async with self._restore_locks.setdefault(room_id, asyncio.Lock()):
-            if room_id in self._restored_rooms:
+            if self._still_watched(bot, room_id):
                 return
+            # No other bot synced this room, so tag changes made meanwhile reached no callback: read it again.
+            self._restored_rooms.discard(room_id)
             try:
                 response = await client.room_get_state(room_id)
                 if not isinstance(response, nio.RoomGetStateResponse):
                     logger.warning("thread_snooze_room_state_unread", room_id=room_id, error=str(response))
                     return
-                self._restored_rooms.add(room_id)
                 for event in response.events:
                     self.observe_state_event(room_id, event)
+                self._restored_rooms.add(room_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("thread_snooze_restore_failed", agent=bot.agent_name, room_id=room_id)
+
+    def _still_watched(self, bot: AgentBot, room_id: str) -> bool:
+        """Return whether the room is restored and another bot is joined to it, so its sync carries the room's tags."""
+        return room_id in self._restored_rooms and any(
+            other is not bot for other, _client in self._joined_bots(room_id)
+        )
 
     def _is_bot(self, user_id: str) -> bool:
         return not is_human_requester_id(user_id, self.config_provider(), self.runtime_paths)
