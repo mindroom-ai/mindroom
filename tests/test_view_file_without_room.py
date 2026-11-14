@@ -12,6 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.headless import run_turn
 from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -65,6 +66,8 @@ async def test_a_headless_turn_views_an_image_in_its_workdir(tmp_path: Path, mon
     offered = set(offered_tools(provider.requests[0]))
     assert "view_file" in offered
     assert not offered & _ROOM_FUNCTIONS
+    system = [str(message.content) for message in provider.requests[0].messages if message.role == "system"]
+    assert any("`view_file`: the workdir; other path tools: agent workspace" in text for text in system)
     assert json.loads(_tool_result(provider.requests[1]))["view_status"] == "ready"
     assert _images(provider.requests[1]) == [("image/png", image_bytes())]
 
@@ -133,7 +136,7 @@ async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
     """read_file reports an image it cannot decode as one, and names view_file only for one the turn can view."""
     workdir = tmp_path / "work"
     workdir.mkdir()
-    (workdir / file_name).write_bytes(image_bytes())
+    (workdir / file_name).write_bytes(image_bytes(image_format="BMP" if file_name.endswith(".bmp") else "PNG"))
     provider = ScriptedProvider(steps=[[("read_file", {"file_name": file_name})], "done"])
     provider.install(monkeypatch)
 
@@ -150,25 +153,32 @@ async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("entry", "offered"),
+    ("entry", "saved", "offered"),
     [
-        ({"attachments": {"include_tools": ["list_attachments", "view_file"]}}, {"view_file"}),
-        ({"attachments": {"include_tools": ["list_attachments"]}}, set()),
-        ({"attachments": {"exclude_tools": ["view_file"]}}, set()),
-        ("matrix_message", {"view_file"}),
+        ({"attachments": {"include_tools": ["list_attachments", "view_file"]}}, {}, {"view_file"}),
+        ({"attachments": {"include_tools": ["list_attachments"]}}, {}, set()),
+        ({"attachments": {"exclude_tools": ["view_file"]}}, {}, set()),
+        ("attachments", {"include_tools": ["list_attachments"]}, set()),
+        ("attachments", {"exclude_tools": ["view_file"]}, set()),
+        ("matrix_message", {}, {"view_file"}),
     ],
-    ids=["included", "not-included", "excluded", "implied"],
+    ids=["included", "not-included", "excluded", "saved-not-included", "saved-excluded", "implied"],
 )
-async def test_a_turn_without_a_room_offers_view_file_within_the_authored_filters(
+async def test_a_turn_without_a_room_offers_view_file_within_the_toolkit_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     entry: object,
+    saved: dict[str, object],
     offered: set[str],
 ) -> None:
-    """Of `attachments`, a turn without a room offers view_file alone, and only where its filters keep it."""
+    """Of `attachments`, a turn without a room offers view_file alone, and only where its authored or saved filters keep it."""
+    storage = tmp_path / "storage"
+    if saved:
+        runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
+        get_runtime_credentials_manager(runtime_paths).save_credentials("attachments", saved)
     provider = ScriptedProvider(steps=["done"])
     provider.install(monkeypatch)
 
-    await run_turn(_headless_config(entry), agent="coder", prompt="look", storage=tmp_path / "storage")
+    await run_turn(_headless_config(entry), agent="coder", prompt="look", storage=storage)
 
     assert set(offered_tools(provider.requests[0])) & {"view_file", *_ROOM_FUNCTIONS} == offered

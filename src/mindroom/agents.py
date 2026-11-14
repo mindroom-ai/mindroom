@@ -51,7 +51,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_room_flags
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
@@ -888,7 +888,7 @@ def _render_tool_execution_environment(
         "workspace": "agent workspace and attachments only"
         if workdir is None
         else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
-        "other path tools: agent workspace and attachments only",
+        "`view_file`: the workdir; other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
@@ -1240,6 +1240,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
+        if not room_tools:
+            adapted = _keep_functions(adapted, lambda function: offered_without_room(tool_name, function.name))
         if narrowed_tools is not None:
             # Match the concrete toolkit; a preset's or implied tool's functions name the tool bringing them in.
             adapted = _keep_functions(
