@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
-from pydantic import ValidationError
 
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -26,10 +25,10 @@ from mindroom.thread_snooze import (
 from mindroom.thread_tags import (
     RESOLVED_THREAD_TAG,
     SNOOZED_THREAD_TAG,
-    ThreadTagRecord,
     ThreadTagsPermissionError,
     get_thread_tag_content,
     get_thread_tags,
+    parse_thread_tag_record,
     remove_thread_tag,
     snooze_until,
 )
@@ -200,10 +199,7 @@ class ThreadSnoozeRuntimeCoordinator:
         content = await self._read_tag(room_id, thread_root_id, SNOOZED_THREAD_TAG)
         if content is None:
             return None
-        try:
-            return snooze_until(ThreadTagRecord.model_validate(content))
-        except ValidationError:
-            return None
+        return snooze_until(parse_thread_tag_record(SNOOZED_THREAD_TAG, content))
 
     async def is_resolved(self, room_id: str, thread_root_id: str) -> bool:
         """Return whether the thread carries the resolved tag."""

@@ -123,6 +123,8 @@ def test_state_event_set_by_a_bot_mentions_nobody() -> None:
         {"data": {"until": "x"}},
         {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "data": {"until": "x"}},
         {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "data": {}},
+        {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "note": 123, "data": {"until": UNTIL.isoformat()}},
+        {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "data": []},
     ],
 )
 def test_removed_or_invalid_snooze_event_drops_the_thread(content: dict[str, object]) -> None:
@@ -437,6 +439,21 @@ async def test_failed_read_retries_after_30_seconds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_observing_the_same_snooze_again_keeps_its_retry_delay() -> None:
+    """Repeated live events of an unchanged snooze do not cut its 30 second retry short."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.read_errors = 1
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    runtime.track(_snooze())
+
+    assert runtime._next_due() == clock() + SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+    assert delivery.calls == ["current_until"]
+
+
+@pytest.mark.asyncio
 async def test_failed_clear_retries_the_whole_wake() -> None:
     """A clear that fails on transport keeps the snooze for a full retry."""
     runtime, delivery, clock = _runtime(UNTIL)
@@ -544,6 +561,48 @@ async def test_unreadable_snooze_past_the_stale_cutoff_is_dropped() -> None:
     await runtime._wake_due()
 
     assert delivery.calls == ["current_until", "current_until"]
+    assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_a_late_copy_of_the_woken_snooze_keeps_its_pending_wake_message() -> None:
+    """Another bot's delayed sync of the snooze that just woke neither drops its pending message nor wakes it again."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    delivery.send_results = [False]
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    delivery.until[ROOM, ROOT] = None
+    runtime.track(_snooze())
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.calls == ["current_until", "is_resolved", "clear", "send_ended", "is_resolved", "send_ended"]
+    assert delivery.sent == [_snooze()]
+    assert runtime._next_due() is None
+
+
+@pytest.mark.asyncio
+async def test_a_late_copy_arriving_during_a_failed_send_keeps_the_wake_message() -> None:
+    """A copy of the woken snooze observed while its message is being sent does not cancel the retry."""
+    runtime, delivery, clock = _runtime(UNTIL)
+    original_send = delivery.send_ended
+
+    async def send_while_the_copy_arrives(snooze: Snooze) -> bool:
+        runtime.track(_snooze())
+        delivery.send_ended = original_send  # type: ignore[method-assign]
+        delivery.send_results = [False]
+        return await original_send(snooze)
+
+    delivery.send_ended = send_while_the_copy_arrives  # type: ignore[method-assign]
+    runtime.track(_snooze())
+    await runtime._wake_due()
+
+    assert runtime._snoozes == {}
+    clock.now += SNOOZE_RETRY_DELAY
+    await runtime._wake_due()
+
+    assert delivery.sent == [_snooze()]
     assert runtime._next_due() is None
 
 

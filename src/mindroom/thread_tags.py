@@ -54,6 +54,7 @@ __all__ = [
     "get_thread_tags",
     "list_tagged_threads",
     "normalize_tag_name",
+    "parse_thread_tag_record",
     "parse_thread_tag_state_key",
     "remove_thread_tag",
     "set_thread_tag",
@@ -407,7 +408,7 @@ def _normalize_tag_data(
     return normalized_data
 
 
-def _parse_thread_tag_record(
+def parse_thread_tag_record(
     tag: str,
     value: object,
 ) -> ThreadTagRecord | None:
@@ -681,7 +682,7 @@ async def _get_room_thread_tags_snapshot(
             per_tag_tombstones_by_thread.setdefault(thread_root_id, set()).add(tag)
             continue
 
-        record = _parse_thread_tag_record(tag, content)
+        record = parse_thread_tag_record(tag, content)
         if record is not None:
             per_tag_records_by_thread.setdefault(thread_root_id, {})[tag] = record
 
@@ -1010,7 +1011,8 @@ async def _get_thread_tags_after_removal(
     """Read one thread's tags; once Matrix accepted a removal, a failed read answers with the state it left."""
     try:
         return await get_thread_tags(client, room_id, thread_root_id)
-    except ThreadTagsError:
+    except Exception:
+        # Any failure, a transport one included, leaves an accepted removal in place; cancellation still propagates.
         if removed_state is None:
             raise
         logger.warning("Thread tag removal accepted but not verified", room_id=room_id, tag=tag)

@@ -240,6 +240,72 @@ async def test_restore_that_fails_partway_leaves_the_room_unrestored(tmp_path: P
     assert set(_tracked(coordinator)) == {(ROOM, ROOT), (ROOM, "$two")}
 
 
+_MALFORMED_CONTENTS = [
+    {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "note": 123, "data": {"until": UNTIL.isoformat()}},
+    {"set_by": PERSON, "set_at": "2026-11-13T08:00:00+00:00", "data": []},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", _MALFORMED_CONTENTS)
+async def test_malformed_snooze_in_a_restore_does_not_hide_later_snoozes(
+    tmp_path: Path,
+    content: dict[str, object],
+) -> None:
+    """A malformed snooze event in a room's state is skipped, and the valid ones after it are indexed."""
+    bot = _bot(ROOM)
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            events=[_snooze_source(root="$bad", content=content), _snooze_source()],
+            room_id=ROOM,
+        ),
+    )
+    coordinator = _coordinator(_config(tmp_path), {"router": bot})
+
+    await coordinator.restore_room(bot, ROOM)
+
+    assert set(_tracked(coordinator)) == {(ROOM, ROOT)}
+    assert ROOM in coordinator._restored_rooms
+    assert coordinator._restore_retries == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", _MALFORMED_CONTENTS)
+async def test_snooze_that_became_malformed_does_not_stall_other_wakes(
+    tmp_path: Path,
+    content: dict[str, object],
+) -> None:
+    """A tracked snooze whose state turned malformed is dropped, and the other due snoozes still wake."""
+    router = _bot(ROOM)
+    coordinator = _coordinator(_config(tmp_path), {"router": router})
+    coordinator.observe_state_event(ROOM, _snooze_source(root="$bad"))
+    coordinator.observe_state_event(ROOM, _snooze_source(root="$live"))
+    coordinator.observe_state_event(ROOM, _snooze_source())
+    coordinator.observe_state_event(ROOM, _snooze_source(root="$live", content=content))
+    assert set(_tracked(coordinator)) == {(ROOM, "$bad"), (ROOM, ROOT)}
+    runtime = coordinator._runtime
+    runtime._clock = lambda: UNTIL
+
+    async def read(_client: object, _room_id: str, thread_root_id: str, tag: str) -> dict[str, Any] | None:
+        if tag == "resolved":
+            return None
+        return content if thread_root_id == "$bad" else _snooze_source()["content"]  # type: ignore[return-value]
+
+    with (
+        patch(f"{_MODULE}.get_thread_tag_content", new=read),
+        patch(f"{_MODULE}.get_thread_tags", new=AsyncMock(return_value=_tag_state())),
+        patch(
+            f"{_MODULE}.remove_thread_tag",
+            new=AsyncMock(return_value=ThreadTagsState(room_id=ROOM, thread_root_id=ROOT)),
+        ),
+    ):
+        await runtime._wake_due()
+
+    assert _tracked(coordinator) == {}
+    router.hook_context.send_message.assert_awaited_once()
+    assert router.hook_context.send_message.await_args.args[2] == ROOT
+
+
 @pytest.mark.asyncio
 async def test_live_events_during_a_restore_win_over_its_older_snapshot(tmp_path: Path) -> None:
     """A tag event that arrives while the room's state is being read is newer than that snapshot, so it stays."""

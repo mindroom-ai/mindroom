@@ -2404,3 +2404,29 @@ async def test_remove_thread_tag_counts_an_accepted_removal_when_the_verificatio
 
     client.room_put_state.assert_awaited_once()
     assert list(state.tags) == ["resolved"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("slow"), OSError("connection reset")])
+async def test_remove_thread_tag_counts_an_accepted_removal_whatever_the_verification_read_raises(
+    error: Exception,
+) -> None:
+    """A transport exception from the verification read after an accepted removal still counts as removed."""
+    current_events = _snoozed_events()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    get_state = client.room_get_state.side_effect
+    reads = 0
+
+    async def second_read_raises(room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise error
+        return await get_state(room_id)
+
+    client.room_get_state.side_effect = second_read_raises
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    client.room_put_state.assert_awaited_once()
+    assert state.tags == {}

@@ -8,13 +8,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from pydantic import ValidationError
-
 from mindroom.logging_config import get_logger
 from mindroom.thread_tags import (
     SNOOZED_THREAD_TAG,
     THREAD_TAGS_EVENT_TYPE,
-    ThreadTagRecord,
+    parse_thread_tag_record,
     parse_thread_tag_state_key,
     snooze_until,
 )
@@ -82,12 +80,9 @@ def snooze_from_state_event(
         return None
     thread_root_id = parsed_state_key[0]
 
-    try:
-        record = ThreadTagRecord.model_validate(source.get("content"))
-    except ValidationError:
-        return thread_root_id, None
+    record = parse_thread_tag_record(SNOOZED_THREAD_TAG, source.get("content"))
     until = snooze_until(record)
-    if until is None:
+    if record is None or until is None:
         return thread_root_id, None
 
     # A person may only name themselves; a MindRoom account writes on behalf of the person it names.
@@ -155,8 +150,18 @@ class ThreadSnoozeRuntime:
     def track(self, snooze: Snooze) -> None:
         """Index a snooze, replacing any earlier one and any wake message still waiting for the same thread."""
         key = snooze.room_id, snooze.thread_root_id
+        pending = self._pending_sends.get(key)
+        if pending is not None:
+            if pending.snooze.until == snooze.until:
+                # A late copy, such as another bot's delayed sync, of the snooze whose wake message is waiting.
+                return
+            del self._pending_sends[key]
+        entry = self._snoozes.get(key)
+        if entry is not None and entry.snooze.until == snooze.until:
+            # The same snooze observed again keeps its entry, so a wake in progress and a pending retry delay stand.
+            entry.snooze = snooze
+            return
         self._snoozes[key] = _Entry(snooze, snooze.until)
-        self._pending_sends.pop(key, None)
         self._changed.set()
 
     def forget(self, room_id: str, thread_root_id: str) -> None:
@@ -248,9 +253,13 @@ class ThreadSnoozeRuntime:
         if await self._delivery.send_ended(snooze):
             self._pending_sends.pop(key, None)
             return
-        if key in self._snoozes:
-            # The thread was snoozed again meanwhile, which cancels this wake message.
-            return
+        current = self._snoozes.get(key)
+        if current is not None:
+            if current.snooze.until != snooze.until:
+                # The thread was snoozed again meanwhile, which cancels this wake message.
+                return
+            # A late copy of this ended snooze arrived meanwhile; the retry below replaces it.
+            del self._snoozes[key]
         logger.warning("thread_snooze_send_retry", room_id=key[0], thread_root_id=key[1])
         self._pending_sends[key] = _Entry(snooze, self._clock() + SNOOZE_RETRY_DELAY)
 
