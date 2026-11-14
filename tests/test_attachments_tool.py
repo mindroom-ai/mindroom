@@ -806,13 +806,16 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
 async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
     """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
     config = Config(agents={"openclaw": AgentConfig(display_name="OpenClaw")})
-    tool = AttachmentTools(
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+    tool = get_tool_by_name(
+        "attachments",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         runtime_config=config,
         worker_target=_shared_worker_target(),
         workspace_in_worker=True,
         tool_output_workspace_root=tmp_path / "workspace",
+        tools=builtin_tool_registry(),
     )
+    assert isinstance(tool, AttachmentTools)
     viewed = ToolValue(content=json.dumps({"path": "plot.png", "view_status": "ready"}))
 
     with patch("mindroom.custom_tools.attachments.view_file_from_worker", return_value=viewed) as view:
