@@ -218,6 +218,32 @@ async def test_restore_retry_stops_when_no_bot_is_joined_and_on_stop(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_a_restore_retry_that_is_reading_the_room(tmp_path: Path) -> None:
+    """Stopping while a retry reads the room cancels it, and nothing schedules another retry afterwards."""
+    bot = _bot(ROOM)
+    reading = asyncio.Event()
+
+    async def room_get_state(_room_id: str) -> nio.RoomGetStateError:
+        if bot.client.room_get_state.await_count == 1:
+            return nio.RoomGetStateError("boom")
+        reading.set()
+        await asyncio.Event().wait()
+        return nio.RoomGetStateError("never")
+
+    bot.client.room_get_state = AsyncMock(side_effect=room_get_state)
+    coordinator = _coordinator(_config(tmp_path), {"router": bot})
+
+    with patch(f"{_MODULE}.SNOOZE_RETRY_DELAY", timedelta(0)):
+        await coordinator.restore_room(bot, ROOM)
+        [retry] = coordinator._restore_retries.values()
+        await asyncio.wait_for(reading.wait(), timeout=1)
+        await coordinator.stop()
+
+    assert retry.cancelled()
+    assert coordinator._restore_retries == {}
+
+
+@pytest.mark.asyncio
 async def test_restore_that_fails_partway_leaves_the_room_unrestored(tmp_path: Path) -> None:
     """A failure while indexing the room's events leaves it unrestored, so the retry reads it again."""
     bot, other = _bot(ROOM), _bot(ROOM)

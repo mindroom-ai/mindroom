@@ -145,18 +145,23 @@ class ThreadSnoozeRuntimeCoordinator:
                 del self._live_during_restore[room_id]
 
     def _retry_restore_later(self, room_id: str) -> None:
-        """Read the room's state again after the retry delay, unless a retry is already pending."""
-        if room_id not in self._restore_retries:
+        """Read the room's state again after the retry delay, unless another retry is already pending."""
+        pending = self._restore_retries.get(room_id)
+        if pending is None or pending is asyncio.current_task():
             self._restore_retries[room_id] = asyncio.create_task(self._retry_restore(room_id))
 
     async def _retry_restore(self, room_id: str) -> None:
-        await asyncio.sleep(SNOOZE_RETRY_DELAY.total_seconds())
-        self._restore_retries.pop(room_id, None)
-        joined = next(self._joined_bots(room_id), None)
-        if joined is None or room_id in self._restored_rooms:
-            # No bot sees the room anymore; the next bot to join restores it.
-            return
-        await self.restore_room(joined[0], room_id)
+        # The retry stays in _restore_retries until it ends, so stop() cancels it even while it reads the room.
+        try:
+            await asyncio.sleep(SNOOZE_RETRY_DELAY.total_seconds())
+            joined = next(self._joined_bots(room_id), None)
+            if joined is None or room_id in self._restored_rooms:
+                # No bot sees the room anymore; the next bot to join restores it.
+                return
+            await self.restore_room(joined[0], room_id)
+        finally:
+            if self._restore_retries.get(room_id) is asyncio.current_task():
+                del self._restore_retries[room_id]
 
     def _still_watched(self, bot: AgentBot, room_id: str) -> bool:
         """Return whether the room is restored and another bot is joined to it, so its sync carries the room's tags."""
