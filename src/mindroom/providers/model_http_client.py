@@ -30,10 +30,10 @@ _TARGET_AND_BODY_HEADERS = frozenset({"host", "content-type", "content-length", 
 
 
 class _PooledClient(httpx2.AsyncClient):
-    """One event loop's pooled client, which follows redirects but sends one to another origin no header of its own."""
+    """One event loop's pooled client, which sends a redirect to another origin only a fresh request's headers."""
 
     def _redirect_headers(self, request: httpx2.Request, url: httpx2.URL, method: str) -> httpx2.Headers:
-        """Return the request's headers for a redirect within its origin, else a fresh request's.
+        """Return the request's headers within its origin, else a fresh request's plus its host and body headers.
 
         httpx2 drops only ``Authorization`` on a redirect to another origin, but model requests also carry keys in
         headers such as ``x-api-key`` and ``api-key``, and headers their config or caller set. A redirect from a host's
