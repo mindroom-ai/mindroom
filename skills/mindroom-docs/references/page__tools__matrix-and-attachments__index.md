@@ -156,12 +156,12 @@ It is not in default tool sets, so other agents cannot snooze threads unless an 
 
 `snooze_thread(until, note=None, thread_id=None)` adds the `snoozed` state, and `unsnooze_thread(thread_id=None)` removes it.
 `until` is an ISO-8601 datetime with a time part, such as `2026-11-14T09:00:00+01:00`; a value without an offset is UTC, and a date alone, an unparsable value, or a time that is not in the future returns an error and changes nothing.
-`note` is a reminder the wake message quotes.
+`note` is a reminder the wake message quotes; it is stored unencrypted in room state, even in an encrypted room.
 `unsnooze_thread` returns `Thread is not snoozed.` when the thread has no snooze.
 Without `thread_id`, both require an active thread; pass a thread root or reply event ID to target another thread in the current room.
 
 When the time comes, the `snoozed` state ends and a message in the thread quotes the note.
-The message mentions the person who set the snooze, or the person an agent snoozed it for; it starts no agent turn.
+The message mentions the person who set the snooze only when that person or a MindRoom account, such as an agent snoozing it for them, sent the snooze's state event; it starts no agent turn.
 `snoozed` is thread lifecycle state, so [`thread_tags`](#thread_tags) refuses to set or remove it.
 A snooze set from MindRoom Chat is stored the same way and woken the same way, and resolving a snoozed thread with [`thread_resolution`] ends its snooze.
 A snooze that is more than 24 hours past due, for example because MindRoom was down, is ended without a message instead of waking the thread late.

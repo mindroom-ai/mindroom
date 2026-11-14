@@ -66,6 +66,9 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 
+MindRoom now has a built-in [`thread_snooze`](tools/matrix-and-attachments.md#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
+Its `thread_snooze` tool name collides with the built-in toolkit, so MindRoom does not load the plugin, and the built-in toolkit replaces it.
+
 ## Configure plugins
 
 List plugins under `plugins:` in `config.yaml`.
