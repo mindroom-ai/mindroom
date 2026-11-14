@@ -27,8 +27,8 @@ _ROOMLESS_FUNCTIONS = {"attachments": frozenset({"view_file"})}
 def turn_room_flags(execution_identity: ToolExecutionIdentity | None) -> tuple[bool, bool]:
     """Return whether a turn under ``execution_identity`` keeps room-context toolkits and adds the Matrix room ones.
 
-    A build without an identity keeps room-context toolkits, a turn without a room hides them, and only a Matrix room
-    turn adds the Matrix room runtime toolkits.
+    A build without an identity keeps room-context toolkits, a turn without a room offers only their functions that need
+    none, and only a Matrix room turn adds the Matrix room runtime toolkits.
     """
     if execution_identity is None:
         return True, False
