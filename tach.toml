@@ -2486,6 +2486,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.llm",

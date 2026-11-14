@@ -144,7 +144,7 @@ def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
             "",
             id="required-implied",
         ),
-        pytest.param(_MESSAGE_TOOLS, "roomless", {}, "shell", "", id="roomless-hides"),
+        pytest.param(_MESSAGE_TOOLS, "roomless", {}, "shell", "attachments", id="roomless-hides"),
         pytest.param(_MESSAGE_TOOLS, "none", {}, "shell", _TRIO, id="identity-less-keeps"),
     ],
 )
@@ -322,7 +322,14 @@ def _locally_allowed(
     ("agent", "toolkit", "identity", "depth", "expected"),
     [
         pytest.param(_ROOM_TOOL, "matrix_message", "room", 0, ("matrix_message",), id="room-context-in-room"),
-        pytest.param(_ROOM_TOOL, "matrix_message", "roomless", 0, "requires room context", id="room-context-roomless"),
+        pytest.param(
+            {"tools": ["matrix_api"]},
+            "matrix_api",
+            "roomless",
+            0,
+            "requires room context",
+            id="room-context-roomless",
+        ),
         # The preset's other toolkits need no room, so its shell's approvals restore without one.
         pytest.param(
             {"tools": ["openclaw_compat"]},

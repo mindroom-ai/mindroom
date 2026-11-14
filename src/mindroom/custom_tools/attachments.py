@@ -17,6 +17,7 @@ from mindroom.attachments.storage import (
     load_attachment,
     register_local_attachment,
 )
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import resolve_agent_file
@@ -52,7 +53,6 @@ from mindroom.tool_system.sandbox_proxy import (
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
