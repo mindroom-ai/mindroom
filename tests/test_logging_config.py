@@ -715,6 +715,22 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     assert [event for event in events if event in captured.err] == expected
 
 
+def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A debug record that nothing shows, such as one holding a full prompt, is never rendered or redacted."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    rendered: list[str] = []
+
+    class _Prompt:
+        def __repr__(self) -> str:
+            rendered.append("prompt")
+            return "prompt"
+
+    get_logger("mindroom.example").debug("Prepared agent full prompt", full_prompt=_Prompt())
+
+    assert rendered == []
+
+
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
     """The refresh child's failure traceback omits frame locals, and the failure it reports carries none either."""
     request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
