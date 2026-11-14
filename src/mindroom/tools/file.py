@@ -197,10 +197,8 @@ class _MindRoomFileTools(AgnoFileTools):
             return str(contents)
         except Exception as e:
             log_error(f"Error reading file: {e}")
-            mime_type = named_mime_type(file_name) if isinstance(e, UnicodeDecodeError) else None
-            if mime_type in _VIEWABLE_IMAGE_TYPES:
-                return _image_read_error(file_name, mime_type)
-            return f"Error reading file: {e}"
+            image_error = _image_read_error(file_name) if isinstance(e, UnicodeDecodeError) else None
+            return image_error or f"Error reading file: {e}"
 
     @shared_directory_aware("file_name", writes=True)
     def delete_file(self, file_name: str) -> str:
@@ -514,7 +512,11 @@ def file_tools() -> type[AgnoFileTools]:
     return _MindRoomFileTools
 
 
-def _image_read_error(file_name: str, mime_type: str) -> str:
+def _image_read_error(file_name: str) -> str | None:
+    """Return what read_file answers for ``file_name`` it cannot decode, if it names an image view_file shows."""
+    mime_type = named_mime_type(file_name)
+    if mime_type not in _VIEWABLE_IMAGE_TYPES:
+        return None
     return f"Error reading file: {file_name} is an image ({mime_type}), not text."
 
 
@@ -547,7 +549,7 @@ async def _name_view_file(call: ToolCall, call_next: ToolNext) -> object:
     # reaches, go by absolute path.
     if not isinstance(file_name, str) or Path(file_name).is_absolute():
         return result
-    mime_type = named_mime_type(file_name)
-    if mime_type is not None and result == _image_read_error(file_name, mime_type):
+    image_error = _image_read_error(file_name)
+    if image_error is not None and result == image_error:
         return f"{result} View it with view_file."
     return result

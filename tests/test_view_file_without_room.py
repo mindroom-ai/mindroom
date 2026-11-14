@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,16 +14,14 @@ from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.headless import run_turn
-from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
+from tests.test_headless import _last_tool_result
 from tests.test_media_delivery import image_bytes
 from tests.test_openai_compat import _openai_client
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.llm.provider import ModelRequest
 
 _ROOM_FUNCTIONS = {"get_attachment", "list_attachments", "register_attachment"}
@@ -36,10 +34,6 @@ def _headless_config(*tools: object) -> dict[str, Any]:
         "memory": "none",
         "agents": {"coder": {"display_name": "Coder", "tools": list(tools)}},
     }
-
-
-def _tool_result(request: ModelRequest) -> str:
-    return str([message for message in request.messages if message.role == "tool"][-1].content)
 
 
 def _images(request: ModelRequest) -> list[tuple[str | None, bytes | None]]:
@@ -68,7 +62,7 @@ async def test_a_headless_turn_views_an_image_in_its_workdir(tmp_path: Path, mon
     assert not offered & _ROOM_FUNCTIONS
     system = [str(message.content) for message in provider.requests[0].messages if message.role == "system"]
     assert any("`view_file`: the workdir; other path tools: agent workspace" in text for text in system)
-    assert json.loads(_tool_result(provider.requests[1]))["view_status"] == "ready"
+    assert json.loads(_last_tool_result(provider.requests[1]))["view_status"] == "ready"
     assert _images(provider.requests[1]) == [("image/png", image_bytes())]
 
 
@@ -78,7 +72,14 @@ def test_an_openai_compatible_turn_views_an_image_in_the_agent_workspace(
 ) -> None:
     """A completion's agent gets view_file without its room-only siblings, and sees the image it views."""
     config = Config(
-        agents={"general": AgentConfig(display_name="General", tools=["file", "attachments"], rooms=[])},
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=["file", "attachments"],
+                rooms=[],
+                memory_backend="none",
+            ),
+        },
         models={"default": ModelConfig(provider="ollama", id="test-model")},
         router=RouterConfig(model="default"),
         defaults=DefaultsConfig(tools=[]),
@@ -95,10 +96,7 @@ def test_an_openai_compatible_turn_views_an_image_in_the_agent_workspace(
     provider = ScriptedProvider(steps=[[("view_file", {"path": "board.png"})], "done"])
     provider.install(monkeypatch)
 
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        _openai_client(config, runtime_paths) as client,
-    ):
+    with _openai_client(config, runtime_paths) as client:
         response = client.post(
             "/v1/chat/completions",
             json={"model": "general", "messages": [{"role": "user", "content": "look"}]},
@@ -123,9 +121,21 @@ def test_an_openai_compatible_turn_views_an_image_in_the_agent_workspace(
         ),
         (
             ["file", "attachments"],
+            "{workdir}/board.png",
+            image_bytes(),
+            "{workdir}/board.png is an image (image/png), not text.",
+        ),
+        (
+            ["file", "attachments"],
             "logo.svg",
             "<svg>\N{LATIN SMALL LETTER E WITH ACUTE}</svg>".encode("latin-1"),
             "'utf-8' codec can't decode byte 0xe9 in position 5: invalid continuation byte",
+        ),
+        (
+            ["file", "attachments"],
+            "missing.png",
+            None,
+            "[Errno 2] No such file or directory: 'missing.png'",
         ),
         (["file"], "board.png", image_bytes(), "board.png is an image (image/png), not text."),
         (
@@ -135,20 +145,26 @@ def test_an_openai_compatible_turn_views_an_image_in_the_agent_workspace(
             "board.png is an image (image/png), not text.",
         ),
     ],
-    ids=["offered", "not-viewable", "no-attachments", "view-file-excluded"],
+    ids=["offered", "absolute-path", "not-viewable", "missing", "no-attachments", "view-file-excluded"],
 )
 async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tools: list[object],
     file_name: str,
-    content: bytes,
+    content: bytes | None,
     message: str,
 ) -> None:
-    """read_file reports an image view_file shows as one, naming view_file when the turn offers it, else the decode error."""
+    """read_file reports an image view_file shows as one, else the decode error, and names view_file when it can help.
+
+    That is when the turn offers it and the path is relative: shared directories and saved outputs, which view_file
+    cannot reach, go by absolute path.
+    """
     workdir = tmp_path / "work"
     workdir.mkdir()
-    (workdir / file_name).write_bytes(content)
+    file_name = file_name.format(workdir=workdir)
+    if content is not None:
+        (workdir / Path(file_name).name).write_bytes(content)
     provider = ScriptedProvider(steps=[[("read_file", {"file_name": file_name})], "done"])
     provider.install(monkeypatch)
 
@@ -160,31 +176,7 @@ async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
         workdir=workdir,
     )
 
-    assert _tool_result(provider.requests[1]) == f"Error reading file: {message}"
-
-
-@pytest.mark.asyncio
-async def test_read_file_names_view_file_only_for_a_relative_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shared directories and saved outputs, which view_file cannot reach, go by absolute path and get no hint."""
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    (workdir / "board.png").write_bytes(image_bytes())
-    file_name = str(workdir / "board.png")
-    provider = ScriptedProvider(steps=[[("read_file", {"file_name": file_name})], "done"])
-    provider.install(monkeypatch)
-
-    await run_turn(
-        _headless_config("file", "attachments"),
-        agent="coder",
-        prompt="look",
-        storage=tmp_path / "storage",
-        workdir=workdir,
-    )
-
-    assert _tool_result(provider.requests[1]) == f"Error reading file: {file_name} is an image (image/png), not text."
+    assert _last_tool_result(provider.requests[1]) == f"Error reading file: {message.format(workdir=workdir)}"
 
 
 @pytest.mark.asyncio

@@ -830,10 +830,7 @@ async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> No
     """A worker view that fails reports the failure in the view receipt instead of raising."""
     tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
 
-    with (
-        tool_runtime_context(_tool_context(tmp_path, process_env=_WORKER_RUNTIME_ENV)),
-        patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")),
-    ):
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")):
         result = await tool.view_file("plot.png")
 
     assert json.loads(result.content) == {
