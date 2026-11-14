@@ -8,6 +8,7 @@ import dataclasses
 import json
 import pickle
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -358,7 +359,8 @@ async def test_workdir_is_shell_cwd_and_file_base(
     assert str(shell_result.content).splitlines()[-1] == str(workdir)
     assert _files(workdir) == ["a.txt"]
     assert (storage / "agents" / "coder" / "sessions" / "coder.db").is_file()
-    # The notes on writing into the workspace are left out, since the tools resolve relative paths in the workdir.
+    # The system prompt leaves out its notes on writing into the workspace, since the tools resolve relative paths in
+    # the workdir; the shell's description is checked beside a profile it writes.
     system = _sent(provider.requests[0], "system")
     assert "MINDROOM_AGENT_WORKSPACE" not in system
     assert "skills/<skill-name>/" not in system
@@ -716,6 +718,37 @@ async def test_a_profile_and_a_record_are_found_where_the_prompt_says(
     assert "You are HELPER-PROFILE." in _sent(provider.requests[2], "system")
     assert _last_tool_result(provider.requests[3]).startswith("ran")
     assert json.loads(_last_tool_result(provider.requests[4]))["status"] == "completed"
+    assert _files(workdir) == []
+
+
+@pytest.mark.asyncio
+async def test_a_profile_the_shell_writes_to_its_workspace_variable_runs_beside_a_workdir(
+    tmp_path: Path,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside a workdir, the shell is described as running there, and `$MINDROOM_AGENT_WORKSPACE` names the workspace."""
+    command = (
+        'pwd; echo "$MINDROOM_AGENT_WORKSPACE"; mkdir -p "$MINDROOM_AGENT_WORKSPACE/subagents"; '
+        f'printf %s {shlex.quote(_PROFILE)} > "$MINDROOM_AGENT_WORKSPACE/subagents/helper.md"'
+    )
+    provider = _install(
+        monkeypatch,
+        [("run_shell_command", {"args": command})],
+        [("run_subagent", {"task": "go", "profile": "helper"})],
+        "ran",
+        "done",
+    )
+    storage = tmp_path / "storage"
+    await run_turn(_config(delegate_to=["coder"]), agent="coder", prompt="go", storage=storage, workdir=workdir)
+
+    (shell,) = (tool for tool in provider.requests[0].tools if tool.name == "run_shell_command")
+    assert "The command runs in the workdir as its working directory" in shell.description
+    assert "runs in your agent workspace" not in shell.description
+    workspace = storage.resolve() / "agents" / "coder" / "workspace"
+    assert _last_tool_result(provider.requests[1]).splitlines()[-2:] == [str(workdir.resolve()), str(workspace)]
+    assert "You are HELPER-PROFILE." in _sent(provider.requests[2], "system")
+    assert _last_tool_result(provider.requests[3]).startswith("ran")
     assert _files(workdir) == []
 
 
