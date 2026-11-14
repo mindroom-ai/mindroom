@@ -864,3 +864,45 @@ async def test_a_relayed_stream_closes_with_the_streams_own_code_when_the_sessio
                 await upstream_closed.wait()
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drop", [True, False], ids=["dropped", "closed"])
+async def test_a_relayed_streams_upstream_learns_how_the_client_left(app: FastAPI, drop: bool) -> None:
+    """A client lost on the embedded server's transport ends the upstream with 1011; a closing one ends it with 1000."""
+    close_codes: asyncio.Queue[int | None] = asyncio.Queue()
+
+    async def echo(request: web.Request) -> web.WebSocketResponse:
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        async for message in websocket:
+            await websocket.send_str(message.data)
+        await close_codes.put(websocket.close_code)
+        return websocket
+
+    upstream = web.Application()
+    upstream.router.add_get("/", echo)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    sys.modules[PROBE_MODULE].upstream = f"http://127.0.0.1:{runner.addresses[0][1]}/"
+    token = client_session_store(app).create(ALICE).token
+    try:
+        async with _serving(app) as port, aiohttp.ClientSession() as session:
+            websocket = await session.ws_connect(
+                f"http://127.0.0.1:{port}/api/plugins/demo/relayed",
+                protocols=_offers(token),
+                origin=CLIENT_ORIGIN,
+            )
+            await websocket.send_str("hi")
+            assert await websocket.receive_str() == "hi"
+            if drop:
+                assert websocket._response.connection is not None
+                websocket._response.connection.transport.abort()
+            else:
+                await websocket.close()
+            async with asyncio.timeout(10):
+                assert await close_codes.get() == (1011 if drop else 1000)
+    finally:
+        await runner.cleanup()
