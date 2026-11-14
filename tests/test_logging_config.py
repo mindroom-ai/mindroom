@@ -749,6 +749,14 @@ def _own_stdout_handler(logger: logging.Logger) -> None:
     logger.handlers[:] = [_formatted(logging.StreamHandler(sys.stdout), "own %(message)s")]
 
 
+def _filter_on_agnos_handler(logger: logging.Logger) -> None:
+    logger.handlers[0].addFilter(lambda _record: False)
+
+
+def _level_on_agnos_handler(logger: logging.Logger) -> None:
+    logger.handlers[0].setLevel(logging.ERROR)
+
+
 def _own_plain_stdout_handler(logger: logging.Logger) -> None:
     logger.handlers[:] = [logging.StreamHandler(sys.stdout)]
 
@@ -766,6 +774,8 @@ def _own_stderr_handler_in_agnos_format(logger: logging.Logger) -> None:
         pytest.param(_propagating, "WARNING agent_warning\n", "root agent_warning\n", id="propagating"),
         pytest.param(_own_stdout_handler, "own agent_warning\n", "", id="own-stdout-handler"),
         pytest.param(_own_plain_stdout_handler, "agent_warning\n", "", id="own-plain-stdout-handler"),
+        pytest.param(_filter_on_agnos_handler, "", "", id="filter-on-agnos-handler"),
+        pytest.param(_level_on_agnos_handler, "", "", id="level-on-agnos-handler"),
         pytest.param(_own_stderr_handler_in_agnos_format, "", "WARNING agent_warning\n", id="own-agno-format"),
     ],
 )
@@ -789,20 +799,35 @@ def test_library_logging_reroutes_only_an_agno_logger_as_agno_set_it_up(
     assert (captured.out, captured.err) == (expected_out, expected_err)
 
 
-def test_library_logging_keeps_what_the_program_sets_on_agno_after_a_call(
+def _handler_after_the_call(logger: logging.Logger) -> None:
+    logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "after %(message)s"))
+
+
+@pytest.mark.parametrize(
+    ("program_setup", "expected_err"),
+    [
+        pytest.param(_handler_after_the_call, "after agent_info\nafter agent_warning\n", id="handler"),
+        pytest.param(_propagating, "root agent_info\nroot agent_warning\n", id="propagating"),
+    ],
+)
+def test_library_logging_steps_aside_when_the_program_sets_up_agno_after_a_call(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    program_setup: Callable[[logging.Logger], None],
+    expected_err: str,
 ) -> None:
-    """A handler the program adds to an Agno logger after a headless call takes its records, below the root level too."""
+    """An Agno logger the program sets up after a headless call sends its records only where the program routes them."""
     monkeypatch.setattr(logging_config, "_library_logging", False)
     _give_agno_its_console_handlers()
+    logging.getLogger().addHandler(_formatted(logging.StreamHandler(sys.stderr), "root %(message)s"))
     logging_config.use_library_logging()
-    agno_log.agent_logger.addHandler(_formatted(logging.StreamHandler(sys.stderr), "after %(message)s"))
+    program_setup(agno_log.agent_logger)
     logging_config.use_library_logging()
 
     agno_log.agent_logger.info("agent_info")
+    agno_log.agent_logger.warning("agent_warning")
 
-    assert capsys.readouterr().err == "after agent_info\n"
+    assert capsys.readouterr().err == expected_err
 
 
 def test_library_logging_leaves_an_agno_logger_adapter_alone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -817,7 +842,7 @@ def test_library_logging_leaves_an_agno_logger_adapter_alone(monkeypatch: pytest
 
 
 def test_a_logger_survives_pickling_and_copying() -> None:
-    """A logger pickles and copies by its name, as structlog's own loggers do."""
+    """A logger pickles and copies, as structlog's own loggers do."""
     logger = get_logger("tests.library")
 
     for clone in (pickle.loads(pickle.dumps(logger)), copy.copy(logger), copy.deepcopy(logger)):  # noqa: S301
