@@ -670,8 +670,8 @@ def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does
     try:
         _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
     except ValueError:
-        get_logger("mindroom.example").exception("test_exception", api_key="api-secret")
-    get_logger("mindroom.example").info("test_info")
+        get_logger("tests.library").exception("test_exception", api_key="api-secret")
+    get_logger("tests.library").info("test_info")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -706,8 +706,8 @@ def test_library_logging_routes_agno_records_at_the_root_level(
     agno_log.set_log_level_to_info()
     agno_log.agent_logger.info("agno_info")
     agno_log.agent_logger.warning("agno_warning")
-    get_logger("mindroom.example").debug("mindroom_debug")
-    get_logger("mindroom.example").info("mindroom_info")
+    get_logger("tests.library").debug("mindroom_debug")
+    get_logger("tests.library").info("mindroom_info")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -739,7 +739,7 @@ def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.M
             rendered.append("prompt")
             return "prompt"
 
-    get_logger("mindroom.example").debug("Prepared agent full prompt", full_prompt=_Prompt())
+    get_logger("tests.library").debug("Prepared agent full prompt", full_prompt=_Prompt())
 
     assert rendered == []
 
