@@ -19,6 +19,7 @@ from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.personas import (
@@ -582,10 +583,12 @@ def _offered_entries(
     is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
     anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
-    reported. A ``read_file`` that cannot read an image names ``view_file`` when the run offers it.
+    reported. A ``file`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
+    viewer = next((entry.toolkit for entry in entries if isinstance(entry.toolkit, AttachmentTools)), None)
     offered = with_view_file_hint(
         offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name),
+        viewer.views if viewer is not None else None,
     )
     offered_entries: list[_ToolkitEntry] = []
     left_out: dict[str, set[str]] = {}

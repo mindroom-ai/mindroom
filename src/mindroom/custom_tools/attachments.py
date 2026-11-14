@@ -409,6 +409,16 @@ class AttachmentTools(Toolkit):
             ],
         )
 
+    def views(self, path: str) -> bool:
+        """Return whether view_file finds ``path`` as a file it may read; a worker resolves its own paths, so yes there."""
+        if self._workspace_in_worker:
+            return True
+        try:
+            resolve_agent_file(path, workspace_root=self._view_root, file_access=self._file_access, field_name="path")
+        except ValueError:
+            return False
+        return True
+
     async def view_file(self, path: str) -> ToolValue:
         """View an image in your own model context without posting or invoking another model.
 

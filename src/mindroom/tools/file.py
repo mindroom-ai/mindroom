@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -151,7 +152,8 @@ class _MindRoomFileTools(AgnoFileTools):
             return self.line_separator.join(lines[start_line : end_line + 1])
         except Exception as e:
             log_error(f"Error reading file: {e}")
-            return f"Error reading file: {e}"
+            image_error = _image_read_error(file_name) if isinstance(e, UnicodeDecodeError) else None
+            return image_error or f"Error reading file: {e}"
 
     @shared_directory_aware("file_name", writes=True)
     def replace_file_chunk(
@@ -520,36 +522,38 @@ def _image_read_error(file_name: str) -> str | None:
     return f"Error reading file: {file_name} is an image ({mime_type}), not text."
 
 
-def with_view_file_hint(toolkits: Sequence[AdaptedToolkit]) -> list[AdaptedToolkit]:
-    """Return ``toolkits`` with ``file``'s ``read_file`` naming ``view_file`` for an image it shows, if one offers it."""
-    if not any(
+def with_view_file_hint(
+    toolkits: Sequence[AdaptedToolkit],
+    views: Callable[[str], bool] | None,
+) -> list[AdaptedToolkit]:
+    """Return ``toolkits`` with ``file``'s reads naming ``view_file`` for an image ``views`` finds, if one offers it."""
+    if views is None or not any(
         function.name == "view_file" and function.registered_toolkit == "attachments"
         for toolkit in toolkits
         for function in toolkit.functions
     ):
         return list(toolkits)
+
+    async def name_view_file(call: ToolCall, call_next: ToolNext) -> object:
+        result = await call_next(call.arguments)
+        file_name = call.arguments.get("file_name")
+        if (
+            isinstance(file_name, str)
+            and result == _image_read_error(file_name)
+            and await asyncio.to_thread(views, file_name)
+        ):
+            return f"{result} View it with view_file."
+        return result
+
     return [
         replace(
             toolkit,
             functions=tuple(
-                replace(function, middleware=(*function.middleware, _name_view_file))
-                if function.name == "read_file" and function.registered_toolkit == "file"
+                replace(function, middleware=(*function.middleware, name_view_file))
+                if function.name in {"read_file", "read_file_chunk"} and function.registered_toolkit == "file"
                 else function
                 for function in toolkit.functions
             ),
         )
         for toolkit in toolkits
     ]
-
-
-async def _name_view_file(call: ToolCall, call_next: ToolNext) -> object:
-    result = await call_next(call.arguments)
-    file_name = call.arguments.get("file_name")
-    # view_file finds a relative path where read_file does; shared directories and saved outputs, which only read_file
-    # reaches, go by absolute path.
-    if not isinstance(file_name, str) or Path(file_name).is_absolute():
-        return result
-    image_error = _image_read_error(file_name)
-    if image_error is not None and result == image_error:
-        return f"{result} View it with view_file."
-    return result

@@ -802,6 +802,22 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert not any((tmp_path / "workspace").rglob("*"))
 
 
+def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
+    """Views resolves a path as view_file does: inside the workspace under workspace access, anywhere in a worker."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plot.png").write_bytes(b"png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+
+    assert tool.views("plot.png")
+    assert tool.views(str(workspace / "plot.png"))
+    assert not tool.views(str(outside))
+    assert not tool.views("missing.png")
+    assert AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True).views(str(outside))
+
+
 @pytest.mark.asyncio
 async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
     """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
