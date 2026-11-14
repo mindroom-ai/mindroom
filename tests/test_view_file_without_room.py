@@ -113,14 +113,25 @@ def test_an_openai_compatible_turn_views_an_image_in_the_agent_workspace(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tools", "file_name", "message"),
+    ("tools", "file_name", "content", "message"),
     [
-        (["file", "attachments"], "board.png", "board.png is an image (image/png), not text. View it with view_file."),
-        (["file", "attachments"], "board.bmp", "board.bmp is an image (image/bmp), not text."),
-        (["file"], "board.png", "board.png is an image (image/png), not text."),
+        (
+            ["file", "attachments"],
+            "board.png",
+            image_bytes(),
+            "board.png is an image (image/png), not text. View it with view_file.",
+        ),
+        (
+            ["file", "attachments"],
+            "logo.svg",
+            "<svg>\N{LATIN SMALL LETTER E WITH ACUTE}</svg>".encode("latin-1"),
+            "'utf-8' codec can't decode byte 0xe9 in position 5: invalid continuation byte",
+        ),
+        (["file"], "board.png", image_bytes(), "board.png is an image (image/png), not text."),
         (
             ["file", {"attachments": {"exclude_tools": ["view_file"]}}],
             "board.png",
+            image_bytes(),
             "board.png is an image (image/png), not text.",
         ),
     ],
@@ -131,12 +142,13 @@ async def test_read_file_on_an_image_says_so_and_names_view_file_when_offered(
     monkeypatch: pytest.MonkeyPatch,
     tools: list[object],
     file_name: str,
+    content: bytes,
     message: str,
 ) -> None:
-    """read_file reports an image it cannot decode as one, and names view_file only for one the turn can view."""
+    """read_file reports an image view_file shows as one, naming view_file when the turn offers it, else the decode error."""
     workdir = tmp_path / "work"
     workdir.mkdir()
-    (workdir / file_name).write_bytes(image_bytes(image_format="BMP" if file_name.endswith(".bmp") else "PNG"))
+    (workdir / file_name).write_bytes(content)
     provider = ScriptedProvider(steps=[[("read_file", {"file_name": file_name})], "done"])
     provider.install(monkeypatch)
 

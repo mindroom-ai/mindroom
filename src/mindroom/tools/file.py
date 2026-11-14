@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
-# The image types view_file shows, which read_file names it for.
+# The image types view_file shows, which are never text and which read_file names it for.
 _VIEWABLE_IMAGE_TYPES = frozenset(f"image/{image_format.lower()}" for image_format in SUPPORTED_IMAGE_FORMATS)
 
 # Agno searches only text files up to this size.
@@ -198,7 +198,7 @@ class _MindRoomFileTools(AgnoFileTools):
         except Exception as e:
             log_error(f"Error reading file: {e}")
             mime_type = named_mime_type(file_name) if isinstance(e, UnicodeDecodeError) else None
-            if mime_type is not None and mime_type.startswith("image/"):
+            if mime_type in _VIEWABLE_IMAGE_TYPES:
                 return _image_read_error(file_name, mime_type)
             return f"Error reading file: {e}"
 
@@ -546,6 +546,6 @@ async def _name_view_file(call: ToolCall, call_next: ToolNext) -> object:
     if not isinstance(file_name, str):
         return result
     mime_type = named_mime_type(file_name)
-    if mime_type in _VIEWABLE_IMAGE_TYPES and result == _image_read_error(file_name, mime_type):
+    if mime_type is not None and result == _image_read_error(file_name, mime_type):
         return f"{result} View it with view_file."
     return result
