@@ -224,7 +224,7 @@ def _shell_subprocess_env(
     env.update(workspace_home_contract)
     if workspace_dir is not None and not workspace_home_contract:
         # Local (non-worker) execution keeps the host HOME, but the workspace
-        # env var is still promised to agents, so export it from base_dir.
+        # env var is still promised to agents, so export it from workspace_dir.
         env["MINDROOM_AGENT_WORKSPACE"] = str(workspace_dir.expanduser().resolve())
 
     path_value = subprocess_path_with_prepends(
