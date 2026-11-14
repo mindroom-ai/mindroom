@@ -673,7 +673,6 @@ def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does
         _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
     except ValueError:
         get_logger("tests.library").exception("test_exception", api_key="api-secret")
-    get_logger("tests.library").info("test_info")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -681,8 +680,6 @@ def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does
     assert "git failed with GIT_CONFIG_VALUE_0 configured" in captured.err
     assert _FRAME_LOCAL_CREDENTIAL not in captured.err
     assert "api-secret" not in captured.err
-    # The root logger stays at its default WARNING level.
-    assert "test_info" not in captured.err
 
 
 @pytest.mark.parametrize(

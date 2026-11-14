@@ -563,7 +563,7 @@ def test_a_library_program_gets_warnings_on_stderr_and_nothing_on_stdout(tmp_pat
         capture_output=True,
         check=True,
         text=True,
-        timeout=120,
+        timeout=60,
     )
 
     assert completed.stdout == ""
