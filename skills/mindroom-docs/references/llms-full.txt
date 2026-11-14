@@ -21510,6 +21510,14 @@ The agent's skills, subagent profiles, and delegation records stay in its worksp
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
 
+## Logging
+
+Headless runs send MindRoom's log records to Python's `logging` module, under the `mindroom` logger, instead of printing them to stdout.
+Until your program configures `logging`, Python prints only warnings and errors, on stderr.
+To see more, configure it, for example with `logging.basicConfig(level=logging.INFO)`; `DEBUG` records include the full prompts sent to the model.
+Your program's structlog configuration applies to its own records, not to MindRoom's.
+Agno, the tool library MindRoom uses, prints its own log lines to stdout; `logging.getLogger("agno").handlers.clear()` after importing `mindroom.headless` keeps them off stdout and leaves only its warnings and errors, on stderr.
+
 # MCP Gateway
 
 The optional MCP gateway lets external MCP clients, such as desktop AI apps, use MindRoom agents' tools through one endpoint at `/mcp`.
