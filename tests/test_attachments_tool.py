@@ -802,15 +802,60 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert not any((tmp_path / "workspace").rglob("*"))
 
 
+def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
+    """A path view_file finds lies inside the workspace under workspace access, a worker's included."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plot.png").write_bytes(b"png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+
+    assert tool.views("plot.png")
+    assert tool.views(str(workspace / "plot.png"))
+    assert not tool.views(str(outside))
+    assert not tool.views("missing.png")
+    in_worker = AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True)
+    assert in_worker.views("only-in-the-worker.png")
+    assert in_worker.views(str(workspace / "plot.png"))
+    assert not in_worker.views(str(outside))
+    unrestricted = AttachmentTools(
+        tool_output_workspace_root=workspace,
+        workspace_in_worker=True,
+        file_access="unrestricted",
+    )
+    assert unrestricted.views(str(outside))
+
+
+@pytest.mark.asyncio
+async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
+    """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
+    config = Config(agents={"openclaw": AgentConfig(display_name="OpenClaw")})
+    tool = get_tool_by_name(
+        "attachments",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        runtime_config=config,
+        worker_target=_shared_worker_target(),
+        workspace_in_worker=True,
+        tool_output_workspace_root=tmp_path / "workspace",
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(tool, AttachmentTools)
+    viewed = ToolValue(content=json.dumps({"path": "plot.png", "view_status": "ready"}))
+
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", return_value=viewed) as view:
+        result = await tool.view_file("plot.png")
+
+    assert result == viewed
+    assert view.call_args.kwargs["runtime_config"] is config
+
+
 @pytest.mark.asyncio
 async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> None:
     """A worker view that fails reports the failure in the view receipt instead of raising."""
     tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
 
-    with (
-        tool_runtime_context(_tool_context(tmp_path, process_env=_WORKER_RUNTIME_ENV)),
-        patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")),
-    ):
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")):
         result = await tool.view_file("plot.png")
 
     assert json.loads(result.content) == {

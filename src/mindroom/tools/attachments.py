@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKSPACE_IN_WORKER,
         ToolManagedInitArg.FILE_ACCESS,

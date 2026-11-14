@@ -117,6 +117,7 @@ They run in standard mode; [minimal mode](tools/agent-cli.md) needs `mindroom ru
 With a `workdir`, the files that `shell`, `file`, and `coding` write land there, and MindRoom's own files stay under `storage`.
 Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
+An agent with the [`attachments`](attachments.md#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `file` and `coding` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.

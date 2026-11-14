@@ -19,6 +19,7 @@ from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.personas import (
@@ -51,7 +52,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_room_flags
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
@@ -82,6 +83,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
+from mindroom.tools.file import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
@@ -581,9 +583,13 @@ def _offered_entries(
     is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
     anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
-    reported.
+    reported. A ``file`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
-    offered = offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name)
+    viewer = next((entry.toolkit for entry in entries if isinstance(entry.toolkit, AttachmentTools)), None)
+    offered = with_view_file_hint(
+        offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name),
+        viewer.views if viewer is not None else None,
+    )
     offered_entries: list[_ToolkitEntry] = []
     left_out: dict[str, set[str]] = {}
     for entry, toolkit in zip(entries, offered, strict=True):
@@ -885,7 +891,7 @@ def _render_tool_execution_environment(
         "workspace": "agent workspace and attachments only"
         if workdir is None
         else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
-        "other path tools: agent workspace and attachments only",
+        "`view_file`: the workdir; other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
@@ -1237,6 +1243,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
+        if not room_tools:
+            adapted = _keep_functions(adapted, lambda function: offered_without_room(tool_name, function.name))
         if narrowed_tools is not None:
             # Match the concrete toolkit; a preset's or implied tool's functions name the tool bringing them in.
             adapted = _keep_functions(

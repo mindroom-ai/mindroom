@@ -96,7 +96,7 @@ def _offered(tmp_path: Path, agent: dict[str, Any], *, room: bool = True, depth:
         pytest.param(
             {"tools": ["matrix_message"], "delegate_to": ["helper"]},
             {"room": False},
-            ["delegate"],
+            ["attachments", "delegate"],
             id="room-tools-need-a-room",
         ),
         pytest.param(

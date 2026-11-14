@@ -892,6 +892,7 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
     "mindroom.constants",
+    "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.computer_announcement",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.dynamic_workflow",
@@ -2486,6 +2487,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.llm",

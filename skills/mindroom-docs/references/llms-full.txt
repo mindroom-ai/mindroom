@@ -6135,7 +6135,8 @@ The model and its provider must support that media type and may have stricter li
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
 `view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
-Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace.
+Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace, or in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, inside that directory.
+Turns without a Matrix room, in [headless runs](https://docs.mindroom.chat/headless/) and through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), offer `view_file` alone of the `attachments` functions.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
 Image viewing through `get_attachment(view=True)` follows the same limits.
@@ -17561,7 +17562,7 @@ The instance chart refuses dedicated Kubernetes workers because RBAC cannot conf
 
 | Value | Path tools may use |
 |---|---|
-| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined; in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, `file` and `coding` use that directory instead of the workspace and may read the agent's saved tool outputs, and the other path tools keep the workspace; a `browser` in the primary process also uploads and opens files by absolute path from its own [artifact directory](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser-configuration), `browser/` in the agent's state root unless `output_dir` names another |
+| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined; in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, `file`, `coding`, and `attachments`' `view_file` use that directory instead of the workspace, `file` and `coding` may also read the agent's saved tool outputs, and the other path tools keep the workspace; a `browser` in the primary process also uploads and opens files by absolute path from its own [artifact directory](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser-configuration), `browser/` in the agent's state root unless `output_dir` names another |
 | `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
 
 Every tool, including plugin tools, must declare one of these file access classes when it registers, so no tool silently defaults to taking no paths.
@@ -21366,7 +21367,7 @@ Unmapped keys and unauthenticated callers can use every available model but cann
 ## Limitations
 
 - **Fewer tools than in Matrix**: `/v1` hides tool functions matched by a required [tool approval](https://docs.mindroom.chat/tool-approval/#tools-that-cannot-pause-for-approval) rule, including script rules, because approval cards need a Matrix room.
-  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, `attachments`, and `todo`.
+  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, and `todo`, and every [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) function but `view_file`.
 - **No requester-private agents**: see [Model selection](#model-selection).
 - **Partial token usage**: only non-streaming responses report `usage`.
   It counts the turn's final model run, summed over the leader and members for teams, with cached input included in `prompt_tokens`, so tokens spent on earlier internal attempts in the same turn are not counted.
@@ -21503,6 +21504,7 @@ They run in standard mode; [minimal mode](https://docs.mindroom.chat/tools/agent
 With a `workdir`, the files that `shell`, `file`, and `coding` write land there, and MindRoom's own files stay under `storage`.
 Code that `python` runs uses the calling process's current directory, so give it absolute paths.
 `file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
+An agent with the [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
 `file` and `coding` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.

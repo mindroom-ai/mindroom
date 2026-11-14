@@ -88,7 +88,8 @@ The model and its provider must support that media type and may have stricter li
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
 `view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
-Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace.
+Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace, or in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, inside that directory.
+Turns without a Matrix room, in [headless runs](https://docs.mindroom.chat/headless/) and through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), offer `view_file` alone of the `attachments` functions.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
 Image viewing through `get_attachment(view=True)` follows the same limits.

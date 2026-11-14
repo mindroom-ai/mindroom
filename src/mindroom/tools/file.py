@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,6 +14,8 @@ from agno.tools.file import FileTools as AgnoFileTools
 from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
+from mindroom.llm.media import named_mime_type
+from mindroom.media_delivery import SUPPORTED_IMAGE_FORMATS
 from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
 from mindroom.path_safety import (
     blocked_file_action_message,
@@ -38,10 +42,15 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
+    from mindroom.tool_system.tool_function import AdaptedToolkit
+
+# The image types view_file shows, which are never text and which read_file names it for.
+_VIEWABLE_IMAGE_TYPES = frozenset(f"image/{image_format.lower()}" for image_format in SUPPORTED_IMAGE_FORMATS)
 
 # Agno searches only text files up to this size.
 _SEARCH_CONTENT_MAX_BYTES = 500 * 1024
@@ -143,7 +152,8 @@ class _MindRoomFileTools(AgnoFileTools):
             return self.line_separator.join(lines[start_line : end_line + 1])
         except Exception as e:
             log_error(f"Error reading file: {e}")
-            return f"Error reading file: {e}"
+            image_error = _image_read_error(file_name) if isinstance(e, UnicodeDecodeError) else None
+            return image_error or f"Error reading file: {e}"
 
     @shared_directory_aware("file_name", writes=True)
     def replace_file_chunk(
@@ -189,7 +199,8 @@ class _MindRoomFileTools(AgnoFileTools):
             return str(contents)
         except Exception as e:
             log_error(f"Error reading file: {e}")
-            return f"Error reading file: {e}"
+            image_error = _image_read_error(file_name) if isinstance(e, UnicodeDecodeError) else None
+            return image_error or f"Error reading file: {e}"
 
     @shared_directory_aware("file_name", writes=True)
     def delete_file(self, file_name: str) -> str:
@@ -501,3 +512,48 @@ class _MindRoomFileTools(AgnoFileTools):
 def file_tools() -> type[AgnoFileTools]:
     """Return file tools for local file operations."""
     return _MindRoomFileTools
+
+
+def _image_read_error(file_name: str) -> str | None:
+    """Return what read_file answers for ``file_name`` it cannot decode, if it names an image view_file shows."""
+    mime_type = named_mime_type(file_name)
+    if mime_type not in _VIEWABLE_IMAGE_TYPES:
+        return None
+    return f"Error reading file: {file_name} is an image ({mime_type}), not text."
+
+
+def with_view_file_hint(
+    toolkits: Sequence[AdaptedToolkit],
+    views: Callable[[str], bool] | None,
+) -> list[AdaptedToolkit]:
+    """Return ``toolkits`` with ``file``'s reads naming ``view_file`` for an image ``views`` finds, if one offers it."""
+    if views is None or not any(
+        function.name == "view_file" and function.registered_toolkit == "attachments"
+        for toolkit in toolkits
+        for function in toolkit.functions
+    ):
+        return list(toolkits)
+
+    async def name_view_file(call: ToolCall, call_next: ToolNext) -> object:
+        result = await call_next(call.arguments)
+        file_name = call.arguments.get("file_name")
+        if (
+            isinstance(file_name, str)
+            and result == _image_read_error(file_name)
+            and await asyncio.to_thread(views, file_name)
+        ):
+            return f"{result} View it with view_file."
+        return result
+
+    return [
+        replace(
+            toolkit,
+            functions=tuple(
+                replace(function, middleware=(*function.middleware, name_view_file))
+                if function.name in {"read_file", "read_file_chunk"} and function.registered_toolkit == "file"
+                else function
+                for function in toolkit.functions
+            ),
+        )
+        for toolkit in toolkits
+    ]

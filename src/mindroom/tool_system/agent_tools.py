@@ -20,12 +20,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+# The functions of a toolkit that needs a room which work without one, all a turn without a room offers of it.
+_ROOMLESS_FUNCTIONS = {"attachments": frozenset({"view_file"})}
+
 
 def turn_room_flags(execution_identity: ToolExecutionIdentity | None) -> tuple[bool, bool]:
     """Return whether a turn under ``execution_identity`` keeps room-context toolkits and adds the Matrix room ones.
 
-    A build without an identity keeps room-context toolkits, a turn without a room hides them, and only a Matrix room
-    turn adds the Matrix room runtime toolkits.
+    A build without an identity keeps room-context toolkits, a turn without a room offers only their functions that need
+    none, and only a Matrix room turn adds the Matrix room runtime toolkits.
     """
     if execution_identity is None:
         return True, False
@@ -200,7 +203,13 @@ class AgentTools:
 
     def _needs_room(self, tool_name: str) -> bool:
         metadata = self.tools.get(tool_name)
-        return metadata is not None and metadata.requires_room_context
+        return metadata is not None and metadata.requires_room_context and tool_name not in _ROOMLESS_FUNCTIONS
+
+
+def offered_without_room(tool_name: str, function_name: str) -> bool:
+    """Return whether a turn without a room offers ``function_name`` of a candidate toolkit ``tool_name`` builds."""
+    functions = _ROOMLESS_FUNCTIONS.get(tool_name)
+    return functions is None or function_name in functions
 
 
 def room_turn_offers(config: Config, agent_name: str, tool_name: str) -> bool:
