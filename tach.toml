@@ -3187,6 +3187,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_snooze_runtime"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.thread_snooze",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants"]
 
@@ -3273,6 +3281,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.storage_preparation",
+    "mindroom.orchestration.thread_snooze_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.plugin_lifecycle",
@@ -4970,6 +4979,7 @@ depends_on = [
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]

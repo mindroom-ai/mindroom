@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+    from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
@@ -78,6 +79,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
+
+    @property
+    def thread_snooze(self) -> ThreadSnoozeRuntimeCoordinator: ...  # noqa: D102
 
     @property
     def script_runtime(self) -> ScriptRuntimeLifecycle: ...  # noqa: D102

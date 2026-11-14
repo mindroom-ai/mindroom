@@ -16,6 +16,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.memory import MemoryAutoFlushService
+from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_admission import ResponseAdmissionGate
@@ -57,6 +58,11 @@ async def test_runtime_services_share_the_sync_and_stop_lifecycle(tmp_path: Path
             bot_provider=lambda _name: None,
             agent_reply_memberships=memberships,
         ),
+        ThreadSnoozeRuntimeCoordinator(
+            runtime_paths=runtime_paths,
+            config_provider=lambda: config,
+            bots=dict,
+        ),
         AutomationRunner(
             runtime_paths=runtime_paths,
             config_provider=lambda: config,
@@ -84,6 +90,7 @@ async def test_runtime_services_share_the_sync_and_stop_lifecycle(tmp_path: Path
         "knowledge_source_watchers",
         "knowledge_graph",
         "todo_poke",
+        "thread_snooze",
         "automations",
         "budgets",
         "thread_exports",
