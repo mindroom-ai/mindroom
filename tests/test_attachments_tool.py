@@ -803,6 +803,26 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
 
 
 @pytest.mark.asyncio
+async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
+    """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
+    config = Config(agents={"openclaw": AgentConfig(display_name="OpenClaw")})
+    tool = AttachmentTools(
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        runtime_config=config,
+        worker_target=_shared_worker_target(),
+        workspace_in_worker=True,
+        tool_output_workspace_root=tmp_path / "workspace",
+    )
+    viewed = ToolValue(content=json.dumps({"path": "plot.png", "view_status": "ready"}))
+
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", return_value=viewed) as view:
+        result = await tool.view_file("plot.png")
+
+    assert result == viewed
+    assert view.call_args.kwargs["runtime_config"] is config
+
+
+@pytest.mark.asyncio
 async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> None:
     """A worker view that fails reports the failure in the view receipt instead of raising."""
     tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)

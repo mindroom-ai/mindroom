@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,6 +13,8 @@ from agno.tools.file import FileTools as AgnoFileTools
 from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
+from mindroom.llm.media import named_mime_type
+from mindroom.media_delivery import SUPPORTED_IMAGE_FORMATS
 from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
 from mindroom.path_safety import (
     blocked_file_action_message,
@@ -38,10 +41,15 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
+    from mindroom.tool_system.tool_function import AdaptedToolkit
+
+# The image types view_file shows, which read_file names it for.
+_VIEWABLE_IMAGE_TYPES = frozenset(f"image/{image_format.lower()}" for image_format in SUPPORTED_IMAGE_FORMATS)
 
 # Agno searches only text files up to this size.
 _SEARCH_CONTENT_MAX_BYTES = 500 * 1024
@@ -189,6 +197,9 @@ class _MindRoomFileTools(AgnoFileTools):
             return str(contents)
         except Exception as e:
             log_error(f"Error reading file: {e}")
+            mime_type = named_mime_type(file_name) if isinstance(e, UnicodeDecodeError) else None
+            if mime_type is not None and mime_type.startswith("image/"):
+                return _image_read_error(file_name, mime_type)
             return f"Error reading file: {e}"
 
     @shared_directory_aware("file_name", writes=True)
@@ -501,3 +512,40 @@ class _MindRoomFileTools(AgnoFileTools):
 def file_tools() -> type[AgnoFileTools]:
     """Return file tools for local file operations."""
     return _MindRoomFileTools
+
+
+def _image_read_error(file_name: str, mime_type: str) -> str:
+    return f"Error reading file: {file_name} is an image ({mime_type}), not text."
+
+
+def with_view_file_hint(toolkits: Sequence[AdaptedToolkit]) -> list[AdaptedToolkit]:
+    """Return ``toolkits`` with ``file``'s ``read_file`` naming ``view_file`` for an image it shows, if one offers it."""
+    if not any(
+        function.name == "view_file" and function.registered_toolkit == "attachments"
+        for toolkit in toolkits
+        for function in toolkit.functions
+    ):
+        return list(toolkits)
+    return [
+        replace(
+            toolkit,
+            functions=tuple(
+                replace(function, middleware=(*function.middleware, _name_view_file))
+                if function.name == "read_file" and function.registered_toolkit == "file"
+                else function
+                for function in toolkit.functions
+            ),
+        )
+        for toolkit in toolkits
+    ]
+
+
+async def _name_view_file(call: ToolCall, call_next: ToolNext) -> object:
+    result = await call_next(call.arguments)
+    file_name = call.arguments.get("file_name")
+    if not isinstance(file_name, str):
+        return result
+    mime_type = named_mime_type(file_name)
+    if mime_type in _VIEWABLE_IMAGE_TYPES and result == _image_read_error(file_name, mime_type):
+        return f"{result} View it with view_file."
+    return result

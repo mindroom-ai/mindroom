@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+# The functions of a toolkit that needs a room which work without one, all a turn without a room offers of it.
+_ROOMLESS_FUNCTIONS = {"attachments": ("view_file",)}
+
 
 def turn_room_flags(execution_identity: ToolExecutionIdentity | None) -> tuple[bool, bool]:
     """Return whether a turn under ``execution_identity`` keeps room-context toolkits and adds the Matrix room ones.
@@ -188,7 +191,7 @@ class AgentTools:
         from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         return tuple(
-            entry
+            entry if room_tools else _roomless(entry)
             for entry in entries
             if (entry.name != "delegate" or depth < MAX_DELEGATION_DEPTH)
             and (room_tools or not self._needs_room(entry.name))
@@ -200,7 +203,17 @@ class AgentTools:
 
     def _needs_room(self, tool_name: str) -> bool:
         metadata = self.tools.get(tool_name)
-        return metadata is not None and metadata.requires_room_context
+        return metadata is not None and metadata.requires_room_context and tool_name not in _ROOMLESS_FUNCTIONS
+
+
+def _roomless(entry: EffectiveToolConfig) -> EffectiveToolConfig:
+    """Return ``entry`` as a turn without a room offers it: only its functions that need none, of those it includes."""
+    roomless = _ROOMLESS_FUNCTIONS.get(entry.name)
+    if roomless is None:
+        return entry
+    included = entry.tool_config_overrides.get("include_tools")
+    include = [name for name in roomless if not isinstance(included, list) or name in included]
+    return replace(entry, tool_config_overrides={**entry.tool_config_overrides, "include_tools": include})
 
 
 def room_turn_offers(config: Config, agent_name: str, tool_name: str) -> bool:

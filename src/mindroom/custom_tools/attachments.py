@@ -30,6 +30,7 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
+    current_tool_workdir,
     saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
@@ -51,6 +52,7 @@ from mindroom.tool_system.sandbox_proxy import (
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -382,17 +384,21 @@ class AttachmentTools(Toolkit):
         self,
         *,
         runtime_paths: RuntimePaths | None = None,
+        runtime_config: Config | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         workspace_in_worker: bool = False,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
         self._runtime_paths = runtime_paths
+        self._runtime_config = runtime_config
         self._worker_target = worker_target
         self._file_access = file_access
         # Whether the agent's workspace-path tools run in a worker, away from runtime attachment storage.
         self._workspace_in_worker = workspace_in_worker
         self._tool_output_workspace_root = tool_output_workspace_root
+        # view_file reads where the file tools work: a headless run's workdir, else the workspace.
+        self._view_root = current_tool_workdir() or tool_output_workspace_root
         super().__init__(
             name="attachments",
             tools=[
@@ -412,15 +418,13 @@ class AttachmentTools(Toolkit):
         The source path and a reusable attachment handle are retained when available.
         Use read_file for ordinary text/code; use matrix_message only when sharing is requested.
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return media_error("Tool runtime context is unavailable.", metadata={"tool": "view_file"})
         if self._workspace_in_worker:
+            assert self._runtime_paths is not None, "an agent build gives every toolkit its runtime paths"
             try:
                 result = await asyncio.to_thread(
                     view_file_from_worker,
-                    runtime_paths=self._runtime_paths or context.runtime_paths,
-                    runtime_config=context.config,
+                    runtime_paths=self._runtime_paths,
+                    runtime_config=self._runtime_config,
                     worker_target=self._worker_target,
                     workspace_root=self._tool_output_workspace_root,
                     path=path,
@@ -431,7 +435,7 @@ class AttachmentTools(Toolkit):
             result = await asyncio.to_thread(
                 view_agent_image,
                 path,
-                workspace=self._tool_output_workspace_root,
+                workspace=self._view_root,
                 file_access=self._file_access,
             )
         return await asyncio.to_thread(finalize_tool_media, result)

@@ -82,6 +82,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
+from mindroom.tools.file import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
@@ -581,9 +582,11 @@ def _offered_entries(
     is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
     anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
-    reported.
+    reported. A ``read_file`` that cannot read an image names ``view_file`` when the run offers it.
     """
-    offered = offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name)
+    offered = with_view_file_hint(
+        offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name),
+    )
     offered_entries: list[_ToolkitEntry] = []
     left_out: dict[str, set[str]] = {}
     for entry, toolkit in zip(entries, offered, strict=True):

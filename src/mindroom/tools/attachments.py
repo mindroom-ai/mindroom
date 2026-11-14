@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     dependencies=[],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKSPACE_IN_WORKER,
