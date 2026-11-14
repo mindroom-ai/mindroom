@@ -681,6 +681,7 @@ class TestConfigInit:
             {"name": "thread_tags", "defer": True},
             {"name": "thread_summary", "defer": True},
             {"name": "thread_resolution", "defer": True},
+            {"name": "thread_snooze", "defer": True},
             {"name": "compact_context", "defer": True},
             {"name": "callback_manager", "defer": True},
             {"name": "chat_ui", "defer": True, "overrides": {"enable_show_canvas": True}},

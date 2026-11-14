@@ -20,6 +20,7 @@ from mindroom.thread_tag_vocabulary import (
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     RESOLVED_THREAD_TAG,
+    SNOOZED_THREAD_TAG,
     ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
@@ -87,13 +88,20 @@ def _normalize_tool_tag(tag: str) -> str:
     return normalized_tag
 
 
+_LIFECYCLE_TAG_TOOLS = {
+    RESOLVED_THREAD_TAG: "thread_resolution",
+    SNOOZED_THREAD_TAG: "thread_snooze",
+}
+
+
 def _normalize_topic_tool_tag(tag: str) -> str:
     """Normalize one topic tag and reject thread lifecycle state."""
     normalized_tag = _normalize_tool_tag(tag)
-    if normalized_tag == RESOLVED_THREAD_TAG:
+    owning_tool = _LIFECYCLE_TAG_TOOLS.get(normalized_tag)
+    if owning_tool is not None:
         msg = (
-            f"Tag {RESOLVED_THREAD_TAG!r} is thread lifecycle state and cannot be changed with thread_tags. "
-            "Use thread_resolution when that capability is explicitly configured."
+            f"Tag {normalized_tag!r} is thread lifecycle state and cannot be changed with thread_tags. "
+            f"Use {owning_tool} when that capability is explicitly configured."
         )
         raise ThreadTagsError(msg)
     return normalized_tag

@@ -3484,7 +3484,7 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
         hooks_module = cached_plugin_module(hooks_path)
         helper_module = sys.modules[f"{hooks_module.__name__.rsplit('.', 1)[0]}.helper"]
         hooks_module._AUTO_POKE_TASK = shared_task
-        hooks_module._snooze_tasks = {"shared": shared_task, "extra": extra_task}
+        hooks_module._background_tasks = {"shared": shared_task, "extra": extra_task}
         helper_module._AUTO_POKE_TASK = shared_task
 
         result = _publish(config, runtime_paths)

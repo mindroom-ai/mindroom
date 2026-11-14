@@ -2622,6 +2622,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_snooze"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.thread_tags"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",
@@ -3189,6 +3197,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_snooze_runtime"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.thread_snooze",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants"]
 
@@ -3275,6 +3291,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.storage_preparation",
+    "mindroom.orchestration.thread_snooze_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.plugin_lifecycle",
@@ -4626,6 +4643,12 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.thread_snooze"
+depends_on = [
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.thread_tag_vocabulary"
 depends_on = [
     "mindroom.constants",
@@ -4966,6 +4989,7 @@ depends_on = [
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]

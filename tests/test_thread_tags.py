@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -20,15 +21,19 @@ from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
     SetThreadTagsIfEmptyResult,
+    ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
+    ThreadTagsPermissionError,
     ThreadTagsState,
     coerce_tag_name,
+    get_thread_tag_content,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
     set_thread_tag,
     set_thread_tags_if_empty,
+    snooze_until,
 )
 
 if TYPE_CHECKING:
@@ -2152,3 +2157,305 @@ async def test_enumerate_room_thread_root_ids_roots_past_the_cap_on_the_final_pa
 
     assert thread_root_ids == ["$thread-0:localhost", "$thread-1:localhost"]
     assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_snoozed_tag_stores_until_in_utc() -> None:
+    """The snoozed tag stores its wake time normalized to UTC."""
+    current_events: dict[str, dict[str, object]] = {}
+    client = _tag_writer_client("@alice:localhost", current_events)
+    client.joined_members.return_value = _joined_members_response("@alice:localhost")
+
+    state = await set_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        set_by="@alice:localhost",
+        data={"until": "2026-11-14T09:00:00+01:00"},
+    )
+
+    assert state.tags["snoozed"].data == {"until": "2026-11-14T08:00:00+00:00"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [None, {}, {"until": "tomorrow"}, {"until": 5}])
+async def test_snoozed_tag_requires_a_timestamp(data: dict[str, object] | None) -> None:
+    """The snoozed tag fails without a valid until timestamp, before any Matrix I/O."""
+    client = AsyncMock()
+
+    with pytest.raises(ThreadTagsError, match=r"snoozed\.data\.until must be an ISO-8601 timestamp\."):
+        await set_thread_tag(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "snoozed",
+            set_by="@alice:localhost",
+            data=data,
+        )
+
+    client.room_get_state_event.assert_not_awaited()
+
+
+def test_snooze_until_reads_naive_values_as_utc() -> None:
+    """Naive stored values are read as UTC; absent records give None."""
+    record = ThreadTagRecord(
+        set_by="@alice:localhost",
+        set_at=datetime(2026, 11, 13, tzinfo=UTC),
+        data={"until": "2026-11-14T08:00:00"},
+    )
+    assert snooze_until(record) == datetime(2026, 11, 14, 8, tzinfo=UTC)
+    assert snooze_until(None) is None
+    assert snooze_until(record.model_copy(update={"data": {}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "soon"}})) is None
+
+
+@pytest.mark.asyncio
+async def test_insufficient_power_is_a_permission_error() -> None:
+    """Insufficient power raises the dedicated subclass of ThreadTagsError."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={"@mindroom_general:localhost": 0},
+    )
+
+    with pytest.raises(ThreadTagsPermissionError):
+        await _write_operation(client, "set")
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_reads_one_state_event() -> None:
+    """One tag is read with a single state-event request."""
+    content = _tag_record_content(data={"until": "2026-11-14T08:00:00+00:00"})
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=content,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
+    )
+
+    result = await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+    assert result == content
+    client.room_get_state_event.assert_awaited_once_with(
+        "!room:localhost",
+        THREAD_TAGS_EVENT_TYPE,
+        '["$root","snoozed"]',
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_returns_none_when_absent() -> None:
+    """M_NOT_FOUND and empty content both mean no tag."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="nope", status_code="M_NOT_FOUND")
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
+
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
+    )
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_raises_on_other_errors() -> None:
+    """Any other error response is a ThreadTagsError."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="boom", status_code="M_UNKNOWN")
+
+    with pytest.raises(ThreadTagsError, match="boom"):
+        await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+
+_OVERFLOWING_UNTILS = ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+async def test_snoozed_tag_whose_until_overflows_utc_is_dropped(until: str) -> None:
+    """A wake time that cannot be expressed in UTC drops that tag, not the room's other tags."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-root:localhost", "resolved"),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "snoozed",
+            content=_tag_record_content(data={"until": until}),
+        ),
+    )
+
+    state = await get_thread_tags(client, "!room:localhost", "$thread-root:localhost")
+    listing = await list_tagged_threads(client, "!room:localhost")
+
+    assert state is not None
+    assert list(state.tags) == ["resolved"]
+    assert list(listing.tag_state["$thread-root:localhost"].tags) == ["resolved"]
+
+
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+def test_snooze_until_is_none_when_until_overflows_utc(until: str) -> None:
+    """The latest and earliest representable UTC times still parse; one step beyond them is invalid."""
+    record = ThreadTagRecord(set_by="@alice:localhost", set_at=datetime(2026, 11, 13, tzinfo=UTC), data={})
+    assert snooze_until(record.model_copy(update={"data": {"until": until}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "9999-12-31T22:59:59-01:00"}})) == datetime(
+        9999,
+        12,
+        31,
+        23,
+        59,
+        59,
+        tzinfo=UTC,
+    )
+    assert snooze_until(record.model_copy(update={"data": {"until": "0001-01-01T01:00:00+01:00"}})) == datetime(
+        1,
+        1,
+        1,
+        tzinfo=UTC,
+    )
+
+
+def _snoozed_events(until: str = "2026-11-14T08:00:00+00:00", note: str = "first") -> dict[str, dict[str, object]]:
+    return {
+        _thread_tag_state_key("$thread-root:localhost", "snoozed"): _tag_record_content(
+            note=note,
+            data={"until": until},
+        ),
+    }
+
+
+def _snoozed_record(until: str = "2026-11-14T08:00:00+00:00", note: str = "first") -> ThreadTagRecord:
+    return ThreadTagRecord.model_validate(_tag_record_content(note=note, data={"until": until}))
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_retry_keeps_a_different_record_written_after_the_removal() -> None:
+    """A verification read that finds a new value for the tag keeps it instead of removing it again."""
+    current_events = _snoozed_events()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    put_state = client.room_put_state.side_effect
+
+    async def put_then_replaced(**kwargs: object) -> object:
+        response = await put_state(**kwargs)
+        current_events.update(_snoozed_events(until="2026-11-15T08:00:00+00:00", note="second"))
+        return response
+
+    client.room_put_state.side_effect = put_then_replaced
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    assert client.room_put_state.await_count == 1
+    assert state.tags["snoozed"].note == "second"
+    assert current_events[_thread_tag_state_key("$thread-root:localhost", "snoozed")]["note"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_with_an_expected_record_leaves_a_different_one() -> None:
+    """A conditional remove writes nothing when room state holds a different value for the tag."""
+    current_events = _snoozed_events(until="2026-11-15T08:00:00+00:00", note="second")
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+
+    client.room_put_state.assert_not_awaited()
+    assert state.tags["snoozed"].note == "second"
+
+    current_events.update(_snoozed_events())
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+
+    client.room_put_state.assert_awaited_once()
+    assert "snoozed" not in state.tags
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_counts_an_accepted_removal_when_the_verification_read_fails() -> None:
+    """Once Matrix accepted the removal, a failed verification read does not turn it into an error."""
+    current_events = _snoozed_events()
+    current_events[_thread_tag_state_key("$thread-root:localhost", "resolved")] = _tag_record_content()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    get_state = client.room_get_state.side_effect
+    reads = 0
+
+    async def second_read_fails(room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            return nio.RoomGetStateError("boom")
+        return await get_state(room_id)
+
+    client.room_get_state.side_effect = second_read_fails
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    client.room_put_state.assert_awaited_once()
+    assert list(state.tags) == ["resolved"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("slow"), OSError("connection reset")])
+async def test_remove_thread_tag_counts_an_accepted_removal_whatever_the_verification_read_raises(
+    error: Exception,
+) -> None:
+    """A transport exception from the verification read after an accepted removal still counts as removed."""
+    current_events = _snoozed_events()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    get_state = client.room_get_state.side_effect
+    reads = 0
+
+    async def second_read_raises(room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise error
+        return await get_state(room_id)
+
+    client.room_get_state.side_effect = second_read_raises
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    client.room_put_state.assert_awaited_once()
+    assert state.tags == {}
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_with_an_expected_record_returns_when_the_tag_is_already_gone() -> None:
+    """A conditional remove of a tag someone already removed writes nothing and raises nothing."""
+    current_events = {
+        _thread_tag_state_key("$thread-root:localhost", "resolved"): _tag_record_content(),
+    }
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert list(state.tags) == ["resolved"]
+
+    current_events.clear()
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert state.tags == {}
+    client.room_put_state.assert_not_awaited()

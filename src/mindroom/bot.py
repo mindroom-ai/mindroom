@@ -111,6 +111,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .router.duties import RouterDuties, RouterDutiesDeps
+from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
@@ -369,7 +370,7 @@ class AgentBot:
                 admit_response=self._runtime_view.admission_fence,
                 refresh_memberships=orchestrator.refresh_agent_reply_memberships_when_needed,
                 on_configured_room_joined=self._post_join_room_setup,
-                on_room_joined=self._restore_scheduled_tasks,
+                on_room_joined=self._restore_joined_room,
                 get_conversation_reader=lambda: self._conversation_reader,
                 get_agent_bot=lambda name: self.orchestrator.agent_bots.get(name),
             ),
@@ -1082,9 +1083,19 @@ class AgentBot:
         if self._router is not None:
             await self._router.room_joined(room_id)
 
-    async def _restore_scheduled_tasks(self, room_id: str) -> None:
-        """Hand the schedules this bot owns in a room it joined to the runtime's scheduled-task owner."""
+    async def _restore_joined_room(self, room_id: str) -> None:
+        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
+        await self.orchestrator.thread_snooze.restore_room(self, room_id)
+
+    def _on_thread_tag_state(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Index a live thread tag state event from sync; never raise into nio's callback loop."""
+        if event.type != THREAD_TAGS_EVENT_TYPE or "state_key" not in event.source or event.decrypted:
+            return
+        try:
+            self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
+        except Exception:
+            self.logger.exception("thread_snooze_observe_failed", room_id=room.room_id)
 
     async def change_local_membership(
         self,
@@ -1589,6 +1600,10 @@ class AgentBot:
             client.add_event_callback(
                 self._room_lifecycle.on_space_child,  # ty: ignore[invalid-argument-type]
                 nio.RoomSpaceChildEvent,
+            )
+            client.add_event_callback(
+                self._on_thread_tag_state,  # ty: ignore[invalid-argument-type]
+                nio.UnknownEvent,
             )
             await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(

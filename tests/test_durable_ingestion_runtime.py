@@ -32,6 +32,7 @@ from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration import entity_fleet
+from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -63,6 +64,12 @@ def _no_server_state_publication(monkeypatch: pytest.MonkeyPatch) -> None:
 def _no_scheduled_task_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     """These rooms hold no scheduled tasks; restoring a joined room's schedules reads room state no homeserver serves."""
     monkeypatch.setattr(ScheduledTaskRuntime, "restore_room", AsyncMock(return_value=0))
+
+
+@pytest.fixture(autouse=True)
+def _no_thread_snooze_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These rooms hold no snoozes; restoring a joined room's snoozes reads room state no homeserver serves."""
+    monkeypatch.setattr(ThreadSnoozeRuntimeCoordinator, "restore_room", AsyncMock())
 
 
 @pytest.mark.asyncio

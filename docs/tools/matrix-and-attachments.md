@@ -14,6 +14,7 @@ This page also covers automatic thread summaries.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and list shared tags on Matrix threads.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
+- [`thread_snooze`] - Snooze a thread until a set time; it returns with a message.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
 - [`stop_reply`] - Stop the reply another agent or team is writing in the current conversation.
@@ -30,8 +31,8 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
-`matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
-`thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
+`matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
+`thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 `room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
@@ -113,6 +114,7 @@ The `tag_thread()` description shows the agent up to 20 of the room's most-used 
 Some tags validate their `data`: `blocked.data.blocked_by` must be a list of strings, `waiting.data.waiting_on` a non-empty string, `priority.data.level` one of `high`, `medium`, or `low`, and `due.data.deadline` an ISO-8601 timestamp.
 
 `resolved` is thread lifecycle state, so `tag_thread()` and `untag_thread()` reject it; use [`thread_resolution`] instead.
+`snoozed` is lifecycle state too, and `tag_thread()` and `untag_thread()` point to [`thread_snooze`].
 Listing and filtering by `resolved` still works.
 
 Filters for `list_thread_tags()`:
@@ -149,6 +151,31 @@ agents:
 ```
 
 To close out finished threads, find candidates with `list_thread_tags(exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+
+## [`thread_snooze`]
+
+`thread_snooze` lets an agent snooze threads in the current room until a set time.
+The `mindroom config init` starter gives it to Mind, without an approval rule.
+It is not in default tool sets, so other agents cannot snooze threads unless an operator grants it or an agent with [`self_config`](agent-orchestration.md#self_config) adds it to its own tools.
+
+`snooze_thread(until, note=None, thread_id=None)` adds the `snoozed` state, and `unsnooze_thread(thread_id=None)` removes it.
+`until` is an ISO-8601 datetime with a time part, such as `2026-11-14T09:00:00+01:00`; a value without an offset is UTC, and a date alone, an unparsable value, or a time that is not in the future returns an error and changes nothing.
+`note` is a reminder the wake message quotes; it is stored unencrypted in room state, even in an encrypted room.
+`unsnooze_thread` returns `Thread is not snoozed.` when the thread has no snooze.
+Without `thread_id`, both require an active thread; pass a thread root or reply event ID to target another thread in the current room.
+
+When the time comes, the `snoozed` state ends and a message in the thread quotes the note.
+The message mentions the person who set the snooze only when that person or a MindRoom account, such as an agent snoozing it for them, sent the snooze's state event; it starts no agent turn.
+`snoozed` is thread lifecycle state, so [`thread_tags`](#thread_tags) refuses to set or remove it.
+A snooze set from MindRoom Chat is stored the same way and woken the same way, and resolving a snoozed thread with [`thread_resolution`] ends its snooze.
+A snooze that is more than 24 hours past due, for example because MindRoom was down, is ended without a message instead of waking the thread late.
+
+```yaml
+agents:
+  triage:
+    tools:
+      - thread_snooze
+```
 
 ## [`thread_move`]
 
