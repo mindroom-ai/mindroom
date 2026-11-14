@@ -17,6 +17,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.delegation.lifecycle import running_child_run
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.llm.request_context import bind_request_headers
+from mindroom.logging_config import use_library_logging
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_turn import detached_turn_context
@@ -186,6 +187,8 @@ def _validated(
 
     The path tools open their base directory without following a link, so the workdir is the directory itself.
     """
+    # The calling program owns the process's output, so MindRoom logs through its logging setup instead of stdout.
+    use_library_logging()
     storage = storage.expanduser().resolve()
     runtime_paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage)
     validated = Config.validate_with_runtime(dict(config), runtime_paths)

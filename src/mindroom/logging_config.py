@@ -37,6 +37,7 @@ __all__ = [
     "setup_logging",
     "setup_subprocess_logging",
     "subprocess_logging_env",
+    "use_library_logging",
     "uses_default_logging",
 ]
 
@@ -170,8 +171,8 @@ def _hand_rendered_line_to_logger(
 ) -> str | tuple[tuple[str], dict[str, None]]:
     """Hand a stdlib logger the rendered line without the exception, whose traceback the line already holds.
 
-    A program can set structlog's stdlib logger factory and keep these processors, and `logging.Logger.exception`
-    logs the current exception again unless it is told there is none.
+    Library logging hands every line to a stdlib logger, and a program can also set structlog's stdlib logger factory
+    and keep these processors; `logging.Logger.exception` logs the current exception again unless told there is none.
     """
     if isinstance(logger, logging.Logger):
         return (line,), {"exc_info": None}
@@ -181,7 +182,7 @@ def _hand_rendered_line_to_logger(
 # structlog's builtin console renderer prints Rich tracebacks with every frame's
 # locals: resolved config, credentials, subprocess environments. Processes that
 # never call `setup_logging`, such as subprocess entrypoints and the sandbox
-# runner, log through these processors instead.
+# runner, log through these processors instead, and so does library logging.
 _DEFAULT_PROCESSORS: list[Processor] = [
     structlog.contextvars.merge_contextvars,
     structlog.processors.add_log_level,
@@ -195,6 +196,25 @@ _DEFAULT_PROCESSORS: list[Processor] = [
     ),
     cast("Processor", _hand_rendered_line_to_logger),
 ]
+
+
+# MindRoom's own processors for library logging, which skip each record below its stdlib logger's level first.
+_LIBRARY_PROCESSORS: list[Processor] = [
+    structlog.stdlib.filter_by_level,
+    structlog.stdlib.PositionalArgumentsFormatter(),
+    *_DEFAULT_PROCESSORS,
+]
+_library_logging = False
+
+
+def use_library_logging() -> None:
+    """Hand MindRoom's records to stdlib logging, where the program's own logging setup decides what shows.
+
+    MindRoom's records keep `_DEFAULT_PROCESSORS`' rendering and redaction, whatever the program configures structlog
+    to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
+    """
+    global _library_logging
+    _library_logging = True
 
 
 def configure_default_logging() -> None:
@@ -560,6 +580,25 @@ def exception_frames(error: BaseException) -> list[str]:
     ]
 
 
+class _Logger:
+    """A logger that follows structlog's configuration, or after `use_library_logging` MindRoom's own processors."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._configured_logger = structlog.get_logger(name)
+
+    def __reduce__(self) -> tuple[type[_Logger], tuple[str]]:
+        """Pickle and copy by name, since `__getattr__` cannot serve a copy whose attributes are not set yet."""
+        return _Logger, (self._name,)
+
+    def __getattr__(self, attribute: str) -> object:
+        if _library_logging:
+            # Built here rather than from structlog's configuration, which the program owns and may set to anything.
+            logger = structlog.stdlib.BoundLogger(logging.getLogger(self._name), _LIBRARY_PROCESSORS, {})
+            return getattr(logger, attribute)
+        return getattr(self._configured_logger, attribute)
+
+
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
     """Get a structlog logger instance.
 
@@ -567,10 +606,10 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
         name: Logger name (typically __name__)
 
     Returns:
-        Configured structlog logger
+        A structlog logger, which logs through MindRoom's own processors after `use_library_logging`
 
     """
-    return structlog.get_logger(name)
+    return cast("structlog.stdlib.BoundLogger", _Logger(name))
 
 
 def bound_log_context(**context: object) -> AbstractContextManager[None]:

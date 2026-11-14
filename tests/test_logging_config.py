@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import logging.config
 import os
+import pickle
 import socket
 import subprocess
 import sys
@@ -40,7 +42,7 @@ from mindroom.message_target import MessageTarget
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
     from typing import TextIO
 
@@ -633,6 +635,103 @@ def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
     assert output.count("Traceback (most recent call last):") == 1
     assert "_raise_secret_value_error" in output
     assert "api-secret" not in output
+
+
+@pytest.mark.parametrize(
+    "structlog_setup",
+    [
+        pytest.param(structlog.reset_defaults, id="structlog-defaults"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.stdlib.BoundLogger), id="stdlib-wrapper"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.BoundLogger), id="generic-wrapper"),
+        pytest.param(
+            lambda: structlog.configure(
+                wrapper_class=structlog.stdlib.BoundLogger,
+                logger_factory=lambda *args: logging.LoggerAdapter(logging.getLogger(*args)),
+            ),
+            id="logger-adapter",
+        ),
+        pytest.param(
+            lambda: structlog.configure(
+                processors=[structlog.processors.dict_tracebacks, structlog.processors.JSONRenderer()],
+            ),
+            id="own-processors",
+        ),
+    ],
+)
+def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    structlog_setup: Callable[[], None],
+) -> None:
+    """A program's structlog setup neither undoes the redaction of MindRoom's records nor adds a raw traceback."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    structlog_setup()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+
+    try:
+        _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
+    except ValueError:
+        get_logger("tests.library").exception("test_exception", api_key="api-secret")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("Traceback (most recent call last):") == 1
+    assert "git failed with GIT_CONFIG_VALUE_0 configured" in captured.err
+    assert _FRAME_LOCAL_CREDENTIAL not in captured.err
+    assert "api-secret" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        (logging.DEBUG, ["mindroom_debug", "mindroom_info", "mindroom_warning"]),
+        (logging.WARNING, ["mindroom_warning"]),
+    ],
+)
+def test_library_logging_follows_the_programs_logging_level(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: int,
+    expected: list[str],
+) -> None:
+    """MindRoom's records, `%`-style arguments filled in, reach the program's own handlers at its root level."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+    logging.getLogger().setLevel(level)
+
+    for method in ("debug", "info", "warning"):
+        getattr(get_logger("tests.library"), method)("mindroom_%s", method)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    events = ["mindroom_debug", "mindroom_info", "mindroom_warning"]
+    assert [event for event in events if event in captured.err] == expected
+
+
+def test_a_logger_survives_pickling_and_copying() -> None:
+    """A logger pickles and copies, as structlog's own loggers do."""
+    logger = get_logger("tests.library")
+
+    for clone in (pickle.loads(pickle.dumps(logger)), copy.copy(logger), copy.deepcopy(logger)):  # noqa: S301
+        clone.info("copied")
+
+
+def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A debug record that nothing shows, such as one holding a full prompt, is never rendered or redacted."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    rendered: list[str] = []
+
+    class _Prompt:
+        def __repr__(self) -> str:
+            rendered.append("prompt")
+            return "prompt"
+
+    get_logger("tests.library").debug("Prepared agent full prompt", full_prompt=_Prompt())
+
+    assert rendered == []
 
 
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
