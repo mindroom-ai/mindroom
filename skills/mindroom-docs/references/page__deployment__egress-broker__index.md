@@ -687,6 +687,23 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
 
+### Asking in chat
+
+For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+
+- MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
+  Other people in the thread see who the card waits for.
+- Chat sends the key to this MindRoom's API with the user's client session.
+  MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
+  The key never goes through Matrix, the model, the worker, or the logs.
+- The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  A card expires after 15 minutes, and a restart of MindRoom ends every pending request.
+- The requester answers.
+  For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
+- The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+  The refusal names the Agent Keys page where one exists.
+- The homeserver must bind OpenID tokens to MindRoom deployments (`mindroom_openid_audience` on Tuwunel), so the client session can reach this API.
+
 ## Deployment
 
 ### Docker workers

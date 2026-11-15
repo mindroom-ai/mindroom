@@ -15273,7 +15273,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 Related tools documented elsewhere:
 
 - [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -23773,6 +23773,23 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
+
+### Asking in chat
+
+For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+
+- MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
+  Other people in the thread see who the card waits for.
+- Chat sends the key to this MindRoom's API with the user's client session.
+  MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
+  The key never goes through Matrix, the model, the worker, or the logs.
+- The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  A card expires after 15 minutes, and a restart of MindRoom ends every pending request.
+- The requester answers.
+  For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
+- The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+  The refusal names the Agent Keys page where one exists.
+- The homeserver must bind OpenID tokens to MindRoom deployments (`mindroom_openid_audience` on Tuwunel), so the client session can reach this API.
 
 ## Deployment
 
