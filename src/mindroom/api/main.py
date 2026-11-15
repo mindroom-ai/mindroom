@@ -57,6 +57,7 @@ from mindroom.api.response_activity import router as response_activity_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
+from mindroom.api.secret_requests import router as secret_requests_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
@@ -522,6 +523,7 @@ app.include_router(agent_terminals_router)  # Authenticates client sessions.
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
 app.include_router(workspace_files_router)  # Authenticates client sessions.
+app.include_router(secret_requests_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.

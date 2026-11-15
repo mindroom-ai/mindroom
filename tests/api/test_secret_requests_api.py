@@ -1,0 +1,304 @@
+"""The requester answers an agent's secret request from Chat: the key lands in the agent's Agent Keys scope.
+
+Alice and Bob use ``code``, a personal Agent Keys agent, and ``team``, a shared one whose keys Alice manages. Each
+request is Alice's, as the tool registers it, and only she may answer it while it is pending.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING
+
+import httpx
+import pytest
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from structlog.testing import capture_logs
+
+from mindroom.api import main, secret_requests
+from mindroom.api.client_sessions import client_session_store
+from mindroom.api.validation_errors import validation_error_response
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
+from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.secret_requests import SECRET_REQUEST_TTL_SECONDS, secret_request_registry
+from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room, _room
+from tests.egress_broker.conftest import worker_target
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
+
+    from mindroom.secret_requests import PendingSecretRequest
+
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+
+SECRET = "ghp-test-secret-value"  # noqa: S105 - test credential
+NOT_ACTIVE = "This request is no longer active."
+CANNOT_SET = "You can no longer set keys for this agent."
+# A static runner's URL places the agents' shell calls in a worker, and the broker's port turns Agent Keys on.
+ENV = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+
+
+def _config(*, code_users: tuple[str, ...] = (ALICE, BOB), team_managers: tuple[str, ...] = (ALICE,)) -> Config:
+    """``code`` for ``code_users``, and ``team`` for Alice and Bob, whose keys ``team_managers`` manage."""
+    tools = ["shell", "egress_credentials"]
+    return Config(
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                tools=tools,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user_agent"),
+                access=ResponderAccessConfig(users=list(code_users)),
+            ),
+            "team": AgentConfig(
+                display_name="Team",
+                tools=tools,
+                include_default_tools=False,
+                worker_scope="shared",
+                credential_managers=list(team_managers),
+                access=ResponderAccessConfig(users=[ALICE, BOB]),
+            ),
+        },
+    )
+
+
+@pytest.fixture
+def room(tmp_path: Path) -> _Room:
+    """The router, Alice, Bob and Carol in ``ROOM`` with both agents, on an app serving the route."""
+    room = _room(tmp_path, dict(_config().agents), **ENV)
+    room.app.include_router(secret_requests.router)
+    room.app.add_exception_handler(RequestValidationError, validation_error_response)
+    return room
+
+
+@pytest.fixture
+def ask() -> Iterator[Callable[..., PendingSecretRequest]]:
+    """Register Alice's requests in the process-wide registry as the tool does, and forget them after the test."""
+    registry = secret_request_registry()
+    registered: list[str] = []
+
+    def ask(agent: str = "code", *, room_id: str = ROOM, now: float | None = None) -> PendingSecretRequest:
+        request = registry.register(
+            room_id=room_id,
+            requester_id=ALICE,
+            agent_name=agent,
+            service="github",
+            worker_target=worker_target(ALICE, agent, scope="user_agent" if agent == "code" else "shared"),
+            now=time.time() if now is None else now,
+        )
+        registered.append(request.request_id)
+        return request
+
+    yield ask
+    for request_id in registered:
+        registry.discard(request_id)
+
+
+async def _answer(
+    room: _Room,
+    user_id: str,
+    request_id: str,
+    body: dict[str, object],
+) -> httpx.Response:
+    """POST ``body`` as ``user_id``'s answer to ``request_id`` in ``ROOM``, signed in with a client session."""
+    token = client_session_store(room.app).create(user_id).token
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=room.app), base_url="http://test") as http:
+        return await http.post(
+            f"/api/rooms/{ROOM}/secret-requests/{request_id}",
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+
+def _stored(room: _Room, request: PendingSecretRequest) -> str | None:
+    """The GitHub key stored in the request's Agent Keys scope, if any."""
+    stored = load_scoped_credentials(
+        "egress_github",
+        credentials_manager=get_runtime_credentials_manager(room.paths),
+        worker_target=request.worker_target,
+        primary_built_tool=True,
+    )
+    return None if stored is None else stored["secret"]
+
+
+def test_the_api_serves_the_route() -> None:
+    """The main app mounts the route Chat calls."""
+    paths = {route.path for route in main.app.routes if isinstance(route, APIRoute)}
+
+    assert "/api/rooms/{room_id}/secret-requests/{request_id}" in paths
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", ["code", "team"])
+async def test_saving_stores_the_key_in_the_agents_scope(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    agent: str,
+) -> None:
+    """The secret becomes the agent's GitHub key in the request's scope, and the tool learns it was saved."""
+    request = ask(agent)
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert response.status_code == 204
+    assert _stored(room, request) == SECRET
+    assert request.outcome.result() == "saved"
+
+
+@pytest.mark.asyncio
+async def test_decline_resolves_without_storing(room: _Room, ask: Callable[..., PendingSecretRequest]) -> None:
+    """A decline stores nothing and tells the tool the requester declined."""
+    request = ask()
+
+    response = await _answer(room, ALICE, request.request_id, {"decline": True})
+
+    assert response.status_code == 204
+    assert request.outcome.result() == "declined"
+    assert _stored(room, request) is None
+
+
+@pytest.mark.asyncio
+async def test_another_member_gets_403(room: _Room, ask: Callable[..., PendingSecretRequest]) -> None:
+    """Bob may use the agent but was not asked: his key is refused and Alice can still answer."""
+    request = ask()
+
+    response = await _answer(room, BOB, request.request_id, {"secret": "bobs-key"})
+
+    assert (response.status_code, response.json()) == (403, {"detail": "Only the person the agent asked can answer."})
+    assert _stored(room, request) is None
+    assert not request.outcome.done()
+    assert (await _answer(room, ALICE, request.request_id, {"secret": SECRET})).status_code == 204
+    assert _stored(room, request) == SECRET
+
+
+@pytest.mark.asyncio
+async def test_unknown_or_expired_request_gets_404(room: _Room, ask: Callable[..., PendingSecretRequest]) -> None:
+    """An unknown request, an expired one, and one asked in another room are not active here."""
+    expired = ask(now=time.time() - SECRET_REQUEST_TTL_SECONDS - 1)
+    elsewhere = ask(room_id="!other:localhost")
+
+    for request_id in ("no-such-request", expired.request_id, elsewhere.request_id):
+        response = await _answer(room, ALICE, request_id, {"secret": SECRET})
+        assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert _stored(room, expired) is None
+
+
+@pytest.mark.asyncio
+async def test_second_answer_gets_404(room: _Room, ask: Callable[..., PendingSecretRequest]) -> None:
+    """Once answered, a request takes no other key and no decline."""
+    request = ask()
+    assert (await _answer(room, ALICE, request.request_id, {"secret": SECRET})).status_code == 204
+
+    for body in ({"secret": "another-key"}, {"decline": True}):
+        response = await _answer(room, ALICE, request.request_id, body)
+        assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert _stored(room, request) == SECRET
+    assert request.outcome.result() == "saved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "revised"),
+    [
+        pytest.param("code", _config(code_users=(BOB,)), id="no-longer-uses-the-agent"),
+        pytest.param("team", _config(team_managers=()), id="no-longer-manages-shared-keys"),
+    ],
+)
+async def test_revoked_permission_gets_403_and_stores_nothing(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    agent: str,
+    revised: Config,
+) -> None:
+    """The route checks the config it serves now; a decline still ends the request."""
+    request = ask(agent)
+    room.serve(revised)
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert (response.status_code, response.json()) == (403, {"detail": CANNOT_SET})
+    assert _stored(room, request) is None
+    assert not request.outcome.done()
+    assert (await _answer(room, ALICE, request.request_id, {"decline": True})).status_code == 204
+    assert request.outcome.result() == "declined"
+
+
+@pytest.mark.asyncio
+async def test_invalid_secret_gets_422_and_stays_pending(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+) -> None:
+    """A value the key store refuses is answered with its reason, never the value, and Alice can try again."""
+    request = ask()
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": "a\nb"})
+
+    assert (response.status_code, response.json()) == (
+        422,
+        {"detail": "Secret contains invalid control character (ord 10)"},
+    )
+    assert "a\nb" not in response.text
+    assert "a\\nb" not in response.text
+    assert not request.outcome.done()
+    assert (await _answer(room, ALICE, request.request_id, {"secret": SECRET})).status_code == 204
+    assert request.outcome.result() == "saved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"secret": SECRET, "decline": True},
+        {},
+        {"decline": False},
+        {"secret": SECRET, "note": "extra"},
+    ],
+    ids=["both", "neither", "decline-false", "extra-field"],
+)
+async def test_body_needs_exactly_one_of_secret_or_decline(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    body: dict[str, object],
+) -> None:
+    """Any other body is a 422 that repeats no value and leaves the request pending."""
+    request = ask()
+
+    response = await _answer(room, ALICE, request.request_id, body)
+
+    assert response.status_code == 422
+    assert SECRET not in response.text
+    assert not request.outcome.done()
+    assert _stored(room, request) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "status"), [(SECRET, 204), (f"{SECRET}\x7f", 422)], ids=["saved", "refused"])
+async def test_value_never_logged(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    value: str,
+    status: int,
+) -> None:
+    """The answer logs one line naming the request, never the value, whether it was saved or refused."""
+    request = ask()
+
+    with capture_logs() as logs:
+        response = await _answer(room, ALICE, request.request_id, {"secret": value})
+
+    assert response.status_code == status
+    assert [entry for entry in logs if SECRET in repr(entry)] == []
+    answered = [entry for entry in logs if entry["event"] == "secret_request_answered"]
+    assert answered == [
+        {
+            "event": "secret_request_answered",
+            "log_level": "info",
+            "request_id": request.request_id,
+            "agent": "code",
+            "service": "github",
+            "status": "saved" if status == 204 else "invalid",
+            "user_id": ALICE,
+        },
+    ]
