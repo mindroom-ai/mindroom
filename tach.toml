@@ -4062,6 +4062,7 @@ visibility = [
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.chat_ui",
+    "mindroom.custom_tools.egress_credentials",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.stop_reply",
@@ -5717,6 +5718,7 @@ depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
 path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.egress_broker",
+    "mindroom.matrix.client_delivery",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
 ]

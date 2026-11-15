@@ -7,7 +7,7 @@ import pytest
 from mindroom import secret_requests
 from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
-    SecretRequestRegistry,
+    _SecretRequestRegistry,
     secret_request_body,
     secret_request_content,
     secret_request_registry,
@@ -17,7 +17,7 @@ from tests.egress_broker.conftest import worker_target
 ROOM = "!room:example.org"
 
 
-def _register(registry: SecretRequestRegistry, *, now: float = 1000.0) -> secret_requests.PendingSecretRequest:
+def _register(registry: _SecretRequestRegistry, *, now: float = 1000.0) -> secret_requests.PendingSecretRequest:
     return registry.register(
         room_id=ROOM,
         requester_id="@alice:example.org",
@@ -31,7 +31,7 @@ def _register(registry: SecretRequestRegistry, *, now: float = 1000.0) -> secret
 @pytest.mark.asyncio
 async def test_claim_is_single_use() -> None:
     """A second claim of the same request is refused."""
-    registry = SecretRequestRegistry()
+    registry = _SecretRequestRegistry()
     request = _register(registry)
     assert registry.claim(request.request_id, room_id=ROOM, now=1001.0) is request
     assert registry.claim(request.request_id, room_id=ROOM, now=1001.0) is None
@@ -40,7 +40,7 @@ async def test_claim_is_single_use() -> None:
 @pytest.mark.asyncio
 async def test_release_lets_a_failed_save_retry() -> None:
     """Releasing a claim makes the request claimable again."""
-    registry = SecretRequestRegistry()
+    registry = _SecretRequestRegistry()
     request = _register(registry)
     assert registry.claim(request.request_id, room_id=ROOM, now=1001.0) is request
     registry.release(request.request_id)
@@ -50,7 +50,7 @@ async def test_release_lets_a_failed_save_retry() -> None:
 @pytest.mark.asyncio
 async def test_claim_refuses_other_room_and_expired() -> None:
     """Unknown, other-room, expired and finished requests cannot be claimed."""
-    registry = SecretRequestRegistry()
+    registry = _SecretRequestRegistry()
     request = _register(registry)
     assert request.expires_at == 1000.0 + SECRET_REQUEST_TTL_SECONDS
     assert registry.claim("unknown", room_id=ROOM, now=1001.0) is None
@@ -64,7 +64,7 @@ async def test_claim_refuses_other_room_and_expired() -> None:
 @pytest.mark.asyncio
 async def test_resolve_sets_outcome_once() -> None:
     """The first outcome wins and later ones are ignored."""
-    registry = SecretRequestRegistry()
+    registry = _SecretRequestRegistry()
     request = _register(registry)
     registry.resolve(request.request_id, "saved")
     registry.resolve(request.request_id, "expired")
@@ -75,7 +75,7 @@ async def test_resolve_sets_outcome_once() -> None:
 @pytest.mark.asyncio
 async def test_discard_forgets_the_request() -> None:
     """A discarded request is gone."""
-    registry = SecretRequestRegistry()
+    registry = _SecretRequestRegistry()
     request = _register(registry)
     registry.discard(request.request_id)
     registry.discard(request.request_id)
@@ -86,7 +86,7 @@ async def test_discard_forgets_the_request() -> None:
 async def test_ttl_is_read_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """Monkeypatching the module constant changes the next expiry."""
     monkeypatch.setattr(secret_requests, "SECRET_REQUEST_TTL_SECONDS", 5)
-    assert _register(SecretRequestRegistry()).expires_at == 1005.0
+    assert _register(_SecretRequestRegistry()).expires_at == 1005.0
 
 
 def test_registry_is_a_singleton() -> None:
@@ -97,10 +97,9 @@ def test_registry_is_a_singleton() -> None:
 @pytest.mark.asyncio
 async def test_content_carries_metadata_only() -> None:
     """The card content has exactly the documented keys and millisecond expiry."""
-    request = _register(SecretRequestRegistry())
+    request = _register(_SecretRequestRegistry())
     content = secret_request_content(
         request,
-        agent_display_name="Code",
         display_name="GitHub",
         hosts=["api.github.com"],
         reason="to open a PR",

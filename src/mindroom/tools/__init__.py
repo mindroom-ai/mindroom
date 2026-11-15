@@ -285,7 +285,7 @@ def _homeassistant_tools() -> type[Toolkit]:
         ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[],
-    function_names=("list_egress_credentials",),
+    function_names=("list_egress_credentials", "request_secret"),
 )
 def _egress_credentials_tools() -> type[Toolkit]:
     """Return the egress broker credential status tool."""

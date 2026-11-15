@@ -37,7 +37,7 @@ class PendingSecretRequest:
     claimed: bool = False
 
 
-class SecretRequestRegistry:
+class _SecretRequestRegistry:
     """Pending requests by ID; every method is synchronous on the event loop."""
 
     def __init__(self) -> None:
@@ -98,10 +98,10 @@ class SecretRequestRegistry:
         self._requests.pop(request_id, None)
 
 
-_REGISTRY = SecretRequestRegistry()
+_REGISTRY = _SecretRequestRegistry()
 
 
-def secret_request_registry() -> SecretRequestRegistry:
+def secret_request_registry() -> _SecretRequestRegistry:
     """Return the process-wide registry."""
     return _REGISTRY
 
@@ -125,7 +125,6 @@ def secret_request_body(
 def secret_request_content(
     request: PendingSecretRequest,
     *,
-    agent_display_name: str,  # noqa: ARG001 - the body carries the agent name, not this object
     display_name: str,
     hosts: list[str],
     reason: str,

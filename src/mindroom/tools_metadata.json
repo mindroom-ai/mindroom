@@ -8129,7 +8129,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_egress_credentials"
+        "list_egress_credentials",
+        "request_secret"
       ],
       "helper_text": null,
       "icon": "KeyRound",

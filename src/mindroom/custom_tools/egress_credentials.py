@@ -8,22 +8,38 @@ may use in this agent's scope, and where to add the missing ones. Each service s
 the administrator defined it (``source: "config"``) or the user added it in
 this scope (``source: "user"``). The tool reports names and flags only; it
 never reads a secret, access token, or connect link into its output.
+For a missing key the agent calls ``request_secret``, which posts a card in the
+conversation; the requester's key goes from MindRoom Chat straight to the Agent
+Keys store and never passes through the tool, Matrix, or the model.
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
-from typing import TYPE_CHECKING
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
+from mindroom import secret_requests
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_tool_without_worker_commands, personal_page_served
+from mindroom.egress_broker.key_access import egress_key_access
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.message_builder import build_message_content
+from mindroom.secret_requests import (
+    SECRET_REQUEST_CONTENT_KEY,
+    secret_request_body,
+    secret_request_content,
+    secret_request_registry,
+)
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -32,6 +48,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.secret_requests import PendingSecretRequest, SecretRequestOutcome, SecretRequestStatus
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -50,10 +68,128 @@ _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
     "and users can add services of their own on the egress page where it is available."
 )
+_MAX_REASON_LENGTH = 500
+_OUTCOME_NOTES: dict[SecretRequestOutcome, str] = {
+    "saved": "The user saved the key. Your next request through Agent Keys uses it, so retry the request that failed.",
+    "declined": "The user declined, so do not ask again for this service in this turn.",
+    "expired": "No answer came in 15 minutes, so no key was saved.",
+}
+
+
+@dataclass(frozen=True)
+class _SecretRequestCard:
+    """What a secret request card shows besides its request's own metadata; never a key."""
+
+    agent_display_name: str
+    display_name: str
+    hosts: list[str]
+    reason: str
+
+    def message(
+        self,
+        request: PendingSecretRequest,
+        status: SecretRequestStatus,
+        *,
+        thread_id: str | None = None,
+        reply_to_event_id: str | None = None,
+        latest_thread_event_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the card's message content in `status`, in the thread when `thread_id` is given."""
+        body = secret_request_body(status, agent_display_name=self.agent_display_name, display_name=self.display_name)
+        metadata = secret_request_content(
+            request,
+            display_name=self.display_name,
+            hosts=self.hosts,
+            reason=self.reason,
+            status=status,
+        )
+        return build_message_content(
+            body,
+            thread_event_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
+            extra_content={"msgtype": "m.notice", SECRET_REQUEST_CONTENT_KEY: metadata},
+        )
+
+
+async def _edit_card(
+    context: ToolRuntimeContext,
+    event_id: str,
+    card: _SecretRequestCard,
+    request: PendingSecretRequest,
+    status: SecretRequestStatus,
+) -> None:
+    """Replace the posted card with its final `status`; a failed edit is only logged, never the reason."""
+    content = card.message(request, status)
+    try:
+        delivered = await edit_message_result(context.client, context.room_id, event_id, content, content["body"])
+    except Exception as exc:
+        logger.warning(
+            "secret_request_edit_failed",
+            request_id=request.request_id,
+            status=status,
+            error_type=type(exc).__name__,
+        )
+    else:
+        if delivered is None:
+            logger.warning("secret_request_edit_failed", request_id=request.request_id, status=status)
+
+
+async def _await_outcome(
+    context: ToolRuntimeContext,
+    event_id: str,
+    card: _SecretRequestCard,
+    request: PendingSecretRequest,
+) -> SecretRequestOutcome:
+    """Wait for the requester's answer, then edit the card; a timeout or a stopped reply ends it as `expired`.
+
+    The shield keeps the registry's future intact when the wait ends, and a cancellation propagates after the edit.
+    """
+    try:
+        outcome = await asyncio.wait_for(asyncio.shield(request.outcome), secret_requests.SECRET_REQUEST_TTL_SECONDS)
+    except TimeoutError:
+        outcome = "expired"
+    except asyncio.CancelledError:
+        await _edit_card(context, event_id, card, request, "expired")
+        raise
+    await _edit_card(context, event_id, card, request, outcome)
+    return outcome
+
+
+def _key_access_refusal(context: ToolRuntimeContext, agent_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return why the requester may not set this agent's keys, or None when they may, as on the Agent Keys pages."""
+    memberships = context.agent_reply_memberships
+    if memberships is None:
+        return "This turn cannot check who may set this agent's keys, so no card was posted."
+    access = egress_key_access(context.requester_id, agent_name, context.current_config, runtime_paths, memberships)
+    if access is None:
+        return "The requester cannot set keys for this agent: it does not use Agent Keys for them."
+    _is_shared, can_manage = access
+    if not can_manage:
+        return (
+            "Only this agent's credential managers or an administrator can set its keys; "
+            "ask one of them to add the key on the Agent Keys page."
+        )
+    return None
+
+
+def _requestable_service(services: dict[str, EgressService], name: str) -> EgressService | str:
+    """Return the service `name` a key can be asked for, or why no key can be asked for it."""
+    service = services.get(name)
+    if service is None:
+        return (
+            f"Unknown service '{name}'. Call `list_egress_credentials` for the services this agent can use; "
+            "a new service needs host rules, which the user adds on the Agent Keys page."
+        )
+    if service.restrict_only:
+        return f"Service '{name}' only limits which paths requests may use and never takes a key."
+    if service.admin_key:
+        return f"Only an administrator sets the key of service '{name}', for every agent that uses it; ask an administrator."
+    return service
 
 
 class EgressCredentialsTools(Toolkit):
-    """Tool that lists the egress broker services and whether this agent has a key or account for each."""
+    """Tool that lists the egress broker services, whether this agent has a key or account for each, and asks for keys."""
 
     def __init__(
         self,
@@ -63,7 +199,7 @@ class EgressCredentialsTools(Toolkit):
     ) -> None:
         self._runtime_paths = runtime_paths
         self._worker_target = worker_target
-        super().__init__(name="egress_credentials", tools=[self.list_egress_credentials])
+        super().__init__(name="egress_credentials", tools=[self.list_egress_credentials, self.request_secret])
 
     def list_egress_credentials(self) -> str:
         """List the services this agent can use through the egress broker and how to give it credentials.
@@ -83,10 +219,9 @@ class EgressCredentialsTools(Toolkit):
         `X-Agent-Keys-Service` header.
         The result carries the link
         where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
-        into the chat; send them to the link instead.
+        into the chat: call `request_secret` for a missing key; the link is the fallback.
         """
-        # Only the personal page sets a personal scope's keys and accounts, so without it there is no page to name.
-        settable = not is_personal_target(self._worker_target) or personal_page_served(self._runtime_paths)
+        settable = self._settable()
         link = manage_url(self._runtime_paths) if settable else None
         if self._worker_target is None:
             return self._payload([], link, _NO_WORKER_NOTE)
@@ -112,6 +247,116 @@ class EgressCredentialsTools(Toolkit):
         entries = [self._entry(manager, config, name, service) for name, service in services.items()]
         note = self._note(link, settable=settable, shared=not is_personal_target(self._worker_target))
         return self._payload(entries, link, note)
+
+    async def request_secret(self, service: str, reason: str) -> str:
+        """Ask the user for a missing API key with a card in this conversation, and wait for their answer.
+
+        Call this when a brokered request fails with `credential_not_configured` for a service that takes an API key
+        (`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the
+        key is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's
+        Agent Keys key for the service. The key never reaches you, the chat, or your commands.
+        Waits up to 15 minutes and returns `status`:
+        `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
+        `declined` when the user refused: do not ask again for this service in this turn;
+        `expired` when no answer came in 15 minutes.
+        An `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.
+
+        Args:
+            service: The service's `name` from `list_egress_credentials`.
+            reason: What you need the key for, in a sentence or two the user reads on the card.
+
+        """
+        context = get_tool_runtime_context()
+        target = self._worker_target
+        if context is None:
+            return self._request_error("No conversation is available in this context, so no card can be posted.")
+        if target is None or target.routing_agent_name is None:
+            return self._request_error(_NO_WORKER_NOTE)
+        agent_name = target.routing_agent_name
+        card = self._card(context, target, agent_name, service, reason)
+        if isinstance(card, str):
+            return self._request_error(card)
+        thread_id = context.resolved_thread_id
+        latest_thread_event_id = context.reply_to_event_id
+        if thread_id is not None and latest_thread_event_id is None:
+            latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+                room_id=context.room_id,
+                thread_id=thread_id,
+            )
+            if latest_thread_event_id is None:
+                return self._request_error("The thread's latest message could not be found, so no card was posted.")
+        registry = secret_request_registry()
+        request = registry.register(
+            room_id=context.room_id,
+            requester_id=context.requester_id,
+            agent_name=agent_name,
+            service=service,
+            worker_target=target,
+            now=time.time(),
+        )
+        try:
+            content = card.message(
+                request,
+                "pending",
+                thread_id=thread_id,
+                reply_to_event_id=context.reply_to_event_id if thread_id is not None else None,
+                latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
+            )
+            delivered = await send_message_result(context.client, context.room_id, content, operation="secret_request")
+            if delivered is None:
+                return self._request_error("The card could not be sent to the conversation.")
+            logger.info(
+                "secret_request_posted",
+                request_id=request.request_id,
+                agent=agent_name,
+                service=service,
+                room_id=context.room_id,
+            )
+            outcome = await _await_outcome(context, delivered.event_id, card, request)
+        finally:
+            registry.discard(request.request_id)
+        return json.dumps({"status": outcome, "service": service, "note": _OUTCOME_NOTES[outcome]}, sort_keys=True)
+
+    def _card(
+        self,
+        context: ToolRuntimeContext,
+        target: ResolvedWorkerTarget,
+        agent_name: str,
+        service: str,
+        reason: str,
+    ) -> _SecretRequestCard | str:
+        """Return the card asking the requester for `service`'s key, or why no card may be posted.
+
+        The service resolves as `list_egress_credentials` lists it, and the requester must be one who may set this
+        agent's keys, as on the Agent Keys pages; the card needs no personal page, so it works where none is served.
+        """
+        reason = reason.strip()[:_MAX_REASON_LENGTH]
+        if not reason:
+            return "Give a reason: the card tells the user what you need the key for."
+        refusal = _key_access_refusal(context, agent_name, self._runtime_paths)
+        if refusal is not None:
+            return refusal
+        config = context.current_config
+        manager = get_runtime_credentials_manager(self._runtime_paths)
+        services = services_for_agent(effective_config(config.egress_broker, manager, target).services, agent_name)
+        egress_service = _requestable_service(services, service)
+        if isinstance(egress_service, str):
+            return egress_service
+        agent = config.agents.get(agent_name)
+        return _SecretRequestCard(
+            agent_display_name=(agent.display_name if agent is not None else "") or agent_name,
+            display_name=egress_service.display_name or service,
+            hosts=sorted({rule.host for rule in egress_service.rules}),
+            reason=reason,
+        )
+
+    def _settable(self) -> bool:
+        """Return whether a page sets this agent's keys: only the personal page sets a personal scope's."""
+        return not is_personal_target(self._worker_target) or personal_page_served(self._runtime_paths)
+
+    def _request_error(self, message: str) -> str:
+        link = manage_url(self._runtime_paths) if self._settable() else None
+        return json.dumps({"status": "error", "message": message, "link": link}, sort_keys=True)
 
     def _entry(
         self,
