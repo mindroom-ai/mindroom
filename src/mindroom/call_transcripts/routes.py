@@ -1,8 +1,9 @@
 """The HTTP routes MindRoom Chat uses for call transcripts: the room's call, leaving, Pause and speech.
 
-While call transcripts are off every route answers 404, except the read of the room's live call in a room an agent
-answers calls in; otherwise each needs a client session. The service makes every other decision, and a refusal
-answers with its HTTP status, a sentence and a code.
+The read of the room's live call needs a client session first in every room. While call transcripts are off every
+other route answers 404, and so does that read except in a room an agent answers calls in; otherwise each needs a
+client session. The service makes every other decision, and a refusal answers with its HTTP status, a sentence and a
+code.
 """
 
 from __future__ import annotations
