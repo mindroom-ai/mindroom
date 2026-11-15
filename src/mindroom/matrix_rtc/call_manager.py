@@ -271,6 +271,19 @@ class _PreparedCallAgent:
     origin_context: CallOriginContext | None
 
 
+@dataclass(frozen=True)
+class _LiveAgentCall:
+    """An agent call in progress in one room, as MindRoom Chat reads its live transcript."""
+
+    id: str
+    started_at: float
+    caller_id: str
+    agent_id: str
+    agent_display_name: str
+    spoken: tuple[tuple[str, str, float], ...]
+    """Each finalized item in arrival order: its speaker's user ID, its text, and the Unix time it started."""
+
+
 class _CallAgentUnavailableError(Exception):
     """The call's agent could not be materialized; the join is skipped, not retried."""
 
@@ -490,6 +503,8 @@ class CallManager:
         self._reconcile_requests: dict[str, nio.MatrixRoom] = {}
         self._reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Each room's call in progress, from when its session started until it stopped: its caller and transcript.
+        self._live_transcripts: dict[str, tuple[str, CallTranscript]] = {}
         self._shutting_down = False
 
     @property
@@ -497,6 +512,31 @@ class CallManager:
         """Return the requester of each call this agent has joined or is joining."""
         return tuple(
             requester_id for room_call in self._rooms.values() if (requester_id := room_call.requester_id) is not None
+        )
+
+    def watches(self, room_id: str) -> bool:
+        """Return whether this agent watches the room for calls, as it does every room it answers calls in."""
+        return room_id in self._rooms
+
+    def live_call(self, room_id: str) -> _LiveAgentCall | None:
+        """Return this agent's call in progress in the room, None while it is in none there."""
+        live = self._live_transcripts.get(room_id)
+        if live is None:
+            return None
+        caller_id, transcript = live
+        agent_id = self._client.user_id
+        speakers = {"user": caller_id, "assistant": agent_id}
+        return _LiveAgentCall(
+            id=transcript.id,
+            started_at=transcript.started_at.timestamp(),
+            caller_id=caller_id,
+            agent_id=agent_id,
+            agent_display_name=self._config.agents[self._agent_name].display_name,
+            spoken=tuple(
+                (speakers[speaker], text, spoken_at)
+                for speaker, text, spoken_at in transcript.spoken_items()
+                if speaker in speakers
+            ),
         )
 
     def update_config(self, config: Config) -> None:
@@ -1197,7 +1237,7 @@ class CallManager:
         assert prepared is not None
         room_call.session = session
         logical_call.session_started_ms = self._clock_ms()
-        prepared.transcript.mark_call_active()
+        self._start_call_clock(room_id, requester_id, prepared.transcript)
         self._replay_pending_keys(room_call, session)
         logger.info(
             "call_join_timing",
@@ -1208,6 +1248,11 @@ class CallManager:
         )
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
+
+    def _start_call_clock(self, room_id: str, requester_id: str, transcript: CallTranscript) -> None:
+        """Start the call's clock now that its agent can hear the caller, and read its transcript live until it stops."""
+        transcript.mark_call_active()
+        self._live_transcripts[room_id] = (requester_id, transcript)
 
     async def _prepare_call_agent(
         self,
@@ -1538,6 +1583,8 @@ class CallManager:
         response admission closed, so it must never wait for the post.
         """
         transcript, origin_context = agent.transcript, agent.origin_context
+        if (live := self._live_transcripts.get(room_id)) is not None and live[1] is transcript:
+            del self._live_transcripts[room_id]
         duration_seconds = transcript.elapsed_seconds()
         with call_helper_usage(agent.execution_identity, config=self._config, runtime_paths=self._runtime_paths):
             await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)

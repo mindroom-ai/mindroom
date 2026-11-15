@@ -15,11 +15,13 @@ from structlog.testing import capture_logs
 
 from mindroom.call_transcripts import service as service_module
 from mindroom.call_transcripts.service import (
+    AgentCallRoom,
     Call,
     CallRefusedError,
     CallTranscript,
     CallTranscriptService,
     EndedRow,
+    LiveCall,
     TranscriptMessage,
     _Turn,
 )
@@ -38,6 +40,7 @@ ANN = "@ann:example.org"
 BOB = "@bob:example.org"
 CAROL = "@carol:example.org"
 OUTSIDER = "@eve:example.org"
+AGENT = "@mindroom_helper:example.org"
 START = 1_000.0
 # How long after a call's end its stretches are still taken and its message waits.
 DELAY = 30
@@ -190,6 +193,18 @@ class FakeRoom:
             return None
         self.row_edits.append(row)
         return f"$edit-{len(self.row_edits)}"
+
+
+@dataclass(frozen=True)
+class FakeAgentCall:
+    """A call between Ann and an agent in progress, as the agent's call manager keeps it."""
+
+    spoken: tuple[tuple[str, str, float], ...] = ()
+    id: str = "agentcall"
+    started_at: float = START
+    caller_id: str = ANN
+    agent_id: str = AGENT
+    agent_display_name: str = "Helper"
 
 
 @dataclass
@@ -2418,3 +2433,99 @@ async def test_a_heartbeat_checks_in_before_the_room_is_read(world: World) -> No
     again = await world.service.join(ROOM, ANN)
 
     assert (again.id, again.members) == (call.id, (ANN,))
+
+
+# A call with an agent
+
+EXCHANGE = ((ANN, "Book the train", START + 5), (AGENT, "Booked", START + 9), (ANN, "Thanks", START + 12))
+
+
+@pytest.mark.asyncio
+async def test_an_agent_call_reads_as_a_live_call_between_its_caller_and_the_agent(world: World) -> None:
+    """What each said is a speech line under their ID, read through the agent's view of the room, not the router's."""
+    world.room.ready = False
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE[:2]))
+
+    live = await world.service.live(ROOM, ANN, agent_room=agent_room)
+
+    assert live.call == Call(
+        id="agentcall",
+        room_id=ROOM,
+        row_event_id=None,
+        started_at=START,
+        ended_at=None,
+        members=(ANN, AGENT),
+        paused_by=None,
+    )
+    assert [(line.id, line.call_id, line.user_id, line.said_at, line.seconds, line.kind) for line in live.lines] == [
+        ("agentcall:1", "agentcall", ANN, START + 5, 0.0, "speech"),
+        ("agentcall:2", "agentcall", AGENT, START + 9, 0.0, "speech"),
+    ]
+    assert [line.text for line in live.lines] == ["Book the train", "Booked"]
+    assert live.names == {ANN: "Ann", AGENT: "Helper"}
+
+
+@pytest.mark.asyncio
+async def test_a_poll_of_an_agent_call_gets_only_what_was_said_since_its_last_line() -> None:
+    """With ``after`` one of the call's lines, only later ones come; a line of another call gets them all."""
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE))
+
+    first, *rest = (await agent_room.live(ANN)).lines
+
+    assert (await agent_room.live(ANN, after=first.id)).lines == tuple(rest)
+    assert (await agent_room.live(ANN, after=rest[-1].id)).lines == ()
+    for other in (
+        "othercall:1",
+        "agentcall:x",
+        "agentcall:",
+        "agentcall:99",
+        "agentcall:01",
+        "agentcall:" + "9" * 5000,
+        "unknown",
+    ):
+        assert len((await agent_room.live(ANN, after=other)).lines) == len(EXCHANGE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [FakeAgentCall(spoken=EXCHANGE), None])
+async def test_only_a_member_of_the_room_reads_its_agent_call(call: FakeAgentCall | None) -> None:
+    """Someone outside the room is told they are not in it, and nobody is answered while the room cannot be read."""
+    view = FakeRoom()
+    agent_room = AgentCallRoom(room_id=ROOM, room=view, call=call)
+
+    await _refused("not-found", lambda: agent_room.live(OUTSIDER))
+    view.readable = False
+    await _refused("unavailable", lambda: agent_room.live(ANN))
+
+
+@pytest.mark.asyncio
+async def test_only_the_caller_sees_their_agent_call(world: World) -> None:
+    """Another member of the room is not shown the call, since the caller could not tell they were heard."""
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE))
+
+    assert await agent_room.live(BOB) == LiveCall(call=None, lines=(), names={})
+    assert await world.service.live(ROOM, BOB, agent_room=agent_room) == LiveCall(call=None, lines=(), names={})
+
+
+@pytest.mark.asyncio
+async def test_a_room_whose_agent_is_in_no_call_has_no_live_call(world: World) -> None:
+    """Once the agent's call ends, its room reads as having no live call, as after a call between people."""
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=None)
+
+    assert await world.service.live(ROOM, ANN, agent_room=agent_room) == LiveCall(call=None, lines=(), names={})
+
+
+@pytest.mark.asyncio
+async def test_a_live_call_between_people_comes_before_an_agent_call(world: World) -> None:
+    """While people are in a call in the room, that call is read; once it ends, the agent's call is."""
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE))
+    call = await world.service.join(ROOM, BOB)
+
+    people = await world.service.live(ROOM, ANN, agent_room=agent_room)
+    await world.service.leave(call.id, BOB)
+    agent = await world.service.live(ROOM, ANN, agent_room=agent_room)
+
+    assert people.call is not None
+    assert people.call.id == call.id
+    assert agent.call is not None
+    assert agent.call.id == "agentcall"

@@ -376,6 +376,7 @@ class _MultiAgentOrchestrator:
         self._call_transcripts_runtime = CallTranscriptsRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
         )
         self._skill_reviews = SkillReviewRunner(self.runtime_paths, lambda agent_name: self.agent_bots.get(agent_name))
         self._automations = AutomationRunner(
@@ -1481,6 +1482,7 @@ class _MultiAgentOrchestrator:
             script_broker=self._script_runtime.broker,
             script_worker_keepalive=self._script_runtime.touch_live_workers,
             call_transcripts=self._call_transcripts_runtime.service,
+            agent_call_room=self._call_transcripts_runtime.agent_call_room,
         )
 
     def event_journal_store(self) -> EventJournalStore:

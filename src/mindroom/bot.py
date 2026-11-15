@@ -1187,6 +1187,11 @@ class AgentBot:
             self._router.invalidate_memberships(reason=reason)
 
     @property
+    def call_manager(self) -> CallManager | None:
+        """Return the call manager answering this agent's voice calls, None when it answers none."""
+        return self._call_manager
+
+    @property
     def active_call_requesters(self) -> tuple[str, ...]:
         """Return the requester of each voice call this bot has joined or is joining."""
         call_manager = self._call_manager
