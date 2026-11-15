@@ -162,7 +162,11 @@ async def test_every_route_answers_404_while_call_transcripts_are_off(api: Api, 
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-origin"] == CHAT
     for response in (signed_in, anonymous):
-        _refusal(response, 404, "not-found")
+        if response is anonymous and method == "GET":
+            # The live read asks for a session first, so it does not tell an agent's room from any other.
+            assert response.status_code == 401
+        else:
+            _refusal(response, 404, "not-found")
         assert response.headers["access-control-allow-origin"] == CHAT
         assert response.headers["cache-control"] == "no-store"
         assert "access-control-allow-credentials" not in response.headers
@@ -648,8 +652,8 @@ async def test_an_agent_call_reads_as_the_rooms_live_call_with_call_transcripts_
     spoken = ((ANN, "Book the train", START + 5), (AGENT, "Booked", START + 9))
     api.agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=spoken))
 
-    response = await api.live(BOB)
-    newer = await api.live(BOB, after="agentcall:1")
+    response = await api.live(ANN)
+    newer = await api.live(ANN, after="agentcall:1")
 
     assert response.status_code == 200, response.text
     assert response.json() == {

@@ -399,8 +399,8 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 
 A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
 A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
-Every route answers 404 while `calls.transcripts.enabled` is off, except `GET /rooms/{room_id}/call` in a room an agent answers calls in.
-In such a room without a live call between people, `GET /rooms/{room_id}/call` answers with the agent's call while it runs: `members` are the caller and the agent, `rowEventId` and `pausedBy` are null, each line is a `speech` line with `seconds` 0 in the order it was heard, and the agent's name is its configured `display_name`.
+Every route answers 404 while `calls.transcripts.enabled` is off, except `GET /rooms/{room_id}/call` in a room an agent answers calls in; that read asks for a client session first (401 without one), so nobody without one learns which rooms those are.
+In such a room without a live call between people, `GET /rooms/{room_id}/call` answers its caller with the agent's call while it runs (other members of the room read no call): `members` are the caller and the agent, `rowEventId` and `pausedBy` are null, each line is a `speech` line with `seconds` 0 in the order it was heard, and the agent's name is its configured `display_name`.
 A call's routes take the room from the call and answer 404 to anyone not in that room.
 Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.

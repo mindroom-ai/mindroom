@@ -266,16 +266,16 @@ class AgentCallRoom:
     async def live(self, user_id: str, *, after: str | None = None) -> LiveCall:
         """Return the agent call as a live call between its caller and the agent, with its lines and their names.
 
-        Only a member of the room may read it, refused as for a call between people. Its lines are what each of
-        them said, those after the line ``after`` if it is one of this call's, and all of them otherwise.
+        Only a member of the room may read it, refused as for a call between people, and only its caller sees the
+        call: other members could not tell they were heard, so for them the room has none. Its lines are what each
+        of them said, those after the line ``after`` if it is one of this call's, and all of them otherwise.
         """
         if not await _is_room_member(self.room, self.room_id, user_id):
             raise CallRefusedError(code="not-found", message=_NOT_IN_ROOM)
         call = self.call
-        if call is None:
+        if call is None or call.caller_id != user_id:
             return LiveCall(call=None, lines=(), names={})
-        prefix, _, number = (after or "").rpartition(":")
-        heard = int(number) if prefix == call.id and number.isascii() and number.isdigit() else 0
+        heard = next((n for n in range(len(call.spoken), 0, -1) if after == f"{call.id}:{n}"), 0)
         lines = tuple(
             StoredLine(
                 id=f"{call.id}:{position}",

@@ -2446,7 +2446,7 @@ async def test_an_agent_call_reads_as_a_live_call_between_its_caller_and_the_age
     world.room.ready = False
     agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE[:2]))
 
-    live = await world.service.live(ROOM, BOB, agent_room=agent_room)
+    live = await world.service.live(ROOM, ANN, agent_room=agent_room)
 
     assert live.call == Call(
         id="agentcall",
@@ -2474,7 +2474,15 @@ async def test_a_poll_of_an_agent_call_gets_only_what_was_said_since_its_last_li
 
     assert (await agent_room.live(ANN, after=first.id)).lines == tuple(rest)
     assert (await agent_room.live(ANN, after=rest[-1].id)).lines == ()
-    for other in ("othercall:1", "agentcall:x", "agentcall:", "unknown"):
+    for other in (
+        "othercall:1",
+        "agentcall:x",
+        "agentcall:",
+        "agentcall:99",
+        "agentcall:01",
+        "agentcall:" + "9" * 5000,
+        "unknown",
+    ):
         assert len((await agent_room.live(ANN, after=other)).lines) == len(EXCHANGE)
 
 
@@ -2488,6 +2496,15 @@ async def test_only_a_member_of_the_room_reads_its_agent_call(call: FakeAgentCal
     await _refused("not-found", lambda: agent_room.live(OUTSIDER))
     view.readable = False
     await _refused("unavailable", lambda: agent_room.live(ANN))
+
+
+@pytest.mark.asyncio
+async def test_only_the_caller_sees_their_agent_call(world: World) -> None:
+    """Another member of the room is not shown the call, since the caller could not tell they were heard."""
+    agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=EXCHANGE))
+
+    assert await agent_room.live(BOB) == LiveCall(call=None, lines=(), names={})
+    assert await world.service.live(ROOM, BOB, agent_room=agent_room) == LiveCall(call=None, lines=(), names={})
 
 
 @pytest.mark.asyncio

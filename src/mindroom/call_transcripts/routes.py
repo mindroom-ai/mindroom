@@ -69,11 +69,14 @@ class _Caller:
     user_id: str
 
 
+_TRANSCRIPTS_OFF = "Call transcripts are off on this MindRoom."
+
+
 async def _caller(request: Request) -> _Caller:
     """Answer 404 while call transcripts are off, and then 401 without a client session."""
     service = app_state(request.app).runtime.call_transcripts()
     if service is None:
-        raise CallRefusedError(code="not-found", message="Call transcripts are off on this MindRoom.")
+        raise CallRefusedError(code="not-found", message=_TRANSCRIPTS_OFF)
     user = await require_client_user(request)
     return _Caller(service, user.user_id)
 
@@ -136,11 +139,14 @@ async def live_call(room_id: str, request: Request, after: str | None = None) ->
     In a room an agent answers calls in, a call with the agent is read too, whether call transcripts are on or off.
     """
     runtime = app_state(request.app).runtime
-    agent_room = runtime.agent_call_room(room_id)
-    if agent_room is None or runtime.call_transcripts() is not None:
-        caller = await _caller(request)
-        return _live_json(await caller.service.live(room_id, caller.user_id, after=after, agent_room=agent_room))
+    # Signed in first, so nobody without a session learns from the answer whether an agent answers calls here.
     user = await require_client_user(request)
+    service = runtime.call_transcripts()
+    agent_room = runtime.agent_call_room(room_id)
+    if service is not None:
+        return _live_json(await service.live(room_id, user.user_id, after=after, agent_room=agent_room))
+    if agent_room is None:
+        raise CallRefusedError(code="not-found", message=_TRANSCRIPTS_OFF)
     return _live_json(await agent_room.live(user.user_id, after=after))
 
 
