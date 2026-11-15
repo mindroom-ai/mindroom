@@ -327,6 +327,7 @@ What a worker can see depends on the backend:
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
   Set `MINDROOM_STATIC_RUNNER_AGENT_STORAGE=true` on the primary when its `static_runner` mounts the agents' storage, as the Kubernetes chart does; only then may people in a room type in the [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) of agents with `terminals: type` whose shell runs there, and change the [workspace files](https://docs.mindroom.chat/workspace-files/) of agents whose writing tools run there; otherwise they only watch and read them.
+  When the runner does not mount the agents' storage, a turn's [working directory](https://docs.mindroom.chat/hooks/#turn-working-directory-set_workdir) must exist in the runner's own copy of the agent's workspace, or the runner refuses that turn's tool calls.
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
