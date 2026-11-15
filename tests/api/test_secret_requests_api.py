@@ -6,6 +6,8 @@ request is Alice's, as the tool registers it, and only she may answer it while i
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -195,6 +197,40 @@ async def test_second_answer_gets_404(room: _Room, ask: Callable[..., PendingSec
     for body in ({"secret": "another-key"}, {"decline": True}):
         response = await _answer(room, ALICE, request.request_id, body)
         assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert _stored(room, request) == SECRET
+    assert request.outcome.result() == "saved"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_while_the_first_saves_gets_404(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second answer sent while the first is still being stored is not active; the key is stored once."""
+    request = ask()
+    saving, release = threading.Event(), threading.Event()
+    saved: list[str] = []
+    save_secret = secret_requests.save_secret
+
+    def slow_save(*args: object, **kwargs: object) -> None:
+        saved.append(str(args[3]))
+        saving.set()
+        release.wait(timeout=30)
+        save_secret(*args, **kwargs)
+
+    monkeypatch.setattr(secret_requests, "save_secret", slow_save)
+    first = asyncio.create_task(_answer(room, ALICE, request.request_id, {"secret": SECRET}))
+    try:
+        assert await asyncio.to_thread(saving.wait, 30)
+        second = await _answer(room, ALICE, request.request_id, {"secret": "another-key"})
+    finally:
+        release.set()
+    first_response = await first
+
+    assert first_response.status_code == 204
+    assert (second.status_code, second.json()) == (404, {"detail": NOT_ACTIVE})
+    assert saved == [SECRET]
     assert _stored(room, request) == SECRET
     assert request.outcome.result() == "saved"
 

@@ -5719,6 +5719,10 @@ path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.egress_broker",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix_openid",
+    "mindroom.origins",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
 ]
@@ -8938,6 +8942,8 @@ visibility = [
     "mindroom.tool_jobs.execution_authority",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.notices",
+    # A secret request waits on its card as an approval does, so a Stop cancels its job.
+    "mindroom.custom_tools.egress_credentials",
 ]
 
 [[modules]]
@@ -8965,6 +8971,7 @@ visibility = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.custom_tools.job",
+    "mindroom.custom_tools.egress_credentials",
 ]
 
 [[modules]]

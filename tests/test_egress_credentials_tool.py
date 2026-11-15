@@ -8,6 +8,7 @@ import json
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -30,6 +31,8 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -44,6 +47,7 @@ from tests.conftest import (
 )
 from tests.egress_broker.conftest import account_store, allow_oauth_reuse, connect_account, worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_owner, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -52,6 +56,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
+
+# The responder access checks of a secret request run for real.
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 _ALICE = "@alice:example.org"
 _BOB = "@bob:example.org"
@@ -390,7 +397,7 @@ def test_personal_scope_without_the_personal_page_is_sent_to_no_page(
     assert "When `can_connect_account` is true, the user can still connect their `provider` account at" in note
     assert "connect_url" in note
     assert "https://" not in note
-    assert "Never ask the user to paste a key into the chat." in note
+    assert "Never ask the user to paste a key into the chat: call `request_secret`" in note
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", None])
@@ -489,7 +496,8 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
+        "and ask the user for a missing key"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
@@ -853,7 +861,7 @@ def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) ->
         "https://mindroom.example/connections/egress"
     ) in note
     assert "otherwise, or to use their own key instead, they can add an API key there" in note
-    assert "Never ask the user to paste a key into the chat." in note
+    assert "Never ask the user to paste a key into the chat: call `request_secret`" in note
 
 
 def test_note_without_a_public_url_sends_the_agent_to_the_operator(tmp_path: Path) -> None:
@@ -952,8 +960,19 @@ def test_a_service_limited_to_other_agents_is_not_listed(tmp_path: Path) -> None
     assert [entry["name"] for entry in payload["services"]] == ["github"]
 
 
-# The broker is on and the sandbox proxy runs shell in a worker, so agent `code` reaches Agent Keys.
-_BROKER_ENV = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+# The broker is on and the sandbox proxy runs shell in a worker, so agent `code` reaches Agent Keys, and MindRoom Chat
+# may call this MindRoom to answer a card.
+_BROKER_ENV = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+    "MINDROOM_EGRESS_BROKER_PORT": "8768",
+    "MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+}
+
+
+@pytest.fixture(autouse=True)
+def _homeserver_binds_openid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The homeserver binds OpenID tokens, so Chat can sign in to this MindRoom with a client session."""
+    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
 
 
 @pytest.fixture(autouse=True)
@@ -971,9 +990,13 @@ def _asking(
     *,
     worker_scope: WorkerScope = "user_agent",
     room_mode: bool = False,
+    agent_fields: dict[str, object] | None = None,
     **env: str,
 ) -> tuple[EgressCredentialsTools, ToolRuntimeContext]:
-    """Return the tool and Alice's turn on agent `code`: personal, or shared with Bob as its credential manager."""
+    """Return the tool and Alice's turn on agent `code`: personal, or shared with Bob as its credential manager.
+
+    `agent_fields` replace the agent's own.
+    """
     runtime_paths = _runtime_paths(tmp_path, **{**_BROKER_ENV, **env})
     scope: dict[str, object] = (
         {"worker_scope": "shared", "credential_managers": [_BOB]}
@@ -987,6 +1010,7 @@ def _asking(
             "include_default_tools": False,
             "access": {"users": [_ALICE, _BOB]},
             **scope,
+            **(agent_fields or {}),
         },
     )
     context = _context(
@@ -1086,6 +1110,7 @@ async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
     assert result["status"] == "saved"
     assert result["service"] == "github"
     assert "retry" in result["note"]
+    assert "`X-Agent-Keys-Service: github`" in result["note"]
 
 
 @pytest.mark.asyncio
@@ -1111,8 +1136,22 @@ async def test_request_declined_and_expired(tmp_path: Path, monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) -> None:
-    """A stopped reply ends the wait: the card turns expired, the request is gone, and the cancellation propagates."""
+    """A stopped reply ends the wait: the card turns expired, the request is gone, and the cancellation propagates.
+
+    The request is settled before the edit, so an answer arriving while the card turns expired is refused.
+    """
     tool, context = _asking(tmp_path)
+    claims_during_edit: list[object] = []
+
+    async def send(**kwargs: object) -> nio.RoomSendResponse:
+        content = kwargs["content"]
+        assert isinstance(content, dict)
+        if content.get("m.relates_to", {}).get("rel_type") == "m.replace":
+            claim = secret_request_registry().claim(_request_id(content), room_id=_ROOM, now=time.time())
+            claims_during_edit.append(claim)
+        return nio.RoomSendResponse(_CARD, _ROOM)
+
+    context.client.room_send.side_effect = send
     task = _start(tool, context)
     request_id = _request_id(await _posted_card(context, task))
 
@@ -1121,6 +1160,7 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         await task
 
     _final_card(context, "expired")
+    assert claims_during_edit == [None]
     assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is None
 
 
@@ -1136,6 +1176,8 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         ("empty-reason", "github", "  \n", "reason"),
         ("github-app", "acme", _REASON, "Acme takes no key"),
         ("separate-account", "mine", _REASON, "Google Drive takes no key; connect an account instead"),
+        ("no-agent-keys", "github", _REASON, "This agent's commands do not reach Agent Keys"),
+        ("not-a-user", "github", _REASON, "The requester may not use this agent"),
     ],
     ids=[
         "unknown",
@@ -1146,6 +1188,8 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         "empty-reason",
         "github-app",
         "separate-account",
+        "no-agent-keys",
+        "not-a-user",
     ],
 )
 async def test_refuses_without_posting(
@@ -1162,7 +1206,13 @@ async def test_refuses_without_posting(
         "openai": {**_SERVICES["openai"], "admin_key": True},
         "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
     }
-    tool, context = _asking(tmp_path, services, worker_scope="shared" if case == "non-manager" else "user_agent")
+    agent_fields = {"no-agent-keys": {"worker_tools": []}, "not-a-user": {"access": {"users": [_BOB]}}}.get(case)
+    tool, context = _asking(
+        tmp_path,
+        services,
+        worker_scope="shared" if case == "non-manager" else "user_agent",
+        agent_fields=agent_fields,
+    )
     manager = get_runtime_credentials_manager(context.runtime_paths)
     if case == "restrict-only":
         limit = {"restrict_only": True, "rules": [{"host": "api.github.com", "path_prefix": "/repos/o/a"}]}
@@ -1198,6 +1248,77 @@ async def test_refusal_names_the_agent_keys_page(tmp_path: Path) -> None:
     assert "Unknown service 'gitlab'" in result["message"]
     assert result["link"] == "https://mindroom.example.org/connections/egress"
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origins", "binding", "message"),
+    [
+        ("[]", True, "MINDROOM_COMPUTER_ALLOWED_ORIGINS"),
+        ('["https://chat.example.org"]', False, "binds OpenID tokens"),
+        ('["https://chat.example.org"]', None, "binds OpenID tokens"),
+    ],
+    ids=["no-chat-origin", "no-openid-binding", "binding-check-failed"],
+)
+async def test_refuses_when_chat_cannot_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origins: str,
+    binding: bool | None,
+    message: str,
+) -> None:
+    """Without Chat allowed to call this MindRoom with a client session, nobody could answer, so no card is posted."""
+    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=binding))
+    tool, context = _asking(
+        tmp_path,
+        **_PAGE_SERVED,
+        MINDROOM_PUBLIC_URL="https://mindroom.example.org",
+        MINDROOM_COMPUTER_ALLOWED_ORIGINS=origins,
+    )
+
+    result = await _ask(tool, context)
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    assert "Agent Keys page (`link`)" in result["message"]
+    assert result["link"] == "https://mindroom.example.org/connections/egress"
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_withdraws_the_card_of_a_background_job(tmp_path: Path) -> None:
+    """Run as a background job, the call waits on its card as an approval does, so the reply's Stop expires the card."""
+    tool, context = _asking(tmp_path)
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+
+    async def ask() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", await tool.request_secret("github", _REASON))
+
+    try:
+        with tool_runtime_context(context):
+            await start_job(
+                runtime,
+                "ask",
+                tool_name="request_secret",
+                depth=0,
+                adapter={},
+                owner=job_owner(),
+                operation=ask,
+                reply_id="reply",
+            )
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "awaiting_approval"), JOB_TEST_TIMEOUT)
+        request_id = _request_id(_sent(context)[0])
+
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    _final_card(context, "expired")
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is None
+    assert request_id not in secret_request_registry()._requests
 
 
 @pytest.mark.asyncio

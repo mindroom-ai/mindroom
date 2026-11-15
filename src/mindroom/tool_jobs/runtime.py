@@ -233,7 +233,7 @@ class _JobWait:
 @dataclass
 class _Entry:
     job: BackgroundJob
-    control: JobControl = field(default_factory=JobControl)
+    control: JobControl = field(init=False)
     task: asyncio.Task[None] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     claim: JobClaim | None = None
@@ -251,6 +251,10 @@ class _Entry:
     progress: str | None = None
     # The reply whose call started the job, whose Stop refuses the job every later approval.
     reply_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Give the job's control its ID, which a call running in the job reads (`current_job_id`)."""
+        self.control = JobControl(job_id=self.job.job_id)
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
