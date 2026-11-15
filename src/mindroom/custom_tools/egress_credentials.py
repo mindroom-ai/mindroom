@@ -16,6 +16,7 @@ Keys store and never passes through the tool, Matrix, or the model.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import time
@@ -69,6 +70,8 @@ _NO_SERVICES_NOTE = (
     "and users can add services of their own on the egress page where it is available."
 )
 _MAX_REASON_LENGTH = 500
+# How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
+_SAVE_GRACE_SECONDS = 30
 _OUTCOME_NOTES: dict[SecretRequestOutcome, str] = {
     "saved": "The user saved the key. Your next request through Agent Keys uses it, so retry the request that failed.",
     "declined": "The user declined, so do not ask again for this service in this turn.",
@@ -143,17 +146,29 @@ async def _await_outcome(
 ) -> SecretRequestOutcome:
     """Wait for the requester's answer, then edit the card; a timeout or a stopped reply ends it as `expired`.
 
-    The shield keeps the registry's future intact when the wait ends, and a cancellation propagates after the edit.
+    An answer the route claimed before the wait ended gets up to `_SAVE_GRACE_SECONDS` more to be saved, so a key
+    stored just after the TTL is reported and shown as saved. The shield keeps the registry's future intact when a
+    wait ends, and a cancellation propagates after the edit.
     """
     try:
         outcome = await asyncio.wait_for(asyncio.shield(request.outcome), secret_requests.SECRET_REQUEST_TTL_SECONDS)
     except TimeoutError:
-        outcome = "expired"
+        outcome = await _answer_in_flight(request)
     except asyncio.CancelledError:
-        await _edit_card(context, event_id, card, request, "expired")
+        await _edit_card(context, event_id, card, request, await _answer_in_flight(request))
         raise
     await _edit_card(context, event_id, card, request, outcome)
     return outcome
+
+
+async def _answer_in_flight(request: PendingSecretRequest) -> SecretRequestOutcome:
+    """Return the answer that arrived or is being saved as the wait ended, else `expired`."""
+    if request.outcome.done():
+        return request.outcome.result()
+    if request.claimed:
+        with contextlib.suppress(TimeoutError):
+            return await asyncio.wait_for(asyncio.shield(request.outcome), _SAVE_GRACE_SECONDS)
+    return "expired"
 
 
 def _key_access_refusal(context: ToolRuntimeContext, agent_name: str, runtime_paths: RuntimePaths) -> str | None:
@@ -185,6 +200,13 @@ def _requestable_service(services: dict[str, EgressService], name: str) -> Egres
         return f"Service '{name}' only limits which paths requests may use and never takes a key."
     if service.admin_key:
         return f"Only an administrator sets the key of service '{name}', for every agent that uses it; ask an administrator."
+    display_name = service.display_name or name
+    if service.github_app is not None:
+        return (
+            f"{display_name} takes no key: it uses the administrator's GitHub App; ask an administrator to change it."
+        )
+    if service.oauth_separate_account:
+        return f"{display_name} takes no key; connect an account instead."
     return service
 
 

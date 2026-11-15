@@ -971,9 +971,10 @@ def _asking(
     *,
     worker_scope: WorkerScope = "user_agent",
     room_mode: bool = False,
+    **env: str,
 ) -> tuple[EgressCredentialsTools, ToolRuntimeContext]:
     """Return the tool and Alice's turn on agent `code`: personal, or shared with Bob as its credential manager."""
-    runtime_paths = _runtime_paths(tmp_path, **_BROKER_ENV)
+    runtime_paths = _runtime_paths(tmp_path, **{**_BROKER_ENV, **env})
     scope: dict[str, object] = (
         {"worker_scope": "shared", "credential_managers": [_BOB]}
         if worker_scope == "shared"
@@ -1133,8 +1134,19 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         ("non-manager", "github", _REASON, "credential managers"),
         ("no-memberships", "github", _REASON, "cannot check"),
         ("empty-reason", "github", "  \n", "reason"),
+        ("github-app", "acme", _REASON, "Acme takes no key"),
+        ("separate-account", "mine", _REASON, "Google Drive takes no key; connect an account instead"),
     ],
-    ids=["unknown", "restrict-only", "admin-key", "non-manager", "no-memberships", "empty-reason"],
+    ids=[
+        "unknown",
+        "restrict-only",
+        "admin-key",
+        "non-manager",
+        "no-memberships",
+        "empty-reason",
+        "github-app",
+        "separate-account",
+    ],
 )
 async def test_refuses_without_posting(
     tmp_path: Path,
@@ -1144,12 +1156,26 @@ async def test_refuses_without_posting(
     message: str,
 ) -> None:
     """A service no key can be asked for, a requester who may not set the key, or no reason posts no card."""
-    services = {**_SERVICES, "openai": {**_SERVICES["openai"], "admin_key": True}}
+    app = {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}
+    services = {
+        **_SERVICES,
+        "openai": {**_SERVICES["openai"], "admin_key": True},
+        "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
+    }
     tool, context = _asking(tmp_path, services, worker_scope="shared" if case == "non-manager" else "user_agent")
+    manager = get_runtime_credentials_manager(context.runtime_paths)
     if case == "restrict-only":
         limit = {"restrict_only": True, "rules": [{"host": "api.github.com", "path_prefix": "/repos/o/a"}]}
-        manager = get_runtime_credentials_manager(context.runtime_paths)
         _save_mine(manager, "github-limited", limit, context.config.egress_broker.services)
+    if case == "separate-account":
+        save_user_service(
+            manager,
+            worker_target(),
+            "mine",
+            EgressService.model_validate({"preset": "google_drive", "oauth_separate_account": True}),
+            config_services=context.config.egress_broker.services,
+            oauth_providers={"google_drive"},
+        )
     if case == "no-memberships":
         context = replace(context, agent_reply_memberships=None)
 
@@ -1163,13 +1189,36 @@ async def test_refuses_without_posting(
 
 @pytest.mark.asyncio
 async def test_refusal_names_the_agent_keys_page(tmp_path: Path) -> None:
-    """Where the user can set the key on a page, a refusal links it."""
-    runtime_paths = _runtime_paths(tmp_path, **_PAGE_SERVED, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+    """Where the user can set the key on a page, a refusal links it, here for a service that needs host rules first."""
+    tool, context = _asking(tmp_path, **_PAGE_SERVED, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
 
-    result = await _ask(_tool(runtime_paths), _context(runtime_paths), "gitlab")
+    result = await _ask(tool, context, "gitlab")
 
     assert result["status"] == "error"
+    assert "Unknown service 'gitlab'" in result["message"]
     assert result["link"] == "https://mindroom.example.org/connections/egress"
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_answer_saving_as_the_wait_ends_is_not_expired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key the route claimed before the TTL and stores just after it is reported and shown as saved."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.2)
+    tool, context = _asking(tmp_path)
+    task = _start(tool, context)
+    request_id = _request_id(await _posted_card(context, task))
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is not None
+
+    await asyncio.sleep(0.3)  # The TTL elapses while the claimed answer is still being saved.
+    assert not task.done()
+    secret_request_registry().resolve(request_id, "saved")
+    result = json.loads(await task)
+
+    assert result["status"] == "saved"
+    assert _final_card(context, "saved")["body"] == "🔑 GitHub key saved."
 
 
 @pytest.mark.asyncio
