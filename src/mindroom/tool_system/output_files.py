@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
+from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root, resolve_path_within_root
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -114,7 +114,8 @@ class ToolOutputFileHandled:
 
 
 _active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
-# The directory a headless run's caller chose for its agents' tools to work in, in place of their workspaces.
+# The directory a headless run's caller, or an agent turn's turn:started or turn:resumed hook, chose for the tools to
+# work in, in place of their agents' workspaces.
 _TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
 
 
@@ -131,6 +132,26 @@ def tool_workdir(workdir: Path | None) -> Iterator[None]:
 def current_tool_workdir() -> Path | None:
     """Return the workdir bound for the tools built now, if any."""
     return _TOOL_WORKDIR.get()
+
+
+def confined_workdir(workspace_root: Path, requested: str) -> Path:
+    """Return the existing directory ``requested`` names in the workspace, resolved, for a turn's tools to work in.
+
+    A relative ``requested`` is resolved against ``workspace_root``, an absolute one must lie inside it, and a link on
+    the way may not lead out of it. Raises ``ValueError`` saying why otherwise.
+    """
+    try:
+        workdir = resolve_path_within_root(workspace_root, requested, symlinks="internal", strict=True)
+    except OSError as error:
+        msg = f"{requested} is not an existing directory in the workspace"
+        raise ValueError(msg) from error
+    except ValueError as error:
+        msg = f"{requested} leads outside the workspace"
+        raise ValueError(msg) from error
+    if not workdir.is_dir():
+        msg = f"{requested} is not an existing directory in the workspace"
+        raise ValueError(msg)
+    return workdir
 
 
 def current_tool_output_file_request() -> ToolOutputFileRequest | None:

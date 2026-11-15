@@ -696,6 +696,11 @@ async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events()
         validate_event_name("turn:custom")
 
 
+def _unread_workspace() -> Path:
+    """Stand in for the agent's workspace, which a turn whose hooks ask for no working directory never resolves."""
+    raise AssertionError
+
+
 def _lifecycle(tmp_path: Path, hooks: list[object], *, shutdown: bool = False) -> ResponseLifecycle:
     registry = HookRegistry.from_plugins([_hook_plugin("turn", hooks)])
     _config, service = _response_hook_service(tmp_path, registry)
@@ -720,7 +725,7 @@ async def test_a_hook_scoped_to_agents_or_rooms_sees_only_their_turns(tmp_path: 
         recorder("other_room", rooms=["!other:localhost"]),
     ]
 
-    await _lifecycle(tmp_path, hooks).start_turn(resumed=False)
+    await _lifecycle(tmp_path, hooks).start_turn(resumed=False, agent_workspace_root=_unread_workspace)
 
     assert seen == ["this_agent", "this_room"]
 
@@ -804,7 +809,7 @@ async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_
 
     async def finalized_twice_then_cancelled() -> None:
         async with lifecycle.turn(approval_owns_end=_no_approval):
-            await lifecycle.start_turn(resumed=True)
+            await lifecycle.start_turn(resumed=True, agent_workspace_root=_unread_workspace)
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Cancelled("user_stop")))
             raise asyncio.CancelledError
@@ -869,7 +874,7 @@ async def test_a_turn_settling_as_mindroom_shuts_down_still_reports_how_it_settl
     lifecycle = _lifecycle(tmp_path, _recorders(seen), shutdown=True)
 
     async with lifecycle.turn(approval_owns_end=_no_approval):
-        await lifecycle.start_turn(resumed=False)
+        await lifecycle.start_turn(resumed=False, agent_workspace_root=_unread_workspace)
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=AwaitingApproval()))
 
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None)]

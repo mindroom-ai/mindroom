@@ -3372,6 +3372,7 @@ depends_on = [
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_turn",
+    "mindroom.runtime_resolution",
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
@@ -3485,6 +3486,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.post_response_effects",
     "mindroom.streaming",
+    "mindroom.tool_system.output_files",
 ]
 visibility = [
     "mindroom.bot",

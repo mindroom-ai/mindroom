@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -55,9 +55,11 @@ from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_context
+from mindroom.tool_system.output_files import confined_workdir, tool_workdir
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
+    from pathlib import Path
 
     from structlog.stdlib import BoundLogger
 
@@ -790,10 +792,10 @@ class ResponseHookService:
         event_name: str,
         identity: ResponseIdentity,
         outcome: TurnOutcome | None = None,
-    ) -> None:
-        """Run one turn lifecycle event's hooks for the turn ``identity`` names."""
+    ) -> TurnLifecycleContext | None:
+        """Run one turn lifecycle event's hooks for the turn ``identity`` names; return their context, None without hooks."""
         if not self.hook_context.registry.has_hooks(event_name):
-            return
+            return None
         context = TurnLifecycleContext(
             **self.hook_context.base_kwargs(event_name, identity.correlation_id),
             turn_id=identity.turn_id,
@@ -807,6 +809,7 @@ class ResponseHookService:
             context,
             continue_on_cancelled=event_name in {EVENT_TURN_PAUSED, EVENT_TURN_ENDED},
         )
+        return context
 
 
 def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
@@ -885,13 +888,32 @@ class ResponseLifecycle:
         self.pipeline_timing = pipeline_timing
         # How the last finalization settled the turn; None until one ran.
         self._turn_end: TurnOutcome | Literal["paused"] | None = None
+        # Holds the working directory start_turn's hooks chose until the scope of ``turn`` ends.
+        self._workdir_scope = ExitStack()
 
-    async def start_turn(self, *, resumed: bool) -> None:
-        """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it."""
-        await self.deps.response_hooks._emit_turn_event(
+    async def start_turn(self, *, resumed: bool, agent_workspace_root: Callable[[], Path]) -> None:
+        """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it, in the scope of ``turn``.
+
+        An agent's turn then runs its tools in the directory its hooks asked for, inside the workspace
+        ``agent_workspace_root`` returns, until that scope ends; a team's turn ignores the request.
+        """
+        context = await self.deps.response_hooks._emit_turn_event(
             EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
             self.identity,
         )
+        requested = None if context is None else context.workdir
+        if requested is None:
+            return
+        if self.identity.response_kind != "ai":
+            # A team's members work in their own workspaces.
+            self.deps.logger.debug("turn_workdir_ignored_for_team", workdir=requested)
+            return
+        try:
+            workdir = confined_workdir(agent_workspace_root(), requested)
+        except ValueError as error:
+            self.deps.logger.warning("turn_workdir_refused", workdir=requested, reason=str(error))
+            return
+        self._workdir_scope.enter_context(tool_workdir(workdir))
 
     @asynccontextmanager
     async def turn(self, *, approval_owns_end: Callable[[TurnOutcome], Awaitable[bool]]) -> AsyncIterator[None]:
@@ -899,11 +921,14 @@ class ResponseLifecycle:
 
         How the block's finalization settled the turn decides the event; a block that raised before any finalization
         ends the turn cancelled for a cancellation and failed for an error. A turn with an approval, paused or resumed,
-        ends when that approval ends, whose settlement emits ``turn:ended``.
+        ends when that approval ends, whose settlement emits ``turn:ended``. The working directory ``start_turn`` set
+        is unset when the block ends, however it ends, so a later turn of the task, or this one resumed, starts in its
+        workspace.
         """
         cancelled = False
         try:
-            yield
+            with self._workdir_scope:
+                yield
         except asyncio.CancelledError:
             cancelled = True
             raise

@@ -357,7 +357,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             ),
             _emit_after_response=AsyncMock(),
-            _emit_turn_event=AsyncMock(),
+            # As with no turn hooks: no context, so no working directory to apply.
+            _emit_turn_event=AsyncMock(return_value=None),
         )
 
     @staticmethod

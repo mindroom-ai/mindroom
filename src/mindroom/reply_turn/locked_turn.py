@@ -46,6 +46,7 @@ from mindroom.reply_turn.request import (
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.turn_origin import TurnIntent
@@ -53,6 +54,7 @@ from mindroom.turn_origin import TurnIntent
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from datetime import datetime
+    from pathlib import Path
 
     import nio
     import structlog
@@ -499,7 +501,10 @@ class LockedTurns:
                 correlation_id=lifecycle.identity.correlation_id,
             ):
                 try:
-                    await lifecycle.start_turn(resumed=resumed)
+                    await lifecycle.start_turn(
+                        resumed=resumed,
+                        agent_workspace_root=partial(self._agent_workspace_root, request, target),
+                    )
                     outcome = await self._attempt_outcome(
                         request,
                         target=target,
@@ -532,6 +537,19 @@ class LockedTurns:
             )
             if cancelled is not None:
                 raise cancelled
+
+    def _agent_workspace_root(self, request: ResponseRequest, target: MessageTarget) -> Path:
+        """Return the workspace the tools of this bot's agent turn at ``target`` use, without creating it.
+
+        A private agent's workspace is its requester's, so it is resolved for the identity the turn's tools run as.
+        """
+        execution_identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id)
+        return resolve_agent_runtime(
+            self.deps.agent_name,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            execution_identity,
+        ).workspace.root
 
     @asynccontextmanager
     async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:

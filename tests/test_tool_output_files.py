@@ -35,6 +35,7 @@ from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
+    confined_workdir,
     saved_tool_output_receipt,
     validate_output_path_syntax,
     with_optional_output_path,
@@ -1126,3 +1127,61 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
     assert result.is_error
     assert "[TOOL CALL DECLINED]" in result.content
     assert seen == [("after", True, result.content)]
+
+
+def _workspace_with_worktree(tmp_path: Path) -> Path:
+    """Return a workspace holding `worktrees/wt`, a file, a link to `worktrees`, and a link out to `outside`."""
+    workspace = tmp_path / "workspace"
+    (workspace / "worktrees" / "wt").mkdir(parents=True)
+    (workspace / "notes.txt").write_text("notes", encoding="utf-8")
+    (tmp_path / "outside").mkdir()
+    (workspace / "inner-link").symlink_to(workspace / "worktrees")
+    (workspace / "out-link").symlink_to(tmp_path / "outside")
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["worktrees/wt", "{workspace}/worktrees/wt", "inner-link/wt", "worktrees/../worktrees/wt"],
+    ids=["relative", "absolute-inside", "internal-link", "dot-dot-inside"],
+)
+def test_confined_workdir_returns_the_directory_inside_the_workspace_resolved(tmp_path: Path, requested: str) -> None:
+    workspace = _workspace_with_worktree(tmp_path)
+
+    workdir = confined_workdir(workspace, requested.format(workspace=workspace))
+
+    assert workdir == workspace.resolve() / "worktrees" / "wt"
+
+
+@pytest.mark.parametrize(
+    ("requested", "reason"),
+    [
+        ("..", "leads outside the workspace"),
+        ("{outside}", "leads outside the workspace"),
+        ("out-link", "leads outside the workspace"),
+        ("missing", "is not an existing directory in the workspace"),
+        ("notes.txt", "is not an existing directory in the workspace"),
+    ],
+    ids=["dot-dot", "absolute-outside", "link-out", "missing", "file"],
+)
+def test_confined_workdir_refuses_what_is_not_an_existing_directory_inside_the_workspace(
+    tmp_path: Path,
+    requested: str,
+    reason: str,
+) -> None:
+    workspace = _workspace_with_worktree(tmp_path)
+    requested = requested.format(outside=tmp_path / "outside")
+
+    with pytest.raises(ValueError, match=reason) as raised:
+        confined_workdir(workspace, requested)
+
+    assert str(raised.value) == f"{requested} {reason}"
+
+
+def test_confined_workdir_refuses_any_path_of_a_workspace_that_does_not_exist(tmp_path: Path) -> None:
+    workspace = tmp_path / "not-yet"
+
+    with pytest.raises(ValueError, match="is not an existing directory in the workspace"):
+        confined_workdir(workspace, ".")
+
+    assert not workspace.exists()
