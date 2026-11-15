@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -404,6 +404,141 @@ def test_a_tool_without_a_base_dir_runs_in_the_agent_workspace(tmp_path: Path, s
 
     assert "MINDROOM_AGENT_WORKSPACE" not in context.execution_env
     assert shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd) == "agent"
+
+
+def _with_workdir(shape: _Shape, workdir: str) -> _Shape:
+    """Return ``shape`` with its agent workspace made and its requests naming ``workdir`` inside it."""
+    shape.labels["agent"].mkdir(parents=True, exist_ok=True)
+    return replace(shape, routing={**shape.routing, "workdir": workdir})
+
+
+@pytest.mark.parametrize(
+    ("scope", "agent", "client_base_dir"),
+    [(None, "general", "none"), ("shared", "general", "agent"), ("user_agent", "writer", "agent")],
+)
+def test_a_working_directory_moves_only_the_tools_base_and_the_cwd(
+    tmp_path: Path,
+    scope: str | None,
+    agent: str,
+    client_base_dir: str,
+) -> None:
+    """With a working directory, HOME, the hook workspace and the output root stay on the request's workspace."""
+    shape = _with_workdir(_shape(tmp_path, scope=scope, agent=agent, client_base_dir=client_base_dir), "wt")
+    shape.labels["workdir"] = shape.labels["agent"] / "wt"
+    shape.labels["workdir"].mkdir()
+    request = ExecuteRequest(**shape.execute_payload("shell", "run_shell_command"))
+    route = sandbox_runner._prepare_route_with_config(
+        request,
+        runtime_paths=shape.runtime_paths,
+        config=shape.config,
+        runner_token=TOKEN,
+    )
+    assert not isinstance(route, WorkerFailure), route
+    context = sandbox_runner._prepare_execute_request(
+        sandbox_runner._ExecuteCall(request=request, route=route, tools=builtin_tool_registry()),
+    )
+
+    assert {
+        "home": shape.label(context.execution_env.get("HOME")),
+        "hook_workspace": shape.label(context.execution_env.get("MINDROOM_AGENT_WORKSPACE")),
+        "output_root": shape.label(context.request.tool_output_workspace_root),
+        "tool_base_dir": shape.label(context.request.tool_init_overrides.get("base_dir")),
+        "bound_workdir": shape.label(context.request.workdir),
+        "subprocess_cwd": shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd),
+    } == {
+        "home": "agent",
+        "hook_workspace": "agent",
+        "output_root": "agent",
+        "tool_base_dir": "workdir",
+        "bound_workdir": "workdir",
+        "subprocess_cwd": "workdir",
+    }
+
+
+@pytest.mark.parametrize(("scope", "agent"), [(None, "general"), ("shared", "general")])
+def test_tools_work_in_the_working_directory_with_home_on_the_workspace(
+    tmp_path: Path,
+    scope: str | None,
+    agent: str,
+) -> None:
+    """A shell command runs in the working directory with HOME, its workspace variable and env file on the workspace.
+
+    ``file`` resolves a relative path there too, and saves its output among the workspace's saved tool outputs, named
+    by its absolute path as in the primary. The unkeyed request runs in this process, the keyed one in a child.
+    """
+    shape = _with_workdir(_shape(tmp_path, scope=scope, agent=agent, client_base_dir="none"), "wt")
+    workspace = shape.labels["agent"].resolve()
+    workdir = workspace / "wt"
+    for directory, label in ((workspace, "workspace"), (workdir, "workdir")):
+        (directory / ".mindroom").mkdir(parents=True)
+        (directory / ".mindroom" / "worker-env.sh").write_text(f"export ENV_SOURCE={label}\n", encoding="utf-8")
+        (directory / "note.txt").write_text(f"in the {label}", encoding="utf-8")
+    client = shape.client()
+
+    shell = client.post(
+        "/api/sandbox-runner/execute",
+        headers=HEADERS,
+        json={
+            **shape.execute_payload("shell", "run_shell_command"),
+            "args": [["bash", "-c", 'printf "%s|%s|%s|%s" "$PWD" "$HOME" "$MINDROOM_AGENT_WORKSPACE" "$ENV_SOURCE"']],
+        },
+    )
+    read = client.post(
+        "/api/sandbox-runner/execute",
+        headers=HEADERS,
+        json={**shape.execute_payload("file", "read_file"), "kwargs": {"file_name": "note.txt"}},
+    )
+    saved = client.post(
+        "/api/sandbox-runner/execute",
+        headers=HEADERS,
+        json={
+            **shape.execute_payload("file", "read_file"),
+            "kwargs": {"file_name": "note.txt", "mindroom_output_path": "saved.txt"},
+        },
+    )
+
+    assert shell.status_code == 200, shell.text
+    assert _response_line(shell) == {
+        "ok": True,
+        "result": f"[cwd: {workdir}]\n{workdir}|{workspace}|{workspace}|workspace",
+        "error": None,
+        "failure_kind": None,
+    }
+    assert read.status_code == 200, read.text
+    assert _response_line(read)["result"] == "in the workdir"
+    assert saved.status_code == 200, saved.text
+    saved_path = workspace / "mindroom_tool_outputs" / "saved.txt"
+    assert saved_path.read_text(encoding="utf-8") == "in the workdir"
+    assert str(saved_path) in str(_response_line(saved)["result"])
+
+
+@pytest.mark.parametrize("workdir", ["../outside", "missing", "link-out"])
+@pytest.mark.parametrize(("scope", "agent"), [(None, "general"), ("shared", "general")])
+def test_a_working_directory_outside_the_workspace_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
+    agent: str,
+    workdir: str,
+) -> None:
+    """A working directory that leaves the workspace, by `..` or a link, or does not exist fails the call."""
+    shape = _with_workdir(_shape(tmp_path, scope=scope, agent=agent, client_base_dir="none"), workdir)
+    workspace = shape.labels["agent"]
+    (workspace.parent / "outside").mkdir()
+    (workspace / "link-out").symlink_to(workspace.parent / "outside", target_is_directory=True)
+    built: list[object] = []
+    monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", lambda **kwargs: built.append(kwargs))
+
+    response = shape.client().post(
+        "/api/sandbox-runner/execute",
+        headers=HEADERS,
+        json=shape.execute_payload("shell", "run_shell_command"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": False, "error": response.json()["error"], "failure_kind": "tool"}
+    assert response.json()["error"].startswith(f"workdir {workdir} "), response.json()
+    assert built == []
 
 
 @pytest.mark.parametrize("client_base_dir", ["outside", "absolute"])

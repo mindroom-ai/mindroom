@@ -34,6 +34,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
@@ -41,6 +42,7 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
+from mindroom.agents import build_agent_toolkit
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -84,7 +86,7 @@ from mindroom.tool_system.metadata import (
     ToolValidationInfo,
     get_tool_by_name,
 )
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, tool_workdir
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -914,6 +916,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "private_agent_names": None,
         "config_snapshot": None,
         "base_dir": None,
+        "workdir": None,
         "tool_name": "calculator",
         "function_name": "add",
         "args": ["1", 2],
@@ -7922,6 +7925,86 @@ class TestWorkerToolsOverride:
         assert result == "sandbox-result"
         assert captured["json"]["worker_key"] is not None
         assert captured["json"]["base_dir"] == str(unrelated_base_dir)
+
+
+_WORKDIR_IDENTITY = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="general",
+    requester_id="@alice:example.org",
+    room_id="!room:example.org",
+    thread_id="$thread",
+    resolved_thread_id="$thread",
+    session_id="session-1",
+)
+
+
+def _shared_worker_shell_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    workdir: Callable[[Path], Path | None],
+) -> dict[str, Any]:
+    """Build and call agent ``general``'s shell, which runs in its shared worker, as a turn bound to ``workdir`` does.
+
+    ``workdir`` maps the agent's workspace to the turn's working directory; the sent request is returned.
+    """
+    captured: dict[str, Any] = {}
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        execution_mode="all",
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", tools=["shell"], worker_scope="shared")},
+        models={},
+    )
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
+    (workspace / "wt").mkdir(parents=True)
+
+    with tool_workdir(workdir(workspace.resolve())):
+        shell = build_agent_toolkit(
+            "shell",
+            agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
+            placement=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()),
+            runtime_paths=runtime_paths,
+            execution_identity=_WORKDIR_IDENTITY,
+        )
+        assert shell is not None
+        assert blocking_entrypoint(shell, "run_shell_command")("pwd") == "sandbox-result"
+    return captured["json"]
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_proxy_sends_a_turn_working_directory_beside_the_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bound: bool,
+) -> None:
+    """The request names the agent's workspace as it would without a working directory, and the directory beside it."""
+    sent = _shared_worker_shell_call(monkeypatch, tmp_path, lambda workspace: workspace / "wt" if bound else None)
+
+    assert sent["worker_key"] is not None
+    assert sent["base_dir"] == "agents/general/workspace"
+    assert sent.get("workdir") == ("wt" if bound else None)
+    assert sent["tool_init_overrides"] == {}
+
+
+def test_proxy_sends_the_workspace_alone_for_a_working_directory_outside_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A working directory outside the tool's workspace is never sent; the request names the workspace, with a warning."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    with capture_logs() as logs:
+        sent = _shared_worker_shell_call(monkeypatch, tmp_path, lambda _workspace: elsewhere.resolve())
+
+    assert sent["base_dir"] == "agents/general/workspace"
+    assert sent.get("workdir") is None
+    assert [log["log_level"] for log in logs if log["event"] == "worker_workdir_outside_workspace"] == ["warning"]
 
 
 @pytest.mark.asyncio

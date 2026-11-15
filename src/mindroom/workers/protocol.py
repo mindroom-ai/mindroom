@@ -22,8 +22,9 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
+# 9: a request names a turn's working directory in `workdir`, relative to its workspace.
 # A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 8
+WORKER_PROTOCOL_VERSION = 9
 
 FailureKind = Literal["tool", "worker"]
 
@@ -41,7 +42,9 @@ class WorkerRoute(_WireModel):
     ``execution_identity`` is written by ``serialize_tool_execution_identity`` and read back by
     ``parse_tool_execution_identity_payload``. ``config_snapshot`` holds the live config fields runners resolve,
     for runners that mount no config. ``base_dir`` is the calling agent's tool workspace, relative to the shared
-    storage root when the request names a worker, which the worker confines before acting in it.
+    storage root when the request names a worker, which the worker confines before acting in it. ``workdir`` is the
+    directory a turn's tools work in, relative to that workspace with POSIX separators, which the worker confines to
+    the workspace; HOME and the workspace's own files stay on the workspace.
     """
 
     protocol: int
@@ -52,6 +55,7 @@ class WorkerRoute(_WireModel):
     private_agent_names: list[str] | None = None
     config_snapshot: dict[str, Any] | None = None
     base_dir: str | None = None
+    workdir: str | None = None
 
     @field_validator("execution_identity")
     @classmethod

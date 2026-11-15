@@ -894,6 +894,7 @@ def get_tool_by_name(
                 extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
                 worker_target=worker_target,
                 runtime_config=runtime_config,
+                workspace_root=tool_output_workspace_root,
                 tools=tools,
             )
             if routed

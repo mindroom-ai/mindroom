@@ -23,13 +23,14 @@ import httpx
 from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
+from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, current_tool_workdir
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -87,6 +88,8 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
+
+logger = get_logger(__name__)
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
@@ -306,13 +309,15 @@ def worker_route(
     worker_target: ResolvedWorkerTarget | None,
     worker_manager: WorkerBackend,
     base_dir: str | None,
+    workdir: str | None = None,
     progress_sink: ProgressSink | None = None,
     start: bool = True,
 ) -> tuple[WorkerRoute, WorkerHandle | None]:
     """Return the route of one request, ensuring the dedicated worker that serves it.
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
-    carries it relative to the shared storage root, which the worker mounts at its own path.
+    carries it relative to the shared storage root, which the worker mounts at its own path. ``workdir`` is the
+    turn's working directory relative to that workspace, the same in every worker's paths.
     Without ``start``, a dedicated worker is never started, only looked up and marked used: its handle, None while
     its backend knows none. The shared runner starts nothing, so its worker is ensured either way.
     """
@@ -389,6 +394,7 @@ def worker_route(
             shared_storage_root=runtime_paths.storage_root,
             keyed=worker_key is not None,
         ),
+        workdir=workdir,
     )
     return route, worker_handle
 
@@ -738,6 +744,37 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
+def _request_workspace(
+    base_dir: object,
+    workspace_root: Path | None,
+    *,
+    tool_name: str,
+) -> tuple[str | None, str | None]:
+    """Return the workspace one call's request names and the turn's working directory beside it, if one is bound.
+
+    A toolkit built while a turn's working directory is bound has that directory as its ``base_dir``. The request
+    names the toolkit's workspace ``workspace_root`` instead, as it would without one, and the directory relative to
+    it, so the worker keeps HOME, the saved outputs and the workspace's own files on the workspace.
+    """
+    request_base_dir = str(base_dir) if base_dir is not None else None
+    workdir = current_tool_workdir()
+    if workdir is None or workspace_root is None:
+        return request_base_dir, None
+    if base_dir is not None:
+        request_base_dir = str(workspace_root)
+    # The turn confined its working directory to the canonical workspace.
+    workspace = workspace_root.expanduser().resolve()
+    if not workdir.is_relative_to(workspace):
+        logger.warning(
+            "worker_workdir_outside_workspace",
+            tool_name=tool_name,
+            workdir=str(workdir),
+            workspace=str(workspace),
+        )
+        return request_base_dir, None
+    return request_base_dir, workdir.relative_to(workspace).as_posix()
+
+
 def _build_execute_request(
     stand_ins: WorkerStandIns,
     *,
@@ -756,9 +793,14 @@ def _build_execute_request(
     tool_name = stand_ins.tool_name
     worker_target = stand_ins.worker_target
     runtime_config = stand_ins.runtime_config
-    # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
+    # The tool's workspace travels as the request's workspace, which the worker confines before acting in it, and a
+    # turn's working directory travels beside it.
     init_overrides = dict(stand_ins.tool_init_overrides or {})
-    base_dir = init_overrides.pop("base_dir", None)
+    base_dir, workdir = _request_workspace(
+        init_overrides.pop("base_dir", None),
+        stand_ins.workspace_root,
+        tool_name=tool_name,
+    )
     route, worker_handle = worker_route(
         runtime_paths=runtime_paths,
         runtime_config=runtime_config,
@@ -766,7 +808,8 @@ def _build_execute_request(
         function_name=function_name,
         worker_target=worker_target,
         worker_manager=worker_manager,
-        base_dir=str(base_dir) if base_dir is not None else None,
+        base_dir=base_dir,
+        workdir=workdir,
         progress_sink=progress_sink,
         start=start,
     )
@@ -920,7 +963,8 @@ class WorkerStandIns:
 
     Given a function's name and finished entrypoint, it returns the stand-in that sends that function's calls there.
     ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
-    ``tools`` is the registry the toolkit was built from.
+    ``tools`` is the registry the toolkit was built from. ``workspace_root`` is the workspace of the agent it was
+    built for, in this primary's paths, when known; a call names a turn's working directory relative to it.
     """
 
     tool_name: str
@@ -933,6 +977,7 @@ class WorkerStandIns:
     extra_env_passthrough: str | None = None
     worker_target: ResolvedWorkerTarget | None = None
     runtime_config: Config | None = None
+    workspace_root: Path | None = None
     # The toolkit, when it keeps some calls here; weak, because the toolkit keeps its stand-ins as long as it lives.
     primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None
 
@@ -989,6 +1034,7 @@ def worker_stand_ins(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
+    workspace_root: Path | None = None,
     tools: ToolRegistry,
 ) -> WorkerStandIns:
     """Return the stand-ins that send the calls of ``toolkit``, built to run in a worker, there."""
@@ -1007,6 +1053,7 @@ def worker_stand_ins(
         extra_env_passthrough=extra_env_passthrough,
         worker_target=worker_target,
         runtime_config=runtime_config,
+        workspace_root=workspace_root,
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
 

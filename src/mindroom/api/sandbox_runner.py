@@ -87,7 +87,9 @@ from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
+    confined_workdir,
     normalize_output_path_argument,
+    tool_workdir,
     validate_output_path,
     validate_output_path_syntax,
     write_bytes_to_output_path,
@@ -390,9 +392,10 @@ def _filter_runtime_tool_init_overrides(
 
 
 def _request_runtime_overrides(call: _ExecuteCall) -> dict[str, object]:
-    """Return runtime overrides for one runner-side tool rebuild: the route's workspace and shell pass-through."""
+    """Return the runtime overrides of one tool rebuild here: the route's workdir or workspace and shell pass-through."""
     request, route = call.request, call.route
-    runtime_overrides: dict[str, object] = {"base_dir": str(route.workspace)} if route.workspace is not None else {}
+    base_dir = route.workdir or route.workspace
+    runtime_overrides: dict[str, object] = {"base_dir": str(base_dir)} if base_dir is not None else {}
     if request.tool_name != "shell" or request.extra_env_passthrough is None:
         return runtime_overrides
 
@@ -464,6 +467,8 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     call_path_prepend: list[str] = Field(default_factory=list)
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
+    # The turn's working directory, bound for the tool's build and call as the primary binds it for its own tools.
+    workdir: str | None = None
     run_as_job: bool = False
 
 
@@ -473,7 +478,8 @@ class _PreparedRoute:
 
     ``workspace`` is where the request acts: the HOME and ``.mindroom/worker-env.sh`` of shell and python, the
     subprocess cwd, the tool output root and the tools' ``base_dir``, the view-file and save-attachment root, and
-    the browser's workspace.
+    the browser's workspace. ``workdir``, a turn's working directory confined to the workspace, takes the workspace's
+    place as the tools' ``base_dir`` and the subprocess cwd of a tool call.
     """
 
     runtime_paths: RuntimePaths
@@ -482,6 +488,7 @@ class _PreparedRoute:
     identity: ToolExecutionIdentity | None
     worker: sandbox_worker_prep.PreparedWorkerRequest | None
     workspace: Path | None
+    workdir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -638,7 +645,7 @@ def _prepare_route_with_config(
         )
     except ValueError as exc:
         return WorkerFailure(error=f"This worker cannot resolve the agent's workspace: {exc}", failure_kind="tool")
-    return _PreparedRoute(
+    prepared = _PreparedRoute(
         runtime_paths=runtime_paths,
         config=config,
         worker_key=worker_key,
@@ -646,6 +653,17 @@ def _prepare_route_with_config(
         worker=worker,
         workspace=workspace,
     )
+    return prepared if route.workdir is None else _route_in_workdir(prepared, route.workdir)
+
+
+def _route_in_workdir(prepared: _PreparedRoute, workdir: str) -> _PreparedRoute | WorkerFailure:
+    """Return ``prepared`` working in ``workdir``, an existing directory in its workspace, or why it cannot."""
+    if prepared.workspace is None:
+        return _missing_workspace_failure()
+    try:
+        return replace(prepared, workdir=confined_workdir(prepared.workspace, workdir))
+    except ValueError as exc:
+        return WorkerFailure(error=f"workdir {exc}", failure_kind="tool")
 
 
 def _route_workspace(
@@ -980,6 +998,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         call_path_prepend=list(request.environment.path_prepend),
         runtime_overrides=runtime_overrides,
         tool_output_workspace_root=str(route.workspace) if route.workspace is not None else None,
+        workdir=str(route.workdir) if route.workdir is not None else None,
     )
     return _PreparedSandboxRequestContext(
         request=prepared_request,
@@ -998,7 +1017,7 @@ def _prepare_subprocess_context(
     )
     subprocess_env = sandbox_exec.subprocess_env_for_request(template_env, prepared_request.execution_env)
     if route.workspace is not None:
-        subprocess_cwd = str(route.workspace.resolve())
+        subprocess_cwd = str((route.workdir or route.workspace).resolve())
     return _PreparedSandboxSubprocessContext(
         python_executable=python_executable,
         subprocess_env=subprocess_env,
@@ -1037,8 +1056,10 @@ async def _execute_prepared_request_inprocess(
     tool_output_workspace_root = (
         Path(prepared.tool_output_workspace_root) if prepared.tool_output_workspace_root is not None else None
     )
+    workdir = Path(prepared.workdir) if prepared.workdir is not None else None
 
-    with bind_detached_execution_identity(execution_identity):
+    # Whatever reads the working directory while the tool is built or runs sees the request's, as in the primary.
+    with bind_detached_execution_identity(execution_identity), tool_workdir(workdir):
         try:
             toolkit, entrypoint = _resolve_entrypoint(
                 runtime_paths=runtime_paths,
