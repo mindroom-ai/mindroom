@@ -7943,9 +7943,10 @@ def _shared_worker_shell_call(
     tmp_path: Path,
     workdir: Callable[[Path], Path | None],
 ) -> dict[str, Any]:
-    """Build and call agent ``general``'s shell, which runs in its shared worker, as a turn bound to ``workdir`` does.
+    """Build agent ``general``'s shell, which runs in its shared worker, as a turn bound to ``workdir`` does, and call it.
 
-    ``workdir`` maps the agent's workspace to the turn's working directory; the sent request is returned.
+    ``workdir`` maps the agent's workspace to the turn's working directory; the sent request is returned. The call
+    runs after the turn's variable is unset, so the request follows what the toolkit was built with.
     """
     captured: dict[str, Any] = {}
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
@@ -7971,8 +7972,8 @@ def _shared_worker_shell_call(
             runtime_paths=runtime_paths,
             execution_identity=_WORKDIR_IDENTITY,
         )
-        assert shell is not None
-        assert blocking_entrypoint(shell, "run_shell_command")("pwd") == "sandbox-result"
+    assert shell is not None
+    assert blocking_entrypoint(shell, "run_shell_command")("pwd") == "sandbox-result"
     return captured["json"]
 
 
@@ -8005,6 +8006,53 @@ def test_proxy_sends_the_workspace_alone_for_a_working_directory_outside_it(
     assert sent["base_dir"] == "agents/general/workspace"
     assert sent.get("workdir") is None
     assert [log["log_level"] for log in logs if log["event"] == "worker_workdir_outside_workspace"] == ["warning"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_view_file_sends_the_working_directory_beside_the_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    bound: bool,
+) -> None:
+    """A worker view names the workspace, and the working directory its toolkit was built in, where its path resolves."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+
+    captured: dict[str, Any] = {}
+    manager = _TrackingWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"file"},
+    )
+    envelope = encode_media_result(
+        ToolValue(content='{"view_status":"ready"}', images=(Image(content=b"png", mime_type="image/png"),)),
+    )
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured, responder=lambda _url, _json: {"ok": True, "result": envelope}),
+    )
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general").resolve()
+
+    with tool_workdir(workspace / "wt" if bound else None):
+        toolkit = AttachmentTools(
+            runtime_paths=runtime_paths,
+            worker_target=_worker_target(runtime_paths, "shared", "general", _WORKDIR_IDENTITY),
+            workspace_in_worker=True,
+            tool_output_workspace_root=workspace,
+        )
+    await toolkit.view_file(str(workspace / "wt" / "shot.png"))
+
+    assert captured["json"]["base_dir"] == "agents/general/workspace"
+    assert captured["json"]["workdir"] == ("wt" if bound else None)
+    assert captured["json"]["path"] == ("shot.png" if bound else "wt/shot.png")
 
 
 @pytest.mark.asyncio

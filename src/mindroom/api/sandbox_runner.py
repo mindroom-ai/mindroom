@@ -479,7 +479,7 @@ class _PreparedRoute:
     ``workspace`` is where the request acts: the HOME and ``.mindroom/worker-env.sh`` of shell and python, the
     subprocess cwd, the tool output root and the tools' ``base_dir``, the view-file and save-attachment root, and
     the browser's workspace. ``workdir``, a turn's working directory confined to the workspace, takes the workspace's
-    place as the tools' ``base_dir`` and the subprocess cwd of a tool call.
+    place as the tools' ``base_dir`` and the subprocess cwd of a tool call, and as the view-file root.
     """
 
     runtime_paths: RuntimePaths
@@ -1690,7 +1690,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
 
 @router.post("/view-file")
 async def view_file_in_worker(request: Request, payload: ViewFileRequest) -> ViewFileResponse | WorkerFailure:
-    """View an image only after resolving the request's workspace."""
+    """View an image only after resolving the request's workspace, in its working directory when it names one."""
     route = prepare_route(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
@@ -1699,7 +1699,7 @@ async def view_file_in_worker(request: Request, payload: ViewFileRequest) -> Vie
     result = await asyncio.to_thread(
         _view_file_result_envelope,
         payload.path,
-        route.workspace,
+        route.workdir or route.workspace,
         agent_file_access(route.config, payload.routing_agent_name),
     )
     return ViewFileResponse(ok=True, result=result)

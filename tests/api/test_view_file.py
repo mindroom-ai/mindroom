@@ -27,9 +27,9 @@ TOKEN = "view-file-test-token"  # noqa: S105
 HEADERS = {"x-mindroom-sandbox-token": TOKEN}
 
 
-def _png_bytes() -> bytes:
+def _png_bytes(color: tuple[int, int, int] = (10, 20, 30)) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (4, 3), (10, 20, 30)).save(output, format="PNG")
+    Image.new("RGB", (4, 3), color).save(output, format="PNG")
     return output.getvalue()
 
 
@@ -82,6 +82,30 @@ def test_view_file_endpoint_returns_bounded_image_envelope(
     assert result.images
     assert result.images[0].content == data
     assert json.loads(result.content)["path"] == "plot.png"
+
+
+@pytest.mark.parametrize("workdir", [None, "wt"])
+def test_view_file_endpoint_resolves_a_relative_name_in_the_working_directory(
+    view_file_client: tuple[TestClient, Path],
+    workdir: str | None,
+) -> None:
+    """A relative name resolves in the request's working directory when it names one, else in its workspace."""
+    client, workspace = view_file_client
+    (workspace / "wt").mkdir()
+    in_workspace, in_workdir = _png_bytes((10, 20, 30)), _png_bytes((200, 100, 50))
+    (workspace / "shot.png").write_bytes(in_workspace)
+    (workspace / "wt" / "shot.png").write_bytes(in_workdir)
+
+    response = client.post(
+        "/api/sandbox-runner/view-file",
+        headers=HEADERS,
+        json={**_view(workspace, "shot.png"), "workdir": workdir},
+    )
+
+    assert response.status_code == 200, response.text
+    result = decode_media_result(response.json()["result"])
+    assert result.images, result.content
+    assert result.images[0].content == (in_workdir if workdir else in_workspace)
 
 
 def test_view_file_endpoint_rejects_paths_outside_prepared_workspace(

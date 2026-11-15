@@ -397,8 +397,9 @@ class AttachmentTools(Toolkit):
         # Whether the agent's workspace-path tools run in a worker, away from runtime attachment storage.
         self._workspace_in_worker = workspace_in_worker
         self._tool_output_workspace_root = tool_output_workspace_root
-        # view_file reads where the file tools work: a headless run's workdir, else the workspace.
-        self._view_root = current_tool_workdir() or tool_output_workspace_root
+        # view_file reads where the file tools work: a turn's or headless run's workdir, else the workspace.
+        self._workdir = current_tool_workdir()
+        self._view_root = self._workdir or tool_output_workspace_root
         super().__init__(
             name="attachments",
             tools=[
@@ -412,15 +413,15 @@ class AttachmentTools(Toolkit):
     def views(self, path: str) -> bool:
         """Return whether view_file finds ``path`` as a file it may read.
 
-        A worker resolves the path itself, under workspace access only inside the workspace view_file sends it to.
+        A worker resolves the path itself, under workspace access only inside the directory view_file sends it to.
         """
         if self._workspace_in_worker:
             requested = Path(path)
-            workspace = self._tool_output_workspace_root
+            root = self._view_root
             return (
                 self._file_access == "unrestricted"
                 or not requested.is_absolute()
-                or (workspace is not None and requested.is_relative_to(workspace))
+                or (root is not None and requested.is_relative_to(root))
             )
         try:
             resolve_agent_file(path, workspace_root=self._view_root, file_access=self._file_access, field_name="path")
@@ -446,6 +447,7 @@ class AttachmentTools(Toolkit):
                     runtime_config=self._runtime_config,
                     worker_target=self._worker_target,
                     workspace_root=self._tool_output_workspace_root,
+                    workdir=self._workdir,
                     path=path,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
