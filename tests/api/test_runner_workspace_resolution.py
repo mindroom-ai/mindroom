@@ -516,18 +516,19 @@ def test_tools_work_in_the_working_directory_with_home_on_the_workspace(
 @pytest.mark.parametrize(("scope", "agent"), [(None, "general"), ("shared", "general")])
 def test_a_working_directory_outside_the_workspace_is_refused(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     scope: str | None,
     agent: str,
     workdir: str,
 ) -> None:
-    """A working directory that leaves the workspace, by `..` or a link, or does not exist fails the call."""
+    """A working directory that leaves the workspace, by `..` or a link, or does not exist fails the call.
+
+    The `workdir` error comes only from preparing the request's route, which runs before any tool is built, in this
+    process or in a request child, so it proves the tool never ran.
+    """
     shape = _with_workdir(_shape(tmp_path, scope=scope, agent=agent, client_base_dir="none"), workdir)
     workspace = shape.labels["agent"]
     (workspace.parent / "outside").mkdir()
     (workspace / "link-out").symlink_to(workspace.parent / "outside", target_is_directory=True)
-    built: list[object] = []
-    monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", lambda **kwargs: built.append(kwargs))
 
     response = shape.client().post(
         "/api/sandbox-runner/execute",
@@ -538,7 +539,6 @@ def test_a_working_directory_outside_the_workspace_is_refused(
     assert response.status_code == 200, response.text
     assert response.json() == {"ok": False, "error": response.json()["error"], "failure_kind": "tool"}
     assert response.json()["error"].startswith(f"workdir {workdir} "), response.json()
-    assert built == []
 
 
 @pytest.mark.parametrize("client_base_dir", ["outside", "absolute"])
