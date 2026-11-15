@@ -48,11 +48,11 @@ from mindroom.api.egress_status import (
     rule_summaries,
     service_oauth_provider,
 )
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
+from mindroom.egress_broker.key_access import egress_key_access
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
 from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import delete_secret, save_secret
@@ -71,7 +71,7 @@ from mindroom.egress_broker.user_services import (
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
 from mindroom.oauth.registry import snapshot_oauth_providers
-from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
@@ -141,37 +141,14 @@ def _check_agent_eligibility(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool, bool] | None:
-    """Return ``(is_shared, can_manage)`` for an eligible agent, else ``None``.
-
-    Eligibility requires an agent that reaches the broker (`egress_agent_scope`) and permission to use it.
-    Administrators manage every shared or unscoped agent's keys, including a personal agent they may not use.
-    Listing, portal catalog, mutations, and the request log's shared-agent rows all decide through this one rule.
-    """
-    scope = egress_agent_scope(config, agent_name, runtime_paths)
-    if scope is None:
-        return None
-    manages_shared_keys = scope in {"shared", "unscoped"} and is_platform_administrator(
-        requester_id,
-        config,
-        runtime_paths,
-    )
-    if not manages_shared_keys and not is_sender_allowed_for_responder(
+    """Return ``(is_shared, can_manage)`` for an eligible agent, else ``None``; see `egress_key_access`."""
+    return egress_key_access(
         requester_id,
         agent_name,
-        None,
         config,
         runtime_paths,
         config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
-    ):
-        return None
-    is_shared = scope in {"shared", "unscoped"}
-    can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
-        requester_id,
-        agent_name,
-        config,
-        runtime_paths,
     )
-    return is_shared, can_manage
 
 
 @dataclass(frozen=True)
