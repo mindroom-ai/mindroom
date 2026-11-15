@@ -84,7 +84,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, tool_workdir
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
@@ -530,6 +530,44 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
     assert "Execution location is determined per tool; this agent is not sandboxed as a whole." in _role(agent)
 
 
+@patch("mindroom.agents.get_tool_by_name")
+def test_agent_role_names_the_workdir_as_a_worker_sees_it(
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """With path tools in a worker, the workdir is named in the workspace and the workspace by its variable.
+
+    A worker mounts the workspace at its own path, so this primary's absolute paths would name nothing there.
+    """
+    mock_get_tool_by_name.side_effect = _toolkit_named
+    config = _test_config()
+    config.agents["general"].tools = ["file"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_tools = ["file"]
+    config.agents["general"].worker_scope = "shared"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token"},
+    )
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general").resolve()
+    (workspace / "wt").mkdir(parents=True)
+
+    with tool_workdir(workspace / "wt"):
+        role = _role(_create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths)))
+
+    assert "Worker-routed tools: `file`." in role
+    (workdir_line,) = (line for line in role.splitlines() if line.startswith("- Workdir:"))
+    assert workdir_line == (
+        "- Workdir: `wt` in your workspace, where `shell` runs and `file` and `coding` resolve relative paths; "
+        "code that `python` runs uses this process's current directory, so give it absolute paths. "
+        "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+        "is `$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed tools); "
+        "name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints."
+    )
+    assert str(tmp_path) not in workdir_line
+
+
 @pytest.mark.parametrize(
     ("worker_scope", "expected_reuse"),
     [
@@ -559,6 +597,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         file_access="workspace",
         workdir=None,
         workspace_root=tmp_path,
+        workspace_in_worker=False,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -582,6 +621,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         file_access="workspace",
         workdir=None,
         workspace_root=tmp_path,
+        workspace_in_worker=False,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -610,6 +650,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         file_access="workspace",
         workdir=None,
         workspace_root=tmp_path,
+        workspace_in_worker=False,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -642,6 +683,7 @@ def test_tool_execution_environment_reports_file_access(
             file_access=file_access,
             workdir=None,
             workspace_root=tmp_path,
+            workspace_in_worker=False,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
             shared_directories=(),
@@ -712,6 +754,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         file_access="workspace",
         workdir=None,
         workspace_root=tmp_path,
+        workspace_in_worker=False,
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),

@@ -159,6 +159,8 @@ class _AgentToolAssembly:
     instructions: tuple[str, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
+    # Whether the toolkits that work on workspace paths run in a worker, which mounts the workspace at its own path.
+    workspace_in_worker: bool
     cli_deferred: tuple[DeferredAgentToolkit, ...]
     # The tool-call policy the loop runs around every call, the hook bridge; a browser's computer announcement is
     # its functions' own.
@@ -874,6 +876,7 @@ def _render_tool_execution_environment(
     file_access: FileAccess,
     workdir: Path | None,
     workspace_root: Path,
+    workspace_in_worker: bool,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
@@ -897,11 +900,23 @@ def _render_tool_execution_environment(
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
     if workdir is not None:
         # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
+        # A worker mounts the workspace at its own path, so there this primary's paths name nothing.
+        workspace = workspace_root.expanduser().resolve()
+        in_worker = workspace_in_worker and workdir.is_relative_to(workspace)
+        workdir_name = (
+            f"`{workdir.relative_to(workspace).as_posix()}` in your workspace" if in_worker else f"`{workdir}`"
+        )
+        workspace_name = (
+            "`$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed tools); "
+            "name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints"
+            if in_worker
+            else f"`{workspace_root}`; name files there by absolute path"
+        )
         file_access_lines.append(
-            f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; "
+            f"- Workdir: {workdir_name}, where `shell` runs and `file` and `coding` resolve relative paths; "
             "code that `python` runs uses this process's current directory, so give it absolute paths. "
             "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
-            f"is `{workspace_root}`; name files there by absolute path.",
+            f"is {workspace_name}.",
         )
     if shared_directories:
         file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
@@ -1403,6 +1418,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
+        workspace_in_worker=workspace_in_worker,
         tool_middleware=(hook_middleware,),
     )
     return assembly
@@ -1421,6 +1437,7 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    workspace_in_worker: bool,
     tools: ToolRegistry,
     file_access: FileAccess,
     include_identity: bool,
@@ -1443,6 +1460,7 @@ def _build_agent_role_context(
                 file_access=file_access,
                 workdir=current_tool_workdir(),
                 workspace_root=agent_runtime.workspace.root,
+                workspace_in_worker=workspace_in_worker,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     tools=tools,
@@ -1860,6 +1878,7 @@ def create_agent(
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+        workspace_in_worker=tool_assembly.workspace_in_worker,
         file_access=agent.file_access,
         include_identity=persona is None,
     )
