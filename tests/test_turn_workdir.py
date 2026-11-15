@@ -166,6 +166,46 @@ async def test_a_refused_directory_leaves_the_turn_in_its_workspace_with_one_war
     assert not (tmp_path / "not-yet").exists()
 
 
+async def test_a_workspace_root_that_cannot_be_resolved_refuses_the_directory(tmp_path: Path) -> None:
+    """An OSError while resolving the workspace root is a refusal with one warning, not an escaping error."""
+    workspace = _workspace(tmp_path)
+
+    def broken_root() -> Path:
+        msg = "cannot reconcile links"
+        raise OSError(msg)
+
+    lifecycle = _lifecycle(tmp_path, [_asks_for(EVENT_TURN_STARTED, "wt")])
+    with capture_logs() as logs:
+        async with lifecycle.turn(approval_owns_end=_no_approval):
+            await lifecycle.start_turn(resumed=False, agent_workspace_root=broken_root)
+            seen = await _in_attempt()
+
+    assert seen is None
+    warnings = [log for log in logs if log["log_level"] == "warning"]
+    assert [log["event"] for log in warnings] == ["turn_workdir_refused"]
+    assert "cannot reconcile links" in warnings[0]["reason"]
+    assert workspace.exists()
+
+
+async def test_a_hook_that_assigns_a_non_string_directory_is_refused(tmp_path: Path) -> None:
+    """A plugin that assigns ``ctx.workdir`` a non-string gets a refusal with one warning."""
+    workspace = _workspace(tmp_path)
+
+    @hook(EVENT_TURN_STARTED, name="assigns_an_integer")
+    async def assigns_an_integer(ctx: TurnLifecycleContext) -> None:
+        ctx.workdir = 3  # type: ignore[assignment]
+
+    lifecycle = _lifecycle(tmp_path, [assigns_an_integer])
+    with capture_logs() as logs:
+        async with lifecycle.turn(approval_owns_end=_no_approval):
+            await lifecycle.start_turn(resumed=False, agent_workspace_root=lambda: workspace)
+            seen = await _in_attempt()
+
+    assert seen is None
+    warnings = [log for log in logs if log["log_level"] == "warning"]
+    assert [log["event"] for log in warnings] == ["turn_workdir_refused"]
+
+
 async def test_a_team_s_turn_ignores_the_directory_without_a_warning(tmp_path: Path) -> None:
     """A team's members work in their own workspaces, so its turn keeps no directory a hook asks for."""
     workspace = _workspace(tmp_path)

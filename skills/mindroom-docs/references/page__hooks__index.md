@@ -412,7 +412,7 @@ async def work_in_thread_worktree_after_approval(ctx: TurnLifecycleContext) -> N
 - For the whole turn, `shell` runs in that directory, and `file`, `coding`, and `python`'s file functions resolve paths there, for the agent and the subagents and background jobs it starts, whether its tools run in MindRoom's process or in a worker.
   The tools work there as with a [headless run's `workdir`](https://docs.mindroom.chat/headless/#files), so `file_access: workspace` confines `file` and `coding` to the directory.
   `$MINDROOM_AGENT_WORKSPACE` still holds the workspace, as does `HOME` in a worker, which also still reads `.mindroom/worker-env.sh` from the workspace.
-- MindRoom uses the path only when it names an existing directory inside the workspace, reached without leaving the workspace through a symbolic link; otherwise it logs a warning and the turn runs in the workspace.
+- MindRoom uses the path only when it names an existing directory inside the workspace once symbolic links are resolved, and the tools work in that resolved directory; otherwise it logs a warning and the turn runs in the workspace.
 - A team's turn ignores the request, and on `turn:paused` and `turn:ended` the call does nothing.
 - The directory lasts for that turn only, and a turn resumed after a [tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) works where its `turn:resumed` hooks ask, so a plugin calls it on both events, as above.
 

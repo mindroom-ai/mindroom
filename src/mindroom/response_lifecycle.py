@@ -896,6 +896,7 @@ class ResponseLifecycle:
 
         An agent's turn then runs its tools in the directory its hooks asked for, inside the workspace
         ``agent_workspace_root`` returns, until that scope ends; a team's turn ignores the request.
+        Call it inside the scope of ``turn``, whose end unsets the directory.
         """
         context = await self.deps.response_hooks._emit_turn_event(
             EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
@@ -908,9 +909,13 @@ class ResponseLifecycle:
             # A team's members work in their own workspaces.
             self.deps.logger.debug("turn_workdir_ignored_for_team", workdir=requested)
             return
+        if not isinstance(requested, str):
+            reason = f"the requested working directory must be a string, not {type(requested).__name__}"
+            self.deps.logger.warning("turn_workdir_refused", workdir=requested, reason=reason)
+            return
         try:
             workdir = confined_workdir(agent_workspace_root(), requested)
-        except ValueError as error:
+        except (ValueError, OSError) as error:
             self.deps.logger.warning("turn_workdir_refused", workdir=requested, reason=str(error))
             return
         self._workdir_scope.enter_context(tool_workdir(workdir))
