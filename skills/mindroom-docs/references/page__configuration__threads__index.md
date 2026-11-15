@@ -252,7 +252,7 @@ agents:
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
 It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
-When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, whether each was sent by the person the agent is answering or by another person, the reply text the agent had published when each message arrived, and your `instructions`.

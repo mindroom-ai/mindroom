@@ -35,7 +35,7 @@ def queued_notice_reservation_if_busy(
 ) -> QueuedHumanNoticeReservation | None:
     """Reserve the mid-turn queued notice when this conversation has a running response.
 
-    ``mentions_nobody`` stays False while whom the message mentions is unknown, as for voice before its transcript.
+    ``mentions_nobody`` stays False when whom the message mentions is not checked, as for voice.
     """
     if not envelope.origin.may_answer_interactive_prompt:
         return None

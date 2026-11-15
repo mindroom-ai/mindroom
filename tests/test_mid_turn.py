@@ -1326,8 +1326,20 @@ def _between_people(
         ({"text": "x" * 15_000}, "essential_input_too_large"),
         ({"verdict": "error"}, "judge_error"),
         ({"verdict": None}, "no_answer"),
+        ({"judge": False}, "only_waiting_on_jobs"),
     ],
-    ids=["history", "count", "active", "queued", "progress", "unjudgeable-history", "request", "error", "no-answer"],
+    ids=[
+        "history",
+        "count",
+        "active",
+        "queued",
+        "progress",
+        "unjudgeable-history",
+        "request",
+        "error",
+        "no-answer",
+        "jobs",
+    ],
 )
 @pytest.mark.parametrize("queue", ["others", "with_requester", "with_tagged", "requester_not_a_person"])
 async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
@@ -1338,7 +1350,7 @@ async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
     """Unjudged, the reply wraps up for a queue unless only other people's messages that mention nobody wait in it.
 
     A message of the reply's requester, or one that mentions the agent, wraps the reply up as before, and so does any
-    queue of a reply no person asked for.
+    queue of a reply no person asked for, and of a reply that only waits on its jobs.
     """
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -1363,9 +1375,10 @@ async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
         conversation_context=setup.get("conversation_context", ()),
         requester_id=None if queue == "requester_not_a_person" else _REQUESTER,
     )
-    waits = queue == "others"
+    judge = setup.get("judge", True)
+    waits = queue == "others" and judge
     with capture_logs() as logs:
-        assert await gate.defers(tuple(pending), current=lambda: True) is waits
+        assert await gate.defers(tuple(pending), current=lambda: True, judge=judge) is waits
     skips = [log for log in logs if log["event"] == "Mid-turn judgment skipped"]
     assert [(log["reason"], log["outcome"]) for log in skips] == [(reason, "waits" if waits else "wraps_up")]
     assert "private input" not in str(logs)

@@ -298,6 +298,11 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
+    @property
+    def active(self) -> bool:
+        """Return whether this message still counts as waiting for the running response."""
+        return self._active
+
     def release(self) -> None:
         """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:

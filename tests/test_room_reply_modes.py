@@ -1039,6 +1039,40 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
 
 
 @pytest.mark.asyncio
+async def test_editing_a_waiting_message_handed_to_a_later_turn_asks_the_running_response_nothing(
+    tmp_path: Path,
+) -> None:
+    """A waiting message whose notice a split-off turn already released stays released when its sender edits it.
+
+    Another requester's turn that the queue split off now holds the conversation, and this message waits for that turn
+    to end; asking it to wrap up would hand its unfinished work to the next requester's turn.
+    """
+    async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this"))
+        await _queued(bot, "$follow-up")
+        keys = (
+            requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER),
+            active_follow_up_coalescing_key(ROOM_ID, THREAD_ID),
+        )
+        (pending,) = [
+            pending
+            for key in keys
+            for pending in bot._coalescing_gate.queued_pending_events(key)
+            if pending.event.event_id == "$follow-up"
+        ]
+        assert pending.notice is not None
+        pending.notice.release()
+        assert not running.has_pending_human_messages()
+
+        edit = {
+            "m.new_content": {"body": "look at this one", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this one", **edit))
+        assert not running.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
 async def test_editing_a_waiting_answer_to_a_question_asks_for_no_wrap_up(tmp_path: Path) -> None:
     """An edit of a queued answer to an interactive question reserves no queued-message notice.
 

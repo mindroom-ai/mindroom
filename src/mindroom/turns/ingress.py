@@ -472,18 +472,22 @@ class TurnIngress:
             event_source=event.source,
         )
         envelope = self.deps.resolver.build_envelope(event=event, facts=pending_event.facts, target=target)
-        if pending_event.notice is not None:
+        if pending_event.notice is not None and pending_event.notice.active:
             # Reserved again below, so the running response's judge sees the edited text and whom it mentions.
             pending_event.notice.release()
             pending_event.notice = None
         if self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope):
+            if pending_event.notice is not None:
+                pending_event.notice.release()
+                pending_event.notice = None
             return
-        pending_event.notice = queued_notice_reservation_if_busy(
-            self.deps.response_runner,
-            target=target,
-            envelope=envelope,
-            mentions_nobody=event.for_another_participant is None,
-        )
+        if pending_event.notice is None:
+            pending_event.notice = queued_notice_reservation_if_busy(
+                self.deps.response_runner,
+                target=target,
+                envelope=envelope,
+                mentions_nobody=event.for_another_participant is None,
+            )
         # The reaction's transaction ID is stable, so a message that already shows ⏳ gets no second one.
         mark_waiting_for_approval(self.deps, target, envelope)
 

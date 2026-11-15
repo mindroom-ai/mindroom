@@ -171,7 +171,7 @@ class MidTurnGate:
                         reason = "no_answer" if verdict is None else None
             if reason is not None:
                 # Unjudged, the reply wraps up, unless only other people's messages to nobody in particular wait.
-                finish = judge and bool(pending) and all(self._between_people(message) for message in pending)
+                finish = judge and all(self._between_people(message) for message in pending)
                 logger.info(
                     "Mid-turn judgment skipped",
                     reason=reason,
