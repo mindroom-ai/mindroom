@@ -797,6 +797,8 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     assert "(`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
     assert f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; " in system
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
+    storage_workspace = (tmp_path / "storage").resolve() / "agents" / "coder" / "workspace"
+    assert f"is `{storage_workspace}`; name files there by absolute path." in system
     (save_file,) = (tool for tool in provider.requests[0].tools if tool.name == "save_file")
     description = save_file.parameters["properties"]["mindroom_output_path"]["description"]
     assert description.startswith("Optional MindRoom-managed path relative to your saved tool outputs directory.")

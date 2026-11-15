@@ -907,8 +907,12 @@ def _render_tool_execution_environment(
             f"`{workdir.relative_to(workspace).as_posix()}` in your workspace" if in_worker else f"`{workdir}`"
         )
         workspace_name = (
-            "`$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed tools); "
-            "name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints"
+            "`$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed shell and python tools)"
+            + (
+                "; name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints"
+                if "shell" in worker_routed_tool_names
+                else ""
+            )
             if in_worker
             else f"`{workspace_root}`; name files there by absolute path"
         )

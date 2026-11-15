@@ -562,10 +562,19 @@ def test_agent_role_names_the_workdir_as_a_worker_sees_it(
         "- Workdir: `wt` in your workspace, where `shell` runs and `file` and `coding` resolve relative paths; "
         "code that `python` runs uses this process's current directory, so give it absolute paths. "
         "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
-        "is `$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed tools); "
-        "name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints."
+        "is `$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed shell and python tools)."
     )
     assert str(tmp_path) not in workdir_line
+
+    config.agents["general"].tools = ["file", "shell"]
+    config.agents["general"].worker_tools = ["file", "shell"]
+    with tool_workdir(workspace / "wt"):
+        role = _role(_create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths)))
+    (workdir_line,) = (line for line in role.splitlines() if line.startswith("- Workdir:"))
+    assert workdir_line.endswith(
+        "is `$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed shell and python tools); "
+        "name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints.",
+    )
 
 
 @pytest.mark.parametrize(
