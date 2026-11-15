@@ -35,6 +35,7 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    TurnLifecycleContext,
     message_envelope_for_hook_context,
 )
 from .types import (
@@ -183,6 +184,8 @@ def _merge_observer_context_changes(
     if isinstance(context, ScheduleFiredContext) and isinstance(hook_context, ScheduleFiredContext):
         context.message_text = hook_context.message_text
         context.suppress = hook_context.suppress
+    if isinstance(context, TurnLifecycleContext) and isinstance(hook_context, TurnLifecycleContext):
+        context.workdir = hook_context.workdir
 
 
 def _effective_timeout_ms(hook: RegisteredHook) -> int:

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import nio
@@ -24,6 +24,7 @@ from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_SYSTEM_ENRICH,
+    EVENT_TURN_STARTED,
     BeforeResponseContext,
     CustomEventContext,
     EnrichmentItem,
@@ -38,6 +39,7 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     ResponseDraft,
     SystemEnrichContext,
+    TurnLifecycleContext,
     build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
@@ -59,9 +61,6 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _config(tmp_path: Path) -> Config:
@@ -177,6 +176,18 @@ def _custom_event_context(tmp_path: Path) -> CustomEventContext:
     )
 
 
+def _turn_started_context(tmp_path: Path) -> TurnLifecycleContext:
+    config = _config(tmp_path)
+    return TurnLifecycleContext(
+        event_name=EVENT_TURN_STARTED,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        correlation_id="corr-turn",
+        turn_id="turn-1",
+        envelope=_envelope(),
+    )
+
+
 def _final_response_transform_context(
     tmp_path: Path,
     *,
@@ -254,6 +265,38 @@ async def test_emit_observer_continues_after_failure_and_propagates_suppression(
 
     assert seen == ["failing", "suppressing"]
     assert context.suppress is True
+
+
+@pytest.mark.asyncio
+async def test_emit_keeps_the_last_working_directory_turn_hooks_ask_for(tmp_path: Path) -> None:
+    """Each turn hook sees the earlier hooks' request, a later request replaces it, and a hook that asks none keeps it."""
+    seen: list[str | None] = []
+
+    def asking_for(workdir: str | Path | None, priority: int) -> object:
+        @hook(EVENT_TURN_STARTED, name=f"hook_{priority}", priority=priority)
+        async def ask(ctx: TurnLifecycleContext) -> None:
+            seen.append(ctx.workdir)
+            if workdir is not None:
+                ctx.set_workdir(workdir)
+
+        return ask
+
+    hooks = [asking_for("worktrees/a", 10), asking_for(Path("worktrees/b"), 20), asking_for(None, 30)]
+    context = _turn_started_context(tmp_path)
+
+    await emit(HookRegistry.from_plugins([_plugin("worktrees", hooks)]), EVENT_TURN_STARTED, context)
+
+    assert seen == [None, "worktrees/a", "worktrees/b"]
+    assert context.workdir == "worktrees/b"
+
+
+def test_a_turn_hook_cannot_ask_for_an_empty_working_directory(tmp_path: Path) -> None:
+    """An empty path names no directory, so asking for one is a plugin bug the hook hears about."""
+    context = _turn_started_context(tmp_path)
+
+    with pytest.raises(ValueError, match="empty"):
+        context.set_workdir("")
+    assert context.workdir is None
 
 
 @pytest.mark.asyncio

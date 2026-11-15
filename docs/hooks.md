@@ -223,9 +223,9 @@ async def keep_prices_private(ctx):
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 | `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
-| `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
+| `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | `set_workdir()` | 2000 |
 | `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
-| `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
+| `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | `set_workdir()` | 2000 |
 | `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
 
 Custom events default to 1000 ms.
@@ -241,6 +241,7 @@ Custom events default to 1000 ms.
 - **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
   They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
   A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
+  A `turn:started` or `turn:resumed` hook can also choose the directory the turn's tools work in; see [Turn working directory](#turn-working-directory-set_workdir).
   Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
   `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text, and an adaptive participation check that could not decide, such as when its model request fails, which sends no reply.
   A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
@@ -391,6 +392,36 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
   A hook that waits on the network bounds that wait below its `timeout_ms`, because a timeout also discards its decline.
 
+## Turn working directory (`set_workdir`)
+
+A `turn:started` or `turn:resumed` hook can have the turn's tools work in a directory inside the agent's workspace instead of the workspace itself, such as a git worktree that the thread works on.
+
+```python
+from mindroom.plugin_api import TurnLifecycleContext, hook
+
+
+@hook("turn:started")
+async def work_in_thread_worktree(ctx: TurnLifecycleContext) -> None:
+    if path := worktree_for(ctx.envelope):
+        ctx.set_workdir(path)
+
+
+@hook("turn:resumed")
+async def work_in_thread_worktree_after_approval(ctx: TurnLifecycleContext) -> None:
+    await work_in_thread_worktree(ctx)
+```
+
+- `ctx.set_workdir(path)` asks that the turn's tools work in `path`, relative to the agent's workspace or an absolute path inside it; a private agent's workspace is the requester's own.
+  When several hooks call it, the last in hook order decides, and each hook sees the request so far in `ctx.workdir`; an empty `path` raises `ValueError`.
+- For the whole turn, `shell` runs in that directory, and `file`, `coding`, and `python`'s file functions resolve paths there, for the agent and the subagents and background jobs it starts, whether its tools run in MindRoom's process or in a worker.
+  The tools work there as with a [headless run's `workdir`](headless.md#files), so `file_access: workspace` confines `file` and `coding` to the directory.
+  `$MINDROOM_AGENT_WORKSPACE` still holds the workspace, as does `HOME` in a worker, which also still reads `.mindroom/worker-env.sh` from the workspace.
+- MindRoom uses the path only when it names an existing directory inside the workspace, reached without leaving the workspace through a symbolic link; otherwise it logs a warning and the turn runs in the workspace.
+- A team's turn ignores the request, and on `turn:paused` and `turn:ended` the call does nothing.
+- The directory lasts for that turn only, and a turn resumed after a [tool approval](tool-approval.md#approving-and-denying) works where its `turn:resumed` hooks ask, so a plugin calls it on both events, as above.
+
+A plugin that calls `set_workdir` states `"mindroom_plugin_api": "1.31"` in its manifest.
+
 ## Custom events
 
 Plugins can define their own namespaced events and emit them from tool code:
@@ -476,7 +507,7 @@ All contexts include these fields:
 | `BeforeResponseContext`, `FinalResponseTransformContext` | `draft` |
 | `AfterResponseContext` | `result` |
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
-| `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
+| `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`), `workdir`, `set_workdir(path)` |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
 | `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |

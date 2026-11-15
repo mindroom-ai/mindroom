@@ -556,6 +556,17 @@ class TurnLifecycleContext(HookContext):
     envelope: MessageEnvelope
     # How the turn ended; set only for turn:ended.
     outcome: TurnOutcome | None = None
+    # The directory inside the agent's workspace, relative to it or absolute, that the last hook to call set_workdir
+    # asked the turn's tools to work in; None for the workspace. Only turn:started and turn:resumed requests count.
+    workdir: str | None = None
+
+    def set_workdir(self, path: str | os.PathLike[str]) -> None:
+        """Ask that the turn's tools work in ``path``, a directory inside the agent's workspace."""
+        workdir = os.fspath(path)
+        if not workdir:
+            msg = "A turn's working directory cannot be empty"
+            raise ValueError(msg)
+        self.workdir = workdir
 
 
 @dataclass(slots=True)

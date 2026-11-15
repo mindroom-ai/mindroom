@@ -299,7 +299,7 @@ _SIGNATURES = {
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
-    "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
+    "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, workdir, *, {_HOOK_HELPERS})",
     "WorkerService": "(name, module, idle_timeout_seconds)",
     "WorkerServiceState": "(state, port, exit_code)",
     "TurnOrigin": (
@@ -442,6 +442,7 @@ _MEMBERS = {
         "prepend_path": "(self, directory)",
         "decline": "(self, reason)",
     },
+    "mindroom.plugin_api.TurnLifecycleContext": {"set_workdir": "(self, path)"},
     "mindroom.plugin_api.ContactBeforeSendContext": {
         "rewrite": "(self, text)",
         "revise": "(self, feedback)",
@@ -659,7 +660,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 30), "0a7b1fbbec98d32b5440476028736a3bbc5cd8cd2d56818f7bc0b3e9fd26d73c")
+_PINNED_VERSION = ((1, 31), "c8d81fd7e27fda1a2ad4a58db9b64b7e85d9af582516aa89bbbc4d38d1810e0d")
 
 
 def _is_enum(obj: object) -> bool:
