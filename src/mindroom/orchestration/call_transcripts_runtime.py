@@ -1,16 +1,17 @@
-"""Transcripts of calls between people in the runtime: the service, the router it reads and posts through, its loop."""
+"""Call transcripts in the runtime: the service, the router it reads and posts through, its loop, and agent calls."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.call_transcripts.notes import ModelNotesWriter
 from mindroom.call_transcripts.router_room import RouterCallRoom
-from mindroom.call_transcripts.service import CallTranscriptService
+from mindroom.call_transcripts.service import AgentCallRoom, CallTranscriptService
 from mindroom.call_transcripts.store import CallTranscriptStore, database_path
 from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -33,15 +34,22 @@ _IDLE_SECONDS = 15.0
 
 @dataclass
 class CallTranscriptsRuntimeCoordinator:
-    """Own the call transcript service, the router it reads rooms and posts through, and the loop checking its calls."""
+    """Own the call transcript service, the router it reads rooms and posts through, and the loop checking its calls.
+
+    Also find the agent call to read live in a room, through the agent answering calls there.
+    """
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
+    bots: Callable[[], Mapping[str, AgentBot]]
+    """The runtime's current bots, whose agents' calls are read live."""
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
     """Wall-clock time, which calls are kept by."""
     _router: AgentBot | None = field(default=None, init=False)
     _service: CallTranscriptService | None = field(default=None, init=False)
+    _agent_rooms: dict[str, RouterCallRoom] = field(default_factory=dict, init=False)
+    """Each agent's view of the rooms it answers calls in, kept so polls share its reads of a room."""
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
@@ -79,6 +87,37 @@ class CallTranscriptsRuntimeCoordinator:
         if not self.config_provider().calls.transcripts.enabled:
             return None
         return self._made_service()
+
+    def agent_call_room(self, room_id: str) -> AgentCallRoom | None:
+        """Return the room as the agent answering calls in it reads it, with that agent's call there while it is in one.
+
+        None when no agent answers calls in the room. This holds whether call transcripts are on or off.
+        """
+        watching: str | None = None
+        for agent_name, bot in self.bots().items():
+            manager = bot.call_manager
+            if manager is None:
+                continue
+            if (call := manager.live_call(room_id)) is not None:
+                return AgentCallRoom(room_id=room_id, room=self._agent_room(agent_name), call=call)
+            if watching is None and manager.watches(room_id):
+                watching = agent_name
+        return None if watching is None else AgentCallRoom(room_id=room_id, room=self._agent_room(watching), call=None)
+
+    def _agent_room(self, agent_name: str) -> RouterCallRoom:
+        room = self._agent_rooms.get(agent_name)
+        if room is None:
+            # Only who is in the room and their names are read through it; an agent's view never posts or retitles.
+            room = RouterCallRoom(client=partial(self._agent_client, agent_name), retitle=lambda *_: None)
+            self._agent_rooms[agent_name] = room
+        return room
+
+    def _agent_client(self, agent_name: str) -> nio.AsyncClient | None:
+        """Return the agent's client once its bot runs and has synced its rooms."""
+        bot = self.bots().get(agent_name)
+        if bot is None or not bot.running or not bot.first_sync_complete:
+            return None
+        return bot.client
 
     def _made_service(self) -> CallTranscriptService:
         if self._service is None:

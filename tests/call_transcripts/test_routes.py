@@ -18,8 +18,21 @@ import starlette.formparsers
 from mindroom.api import main
 from mindroom.api.client_sessions import client_session_store
 from mindroom.call_transcripts import routes
+from mindroom.call_transcripts.service import AgentCallRoom
 from mindroom.constants import resolve_runtime_paths
-from tests.call_transcripts.test_service import ANN, BOB, CAROL, OUTSIDER, ROOM, World, _wav
+from tests.call_transcripts.test_service import (
+    AGENT,
+    ANN,
+    BOB,
+    CAROL,
+    OUTSIDER,
+    ROOM,
+    START,
+    FakeAgentCall,
+    FakeRoom,
+    World,
+    _wav,
+)
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
@@ -39,6 +52,8 @@ class Api:
     world: World
     client: httpx.AsyncClient
     enabled: bool = True
+    agent_room: AgentCallRoom | None = None
+    """``ROOM`` as the agent answering calls in it reads it, None while no agent answers calls there."""
 
     def headers(self, user_id: str) -> dict[str, str]:
         """Sign ``user_id`` in with a client session, from MindRoom Chat's origin."""
@@ -100,7 +115,11 @@ async def api(tmp_path: Path) -> AsyncIterator[Api]:
         base_url="http://mindroom.test",
     ) as client:
         served = Api(world, client)
-        bind_test_embedded_runtime(main.app, call_transcripts=lambda: served.world.service if served.enabled else None)
+        bind_test_embedded_runtime(
+            main.app,
+            call_transcripts=lambda: served.world.service if served.enabled else None,
+            agent_call_room=lambda room_id: served.agent_room if room_id == ROOM else None,
+        )
         yield served
 
 
@@ -615,3 +634,69 @@ async def test_polling_after_a_line_answers_only_the_lines_added_since(api: Api)
     assert polled["lines"] == [second]
     assert polled["call"]["pausedBy"] == ANN
     assert polled["names"] == {ANN: "Ann"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_an_agent_call_reads_as_the_rooms_live_call_with_call_transcripts_on_or_off(
+    api: Api,
+    *,
+    enabled: bool,
+) -> None:
+    """Chat polls an agent call as it polls a call between people, the same JSON, whether call transcripts are on."""
+    api.enabled = enabled
+    spoken = ((ANN, "Book the train", START + 5), (AGENT, "Booked", START + 9))
+    api.agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=FakeAgentCall(spoken=spoken))
+
+    response = await api.live(BOB)
+    newer = await api.live(BOB, after="agentcall:1")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "call": {
+            "id": "agentcall",
+            "roomId": ROOM,
+            "rowEventId": None,
+            "startedAt": "1970-01-01T00:16:40.000Z",
+            "endedAt": None,
+            "members": [ANN, AGENT],
+            "pausedBy": None,
+        },
+        "lines": [
+            {
+                "id": "agentcall:1",
+                "callId": "agentcall",
+                "userId": ANN,
+                "saidAt": "1970-01-01T00:16:45.000Z",
+                "seconds": 0.0,
+                "kind": "speech",
+                "text": "Book the train",
+            },
+            {
+                "id": "agentcall:2",
+                "callId": "agentcall",
+                "userId": AGENT,
+                "saidAt": "1970-01-01T00:16:49.000Z",
+                "seconds": 0.0,
+                "kind": "speech",
+                "text": "Booked",
+            },
+        ],
+        "names": {ANN: "Ann", AGENT: "Helper"},
+    }
+    assert [line["id"] for line in newer.json()["lines"]] == ["agentcall:2"]
+
+
+@pytest.mark.asyncio
+async def test_with_call_transcripts_off_an_agents_room_answers_its_members_only_once_signed_in(api: Api) -> None:
+    """Off, an agent's room needs a session, refuses outsiders as on, and reads as having no call between its calls."""
+    api.enabled = False
+    api.agent_room = AgentCallRoom(room_id=ROOM, room=FakeRoom(), call=None)
+
+    anonymous = await api.client.get(f"{PREFIX}/rooms/{quote(ROOM)}/call", headers={"Origin": CHAT})
+    outsider = await api.live(OUTSIDER)
+    member = await api.live(ANN)
+
+    assert anonymous.status_code == 401
+    _refusal(outsider, 404, "not-found")
+    assert member.json() == {"call": None, "lines": [], "names": {}}

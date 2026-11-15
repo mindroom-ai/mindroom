@@ -1,7 +1,8 @@
 """The HTTP routes MindRoom Chat uses for call transcripts: the room's call, leaving, Pause and speech.
 
-While call transcripts are off every route answers 404; otherwise each needs a client session. The service makes
-every other decision, and a refusal answers with its HTTP status, a sentence and a code.
+While call transcripts are off every route answers 404, except the read of the room's live call in a room an agent
+answers calls in; otherwise each needs a client session. The service makes every other decision, and a refusal
+answers with its HTTP status, a sentence and a code.
 """
 
 from __future__ import annotations
@@ -129,9 +130,18 @@ async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> di
 
 
 @router.get("/rooms/{room_id}/call")
-async def live_call(room_id: str, caller: _SignedIn, after: str | None = None) -> dict[str, object]:
-    """Return the room's live call with its lines, only those after the line ``after`` when given, and names."""
-    return _live_json(await caller.service.live(room_id, caller.user_id, after=after))
+async def live_call(room_id: str, request: Request, after: str | None = None) -> dict[str, object]:
+    """Return the room's live call with its lines, only those after the line ``after`` when given, and names.
+
+    In a room an agent answers calls in, a call with the agent is read too, whether call transcripts are on or off.
+    """
+    runtime = app_state(request.app).runtime
+    agent_room = runtime.agent_call_room(room_id)
+    if agent_room is None or runtime.call_transcripts() is not None:
+        caller = await _caller(request)
+        return _live_json(await caller.service.live(room_id, caller.user_id, after=after, agent_room=agent_room))
+    user = await require_client_user(request)
+    return _live_json(await agent_room.live(user.user_id, after=after))
 
 
 def _refusal_response(refusal: CallRefusedError) -> JSONResponse:

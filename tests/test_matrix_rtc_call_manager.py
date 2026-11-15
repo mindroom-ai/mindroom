@@ -3648,6 +3648,33 @@ async def test_call_clock_starts_once_the_agent_listens(tmp_path: Path) -> None:
     await manager.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_a_call_in_progress_is_read_live_until_it_ends(tmp_path: Path) -> None:
+    """What the caller and the agent said is read under their user IDs while the call runs, and nothing after it ends."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    assert manager.live_call(ROOM_ID) is None
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    _record_two_minute_exchange(bridge)
+
+    live = manager.live_call(ROOM_ID)
+
+    assert manager.watches(ROOM_ID)
+    assert live is not None
+    assert (live.caller_id, live.agent_id, live.agent_display_name) == ("@alice:example.org", BOT_USER, "Helper")
+    assert [(speaker, text) for speaker, text, _ in live.spoken] == [
+        ("@alice:example.org", "Book the train"),
+        (BOT_USER, "Booked"),
+    ]
+    assert [spoken_at - live.started_at for _, _, spoken_at in live.spoken] == [pytest.approx(5.5), pytest.approx(11.5)]
+    client.room_get_state.return_value = _state_response()
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert manager.live_call(ROOM_ID) is None
+    await manager.shutdown()
+
+
 async def _drain_background_tasks(manager: CallManager) -> None:
     """Wait for background work the manager scheduled, such as a transcript write-back."""
     while tasks := tuple(manager._background_tasks):

@@ -1,7 +1,8 @@
 """How a call between people runs: who is in it and may act on it, Pause, speech, how it ends, its row and message.
 
 All Matrix and network work goes through what the service is given: the room side (the router's view of the room),
-the transcriber and the notes writer. The store runs in a worker thread.
+the transcriber and the notes writer. The store runs in a worker thread. A call with an agent is read live from the
+agent's own transcript, through the agent's view of its room.
 """
 
 from __future__ import annotations
@@ -15,13 +16,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.call_transcripts.store import StoredLine
 from mindroom.call_transcripts.wav import WavError, wav_seconds
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
-    from mindroom.call_transcripts.store import CallTranscriptStore, RowEdit, StoredCall, StoredLine
+    from mindroom.call_transcripts.store import CallTranscriptStore, RowEdit, StoredCall
 
 logger = get_logger(__name__)
 
@@ -174,15 +176,23 @@ class EndedRow:
         return "ended" if self.transcript_event_id is None else "transcript"
 
 
-class _CallRoom(Protocol):
+class _RoomReader(Protocol):
+    """Who is in a room and their display names, as a bot in it reads them."""
+
+    async def is_member(self, room_id: str, user_id: str) -> bool | None:
+        """Return whether ``user_id`` is joined to the room, None when the bot cannot tell."""
+        ...
+
+    async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
+        """Return each person's display name in the room, None for someone without one; None when it cannot tell."""
+        ...
+
+
+class _CallRoom(_RoomReader, Protocol):
     """The router's side of the rooms calls are in."""
 
     def router_joined(self, room_id: str) -> bool | None:
         """Return whether the router is joined to the room, None while it is not ready."""
-        ...
-
-    async def is_member(self, room_id: str, user_id: str) -> bool | None:
-        """Return whether ``user_id`` is joined to the room, None when the router cannot tell."""
         ...
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
@@ -191,10 +201,6 @@ class _CallRoom(Protocol):
 
     async def router_may_post(self, room_id: str) -> bool | None:
         """Return whether the router may post messages in the room by its power levels, None when it cannot tell."""
-        ...
-
-    async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
-        """Return each person's display name in the room, None for someone without one; None when it cannot tell."""
         ...
 
     async def post_row(self, room_id: str, call_id: str) -> str | None:
@@ -212,6 +218,96 @@ class _CallRoom(Protocol):
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
         """Have the row's thread retitled from the message ``event_id``, in the background."""
         ...
+
+
+class _AgentCall(Protocol):
+    """A call between one person and an agent, in progress, as the agent's call manager keeps it."""
+
+    @property
+    def id(self) -> str:
+        """Names this call; a new call, or the same call rejoined after its media dropped, has a new one."""
+        ...
+
+    @property
+    def started_at(self) -> float:
+        """When the agent could first hear the caller, in seconds since the epoch."""
+        ...
+
+    @property
+    def caller_id(self) -> str:
+        """The person who called the agent."""
+        ...
+
+    @property
+    def agent_id(self) -> str:
+        """The agent's Matrix user ID."""
+        ...
+
+    @property
+    def agent_display_name(self) -> str:
+        """The agent's display name as configured."""
+        ...
+
+    @property
+    def spoken(self) -> Sequence[tuple[str, str, float]]:
+        """What was said so far, in the order it was heard: the speaker's user ID, the text, and when it began."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCallRoom:
+    """A room an agent answers calls in, read through that agent, with its call there while it is in one."""
+
+    room_id: str
+    room: _RoomReader
+    """The room as the agent reads it, so it can be read without the router or call transcripts."""
+    call: _AgentCall | None
+
+    async def live(self, user_id: str, *, after: str | None = None) -> LiveCall:
+        """Return the agent call as a live call between its caller and the agent, with its lines and their names.
+
+        Only a member of the room may read it, refused as for a call between people. Its lines are what each of
+        them said, those after the line ``after`` if it is one of this call's, and all of them otherwise.
+        """
+        if not await _is_room_member(self.room, self.room_id, user_id):
+            raise CallRefusedError(code="not-found", message=_NOT_IN_ROOM)
+        call = self.call
+        if call is None:
+            return LiveCall(call=None, lines=(), names={})
+        prefix, _, number = (after or "").rpartition(":")
+        heard = int(number) if prefix == call.id and number.isascii() and number.isdigit() else 0
+        lines = tuple(
+            StoredLine(
+                id=f"{call.id}:{position}",
+                call_id=call.id,
+                user_id=speaker,
+                said_at=said_at,
+                # How long each stretch lasted is not known.
+                seconds=0.0,
+                kind="speech",
+                text=text,
+                reason=None,
+            )
+            for position, (speaker, text, said_at) in enumerate(call.spoken[heard:], start=heard + 1)
+        )
+        names = await self.room.display_names(self.room_id, {call.caller_id})
+        view = Call(
+            id=call.id,
+            room_id=self.room_id,
+            row_event_id=None,
+            started_at=call.started_at,
+            ended_at=None,
+            members=(call.caller_id, call.agent_id),
+            paused_by=None,
+        )
+        return LiveCall(
+            call=view,
+            lines=lines,
+            names={
+                call.caller_id: None if names is None else names.get(call.caller_id),
+                call.agent_id: call.agent_display_name,
+            },
+        )
 
 
 class _Transcriber(Protocol):
@@ -391,11 +487,21 @@ class CallTranscriptService:
         if self._uploading.get(user_id) is slot:
             del self._uploading[user_id]
 
-    async def live(self, room_id: str, user_id: str, *, after: str | None = None) -> LiveCall:
+    async def live(
+        self,
+        room_id: str,
+        user_id: str,
+        *,
+        after: str | None = None,
+        agent_room: AgentCallRoom | None = None,
+    ) -> LiveCall:
         """Return the room's live call with its lines, those added after the line ``after`` if given, and names.
 
-        Only a member of the room may read it.
+        Only a member of the room may read it. A room without a live call between people that an agent answers calls
+        in, ``agent_room``, answers with the agent's call instead.
         """
+        if agent_room is not None and await asyncio.to_thread(self._store.live_call, room_id) is None:
+            return await agent_room.live(user_id, after=after)
         await self._require_member(room_id, user_id, _NOT_IN_ROOM)
         call = await asyncio.to_thread(self._store.live_call, room_id)
         if call is None:
@@ -825,10 +931,7 @@ class CallTranscriptService:
         longer joined to it leaves the call.
         """
         in_call = call is not None and await self._check_in(call, user_id)
-        member = await self._room.is_member(room_id, user_id)
-        if member is None:
-            raise CallRefusedError(code="unavailable", message=_UNREADABLE)
-        if not member:
+        if not await _is_room_member(self._room, room_id, user_id):
             if call is not None and in_call:
                 await self._leave(call, user_id)
             raise CallRefusedError(code="not-found", message=not_found)
@@ -860,6 +963,14 @@ class CallTranscriptService:
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
         return self._room_locks.setdefault(room_id, asyncio.Lock())
+
+
+async def _is_room_member(room: _RoomReader, room_id: str, user_id: str) -> bool:
+    """Return whether the person is joined to the room, refusing anyone while the room cannot be checked."""
+    member = await room.is_member(room_id, user_id)
+    if member is None:
+        raise CallRefusedError(code="unavailable", message=_UNREADABLE)
+    return member
 
 
 def _require_poster(may_post: bool | None) -> None:

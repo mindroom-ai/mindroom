@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -22,10 +23,11 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.call_transcripts_runtime import CallTranscriptsRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.call_transcripts.test_service import FakeAgentCall
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -41,7 +43,7 @@ def _config(*, enabled: bool) -> Config:
 
 
 def _router(*, running: bool = True, synced: bool = True) -> MagicMock:
-    """A router bot whose client is in ``ROOM`` and finds Ann joined to it."""
+    """A router bot, answering no calls, whose client is in ``ROOM`` and finds Ann joined to it."""
     client = MagicMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_router:example.org"
     client.rooms = {ROOM: nio.MatrixRoom(ROOM, client.user_id)}
@@ -51,7 +53,30 @@ def _router(*, running: bool = True, synced: bool = True) -> MagicMock:
         return nio.RoomGetStateResponse(events=[joined], room_id=room_id)
 
     client.room_get_state.side_effect = state
-    return MagicMock(client=client, running=running, first_sync_complete=synced)
+    return MagicMock(client=client, running=running, first_sync_complete=synced, call_manager=None)
+
+
+@dataclass
+class _FakeCallManager:
+    """An agent's call manager: the rooms it answers calls in, and its call in each room where it is in one."""
+
+    rooms: set[str]
+    calls: dict[str, FakeAgentCall] = field(default_factory=dict)
+
+    def watches(self, room_id: str) -> bool:
+        """Return whether the agent answers calls in the room."""
+        return room_id in self.rooms
+
+    def live_call(self, room_id: str) -> FakeAgentCall | None:
+        """Return the agent's call in the room, None while it is in none there."""
+        return self.calls.get(room_id)
+
+
+def _calls_agent(manager: _FakeCallManager) -> MagicMock:
+    """An agent bot answering calls, whose client is in ``ROOM`` and finds Ann joined to it."""
+    bot = _router()
+    bot.call_manager = manager
+    return bot
 
 
 class _Sleeps:
@@ -78,8 +103,14 @@ def _coordinator(
     paths: RuntimePaths,
     config: Callable[[], Config],
     sleeps: _Sleeps,
+    bots: Mapping[str, AgentBot] | None = None,
 ) -> CallTranscriptsRuntimeCoordinator:
-    return CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=config, sleep=sleeps)
+    return CallTranscriptsRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=config,
+        bots=lambda: bots or {},
+        sleep=sleeps,
+    )
 
 
 def _bots(router: MagicMock) -> dict[str, AgentBot]:
@@ -216,6 +247,7 @@ async def test_turning_call_transcripts_off_stops_the_writes_under_way_and_sends
     coordinator = CallTranscriptsRuntimeCoordinator(
         runtime_paths=paths,
         config_provider=lambda: config,
+        bots=dict,
         sleep=no_next_pass,
     )
     router = _router()
@@ -338,7 +370,12 @@ async def test_off_and_back_on_between_two_passes_ends_nothing(tmp_path: Path) -
         await woken.wait()
         woken.clear()
 
-    coordinator = CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=lambda: config, sleep=sleep)
+    coordinator = CallTranscriptsRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bots=dict,
+        sleep=sleep,
+    )
     store = CallTranscriptStore(paths.storage_root)
 
     def start_call(room_id: str) -> str:
@@ -444,6 +481,55 @@ async def test_stopping_ends_the_loop_and_unbinds_the_router(tmp_path: Path, mon
     assert await _room_cannot_be_checked(service)
 
 
+# Agent calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_rooms_agent_call_is_read_through_the_agent_answering_calls_there(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+) -> None:
+    """The agent in a call in the room reads it, without the router and whether call transcripts are on or off."""
+    paths = test_runtime_paths(tmp_path)
+    call = FakeAgentCall(spoken=((ANN, "Hello", 1_001.0),))
+    bots: dict[str, AgentBot] = {
+        ROUTER_AGENT_NAME: _router(running=False),
+        "idle": _calls_agent(_FakeCallManager({ROOM, OTHER_ROOM})),
+        "helper": _calls_agent(_FakeCallManager({ROOM}, {ROOM: call})),
+    }
+    coordinator = _coordinator(paths, lambda: _config(enabled=enabled), _Sleeps(), bots)
+
+    in_call = coordinator.agent_call_room(ROOM)
+    idle = coordinator.agent_call_room(OTHER_ROOM)
+
+    assert in_call is not None
+    assert in_call.call is call
+    live = await in_call.live(ANN)
+    assert live.call is not None
+    assert (live.call.id, [line.text for line in live.lines]) == ("agentcall", ["Hello"])
+    assert idle is not None
+    assert idle.call is None
+    assert coordinator.agent_call_room("!nobody:example.org") is None
+
+
+@pytest.mark.asyncio
+async def test_an_agent_call_cannot_be_read_while_its_agent_is_not_ready(tmp_path: Path) -> None:
+    """Until the agent runs and has synced, nobody can be told whether they are in its room."""
+    paths = test_runtime_paths(tmp_path)
+    agent = _calls_agent(_FakeCallManager({ROOM}))
+    coordinator = _coordinator(paths, lambda: _config(enabled=False), _Sleeps(), {"helper": agent})
+    agent.first_sync_complete = False
+
+    agent_room = coordinator.agent_call_room(ROOM)
+
+    assert agent_room is not None
+    with pytest.raises(CallRefusedError) as refused:
+        await agent_room.live(ANN)
+    assert refused.value.code == "unavailable"
+
+
 # Wiring in the orchestrator
 
 
@@ -497,3 +583,18 @@ def test_the_api_reaches_the_running_service_through_what_the_runtime_lends_it(t
     service = lent.call_transcripts()
     assert isinstance(service, CallTranscriptService)
     assert lent.call_transcripts() is service
+
+
+def test_the_api_finds_agent_calls_among_the_runtimes_current_bots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard API reads the bots the runtime runs at each request, so a restarted agent's calls are found."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=Config())
+    lent = orchestrator.embedded_runtime()
+
+    assert lent.agent_call_room(ROOM) is None
+    monkeypatch.setattr(orchestrator.fleet, "bots", {"helper": _calls_agent(_FakeCallManager({ROOM}))})
+    agent_room = lent.agent_call_room(ROOM)
+    assert agent_room is not None
+    assert agent_room.call is None

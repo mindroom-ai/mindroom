@@ -322,6 +322,7 @@ When the call ends, file memory stores a reference to the transcript, Mem0 store
 MindRoom transcribes calls between people in rooms where its router is a member, for people who call from MindRoom Chat.
 Each person's MindRoom Chat finds stretches of speech in the microphone it already sends to the call and uploads them to MindRoom, which turns them into text, so each line is under the right name and nobody extra joins the call.
 Calls with a MindRoom agent are not transcribed this way; the agent posts its own transcript, as described in [Calling an agent about a thread](#calling-an-agent-about-a-thread).
+MindRoom Chat still shows a call with an agent live, through the same route as a call between people, also while `calls.transcripts.enabled` is off and in rooms without the router.
 
 ```yaml
 calls:
@@ -394,7 +395,8 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 
 A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
 A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
-Every route answers 404 while `calls.transcripts.enabled` is off.
+Every route answers 404 while `calls.transcripts.enabled` is off, except `GET /rooms/{room_id}/call` in a room an agent answers calls in.
+In such a room without a live call between people, `GET /rooms/{room_id}/call` answers with the agent's call while it runs: `members` are the caller and the agent, `rowEventId` and `pausedBy` are null, each line is a `speech` line with `seconds` 0 in the order it was heard, and the agent's name is its configured `display_name`.
 A call's routes take the room from the call and answer 404 to anyone not in that room.
 Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
