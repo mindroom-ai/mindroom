@@ -227,11 +227,18 @@ class _QueuedMessageState:
         *,
         text: str | None = None,
         requester_id: str | None = None,
+        mentions_nobody: bool = False,
     ) -> bool:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress, requester_id)
+        self._pending_messages[source_event_id] = QueuedMessage(
+            source_event_id,
+            text,
+            progress,
+            requester_id,
+            mentions_nobody,
+        )
         self._notify_changed()
         return True
 
@@ -484,6 +491,7 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -496,6 +504,7 @@ class ResponseLifecycleCoordinator:
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
+            mentions_nobody=mentions_nobody,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)

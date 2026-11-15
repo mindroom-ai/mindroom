@@ -1005,6 +1005,40 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
 
 
 @pytest.mark.asyncio
+async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_records_it_again(
+    tmp_path: Path,
+) -> None:
+    """The judge of general's running response learns which waiting messages mention nobody, also after an edit.
+
+    Unjudged, another person's message that mentions nobody need not cut the response short, while one that
+    mentions general does, so an edit that adds the mention must count.
+    """
+    async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$untagged", "look at this"))
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$tagged", "and this", "general"))
+        await _queued(bot, "$untagged")
+        await _queued(bot, "$tagged")
+        assert {message.event_id: message.mentions_nobody for message in running.pending_message_snapshot()} == {
+            "$untagged": True,
+            "$tagged": False,
+        }
+
+        edit = {
+            "m.new_content": {
+                "body": "look at this",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_mention_id(paths, "general")]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$untagged"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
+        assert {message.event_id: message.mentions_nobody for message in running.pending_message_snapshot()} == {
+            "$untagged": False,
+            "$tagged": False,
+        }
+
+
+@pytest.mark.asyncio
 async def test_editing_a_waiting_answer_to_a_question_asks_for_no_wrap_up(tmp_path: Path) -> None:
     """An edit of a queued answer to an interactive question reserves no queued-message notice.
 
