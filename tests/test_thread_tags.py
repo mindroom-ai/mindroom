@@ -392,7 +392,6 @@ async def test_manual_tag_started_first_prevents_automatic_tag_batch() -> None:
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=True,
         applied_tags=(),
-        failed_tags=(),
     )
     assert set(current_events) == {_thread_tag_state_key("$manual-first-root:localhost", "manual")}
 
@@ -462,7 +461,6 @@ async def test_manual_remove_started_first_prevents_automatic_tag_batch() -> Non
     assert automatic_task.result() == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_get_state.assert_awaited_once_with("!room:localhost")
@@ -500,7 +498,6 @@ async def test_completed_manual_removal_survives_the_model_inference_gap() -> No
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_put_state.assert_not_awaited()
@@ -586,7 +583,6 @@ async def test_automatic_batch_serializes_manual_write_until_all_tags_finish() -
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=("auto-one", "auto-two"),
-        failed_tags=(),
     )
     assert write_order == ["auto-one", "auto-two", "manual"]
 
@@ -715,7 +711,6 @@ async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=("second",),
-        failed_tags=("first", "third"),
     )
 
 

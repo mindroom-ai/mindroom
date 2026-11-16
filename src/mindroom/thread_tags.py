@@ -168,7 +168,6 @@ class SetThreadTagsIfEmptyResult:
 
     had_existing_tags: bool
     applied_tags: tuple[str, ...]
-    failed_tags: tuple[str, ...]
     skipped_due_to_prior_mutation: bool = False
 
 
@@ -934,13 +933,11 @@ async def set_thread_tags_if_empty(
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=True,
                 applied_tags=(),
-                failed_tags=(),
             )
         if normalized_thread_root_id in snapshot.observed_thread_root_ids:
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=False,
                 applied_tags=(),
-                failed_tags=(),
                 skipped_due_to_prior_mutation=True,
             )
 
@@ -975,7 +972,6 @@ async def set_thread_tags_if_empty(
         return SetThreadTagsIfEmptyResult(
             had_existing_tags=False,
             applied_tags=tuple(applied_tags),
-            failed_tags=tuple(failed_tags),
         )
 
 

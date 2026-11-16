@@ -977,7 +977,7 @@ class TestMaybeGenerateThreadSummary:
     ) -> None:
         """Power levels that refuse the agent's tags log one warning for the room, no error, and attempt no write.
 
-        Any other failure to write the tags logs one error per summary, not one per tag. Both summaries are delivered.
+        A later summary tags the thread once the power levels allow it. Any other failure to write the tags logs one error per summary, not one per tag. Both summaries are delivered.
         """
         monkeypatch.setattr(automatic, "_rooms_refusing_automatic_tags", set())
         if failure == "insufficient_power":
@@ -1010,6 +1010,18 @@ class TestMaybeGenerateThreadSummary:
             ]
             assert "exc_info" not in warnings[0]
             self.client.room_put_state.assert_not_awaited()
+            # Once the power levels allow it, a later summary tags the thread.
+            self.room_state.power_level = 100
+            self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+            self._history(
+                [
+                    *_make_thread_history(40),
+                    _make_summary_notice_message(_THREAD, message_count=25, initial_enrichment_complete=False),
+                ],
+            )
+            await self._maybe_generate(config)
+            assert self.room_state.tags(_THREAD) == ["bug"]
+            assert _sent_summaries(self.client)[-1]["initial_enrichment_complete"] is True
         else:
             assert [(log["event"], log["tags"]) for log in errors] == [
                 ("Failed to write automatic thread tags", ["bug", "authentication"]),
