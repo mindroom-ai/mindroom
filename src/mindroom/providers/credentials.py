@@ -66,9 +66,15 @@ def own_api_key(model_config: ModelConfig) -> str | None:
     return client_params.get("api_key") or model_config.configured_api_key()
 
 
-def _api_key_env_reference(model_config: ModelConfig) -> str | None:
-    """Return ``NAME`` when the key the model's route sends is written as the whole value ``${NAME}``, else None."""
-    key = own_api_key(model_config)
+def _api_key_env_reference(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return ``NAME`` when the key the model's route sends is written as the whole value ``${NAME}``, else None.
+
+    A model that authenticates another way (``uses_alternative_auth``) sends only a ``client_params`` key.
+    """
+    client_params = (model_config.extra_kwargs or {}).get("client_params") or {}
+    key = client_params.get("api_key")
+    if not key and not uses_alternative_auth(model_config, runtime_paths):
+        key = model_config.configured_api_key()
     if provider_route(model_config.provider) in _KEYLESS_ROUTES or not isinstance(key, str):
         return None
     reference = ENV_PLACEHOLDER_PATTERN.fullmatch(key)
@@ -77,7 +83,7 @@ def _api_key_env_reference(model_config: ModelConfig) -> str | None:
 
 def unset_api_key_variable(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
     """Return the variable the model's key references when the runtime environment sets no value for it."""
-    name = _api_key_env_reference(model_config)
+    name = _api_key_env_reference(model_config, runtime_paths)
     return name if name and get_secret_from_env(name, runtime_paths) is None else None
 
 
@@ -86,7 +92,7 @@ def resolve_api_key_reference(model_config: ModelConfig, runtime_paths: RuntimeP
 
     A model whose variable is unset comes back unchanged; ``unset_api_key_variable`` names the variable.
     """
-    name = _api_key_env_reference(model_config)
+    name = _api_key_env_reference(model_config, runtime_paths)
     if not name or (value := get_secret_from_env(name, runtime_paths)) is None:
         return model_config
     extra_kwargs = model_config.extra_kwargs or {}

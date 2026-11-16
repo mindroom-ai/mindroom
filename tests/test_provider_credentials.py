@@ -68,6 +68,7 @@ def _keyed_models(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         "partial": ModelConfig(provider="openrouter", id="m", api_key=f"prefix-{team}"),
         "dashboard": ModelConfig(provider="openrouter", id="m", extra_kwargs={"api_key": unset}),
         "keyless": ModelConfig(provider="codex", id="m", api_key=unset),
+        "vertex": ModelConfig(provider="gemini", id="m", api_key=unset, extra_kwargs={"vertexai": True}),
         "ollama": ModelConfig(provider="ollama", id="m", api_key=unset),
     }
     return Config(models=models), runtime_paths
@@ -82,7 +83,7 @@ def test_a_model_key_written_as_an_env_reference_resolves_from_the_runtime_env(t
     assert own_api_key(configured_model(config, runtime_paths, "client")) == "sk-team"
     assert own_api_key(configured_model(config, runtime_paths, "dashboard")) == "sk-ui"
     assert own_api_key(configured_model(config, runtime_paths, "partial")) == "prefix-${OPENROUTER_TEAM_API_KEY}"
-    for name in ("field", "extra", "client", "partial", "dashboard", "keyless"):
+    for name in ("field", "extra", "client", "partial", "dashboard", "keyless", "vertex"):
         assert unset_api_key_variable(configured_model(config, runtime_paths, name), runtime_paths) is None
     assert find_missing_env_variables(config, runtime_paths) == [
         ("ollama", "OPENROUTER_OTHER_API_KEY", ("ollama",)),
