@@ -1,13 +1,16 @@
-"""The automatic pass after a reply: summarize a due thread, and tag it on its first refresh."""
+"""Automatic prompt titles and post-reply summaries, with tags on the first refresh."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
+from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.thread_summary.notices import (
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader, DeliveredResponse
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
@@ -311,6 +315,139 @@ async def _countable_thread_history(
             thread_id=thread_id,
         )
         return None
+
+
+async def _sole_untitled_prompt(
+    history: ThreadHistoryResult,
+    *,
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    prompt_event_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    trusted_sender_ids: Collection[str],
+    authorize_human: Callable[[str], bool],
+) -> ResolvedVisibleMessage | None:
+    """Return the prompt while it is the only prompt of an untitled, unresolved thread."""
+    state = summary_state(
+        history,
+        thread_id=thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+        authorize_human=authorize_human,
+    )
+    if state is None or state.summary_event_ids:
+        return None
+    # The router's voice echo and routing relay, and a responder's reply
+    # placeholder, can land before a read; none is a second prompt.
+    ordinary = [
+        message
+        for message in state.ordinary_messages
+        if message.event_id == prompt_event_id or not is_managed_entity_id(message.sender, config, runtime_paths)
+    ]
+    if len(ordinary) != 1 or ordinary[0].event_id != prompt_event_id:
+        return None
+    # An edit keeps the prompt's event ID but changes its text, so the prompt
+    # this title would be made from is no longer what the thread shows.
+    if ordinary[0].latest_event_id != prompt_event_id:
+        return None
+    # Resolution lives in room state, which a history read cannot see.
+    if await _thread_is_resolved(client, room_id, thread_id):
+        return None
+    return ordinary[0]
+
+
+async def maybe_generate_prompt_summary(  # noqa: PLR0911
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt_event_id: str,
+    prompt: str,
+    conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+) -> None:
+    """Title a new thread from its prompt without advancing the post-reply schedule."""
+    baselines = schedule.THREAD_SUMMARY_BASELINES
+    if not prompt.strip() or not baselines.claim_provisional_title(room_id, thread_id):
+        return
+    try:
+        async with baselines.lock(room_id, thread_id):
+            # A baseline means this process already summarized the thread, maybe
+            # before that notice reached any history read.
+            if baselines.count(room_id, thread_id) > 0:
+                return
+            # The claim stops this process's other bots. Another runtime's title,
+            # or a pin from Chat, may not have reached this client's sync yet, so
+            # read the server's history before claiming absence.
+            history = await refetched_thread_history(
+                conversation_reader,
+                room_id,
+                thread_id,
+                unreadable_is_missing=True,
+            )
+            if not history.is_full_history:
+                return
+            trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+            authorize_human = human_summary_authorizer(
+                client,
+                room_id,
+                config,
+                runtime_paths,
+                entity_name,
+                membership_index,
+            )
+            sole_untitled_prompt = partial(
+                _sole_untitled_prompt,
+                client=client,
+                room_id=room_id,
+                thread_id=thread_id,
+                prompt_event_id=prompt_event_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
+                authorize_human=authorize_human,
+            )
+            if (prompt_message := await sole_untitled_prompt(history)) is None:
+                return
+            model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
+            generated = await generate_summary(
+                [replace(prompt_message, body=prompt)],
+                config,
+                runtime_paths,
+                model_name=model_name,
+                tag_vocabulary=None,
+            )
+            if generated is None:
+                return
+            # A different runtime can title or pin the thread while the model
+            # runs. Keep that title even though this runtime holds its lock.
+            history = await refetched_thread_history(
+                conversation_reader,
+                room_id,
+                thread_id,
+                unreadable_is_missing=True,
+            )
+            if not history.is_full_history:
+                return
+            # Everything that made the thread eligible can change while the model
+            # runs: another title or pin, a resolution, or a deleted or edited prompt.
+            if await sole_untitled_prompt(history) is None:
+                return
+            await send_thread_summary_notice(
+                client,
+                room_id,
+                thread_id,
+                generated.summary,
+                0,
+                model_name,
+                conversation_reader,
+            )
+    except Exception:
+        logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
 async def maybe_generate_thread_summary(  # noqa: PLR0911
