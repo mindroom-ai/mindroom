@@ -34,6 +34,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
+from mindroom.live_frames.frames import utf16_length
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
@@ -656,6 +657,10 @@ def fit_reasoning_to_ordinary_event(
         fitted = dict(base)
         target = dict(fitted["m.new_content"]) if isinstance(new_content, dict) else fitted
         target[REASONING_CONTENT_KEY] = {**reasoning, "text": text}
+        segments = reasoning.get("segments")
+        if isinstance(segments, list):
+            end = utf16_length(text)
+            target[REASONING_CONTENT_KEY]["segments"] = [segment for segment in segments if segment["start"] < end]
         if isinstance(new_content, dict):
             fitted["m.new_content"] = target
         return fitted

@@ -66,6 +66,7 @@ from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _calculate_delivery_event_size,
     calculate_event_size,
+    fit_reasoning_to_ordinary_event,
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
@@ -1887,6 +1888,37 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.room_send.await_count == 1
         kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
         assert kept["text"].endswith("…")
+
+    @pytest.mark.parametrize(
+        ("half", "size_limit", "kept_segments"),
+        [(40_000, 30_000, 1), (10, None, 2)],
+        ids=["cut-drops-the-segment-past-the-cut", "fitting-reasoning-keeps-every-segment"],
+    )
+    async def test_cut_reasoning_keeps_only_segments_that_start_in_the_kept_text(
+        self,
+        half: int,
+        size_limit: int | None,
+        kept_segments: int,
+    ) -> None:
+        """Cutting reasoning to a prefix keeps only the segments that begin inside it."""
+        client = MagicMock(spec=nio.AsyncClient)
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": half + 2, "after_tool": 2, "duration_ms": 5},
+        ]
+        reasoning = {"text": "a" * half + "\n\n" + "b" * half, "duration_ms": 9, "segments": segments}
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {"msgtype": "m.text", "body": "answer", "io.mindroom.reasoning": reasoning},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert (len(kept["text"]) < half) == (kept_segments == 1)
+        assert kept["segments"] == segments[:kept_segments]
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,

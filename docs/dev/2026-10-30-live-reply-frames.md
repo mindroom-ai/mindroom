@@ -58,6 +58,7 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Send: `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/io.mindroom.live/{sid}.{seq}`; the homeserver keeps at most 256 events, 1 MiB, and 30 s per room, allows 30 events per second per sender and room, and refuses `m.*` types, non-members, and bodies over 64 KiB.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
+  A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 
