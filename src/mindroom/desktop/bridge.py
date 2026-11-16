@@ -695,10 +695,15 @@ class DesktopBridge:
                 timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except DesktopMediaError as exc:
-            return self._capture_error_response(command, result=execution.result, error=str(exc))
+            return self._capture_error_response(command, result=execution.result, app_id=None, error=str(exc))
         except Exception:
             logger.exception("browser_image_upload_failed", action=command.action)
-            return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
+            return self._capture_error_response(
+                command,
+                result=execution.result,
+                app_id=None,
+                error="Browser image upload failed.",
+            )
         return success_response(command, result=execution.result, screenshot=screenshot)
 
     async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
@@ -800,10 +805,17 @@ class DesktopBridge:
                 timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
-            return self._capture_error_response(command, result=result, error=str(exc))
+            return self._capture_error_response(command, result=result, app_id=app_id, error=str(exc))
         except Exception:
             logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
-            return self._capture_error_response(command, result=result, error="Local screenshot operation failed.")
+            return self._capture_error_response(
+                command,
+                result=result,
+                app_id=app_id,
+                error="Local screenshot operation failed.",
+            )
+        if (withheld := self._withheld_observation(command, _Execution(result, capture_app=app_id))) is not None:
+            return withheld
         return success_response(
             command,
             result={
@@ -940,7 +952,7 @@ class DesktopBridge:
         if command.action == "list_apps":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
-            return _Execution({"apps": [app.to_result() for app in apps]})
+            return _Execution({"apps": [app.to_result() for app in apps if self._app_allowed(app.app_id)]})
         provider = self._required_gui_provider()
         if command.action == "launch_app":
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
@@ -1072,8 +1084,11 @@ class DesktopBridge:
         command: DesktopCommand,
         *,
         result: dict[str, object],
+        app_id: str | None,
         error: str,
     ) -> DesktopResponse:
+        if (withheld := self._withheld_observation(command, _Execution(result, capture_app=app_id))) is not None:
+            return withheld
         if command.action == "get_app_state":
             warning = (
                 f"Accessibility state was read, but its app-window screenshot failed: {error} "

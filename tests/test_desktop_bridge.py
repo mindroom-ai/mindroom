@@ -3296,3 +3296,107 @@ async def test_a_control_action_whose_scope_ends_before_its_follow_up_returns_no
     assert "state" not in response.result
     assert response.result["follow_up_state"] == "failed"
     assert response.screenshot is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+@pytest.mark.parametrize("phase", ["capture_error", "upload_error", "upload_success"])
+@pytest.mark.parametrize("action", ["get_app_state", "click"])
+@pytest.mark.parametrize("app_id", [APP_ID, OTHER_APP])
+async def test_scope_is_checked_when_capture_or_upload_finishes(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+    phase: str,
+    action: str,
+    app_id: str,
+) -> None:
+    """Both capture outcomes and upload outcomes withhold unsaved state while preserving saved apps and action outcomes."""
+    monotonic = [100.0]
+    bridge: DesktopBridge
+
+    def end() -> None:
+        if ending == "revoke":
+            bridge.revoke_local_control()
+        else:
+            monotonic[0] += 61
+
+    provider = _ScopeEndsDuringRead(end)
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+    )
+    bridge.grant_local_control(60, scope="computer")
+    screenshot = provider.screenshot
+
+    def capture(**kwargs: str) -> object:
+        image = screenshot(**kwargs)
+        if phase == "capture_error":
+            end()
+            msg = "App stopped responding during capture."
+            raise AccessibilityError(msg)
+        return image
+
+    async def upload(*_args: object, **_kwargs: object) -> EncryptedDesktopMedia:
+        end()
+        if phase == "upload_error":
+            msg = "Upload failed."
+            raise DesktopMediaError(msg)
+        return MEDIA
+
+    monkeypatch.setattr(provider, "screenshot", capture)
+    monkeypatch.setattr("mindroom.desktop.bridge.upload_encrypted_media", upload)
+    parameters: dict[str, object] = {"app": app_id}
+    if action == "click":
+        parameters.update(state_id="state-click", x=10, y=20, button="left")
+    response = await _run_for_app(bridge, transport, _numbered(action, 1, parameters))
+
+    if app_id == APP_ID:
+        assert response.ok
+        assert "state" in response.result
+        assert (response.screenshot is not None) == (phase == "upload_success")
+    else:
+        assert "state" not in response.result
+        assert response.screenshot is None
+        if action == "click":
+            assert response.ok
+            assert response.result["action_completed"] is True
+            assert response.result["follow_up_state"] == "failed"
+        else:
+            assert response.error == _NOT_ALLOWED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+async def test_app_list_finishes_with_only_currently_allowed_apps(transport: AsyncMock, ending: str) -> None:
+    """A list ending outside whole-computer scope keeps saved apps and the saved screen, without extra app metadata."""
+    monotonic = [100.0]
+    bridge: DesktopBridge
+    apps = [
+        DesktopApp(APP_ID, "Editor", True),
+        DesktopApp(OTHER_APP, "Other", True),
+        DesktopApp("primary-screen", "Screen", True),
+    ]
+
+    class ListingProvider(FakeProvider):
+        def list_apps(self) -> list[DesktopApp]:
+            if ending == "revoke":
+                bridge.revoke_local_control()
+            else:
+                monotonic[0] += 61
+            return apps
+
+    bridge = DesktopBridge(
+        client=object(),
+        provider=ListingProvider(),
+        policy=replace(_policy(), allowed_app_ids=frozenset({APP_ID, "primary-screen"})),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+    )
+    bridge.grant_local_control(60, scope="computer")
+    response = await _run_for_app(bridge, transport, _numbered("list_apps", 1, {}))
+    assert response.ok
+    assert response.result["apps"] == [apps[0].to_result(), apps[2].to_result()]
