@@ -66,6 +66,7 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     assert [(field.name, field.default) for field in metadata.config_fields] == [
         ("enable_show_canvas", False),
         ("enable_canvas_libraries", False),
+        ("enable_canvas_remote_assets", False),
     ]
     assert sorted(ChatUITools().functions) == ["open_panel", "open_settings"]
     assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).functions)
@@ -83,8 +84,13 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "canvas_event_id",
         "share_state",
         "inline",
+        "raw",
+        "width",
     )
     assert inspect.signature(ChatUITools.show_canvas).parameters["inline"].default is False
+    assert inspect.signature(ChatUITools.show_canvas).parameters["raw"].default is False
+    assert inspect.signature(ChatUITools.show_canvas).parameters["width"].default is None
+    assert inspect.signature(ChatUITools).parameters["enable_canvas_remote_assets"].default is False
     assert tuple(inspect.signature(ChatUITools.read_canvas_state).parameters) == ("self", "canvas_event_id")
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = toolkit_offers(ChatUITools(), "open_panel")
@@ -1418,6 +1424,141 @@ async def test_large_update_of_a_foreign_canvas_uploads_nothing(tmp_path: Path) 
     assert "Only your own canvases" in result["message"]
     context.client.upload.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uploaded", [False, True])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"raw": False, "width": None},
+        {"raw": True},
+        {"width": 1440},
+        {"raw": True, "width": 320},
+        {"raw": True, "width": 2560},
+    ],
+)
+async def test_canvas_page_presentation_fields(tmp_path: Path, uploaded: bool, options: dict[str, object]) -> None:
+    """Raw and viewport width live inside either page representation, not among authority fields."""
+    context = _context(tmp_path)
+    _serve_upload(context)
+    page = "x" * 26_000 if uploaded else CANVAS_HTML
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html=page, **options))
+
+    assert result["status"] == "ok"
+    metadata = _sent_content(context)["io.mindroom.ui_action"]
+    canvas = metadata["canvas"]
+    expected: dict[str, object] = {"title": "Plans"}
+    if options.get("raw"):
+        expected["raw"] = True
+    if options.get("width") is not None:
+        expected["width"] = options["width"]
+    if uploaded:
+        expected["document"] = {"mimetype": "text/html", "size": len(page), "url": "mxc://example.org/canvas"}
+        context.client.upload.assert_awaited_once()
+    else:
+        expected["html"] = page
+        context.client.upload.assert_not_awaited()
+    assert canvas == expected
+    assert {key: value for key, value in metadata.items() if key != "canvas"} == {
+        "version": 1,
+        "action": "show_canvas",
+        "requester_id": REQUESTER_ID,
+        "agent_user_id": context.client.user_id,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [319, 2561, 1.5, True, "800"])
+async def test_canvas_page_rejects_invalid_width_before_send_or_upload(tmp_path: Path, width: object) -> None:
+    """Invalid viewports fail as tool payloads even for pages that would need an upload."""
+    context = _context(tmp_path)
+    _serve_upload(context)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html="x" * 26_000, width=width))  # type: ignore[arg-type]
+
+    assert result == {
+        "tool": "chat_ui",
+        "status": "error",
+        "action": "show_canvas",
+        "message": "Canvas width must be an integer from 320 to 2560 (not a boolean).",
+    }
+    context.client.room_send.assert_not_awaited()
+    context.client.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uploaded", [False, True])
+@pytest.mark.parametrize("original_page_mode", [False, True])
+@pytest.mark.parametrize("options", [{}, {"raw": False, "width": None}, {"raw": True, "width": 390}])
+async def test_canvas_page_update_presentation_is_revision_specific(
+    tmp_path: Path,
+    uploaded: bool,
+    original_page_mode: bool,
+    options: dict[str, object],
+) -> None:
+    """An update states presentation anew; inline and sharing retain their original authority."""
+    context = _context(tmp_path)
+    original = _canvas_source(
+        context,
+        inline=True,
+        share_state=True,
+        canvas={"title": "Plans", "html": "<p>1</p>", **({"raw": True, "width": 1440} if original_page_mode else {})},
+    )
+    _serve_event(context, original)
+    _serve_upload(context)
+    page = "y" * 26_000 if uploaded else "<p>2</p>"
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(html=page, canvas_event_id="$canvas", **options))
+
+    assert result["status"] == "ok"
+    metadata = _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]
+    assert {key: value for key, value in metadata.items() if key != "canvas"} == {
+        key: value for key, value in original["content"]["io.mindroom.ui_action"].items() if key != "canvas"
+    }
+    canvas = metadata["canvas"]
+    assert canvas["title"] == "Plans"
+    assert ("document" in canvas) is uploaded
+    assert ("raw" in canvas) is bool(options.get("raw"))
+    assert ("width" in canvas) is (options.get("width") is not None)
+    if options.get("raw"):
+        assert canvas["raw"] is True
+        assert canvas["width"] == 390
+
+
+@pytest.mark.asyncio
+async def test_canvas_page_size_probe_counts_presentation_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The edit-envelope measurement includes raw and width before deciding whether to upload."""
+    context = _context(tmp_path)
+    _serve_upload(context)
+    probes = []
+
+    def measure(content: dict[str, object]) -> int:
+        probes.append(content)
+        return chat_ui_module.EDIT_MESSAGE_SIZE_LIMIT + 1
+
+    monkeypatch.setattr(chat_ui_module, "calculate_event_size", measure)
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html=CANVAS_HTML, raw=True, width=1440))
+
+    assert result["status"] == "ok"
+    assert probes[0]["m.new_content"]["io.mindroom.ui_action"]["canvas"] == {
+        "title": "Plans",
+        "html": CANVAS_HTML,
+        "raw": True,
+        "width": 1440,
+    }
+    context.client.upload.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,7 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_canvas/document", "", "show_canvas", "document"),
         _ContractCase("show_canvas/shared", "", "show_canvas", "shared"),
         _ContractCase("show_canvas/inline", "", "show_canvas", "inline"),
+        _ContractCase("show_canvas/page", "", "show_canvas", "page"),
     )
     # read_canvas_state only reads, so it sends no UI action for Chat to handle.
     registered_actions = set(ChatUITools(enable_show_canvas=True).functions) - {"read_canvas_state"}
@@ -166,7 +167,9 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
             title=CONTRACT_CANVAS_TITLE,
             html=html,
             share_state=case.argument == "shared",
-            inline=case.argument == "inline",
+            inline=case.argument in {"inline", "page"},
+            raw=case.argument == "page",
+            width=1440 if case.argument == "page" else None,
         )
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
@@ -224,7 +227,7 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             msg = f"Chat UI contract case {case_id!r} failed to emit: {result!r}"
             raise RuntimeError(msg)
         exported: dict[str, object] = {"id": case_id, "event": _contract_event(context, event_id)}
-        if case.argument in {"update", "shared", "inline"}:
+        if case.argument in {"update", "shared", "inline", "page"}:
             edit_id = f"{event_id}-edit"
             update = json.loads(await _update_contract_canvas(context, exported["event"], edit_id))  # type: ignore[arg-type]
             if update.get("status") != "ok" or update.get("revision_event_id") != edit_id:

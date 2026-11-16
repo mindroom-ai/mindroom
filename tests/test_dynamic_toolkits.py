@@ -1252,6 +1252,37 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
 
 
+@pytest.mark.parametrize(
+    ("options", "named"),
+    [
+        ({"enable_show_canvas": True}, False),
+        ({"enable_canvas_remote_assets": True}, False),
+        ({"enable_show_canvas": True, "enable_canvas_remote_assets": True}, True),
+        ({"enable_show_canvas": True, "enable_canvas_remote_assets": True, "exclude_tools": ["show_canvas"]}, False),
+    ],
+)
+def test_chat_ui_names_remote_assets_only_for_an_agent_with_canvases(
+    tmp_path: Path,
+    options: dict[str, object],
+    named: bool,
+) -> None:
+    """Remote asset guidance needs both the deployment opt-in and an offered show_canvas."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = _code_agent(config, tmp_path)
+    prompt = _build_prompt(agent)
+
+    hint = (
+        "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
+        "so a preview can use the real assets of the site it shows. "
+        "Fetching data, workers and nested frames stay blocked."
+    )
+    assert (hint in prompt) is named
+    assert ("from any https: address" in prompt) is named
+
+
 def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
     """An operator may exclude show_canvas defensively; that must not drop the other chat_ui functions."""
     raw = _base_config_data()
