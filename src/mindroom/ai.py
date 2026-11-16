@@ -1068,7 +1068,7 @@ async def run_delegated_child_response(
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
-    child_context = child_tool_runtime_context(context, child) if context is not None else None
+    child_context = child_tool_runtime_context(context, child, config=active_config) if context is not None else None
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,
