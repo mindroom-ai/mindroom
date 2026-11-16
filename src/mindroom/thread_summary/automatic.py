@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader, DeliveredResponse
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
@@ -315,6 +317,42 @@ async def _countable_thread_history(
         return None
 
 
+async def _sole_untitled_prompt(
+    history: ThreadHistoryResult,
+    *,
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    prompt_event_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    trusted_sender_ids: Collection[str],
+    authorize_human: Callable[[str], bool],
+) -> ResolvedVisibleMessage | None:
+    """Return the prompt while it is the only prompt of an untitled, unresolved thread."""
+    state = summary_state(
+        history,
+        thread_id=thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+        authorize_human=authorize_human,
+    )
+    if state is None or state.summary_event_ids:
+        return None
+    # The router's voice echo and routing relay, and a responder's reply
+    # placeholder, can land before a read; none is a second prompt.
+    ordinary = [
+        message
+        for message in state.ordinary_messages
+        if message.event_id == prompt_event_id or not is_managed_entity_id(message.sender, config, runtime_paths)
+    ]
+    if len(ordinary) != 1 or ordinary[0].event_id != prompt_event_id:
+        return None
+    # Resolution lives in room state, which a history read cannot see.
+    if await _thread_is_resolved(client, room_id, thread_id):
+        return None
+    return ordinary[0]
+
+
 async def maybe_generate_prompt_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
@@ -358,32 +396,22 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 entity_name,
                 membership_index,
             )
-            state = summary_state(
-                history,
+            sole_untitled_prompt = partial(
+                _sole_untitled_prompt,
+                client=client,
+                room_id=room_id,
                 thread_id=thread_id,
+                prompt_event_id=prompt_event_id,
+                config=config,
+                runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
             )
-            if state is None:
-                return
-            # The router's voice echo and routing relay, and a responder's reply
-            # placeholder, can land before this read; none is a second prompt.
-            ordinary = [
-                message
-                for message in state.ordinary_messages
-                if message.event_id == prompt_event_id
-                or not is_managed_entity_id(message.sender, config, runtime_paths)
-            ]
-            if (
-                state.summary_event_ids
-                or len(ordinary) != 1
-                or ordinary[0].event_id != prompt_event_id
-                or await _thread_is_resolved(client, room_id, thread_id)
-            ):
+            if (prompt_message := await sole_untitled_prompt(history)) is None:
                 return
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             generated = await generate_summary(
-                [replace(ordinary[0], body=prompt)],
+                [replace(prompt_message, body=prompt)],
                 config,
                 runtime_paths,
                 model_name=model_name,
@@ -401,15 +429,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             )
             if not history.is_full_history:
                 return
-            state = summary_state(
-                history,
-                thread_id=thread_id,
-                trusted_sender_ids=trusted_sender_ids,
-                authorize_human=authorize_human,
-            )
-            # Resolution lives in room state, which the history re-read cannot see,
-            # so a thread resolved while the model ran is checked again here.
-            if state is None or state.summary_event_ids or await _thread_is_resolved(client, room_id, thread_id):
+            # Everything that made the thread eligible can change while the model
+            # runs: another title or pin, a resolution, or a deleted prompt.
+            if await sole_untitled_prompt(history) is None:
                 return
             await send_thread_summary_notice(
                 client,

@@ -923,6 +923,19 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 1
         assert not _sent_summaries(self.client)
 
+    async def test_provisional_title_skips_prompt_deleted_during_generation(self) -> None:
+        """A prompt deleted while the model ran must not leave a title made from its text."""
+
+        async def delete_prompt() -> None:
+            self._history([])
+
+        model = self._summarizer(Await(delete_prompt))
+        self._history(_make_thread_history(1))
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+
     async def test_provisional_title_generation_failure_is_contained(self) -> None:
         """A failing title model cannot propagate into the reply path or advance its schedule."""
 
