@@ -18,6 +18,7 @@ from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
 from mindroom.delegation import lifecycle
@@ -510,7 +511,7 @@ async def test_frames_carry_the_model_the_child_runs_on(tmp_path: Path, monkeypa
     assert (await seen.wait_for(1)).model_name == "fast"
     lifecycle.note_child_run_id(child, "run-2", _runtime_paths(tmp_path), model_name="smart")
     switched = await seen.wait_for(2)
-    assert subagents_module._run_meta(switched, full=False)["model"] == "smart"
+    assert subagents_module._run_meta(switched, full=False)["model"] == {"config": "smart"}
     feed.status("paused")
     await seen.wait_for(3)
     child.model_name = "retained"
@@ -740,6 +741,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     room = FrameRoom(encrypted=encrypted)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+    config.models["default"] = ModelConfig(provider="anthropic", id="claude-opus-5-5", display_name="Opus 5.5")
     context, _bot = _in_room(runtime, room)
 
     with tool_runtime_context(context):
@@ -748,6 +750,8 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     assert result.text.endswith("Done")
     frames = await _run_frames(room)
     first, last = frames[0], frames[-1]
+    model = {"config": "default", "display_name": "Opus 5.5", "id": "claude-opus-5-5", "provider": "anthropic"}
+    assert all(frame["meta"]["model"] == model for frame in frames)
     assert {frame["run"] for frame in frames} == {first["run"]}
     assert "snapshot" in first
     assert (first["meta"]["status"], first["meta"]["caller"], first["meta"]["root"]) == ("running", "leader", "leader")

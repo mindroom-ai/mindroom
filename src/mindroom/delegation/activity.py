@@ -16,7 +16,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.events import ToolCompleted, ToolStarted
@@ -79,6 +79,8 @@ class SubagentSnapshot:
     items_dropped: int
     # Redacted, at most 1,000 characters; set only once the run ended.
     result_preview: str | None
+    # The ``model`` object of ``model_name`` that clients show, with its display name; the sink resolves it.
+    model: Mapping[str, str] | None = None
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]

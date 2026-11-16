@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import model_payload, prior_usage_of
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import runtime_matrix_homeserver
@@ -323,7 +323,7 @@ def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation
     return lambda snapshot: subagent_frames.publish(
         account,
         room_id,
-        snapshot,
+        replace(snapshot, model=model_payload(context.current_config, snapshot.model_name)),
         previews=previews,
         client=client,
         homeserver_url=homeserver_url,
