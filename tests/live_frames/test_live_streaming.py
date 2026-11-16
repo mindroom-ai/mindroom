@@ -244,6 +244,7 @@ async def test_reasoning_segments_record_where_each_began(tmp_path: Path, frames
     ]
     assert segments[1]["start"] == 10
     assert all(isinstance(segment["duration_ms"], int) and segment["duration_ms"] >= 0 for segment in segments)
+    assert abs(sum(segment["duration_ms"] for segment in segments) - reasoning["duration_ms"]) <= len(segments)
     assert _live_segments(frames.sent) == [
         {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in segments
     ]
@@ -266,6 +267,52 @@ async def test_reasoning_segments_anchor_to_the_top_when_tool_calls_are_hidden(t
     assert len(segments) == 2
     assert all(segment["after_tool"] == 0 for segment in segments)
     assert all(segment["after_tool"] == 0 for segment in _live_segments(frames.sent))
+
+
+@pytest.mark.asyncio
+async def test_empty_reasoning_deltas_open_no_segment(tmp_path: Path, frames: _Frames) -> None:
+    """A provider's empty reasoning delta adds no segment, so segment starts stay strictly increasing."""
+    records, edits = _records(), _Edits()
+    started = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"})
+    completed = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"}, result="ok")
+    stream = _stream(
+        ReasoningDelta(""),
+        0.03,
+        ToolStarted(started),
+        0.03,
+        ToolCompleted(completed),
+        0.03,
+        ReasoningDelta("a"),
+        0.03,
+        "Answer",
+        0.03,
+        ReasoningDelta(""),
+        0.03,
+        " is",
+        0.03,
+        ReasoningDelta("b"),
+        0.03,
+        " ready.",
+        0.03,
+    )
+    await _run(_config(tmp_path), stream, records, edits, placeholder_event_id="$placeholder")
+
+    reasoning = _terminal(records)["io.mindroom.reasoning"]
+    assert reasoning["text"] == "a\n\nb"
+    assert [(segment["start"], segment["after_tool"]) for segment in reasoning["segments"]] == [(0, 1), (3, 1)]
+    assert _live_segments(frames.sent) == [{"start": 0, "after_tool": 1}, {"start": 3, "after_tool": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_segment_open_at_the_end_gets_its_duration(tmp_path: Path, frames: _Frames) -> None:
+    """A stream that ends while reasoning closes that segment before the terminal update records it."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Answer", 0.03, ReasoningDelta("Still thinking"), 0.05), records, edits)
+
+    assert frames.sent
+    (segment,) = _terminal(records)["io.mindroom.reasoning"]["segments"]
+    assert isinstance(segment["duration_ms"], int)
+    assert segment["duration_ms"] >= 40
 
 
 @pytest.mark.asyncio

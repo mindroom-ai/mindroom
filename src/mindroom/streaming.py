@@ -659,6 +659,8 @@ class StreamingResponse:
 
     def add_reasoning(self, text: str, *, started_at: float | None = None) -> None:
         """Append model reasoning, starting a new segment after other output at ``started_at``, or now when unknown."""
+        if not text:
+            return
         if self._reasoning_segment_started_at is None:
             self._reasoning_segment_started_at = time.monotonic() if started_at is None else started_at
             if self.reasoning_text and not self.reasoning_text.endswith("\n"):
