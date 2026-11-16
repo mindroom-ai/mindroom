@@ -37,6 +37,7 @@ from mindroom.redaction import REDACTED
 from mindroom.secret_requests import _TemporarySecrets, secret_holder
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -797,3 +798,28 @@ async def test_a_result_never_repeats_a_given_secret(shell: _Shell, given: Calla
     assert not outcome.is_error, outcome.content
     assert "open-sesame-123" not in outcome.content
     assert outcome.content.count(REDACTED) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_reply_s_record_of_a_call_never_holds_a_given_secret(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """The durable record of a call, which a tool trace and a replay read, gets the result the model gets."""
+    given("PASSPHRASE", "open-sesame-123")
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$PASSPHRASE"']})
+
+    assert not outcome.is_error, outcome.content
+    assert len(recorded) == 1
+    assert "open-sesame-123" not in str(recorded[0])
+    assert REDACTED in str(recorded[0])

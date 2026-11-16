@@ -694,7 +694,12 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     tool_body_started_at = time.perf_counter()
     try:
         with collected_tool_environment(environment):
-            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_context.agent_name)
+            result = await _call_recorded_tool(
+                _without_given_secrets(func, given),
+                args,
+                tool_name=tool_name,
+                agent_name=resolved_context.agent_name,
+            )
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
@@ -705,7 +710,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("error", ready, error=error)
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-    result = _without_given_secrets(result, given)
     return await answer(result, "error" if _answered_failure(result) else "success")
 
 
@@ -717,13 +721,26 @@ def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
     return temporary_secrets().values(holder, storage_root=resolved_context.runtime_paths.storage_root)
 
 
-def _without_given_secrets(result: object, given: Mapping[str, str]) -> object:
-    """Return a string result without the exact copies of the call's given secrets: best effort, like all redaction."""
-    if not isinstance(result, str):
+def _without_given_secrets(
+    func: Callable[..., Awaitable[_ToolHookResult]],
+    given: Mapping[str, str],
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Return the tool with the exact copies of the call's given secrets removed from a string result.
+
+    The reply's record of the call, its tool trace, its hooks and the model all read what this returns. Best effort,
+    like all redaction: a command that encodes the value, or a result that is no string, passes.
+    """
+    if not given:
+        return func
+
+    async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        result = await func(**arguments)
+        if isinstance(result, str):
+            for value in given.values():
+                result = result.replace(value, REDACTED)
         return result
-    for value in given.values():
-        result = result.replace(value, REDACTED)
-    return result
+
+    return without_given_secrets
 
 
 async def dispatch_external_tool_hooks(
