@@ -10615,9 +10615,13 @@ agents:
 
 `temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service, a passphrase, or a pairing code.
 It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+The agent can also give a `label` that says what the secret is, the `url` of a page where the user gets or creates it, and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
   Other people in the thread see who the card waits for.
+- A `label` becomes the card's title and a `placeholder` the hint in the empty field, each cut to one line of 80 characters.
+  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host, no `user:password@` part, and no spaces.
+  The agent chooses the link, so the user should check the host on the button before signing in there.
 - The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
   A restart forgets a value kept in memory and reads back one kept in a file.
   The file is deleted at the first tool call or answer after the value expired.
@@ -17828,6 +17832,7 @@ Do not report or "fix" these; they are deliberate.
 - An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - A secret request card shows a `reason` the model wrote, so a manipulated agent can ask for the key of any service it may request with misleading text; the key still reaches only that service's hosts, which the card shows.
+- A secret request card also shows a title, a field hint, and a link button the model chose, so a manipulated agent can point the button at a look-alike sign-in page, as it can with a link in any message; the button names the page's host, only `http` and `https` links with no `user:password@` part get one, and MindRoom never fetches the link.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
@@ -23870,10 +23875,12 @@ agents:
 ### Asking in chat
 
 For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+It can also give the `url` of the page where the user gets or creates the key and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
   Other people in the thread see who the card waits for.
   When the service already has a key in that scope, the card says that saving replaces it.
+- A `url` becomes a button that names the page's host and opens it in the browser, and a `placeholder` becomes the hint in the empty field, as on a [temporary secret's card](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets).
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.
