@@ -28,7 +28,12 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, get_thread_tags, set_thread_tags_if_empty
+from mindroom.thread_tags import (
+    RESOLVED_THREAD_TAG,
+    ThreadTagsPermissionError,
+    get_thread_tags,
+    set_thread_tags_if_empty,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -42,6 +47,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 logger = get_logger(__name__)
+
+# Rooms already warned that their power levels refuse the agent's automatic tags.
+_rooms_refusing_automatic_tags: set[str] = set()
 
 
 async def _thread_is_resolved(
@@ -162,6 +170,12 @@ async def _apply_initial_tags(
             tags,
             set_by=set_by,
         )
+    except ThreadTagsPermissionError as exc:
+        # A room setting, not a fault: warn once per room, and a later summary tags once the power levels allow it.
+        if room_id not in _rooms_refusing_automatic_tags:
+            _rooms_refusing_automatic_tags.add(room_id)
+            logger.warning("Automatic thread tags need a higher power level", room_id=room_id, reason=str(exc))
+        return False
     except Exception:
         logger.exception(
             "Failed to apply automatic thread tags",
@@ -183,13 +197,6 @@ async def _apply_initial_tags(
             thread_id=thread_id,
         )
         return True
-    if result.failed_tags:
-        logger.warning(
-            "Failed to write some automatic thread tags",
-            room_id=room_id,
-            thread_id=thread_id,
-            tags=result.failed_tags,
-        )
     if result.applied_tags:
         logger.info(
             "Automatically tagged thread",

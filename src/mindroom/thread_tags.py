@@ -944,8 +944,11 @@ async def set_thread_tags_if_empty(
                 skipped_due_to_prior_mutation=True,
             )
 
+        # Power levels that refuse the write raise ThreadTagsPermissionError here, before any tag is attempted.
+        await _assert_thread_tags_write_allowed(client, room_id, requester_user_id=normalized_set_by)
         applied_tags: list[str] = []
         failed_tags: list[str] = []
+        first_failure: Exception | None = None
         for tag in tags:
             try:
                 await _set_thread_tag_under_lock(
@@ -955,16 +958,19 @@ async def set_thread_tags_if_empty(
                     tag,
                     set_by=normalized_set_by,
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to write conditional thread tag",
-                    room_id=room_id,
-                    thread_root_id=normalized_thread_root_id,
-                    tag=tag,
-                )
+            except Exception as exc:
+                first_failure = first_failure or exc
                 failed_tags.append(tag)
             else:
                 applied_tags.append(tag)
+        if first_failure is not None:
+            logger.error(
+                "Failed to write automatic thread tags",
+                room_id=room_id,
+                thread_root_id=normalized_thread_root_id,
+                tags=failed_tags,
+                exc_info=first_failure,
+            )
 
         return SetThreadTagsIfEmptyResult(
             had_existing_tags=False,

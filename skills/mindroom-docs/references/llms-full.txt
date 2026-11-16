@@ -13019,6 +13019,7 @@ These models always use their provider's default: Vertex AI Claude, Claude Opus 
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.
+These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 
 ## Related Docs
 

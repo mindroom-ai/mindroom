@@ -18,6 +18,7 @@ import nio
 import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -33,6 +34,7 @@ from mindroom.matrix.conversation_reads import DeliveredResponse, complete_threa
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -258,6 +260,7 @@ class _RoomState:
     failing_reads: frozenset[int] = frozenset()
     read_failure: Exception | nio.RoomGetStateError = field(default_factory=lambda: TimeoutError("state timeout"))
     failing_tags: frozenset[str] = frozenset()
+    power_level: int = 100
     reads: int = 0
 
     def serve(self, client: AsyncMock) -> None:
@@ -296,7 +299,9 @@ class _RoomState:
         event_type: str,
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse:
-        content = {"users": {self.user_id: 100}, "state_default": 50}
+        if event_type == "m.room.create":
+            return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
+        content = {"users": {self.user_id: self.power_level}, "state_default": 50}
         return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
 
     async def room_put_state(
@@ -963,6 +968,53 @@ class TestMaybeGenerateThreadSummary:
         assert self.room_state.tags(_THREAD) == ["authentication"]
         assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is True
         assert self._count() == 12
+
+    @pytest.mark.parametrize("failure", ["insufficient_power", "write_error"])
+    async def test_tags_the_agent_may_not_write_warn_once_per_room_and_other_failures_err_once_per_summary(
+        self,
+        failure: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Power levels that refuse the agent's tags log one warning for the room, no error, and attempt no write.
+
+        Any other failure to write the tags logs one error per summary, not one per tag. Both summaries are delivered.
+        """
+        monkeypatch.setattr(automatic, "_rooms_refusing_automatic_tags", set())
+        if failure == "insufficient_power":
+            self.room_state.power_level = 0
+        else:
+            self.room_state.failing_tags = frozenset({"bug", "authentication"})
+        config = _mock_config(first_threshold=1)
+        histories = [
+            _make_due_second_summary_history(),
+            [
+                *_make_thread_history(25),
+                _make_summary_notice_message(_THREAD, message_count=12, initial_enrichment_complete=False),
+            ],
+        ]
+        with capture_logs() as logs:
+            for history in histories:
+                self._summarizer(
+                    _ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug", "authentication"]),
+                )
+                self._history(history)
+                await self._maybe_generate(config)
+
+        assert [sent["initial_enrichment_complete"] for sent in _sent_summaries(self.client)] == [False, False]
+        errors = [log for log in logs if log["log_level"] == "error"]
+        warnings = [log for log in logs if log["log_level"] == "warning"]
+        if failure == "insufficient_power":
+            assert errors == []
+            assert [(log["event"], log["room_id"]) for log in warnings] == [
+                ("Automatic thread tags need a higher power level", _ROOM),
+            ]
+            assert "exc_info" not in warnings[0]
+            self.client.room_put_state.assert_not_awaited()
+        else:
+            assert [(log["event"], log["tags"]) for log in errors] == [
+                ("Failed to write automatic thread tags", ["bug", "authentication"]),
+            ] * 2
+            assert warnings == []
 
     async def test_tag_read_failure_marks_enrichment_retryable(self) -> None:
         """A transient tag-state read failure must not durably suppress later retries."""

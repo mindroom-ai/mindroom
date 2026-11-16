@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.matrix.room_history_reads import (
     _MAX_THREAD_ENUMERATION_PAGES,
@@ -688,34 +689,33 @@ async def test_automatic_batch_does_not_block_mutations_for_another_thread() -> 
 
 @pytest.mark.asyncio
 async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
-    """One failed automatic tag should not prevent later tags from being attempted."""
+    """A failed automatic tag does not prevent later tags from being attempted, and the batch logs one error."""
     client = AsyncMock()
     client.room_get_state.return_value = _thread_tags_room_state_response()
-    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None])
+    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None, TimeoutError("timed out")])
 
     with (
+        patch("mindroom.thread_tags._assert_thread_tags_write_allowed", new=AsyncMock()),
         patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
-        patch("mindroom.thread_tags.logger.exception") as log_exception,
+        capture_logs() as logs,
     ):
         result = await set_thread_tags_if_empty(
             client,
             "!room:localhost",
             "$partial-auto-root:localhost",
-            ["first", "second"],
+            ["first", "second", "third"],
             set_by="@automatic:localhost",
         )
 
-    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
-    log_exception.assert_called_once_with(
-        "Failed to write conditional thread tag",
-        room_id="!room:localhost",
-        thread_root_id="$partial-auto-root:localhost",
-        tag="first",
-    )
+    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second", "third"]
+    errors = [log for log in logs if log["log_level"] == "error"]
+    assert [(log["event"], log["thread_root_id"], log["tags"]) for log in errors] == [
+        ("Failed to write automatic thread tags", "$partial-auto-root:localhost", ["first", "third"]),
+    ]
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=("second",),
-        failed_tags=("first",),
+        failed_tags=("first", "third"),
     )
 
 
