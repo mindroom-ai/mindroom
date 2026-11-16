@@ -131,17 +131,24 @@ def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, st
     return tuple(reversed(edges))
 
 
-def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
+def child_tool_runtime_context(
+    context: ToolRuntimeContext,
+    child: DelegationChild,
+    *,
+    config: Config,
+) -> ToolRuntimeContext:
     """Rebind a caller's tool context to the child turn running here, carrying its persona as the cap on copies it authors.
 
     The child's turn carries the ID of its child run and names the caller's turn as its parent. It hides its tool calls
-    whatever its caller's reply shows, so they never read as shown.
+    whatever its caller's reply shows, so they never read as shown. ``config`` is the live config the child runs under:
+    the caller's turn may hold an older snapshot, against which a prepared CLI catalog would refuse every call.
     """
     observation = _CHILD_RUN.get()
     assert observation is not None, "A child's tool context is built inside the child's run"
     return replace(
         context,
         agent_name=child.child_agent_name,
+        config=config,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
         persona=child.persona,

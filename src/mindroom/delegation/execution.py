@@ -300,7 +300,7 @@ async def _execute_child(
     if context is None or context.requester_id != identity.requester_id or context.room_id != identity.room_id:
         msg = "Delegation requester context does not match its retained wait"
         raise RuntimeError(msg)
-    child_context = child_tool_runtime_context(context, child)
+    child_context = child_tool_runtime_context(context, child, config=config)
     if fresh:
         return await _start_child_envelope(
             child,

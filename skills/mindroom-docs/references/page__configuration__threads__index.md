@@ -160,7 +160,8 @@ An agent judges a message only when all of these hold:
 Configured human aliases count as one participant, while agents, the internal service account, and `bot_accounts` do not count as humans.
 Agents merely present in the room never join: with 50 agents in a room and two already in the thread, only those two can judge, and only if each opted in.
 Each eligible agent decides separately.
-Commands and scheduled work never use adaptive participation.
+Commands, scheduled work, and a queued message the [mid-turn judge](#mid-turn-coalescing) said a running reply cannot wait for never use adaptive participation, so the agent answers that message once the reply ends.
+The judge decides once for all queued messages, so when new messages from two people were judged together, or a message was edited after the judgment, participation still decides.
 
 An agent that declines sends no reply; with `decline_reaction` set, it reacts once to the latest message of the turn.
 Choose the emoji with care, because 👍 can read as agreement with the message.
