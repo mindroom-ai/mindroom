@@ -691,7 +691,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         environment = environment.then(ToolEnvironment(values=given))
     # The egress broker's env goes over everything else, as the sandbox proxy puts it over a worker call's own.
     if (registered_toolkit, tool_name) == _SHELL_COMMAND and egress_broker_enabled(resolved_context.runtime_paths):
-        environment = environment.then(await _primary_shell_broker_environment(resolved_context, environment))
+        environment = environment.then(await _primary_shell_broker_environment(resolved_context))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -723,14 +723,10 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     return await answer(result, "error" if _answered_failure(result) else "success")
 
 
-async def _primary_shell_broker_environment(
-    resolved_context: _ResolvedToolContext,
-    environment: ToolEnvironment,
-) -> ToolEnvironment:
+async def _primary_shell_broker_environment(resolved_context: _ResolvedToolContext) -> ToolEnvironment:
     """Return the egress broker's env for a shell call of an agent that uses the broker and runs its shell here.
 
-    Empty for any other call, including one routed to a worker, which the sandbox proxy gives the env instead. The
-    broker env keeps the Git config entries the call's environment already sets.
+    Empty for any other call, including one routed to a worker, which the sandbox proxy gives the env instead.
     """
     agent_name = resolved_context.agent_name
     if agent_name is None:
@@ -738,17 +734,14 @@ async def _primary_shell_broker_environment(
     # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
     from mindroom.egress_broker.service import execution_env_for_primary_shell  # noqa: PLC0415
 
-    runtime_paths = resolved_context.runtime_paths
     # The agent's tools are resolved and the credential store read, so off the event loop.
-    values = await asyncio.to_thread(
+    return await asyncio.to_thread(
         execution_env_for_primary_shell,
-        runtime_paths,
+        resolved_context.runtime_paths,
         config=resolved_context.config,
         agent_name=agent_name,
         execution_identity=resolved_context.execution_identity,
-        call_env=environment.applied({}, runtime_paths.process_env),
     )
-    return ToolEnvironment(values=values)
 
 
 async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:

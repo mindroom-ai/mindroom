@@ -10,6 +10,7 @@ from urllib.parse import quote, urlsplit
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RuntimePaths
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
+from mindroom.tool_system.tool_environment import git_config_env
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ __all__ = [
     "EgressAgentScope",
     "apply_runner_ca_bundle",
     "broker_execution_env",
+    "broker_git_config",
     "broker_serves_primary_shell",
     "egress_agent_scope",
     "egress_broker_enabled",
@@ -198,39 +200,16 @@ def broker_execution_env(
         # Git/libcurl does not always send proxy credentials from HTTPS_PROXY userinfo on CONNECT, so
         # environment-backed Git config names the same proxy without writing user or global Git config.
         # It extends the call's env, never the primary's process env, whose Git config must not leak to workers.
-        **_git_config_env(call_env or {}, [("http.proxy", proxy), ("http.proxyAuthMethod", "basic")]),
+        **git_config_env(call_env or {}, broker_git_config(proxy)),
         BROKER_CA_PEM_ENV: ca_pem,
         "NODE_USE_ENV_PROXY": "1",
         **placeholder_env,
     }
 
 
-def _git_config_env(call_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
-    """Append entries to any well-formed environment-backed Git config.
-
-    A malformed incoming block is discarded so Git never receives an
-    inconsistent count/key/value set.
-    """
-    existing_entries: list[tuple[str, str]] = []
-    try:
-        existing_count = int(call_env.get("GIT_CONFIG_COUNT", "0"))
-    except ValueError:
-        existing_count = 0
-    if existing_count > 0:
-        for index in range(existing_count):
-            key = call_env.get(f"GIT_CONFIG_KEY_{index}")
-            value = call_env.get(f"GIT_CONFIG_VALUE_{index}")
-            if key is None or value is None:
-                existing_entries = []
-                break
-            existing_entries.append((key, value))
-
-    merged_entries = [*existing_entries, *entries]
-    env = {"GIT_CONFIG_COUNT": str(len(merged_entries))}
-    for index, (key, value) in enumerate(merged_entries):
-        env[f"GIT_CONFIG_KEY_{index}"] = key
-        env[f"GIT_CONFIG_VALUE_{index}"] = value
-    return env
+def broker_git_config(proxy: str) -> tuple[tuple[str, str], ...]:
+    """Return the Git config entries that send Git through the broker proxy `proxy` with its credentials."""
+    return (("http.proxy", proxy), ("http.proxyAuthMethod", "basic"))
 
 
 def primary_callback_hosts(runtime_paths: RuntimePaths) -> list[str]:

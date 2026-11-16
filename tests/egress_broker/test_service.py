@@ -58,6 +58,7 @@ from mindroom.egress_broker.user_services import (
 from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.plugins import ConfigPlugins
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -356,8 +357,8 @@ async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_thro
 ) -> None:
     """A shell command run in the primary dials the bound broker on loopback, never the worker-facing URL.
 
-    It trusts the broker CA through files in the primary's storage instead of the PEM variable workers get, and keeps
-    the Git config entries its call already carries.
+    It trusts the broker CA through files in the primary's storage instead of the PEM variable workers get, and its
+    Git config entries go after the ones the command already has.
     """
     port = free_port()
     runtime_paths = tmp_runtime_paths(
@@ -367,15 +368,15 @@ async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_thro
     )
     config = _primary_shell_config()
     save_secret(manager, worker_target(scope=None), "github", "s3cret")
-    call_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
+    command_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        env = execution_env_for_primary_shell(
+        environment = execution_env_for_primary_shell(
             runtime_paths,
             config=config,
             agent_name="code",
             execution_identity=tool_identity("@alice:example.org"),
-            call_env=call_env,
         )
+        env = environment.applied(command_env, {})
         response = await get_through(env)
 
     proxy = urlsplit(env["HTTPS_PROXY"])
@@ -402,14 +403,14 @@ async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_thro
     ("host", "url"),
     [
         pytest.param("0.0.0.0", "http://127.0.0.1:8768", id="ipv4-wildcard"),  # noqa: S104
-        pytest.param("::", "http://127.0.0.1:8768", id="ipv6-wildcard"),
+        pytest.param("::", "http://[::1]:8768", id="ipv6-wildcard"),
         pytest.param("127.0.0.1", "http://127.0.0.1:8768", id="loopback"),
         pytest.param("::1", "http://[::1]:8768", id="ipv6-loopback"),
         pytest.param("10.0.0.5", "http://10.0.0.5:8768", id="one-interface"),
     ],
 )
 def test_primary_commands_dial_the_bound_broker_address(host: str, url: str) -> None:
-    """A wildcard bind is reached on IPv4 loopback; any other bound address is dialed as it is."""
+    """A wildcard bind is reached on the loopback of its address family; any other bound address is dialed as it is."""
     settings = service._BrokerSettings(
         host=host,
         port=8768,
@@ -418,6 +419,36 @@ def test_primary_commands_dial_the_bound_broker_address(host: str, url: str) -> 
     )
 
     assert settings.primary_url == url
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])  # noqa: S104 - the wildcard binds primary commands dial
+@pytest.mark.asyncio
+async def test_primary_commands_connect_to_a_broker_bound_to_a_wildcard(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    host: str,
+) -> None:
+    """The loopback address a wildcard bind maps to accepts connections; a `::` listener takes only IPv6 here."""
+    if host == "::":
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind(("::1", 0))
+        except OSError:
+            pytest.skip("no IPv6 loopback")
+    port = free_port()
+    runtime_paths = tmp_runtime_paths(
+        MINDROOM_EGRESS_BROKER_PORT=str(port),
+        MINDROOM_EGRESS_BROKER_HOST=host,
+        MINDROOM_EGRESS_BROKER_URL=f"http://host.docker.internal:{port}",
+    )
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+        runtime = service._active.runtime
+        assert runtime is not None
+        url = urlsplit(runtime.primary_url)
+        assert url.port == port
+        _reader, writer = await asyncio.open_connection(url.hostname, url.port)
+        writer.close()
+        await writer.wait_closed()
 
 
 @pytest.mark.parametrize(
@@ -442,25 +473,21 @@ async def test_only_a_primary_shell_of_a_broker_agent_gets_the_primary_env(
     runtime_paths = tmp_runtime_paths(**_broker_env(free_port()), **sandbox_env)
     config = _primary_shell_config(**agent)
     identity = tool_identity("@alice:example.org")
-    assert (
-        execution_env_for_primary_shell(
-            runtime_paths,
-            config=_primary_shell_config(),
-            agent_name="code",
-            execution_identity=identity,
-            call_env={},
-        )
-        == {}
-    ), "the broker is not running"
+    stopped = execution_env_for_primary_shell(
+        runtime_paths,
+        config=_primary_shell_config(),
+        agent_name="code",
+        execution_identity=identity,
+    )
+    assert stopped == ToolEnvironment(), "the broker is not running"
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        env = execution_env_for_primary_shell(
+        environment = execution_env_for_primary_shell(
             runtime_paths,
             config=config,
             agent_name="code",
             execution_identity=identity,
-            call_env={},
         )
-    assert env == {}
+    assert environment == ToolEnvironment()
 
 
 @pytest.mark.asyncio
@@ -480,14 +507,13 @@ async def test_a_primary_shell_runs_without_the_broker_env_when_building_it_fail
     monkeypatch.setattr(service, "resolve_agent_execution", unresolvable)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         with capture_logs() as logs:
-            env = execution_env_for_primary_shell(
+            environment = execution_env_for_primary_shell(
                 runtime_paths,
                 config=config,
                 agent_name="code",
                 execution_identity=None,
-                call_env={},
             )
-    assert env == {}
+    assert environment == ToolEnvironment()
     assert [log["error_type"] for log in logs if log["event"] == "egress_broker_primary_shell_env_failed"] == [
         "ValueError",
     ]

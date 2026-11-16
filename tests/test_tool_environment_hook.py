@@ -369,12 +369,13 @@ async def test_the_egress_proxy_a_worker_call_gets_wins_over_a_hook(
     assert await shell.run(_registry(proxy), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
 
 
-@pytest.mark.asyncio
-async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_env(tmp_path: Path) -> None:
-    """A shell that runs in the primary reaches the broker on loopback and trusts it through files, like a worker does.
-
-    The worker-facing URL is not used, since it may not resolve on the primary's host, and the CA PEM stays out.
-    """
+async def _run_in_agent_keys_primary_shell(
+    tmp_path: Path,
+    command: str,
+    process_env: dict[str, str] | None = None,
+    **shell_settings: str,
+) -> tuple[str, int]:
+    """Run `command` in the primary shell of an Agent Keys agent with a running broker; return its line and port."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -387,6 +388,7 @@ async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_en
             "MINDROOM_EGRESS_BROKER_PORT": str(port),
             "MINDROOM_EGRESS_BROKER_HOST": "127.0.0.1",
             "MINDROOM_EGRESS_BROKER_URL": f"http://host.docker.internal:{port}",
+            **(process_env or {}),
         },
     )
     config = Config(
@@ -408,25 +410,55 @@ async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_en
         "shell",
         runtime_paths,
         runs_in_worker=False,
+        tool_config_overrides=shell_settings or None,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
     shell = _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
-    command = (
-        'printf "%s|%s|%s|%s" "${HTTPS_PROXY##*@}" "${GH_TOKEN-unset}" '
-        '"$(test -s "$SSL_CERT_FILE" && test -s "$NODE_EXTRA_CA_CERTS" && echo files)" '
-        '"${MINDROOM_EGRESS_BROKER_CA_PEM-unset}"'
-    )
-
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         outcome = await shell.call(
             HookRegistry.empty(),
             {"args": ["bash", "-c", command]},
             policy=detached_policy(HookRegistry.empty(), config=config, runtime_paths=runtime_paths),
         )
-
     assert not outcome.is_error, outcome.content
-    assert outcome.content.rsplit("\n", 1)[-1] == f"127.0.0.1:{port}|mindroom-brokered|files|unset"
+    return outcome.content.rsplit("\n", 1)[-1], port
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_env(tmp_path: Path) -> None:
+    """A shell that runs in the primary reaches the broker on loopback and trusts it through files, like a worker does.
+
+    The worker-facing URL is not used, since it may not resolve on the primary's host, and the CA PEM stays out.
+    """
+    command = (
+        'printf "%s|%s|%s|%s" "${HTTPS_PROXY##*@}" "${GH_TOKEN-unset}" '
+        '"$(test -s "$SSL_CERT_FILE" && test -s "$NODE_EXTRA_CA_CERTS" && echo files)" '
+        '"${MINDROOM_EGRESS_BROKER_CA_PEM-unset}"'
+    )
+
+    line, port = await _run_in_agent_keys_primary_shell(tmp_path, command)
+
+    assert line == f"127.0.0.1:{port}|mindroom-brokered|files|unset"
+
+
+@pytest.mark.asyncio
+async def test_the_broker_s_git_config_goes_after_the_git_config_the_shell_settings_pass(tmp_path: Path) -> None:
+    """Git config the shell's `extra_env_passthrough` hands a primary command survives the broker's own entries."""
+    git_config = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.sshCommand", "GIT_CONFIG_VALUE_0": "ssh -i key"}
+    command = (
+        'printf "%s|%s|%s|%s|%s" "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" '
+        '"$GIT_CONFIG_KEY_1" "$GIT_CONFIG_KEY_2"'
+    )
+
+    line, _port = await _run_in_agent_keys_primary_shell(
+        tmp_path,
+        command,
+        git_config,
+        extra_env_passthrough="GIT_CONFIG_*",
+    )
+
+    assert line == "3|core.sshCommand|ssh -i key|http.proxy|http.proxyAuthMethod"
 
 
 @pytest.mark.asyncio

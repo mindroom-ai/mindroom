@@ -41,7 +41,7 @@ Set these on the primary runtime to enable the broker:
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
-A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is a wildcard address (`0.0.0.0` or `::`), and at the bound address otherwise.
+A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is `0.0.0.0`, at `http://[::1]:<port>` when it is `::`, and at the bound address otherwise.
 
 When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
 Keys and accounts can only be entered while the port is set.

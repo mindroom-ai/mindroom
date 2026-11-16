@@ -22,6 +22,7 @@ from mindroom.egress_broker.env import (
     BROKER_CA_PEM_ENV,
     apply_runner_ca_bundle,
     broker_execution_env,
+    broker_git_config,
     broker_serves_primary_shell,
     egress_broker_enabled,
     personal_page_served,
@@ -53,6 +54,7 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
 )
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import normal_worker_key
 from mindroom.worker_computer.browser_proxy import browser_egress, proxy_env_setting
 
@@ -80,8 +82,9 @@ logger = get_logger(__name__)
 
 _THREAD_NAME = "mindroom-egress-broker"
 _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the container or pod network
-# Bind addresses that listen on every interface, loopback included, which primary commands then dial.
-_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})  # noqa: S104
+# Each wildcard bind address and the loopback address primary commands dial for it: a listener bound to `::` takes
+# only IPv6 here, so it is reached on `::1`, never `127.0.0.1`.
+_WILDCARD_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
 _STOP_TIMEOUT_SECONDS = 5.0
 # OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
@@ -100,7 +103,7 @@ class _BrokerSettings:
     @property
     def primary_url(self) -> str:
         """Return where the primary's own commands reach the bound broker, since the worker-facing `url` may not."""
-        host = "127.0.0.1" if self.host in _WILDCARD_HOSTS else self.host
+        host = _WILDCARD_LOOPBACK.get(self.host, self.host)
         return f"http://[{host}]:{self.port}" if ":" in host else f"http://{host}:{self.port}"
 
 
@@ -558,38 +561,41 @@ def execution_env_for_primary_shell(
     config: Config,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
-    call_env: Mapping[str, str],
-) -> dict[str, str]:
+) -> ToolEnvironment:
     """Return the broker env for one shell call that runs in the primary, as a worker-routed call gets it.
 
     Empty unless the broker is running and `agent_name` uses it with a shell that runs in the primary. The proxy is
-    the broker's loopback URL and the CA the files materialized at start, never the PEM variable.
-    `call_env` is the env the call already carries, whose Git config entries are kept.
+    the broker's loopback URL and the CA the files materialized at start, never the PEM variable. The broker's Git
+    config comes as entries the shell appends to the command's own, whatever sets them.
     The call runs without the broker env when building it fails.
     """
     runtime = _active.runtime
     if runtime is None:
-        return {}
+        return ToolEnvironment()
     try:
         if not broker_serves_primary_shell(config, agent_name, runtime_paths):
-            return {}
+            return ToolEnvironment()
         worker_target = resolve_agent_execution(agent_name, config, runtime_paths, execution_identity).worker_target
         env = _execution_env(
             runtime,
             runtime_paths,
             config,
             worker_target,
-            call_env=call_env,
+            call_env=None,
             broker_url=runtime.primary_url,
         )
     except Exception as exc:
         # Config, credential-store, and identity resolution can raise anything; the shell command still runs.
         logger.warning("egress_broker_primary_shell_env_failed", agent=agent_name, error_type=type(exc).__name__)
-        return {}
+        return ToolEnvironment()
     if not env:
-        return {}
+        return ToolEnvironment()
     env.pop(BROKER_CA_PEM_ENV)
-    return {**env, **runtime.primary_ca_env}
+    values = {name: value for name, value in env.items() if not name.startswith("GIT_CONFIG_")}
+    return ToolEnvironment(
+        values={**values, **runtime.primary_ca_env},
+        git_config=broker_git_config(env["HTTPS_PROXY"]),
+    )
 
 
 def _execution_env(

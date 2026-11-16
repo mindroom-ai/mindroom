@@ -5695,6 +5695,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.tool_environment",
     "mindroom.workers.backend_kinds",
     "mindroom.tls_trust",
 ]
