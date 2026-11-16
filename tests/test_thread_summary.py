@@ -910,28 +910,61 @@ class TestMaybeGenerateThreadSummary:
         assert not _sent_summaries(self.client)
         assert self._count() == 0
 
-    @pytest.mark.parametrize("trusted_echo", [True, False])
-    async def test_provisional_voice_title_ignores_only_trusted_transcript_echo(self, trusted_echo: bool) -> None:
-        """The router publishes its voice echo before dispatch; that echo is not a second prompt."""
-        model = self._summarizer(*([_title("Trip plan")] if trusted_echo else []))
+    @pytest.mark.parametrize("second", ["router_voice_echo", "router_relay", "agent_reply", "human"])
+    async def test_provisional_title_ignores_only_mindroom_entity_messages(self, second: str) -> None:
+        """The router's voice echo or relay and an agent's reply in progress are not a second prompt; a person's is."""
+        config = Config(
+            agents={"helper": {"display_name": "Helper"}},
+            defaults={"thread_summary_first_threshold": 5},
+        )
+        persist_entity_accounts(config, self.rp)
+        (agent_id,) = current_internal_sender_ids(config, self.rp) - {_ROUTER}
+        sender = {"agent_reply": agent_id, "human": "@human:localhost"}.get(second, _ROUTER)
+        content: dict[str, Any] = {"body": "Voice transcript"}
+        if second == "router_voice_echo":
+            content[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
+        is_new_thread = second != "human"
+        model = self._summarizer(*([_title("Trip plan")] if is_new_thread else []))
         self._history(
             [
                 *_make_thread_history(1),
                 ResolvedVisibleMessage.synthetic(
-                    sender=_ROUTER if trusted_echo else "@human:localhost",
+                    sender=sender,
                     body="Voice transcript",
-                    event_id="$echo",
+                    event_id="$second",
                     timestamp=1800000000,
                     thread_id=_THREAD,
-                    content={"body": "Voice transcript", VISIBLE_ROUTER_VOICE_ECHO_KEY: True},
+                    content=content,
                 ),
             ],
         )
-        await self._provisional("Transcribed trip request")
-        assert len(model.requests) == int(trusted_echo)
-        if trusted_echo:
+        await self._provisional("Transcribed trip request", config=config)
+        assert len(model.requests) == int(is_new_thread)
+        if is_new_thread:
             assert "Transcribed trip request" in _prompt(model.requests[0])
             assert "Voice transcript" not in _prompt(model.requests[0])
+
+    async def test_provisional_title_skips_thread_this_process_already_summarized(self) -> None:
+        """A recorded baseline means the after-reply pass titled the thread, even before its notice syncs back."""
+        self.baselines.record(_ROOM, _THREAD, 2)
+        model = self._summarizer()
+        self._history(_make_thread_history(1))
+
+        await self._provisional()
+
+        assert not model.requests
+        assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_runs_once_per_thread_in_process(self) -> None:
+        """A later responder in this process never titles the thread again, even before the first title syncs back."""
+        model = self._summarizer(_title("Trip plan"), _title("Trip plan again"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional()
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert len(_sent_summaries(self.client)) == 1
 
     async def test_pinned_thread_skips_generation_and_advances_baseline(self) -> None:
         """A pinned thread past the threshold must not call the LLM, and bailing advances the baseline.

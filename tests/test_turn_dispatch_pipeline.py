@@ -2730,16 +2730,17 @@ class TestAgentBot(AgentBotTestBase):
         await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("voice", [False, True])
-    @pytest.mark.parametrize("plan_kind", ["ignore", "route", "respond"])
+    @pytest.mark.parametrize("prompt_kind", ["text", "voice_transcript", "raw_audio_fallback"])
+    @pytest.mark.parametrize("action", ["ignore", "route", "individual", "team", "skip", "reject"])
     async def test_prompt_title_is_queued_before_execution_without_waiting(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
-        voice: bool,
-        plan_kind: Literal["ignore", "route", "respond"],
+        prompt_kind: Literal["text", "voice_transcript", "raw_audio_fallback"],
+        action: Literal["ignore", "route", "individual", "team", "skip", "reject"],
     ) -> None:
-        """Reply and routing plans queue raw prompts without waiting; ignored turns never title threads."""
+        """Turns that will be answered queue their prompt without waiting; others, and untranscribed audio, never do."""
+        voice = prompt_kind != "text"
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -2773,7 +2774,12 @@ class TestAgentBot(AgentBotTestBase):
         )
         started = asyncio.Event()
         release = asyncio.Event()
-        plan = DispatchPlan(kind=plan_kind)
+        plan = (
+            DispatchPlan(kind=action)
+            if action in {"ignore", "route"}
+            else DispatchPlan(kind="respond", response_action=ResponseAction(kind=action))
+        )
+        queued = action in {"route", "individual", "team"} and prompt_kind != "raw_audio_fallback"
         replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
 
         async def summarize(*_args: object, **kwargs: object) -> None:
@@ -2783,7 +2789,7 @@ class TestAgentBot(AgentBotTestBase):
             await release.wait()
 
         async def execute(*_args: object, **_kwargs: object) -> None:
-            if plan_kind != "ignore":
+            if queued:
                 await asyncio.wait_for(started.wait(), timeout=1)
                 assert not release.is_set()
 
@@ -2801,12 +2807,15 @@ class TestAgentBot(AgentBotTestBase):
                     room,
                     event,
                     event.sender,
-                    payload_metadata=DispatchPayloadMetadata(voice_transcript=voice),
+                    payload_metadata=DispatchPayloadMetadata(
+                        voice_transcript=prompt_kind == "voice_transcript",
+                        raw_audio_fallback=prompt_kind == "raw_audio_fallback",
+                    ),
                     coalescing_key=requester_coalescing_key(room.room_id, "$prompt", event.sender),
                 )
-                if plan_kind == "ignore":
-                    summary.assert_not_called()
-                else:
+                if queued:
                     summary.assert_awaited_once()
+                else:
+                    summary.assert_not_called()
             finally:
                 release.set()

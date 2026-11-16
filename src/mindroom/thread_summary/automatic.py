@@ -6,10 +6,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
+from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.thread_summary.notices import (
@@ -329,10 +329,15 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     membership_index: AgentReplyMembershipIndex,
 ) -> None:
     """Title a new thread from its prompt without advancing the post-reply schedule."""
-    if not prompt.strip():
+    baselines = schedule.THREAD_SUMMARY_BASELINES
+    if not prompt.strip() or not baselines.claim_provisional_title(room_id, thread_id):
         return
     try:
-        async with schedule.THREAD_SUMMARY_BASELINES.lock(room_id, thread_id):
+        async with baselines.lock(room_id, thread_id):
+            # A baseline means this process already summarized the thread, maybe
+            # before that notice reached any history read.
+            if baselines.count(room_id, thread_id) > 0:
+                return
             # Other bots may have sent a title that this client's sync has not
             # echoed yet. Rewalk under the shared lock before claiming absence.
             history = await refetched_thread_history(
@@ -360,14 +365,13 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             )
             if state is None:
                 return
-            # Voice readiness publishes the router's transcript before dispatch.
-            # It repeats the prompt; only this eligibility check excludes it.
+            # The router's voice echo and routing relay, and a responder's reply
+            # placeholder, can land before this read; none is a second prompt.
             ordinary = [
                 message
                 for message in state.ordinary_messages
-                if not (
-                    message.sender in trusted_sender_ids and message.content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
-                )
+                if message.event_id == prompt_event_id
+                or not is_managed_entity_id(message.sender, config, runtime_paths)
             ]
             if (
                 state.summary_event_ids

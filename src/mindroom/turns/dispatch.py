@@ -341,7 +341,10 @@ class TurnDispatcher:
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
-                if plan.kind != "ignore":
+                # Only a turn someone will answer: routed, or answered by this agent or its team.
+                if plan.kind == "route" or (
+                    plan.response_action is not None and plan.response_action.kind in {"individual", "team"}
+                ):
                     self._queue_prompt_summary(prepared)
                 await self._apply_turn_plan(
                     turn.room,

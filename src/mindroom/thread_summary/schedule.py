@@ -23,7 +23,7 @@ _PREQUEUE_CONCURRENCY_MARGIN = 2
 
 @dataclass
 class _ThreadSummaryBaselines:
-    """Each thread's summarized message count and summary-write lock, shared by every bot in the process.
+    """Each thread's summarized count, summary-write lock, and prompt-title claim, shared by every bot in the process.
 
     A count only rises, and the trusted notices in a thread's history restore it after a restart.
     """
@@ -33,6 +33,14 @@ class _ThreadSummaryBaselines:
         default_factory=lambda: defaultdict(asyncio.Lock),
         init=False,
     )
+    _provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
+
+    def claim_provisional_title(self, room_id: str, thread_id: str) -> bool:
+        """Claim one thread's single prompt-only title attempt, so only the first responder in the process makes it."""
+        if (room_id, thread_id) in self._provisional_titles:
+            return False
+        self._provisional_titles.add((room_id, thread_id))
+        return True
 
     def lock(self, room_id: str, thread_id: str) -> asyncio.Lock:
         """Return the lock every summary write to one thread holds."""
