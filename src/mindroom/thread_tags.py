@@ -168,7 +168,6 @@ class SetThreadTagsIfEmptyResult:
 
     had_existing_tags: bool
     applied_tags: tuple[str, ...]
-    failed_tags: tuple[str, ...]
     skipped_due_to_prior_mutation: bool = False
 
 
@@ -934,18 +933,18 @@ async def set_thread_tags_if_empty(
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=True,
                 applied_tags=(),
-                failed_tags=(),
             )
         if normalized_thread_root_id in snapshot.observed_thread_root_ids:
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=False,
                 applied_tags=(),
-                failed_tags=(),
                 skipped_due_to_prior_mutation=True,
             )
 
         applied_tags: list[str] = []
         failed_tags: list[str] = []
+        first_failure: Exception | None = None
+        refusal: ThreadTagsPermissionError | None = None
         for tag in tags:
             try:
                 await _set_thread_tag_under_lock(
@@ -955,21 +954,29 @@ async def set_thread_tags_if_empty(
                     tag,
                     set_by=normalized_set_by,
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to write conditional thread tag",
-                    room_id=room_id,
-                    thread_root_id=normalized_thread_root_id,
-                    tag=tag,
-                )
+            except ThreadTagsPermissionError as exc:
+                # Power levels that refuse the write refuse every tag, checked before a tag is written; the caller decides.
+                refusal = exc
+                break
+            except Exception as exc:
+                first_failure = first_failure or exc
                 failed_tags.append(tag)
             else:
                 applied_tags.append(tag)
+        if first_failure is not None:
+            logger.error(
+                "Failed to write automatic thread tags",
+                room_id=room_id,
+                thread_root_id=normalized_thread_root_id,
+                tags=failed_tags,
+                exc_info=first_failure,
+            )
+        if refusal is not None:
+            raise refusal
 
         return SetThreadTagsIfEmptyResult(
             had_existing_tags=False,
             applied_tags=tuple(applied_tags),
-            failed_tags=tuple(failed_tags),
         )
 
 

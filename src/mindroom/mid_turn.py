@@ -90,9 +90,14 @@ class MidTurnGate:
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
+    # Receives the messages, as the judge read them, the reply wraps up for.
+    on_stop: Callable[[tuple[QueuedMessage, ...]], None] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
+    # Messages, as they read then, in a queue that could wait, and those this reply's verdicts say it cannot wait for.
+    _waited: set[QueuedMessage] = field(default_factory=set)
+    _stopping: set[QueuedMessage] = field(default_factory=set)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
@@ -153,7 +158,7 @@ class MidTurnGate:
         async with self._lock:
             if judge and self._checked == pending:
                 return self._finish
-            finish = False
+            finish = stops = False
             # An earlier judgment weighed the work that ran then, not a reply that only waits on jobs.
             request = self._request(pending) if judge else "only_waiting_on_jobs"
             if isinstance(request, str):
@@ -167,7 +172,7 @@ class MidTurnGate:
                         # Logged without the exception, whose SDK message can contain private inputs.
                         reason = "judge_error"
                     else:
-                        finish = verdict is True
+                        finish, stops = verdict is True, verdict is False
                         reason = "no_answer" if verdict is None else None
             if reason is not None:
                 # Unjudged, the reply wraps up, unless only other people's messages to nobody in particular wait.
@@ -178,8 +183,23 @@ class MidTurnGate:
                     queued_messages=len(pending),
                     outcome="waits" if finish else "wraps_up",
                 )
+            if finish:
+                self._waited.update(pending)
+                self._stopping.difference_update(pending)
+            elif stops and self._stopping.isdisjoint(pending):
+                # One verdict covers the whole queue, so it names the messages the judge has not let wait (as they read
+                # then, so an edit of one can count) only when one person sent them all and no earlier verdict's
+                # message, still waiting, already explains it.
+                fresh = [message for message in pending if message not in self._waited]
+                if len({message.requester_id for message in fresh}) == 1:
+                    self._stopping.update(fresh)
             self._checked, self._finish = pending, finish
             return finish
+
+    def report_stop(self) -> None:
+        """Hand ``on_stop`` the messages, as the judge read them, that this reply's verdicts say it cannot wait for."""
+        if self.on_stop is not None and self._stopping:
+            self.on_stop(tuple(self._stopping))
 
     def _sender_label(self, message: QueuedMessage) -> str:
         """Name the sender by role only, so no user ID reaches the judge."""
