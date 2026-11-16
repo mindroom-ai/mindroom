@@ -67,7 +67,7 @@ _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
 # Bind the unsupported claim to the named kind, not to other (possibly supported) kinds elsewhere in the error.
 _CAPABILITY_GAP_ERRORS = {
     kind: re.compile(
-        rf"\b(?:(?:does not|doesn't) support|no endpoints found that support|unsupported) (?:inputs? )?{name}\b"
+        rf"\b(?:(?:does not|doesn't) support|no endpoints found that support) (?:inputs? )?{name}\b"
         rf"|\b(?:input )?{name}(?: inputs?)? (?:is |are )?not supported\b"
         rf"|\b{name}(?: inputs?)? is only supported by certain models\b",
     )

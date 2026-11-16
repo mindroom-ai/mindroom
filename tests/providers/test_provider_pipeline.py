@@ -693,6 +693,29 @@ async def test_media_learning_requires_a_named_capability_gap_not_an_input_error
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "removed"),
+    [("Unsupported file", "file"), ("Unsupported image type", "image")],
+)
+async def test_unsupported_payload_retries_only_named_kind_without_learning(error: str, removed: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    retry = inner.requests[1].messages[0]
+    assert retry.images == (None if removed == "image" else [_image()])
+    assert retry.files == (None if removed == "file" else [_REPORT])
+    assert retry.audio == [_CLIP]
+    subsequent = inner.requests[2].messages[0]
+    assert subsequent.images == [_image()]
+    assert subsequent.files == [_REPORT]
+    assert subsequent.audio == [_CLIP]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("end", ["failed", "visible", "closed", "cancelled"])
 async def test_unsuccessful_kind_retry_does_not_teach_capabilities(end: str) -> None:
     rejection = _rejection(message="This model does not support audio input")
