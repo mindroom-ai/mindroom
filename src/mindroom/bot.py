@@ -161,7 +161,7 @@ __all__ = ["AgentBot", "create_bot_for_entity"]
 # Constants
 # Matrix long-poll timeout. Every sync response, even an empty one, commits the
 # durable store several times, so a short poll costs idle agents disk syncs on
-# the event loop. Stop and restart do not wait for it: quiescing cancels the poll.
+# the event loop. Stop, restart, and reload cancel a pending poll, never wait for it.
 _SYNC_TIMEOUT_MS = 30_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
