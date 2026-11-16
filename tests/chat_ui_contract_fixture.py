@@ -227,7 +227,8 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             msg = f"Chat UI contract case {case_id!r} failed to emit: {result!r}"
             raise RuntimeError(msg)
         exported: dict[str, object] = {"id": case_id, "event": _contract_event(context, event_id)}
-        if case.argument in {"update", "shared", "inline", "page"}:
+        # A page preview is checked as first shown, so the client reads its raw presentation and width.
+        if case.argument in {"update", "shared", "inline"}:
             edit_id = f"{event_id}-edit"
             update = json.loads(await _update_contract_canvas(context, exported["event"], edit_id))  # type: ignore[arg-type]
             if update.get("status") != "ok" or update.get("revision_event_id") != edit_id:
