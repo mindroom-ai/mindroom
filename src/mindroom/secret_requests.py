@@ -45,6 +45,14 @@ class KeyTarget:
     hosts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class TemporaryTarget:
+    """An answer becomes the variable `name` of `holder`'s shell commands, for as long as the requester keeps it."""
+
+    name: str
+    holder: SecretHolder
+
+
 @dataclass
 class PendingSecretRequest:
     """One open request for a secret, awaiting the requester's answer."""
@@ -53,9 +61,11 @@ class PendingSecretRequest:
     room_id: str
     requester_id: str
     agent_name: str
-    target: KeyTarget
+    target: KeyTarget | TemporaryTarget
     expires_at: float
     outcome: asyncio.Future[SecretRequestOutcome]
+    # How the requester keeps a temporary secret, set by the answer that gave it.
+    kept: SecretKeep | None = None
     claimed: bool = False
     # Set while no answer is being saved, so the waiting tool stops waiting for one whose save failed.
     claim_released: asyncio.Event = field(default_factory=asyncio.Event)
@@ -73,7 +83,7 @@ class _SecretRequestRegistry:
         room_id: str,
         requester_id: str,
         agent_name: str,
-        target: KeyTarget,
+        target: KeyTarget | TemporaryTarget,
         now: float,
     ) -> PendingSecretRequest:
         """Create and store a pending request that expires after the TTL."""
@@ -151,6 +161,17 @@ def secret_request_body(
     return f"🔑 {display_name} key request expired."
 
 
+def temporary_secret_body(status: SecretRequestStatus, *, agent_display_name: str, name: str) -> str:
+    """Return the plain-text fallback body for a temporary secret's card in `status`."""
+    if status == "pending":
+        return f"🔑 {agent_display_name} asks for a secret ({name}). Open MindRoom Chat to enter it."
+    if status == "saved":
+        return "🔑 Secret received."
+    if status == "declined":
+        return "🔑 Secret request declined."
+    return "🔑 Secret request expired."
+
+
 def secret_request_content(
     request: PendingSecretRequest,
     *,
@@ -158,17 +179,29 @@ def secret_request_content(
     reason: str,
     status: SecretRequestStatus,
 ) -> dict[str, object]:
-    """Return the `io.mindroom.secret_request` object: metadata only, never a value."""
-    return {
-        "request_id": request.request_id,
-        "requester_id": request.requester_id,
-        "service": request.target.service,
-        "display_name": display_name,
-        "hosts": list(request.target.hosts),
-        "reason": reason,
-        "status": status,
-        "expires_at": int(request.expires_at * 1000),
-    }
+    """Return the `io.mindroom.secret_request` object: metadata only, never a value.
+
+    A temporary secret's card has no service fields, so a client that knows only key cards reads none in it; it
+    names the variable, the keeps the requester chooses from with their lifetimes in seconds, and, once answered, the
+    keep chosen.
+    """
+    content: dict[str, object] = {"request_id": request.request_id, "requester_id": request.requester_id}
+    target = request.target
+    if isinstance(target, TemporaryTarget):
+        content["env"] = target.name
+    else:
+        content |= {"service": target.service, "display_name": display_name, "hosts": list(target.hosts)}
+    content |= {"reason": reason, "status": status, "expires_at": int(request.expires_at * 1000)}
+    if isinstance(target, TemporaryTarget):
+        content["keep"] = dict(TEMPORARY_SECRET_KEEP_SECONDS)
+        if request.kept is not None:
+            content["kept"] = request.kept
+    return content
+
+
+def secret_request_log_fields(target: KeyTarget | TemporaryTarget) -> dict[str, str]:
+    """Return what a log line says a request asks for: a service's key, or a variable."""
+    return {"variable": target.name} if isinstance(target, TemporaryTarget) else {"service": target.service}
 
 
 @dataclass(frozen=True)

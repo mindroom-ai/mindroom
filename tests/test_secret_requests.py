@@ -14,12 +14,14 @@ from mindroom.secret_requests import (
     TEMPORARY_SECRET_KEEP_SECONDS,
     KeyTarget,
     SecretHolder,
+    TemporaryTarget,
     _SecretRequestRegistry,
     _TemporarySecrets,
     secret_holder,
     secret_request_body,
     secret_request_content,
     secret_request_registry,
+    temporary_secret_body,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.egress_broker.conftest import worker_target
@@ -278,3 +280,42 @@ def test_an_unreadable_file_is_deleted_not_fatal(tmp_path: Path) -> None:
 
     assert _TemporarySecrets().values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
     assert _files(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_temporary_content_has_no_service_fields() -> None:
+    """A temporary card names its variable and the keeps to choose from, so an older Chat reads no key card in it."""
+    request = _SecretRequestRegistry().register(
+        room_id=ROOM,
+        requester_id="@alice:example.org",
+        agent_name="code",
+        target=TemporaryTarget(name="SUDO_PASSWORD", holder=HOLDER),
+        now=1000.0,
+    )
+
+    pending = secret_request_content(request, display_name="", reason="To restart nginx.", status="pending")
+    request.kept = "disk"
+    saved = secret_request_content(request, display_name="", reason="To restart nginx.", status="saved")
+
+    assert pending == {
+        "request_id": request.request_id,
+        "requester_id": "@alice:example.org",
+        "env": "SUDO_PASSWORD",
+        "reason": "To restart nginx.",
+        "status": "pending",
+        "expires_at": int(request.expires_at * 1000),
+        "keep": {"memory": 900, "disk": 86400},
+    }
+    assert saved == {**pending, "status": "saved", "kept": "disk"}
+
+
+def test_temporary_bodies() -> None:
+    """Each status of a temporary card has its body text, which never says a key was saved."""
+    kwargs = {"agent_display_name": "Code", "name": "SUDO_PASSWORD"}
+    assert (
+        temporary_secret_body("pending", **kwargs)
+        == "🔑 Code asks for a secret (SUDO_PASSWORD). Open MindRoom Chat to enter it."
+    )
+    assert temporary_secret_body("saved", **kwargs) == "🔑 Secret received."
+    assert temporary_secret_body("declined", **kwargs) == "🔑 Secret request declined."
+    assert temporary_secret_body("expired", **kwargs) == "🔑 Secret request expired."

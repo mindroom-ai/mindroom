@@ -21,9 +21,12 @@ from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
+    TemporaryTarget,
     secret_request_body,
     secret_request_content,
+    secret_request_log_fields,
     secret_request_registry,
+    temporary_secret_body,
 )
 from mindroom.tool_jobs.control import current_job_id, job_checkpoint
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -52,7 +55,7 @@ class SecretRequestCard:
     requester_id: str
     agent_display_name: str
     reason: str
-    target: KeyTarget
+    target: KeyTarget | TemporaryTarget
     # A key card's service as people read its name.
     display_name: str = ""
 
@@ -66,7 +69,14 @@ class SecretRequestCard:
         latest_thread_event_id: str | None = None,
     ) -> dict[str, Any]:
         """Return the card's message content in `status`, in the thread when `thread_id` is given."""
-        body = secret_request_body(status, agent_display_name=self.agent_display_name, display_name=self.display_name)
+        if isinstance(self.target, TemporaryTarget):
+            body = temporary_secret_body(status, agent_display_name=self.agent_display_name, name=self.target.name)
+        else:
+            body = secret_request_body(
+                status,
+                agent_display_name=self.agent_display_name,
+                display_name=self.display_name,
+            )
         metadata = secret_request_content(request, display_name=self.display_name, reason=self.reason, status=status)
         return build_message_content(
             body,
@@ -149,8 +159,8 @@ async def ask_with_card(
             "secret_request_posted",
             request_id=request.request_id,
             agent=agent_name,
-            service=card.target.service,
             room_id=context.room_id,
+            **secret_request_log_fields(card.target),
         )
         await _await_outcome(context, delivered.event_id, card, request)
     finally:
