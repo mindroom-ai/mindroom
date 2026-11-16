@@ -910,6 +910,19 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 1
         assert not _sent_summaries(self.client)
 
+    async def test_provisional_title_skips_thread_resolved_during_generation(self) -> None:
+        """Resolution lives in room state, so a thread resolved while the model ran must not get the title."""
+
+        async def resolve_meanwhile() -> None:
+            self.room_state.tag(_THREAD, "resolved")
+
+        model = self._summarizer(Await(resolve_meanwhile))
+        self._history(_make_thread_history(1))
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+
     async def test_provisional_title_generation_failure_is_contained(self) -> None:
         """A failing title model cannot propagate into the reply path or advance its schedule."""
 

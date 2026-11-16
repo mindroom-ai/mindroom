@@ -407,7 +407,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
             )
-            if state is None or state.summary_event_ids:
+            # Resolution lives in room state, which the history re-read cannot see,
+            # so a thread resolved while the model ran is checked again here.
+            if state is None or state.summary_event_ids or await _thread_is_resolved(client, room_id, thread_id):
                 return
             await send_thread_summary_notice(
                 client,
