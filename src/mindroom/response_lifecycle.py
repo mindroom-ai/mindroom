@@ -887,21 +887,39 @@ class ResponseLifecycle:
         self.pipeline_timing = pipeline_timing
         # How the last finalization settled the turn; None until one ran.
         self._turn_end: TurnOutcome | Literal["paused"] | None = None
-        # Holds the working directory start_turn's hooks chose until the scope of ``turn`` ends.
+        # Holds the working directory start_turn bound until the scope of ``turn`` ends.
         self._workdir_scope = ExitStack()
 
-    async def start_turn(self, *, resumed: bool, work_in: Callable[[str], AbstractContextManager[None]]) -> None:
+    async def start_turn(
+        self,
+        *,
+        resumed: bool,
+        work_in: Callable[[str], AbstractContextManager[None]],
+        paused_workdir: str | None = None,
+    ) -> None:
         """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it, in the scope of ``turn``.
 
-        An agent's turn then runs its tools in the directory its hooks asked for until that scope ends; a team's turn
-        ignores the request. ``work_in`` returns the scope that binds a directory of the agent's workspace for the
-        turn's tools, and raises ``ValueError`` or ``OSError`` for one the turn cannot work in.
+        An agent's turn then runs its tools in the directory its ``turn:started`` hooks asked for until that scope
+        ends; a team's turn ignores the request. A resumed turn works in ``paused_workdir``, where its paused part
+        worked, whatever its hooks ask: its approver decided calls proposed there, so when it can no longer work
+        there this raises ``RuntimeError`` naming the directory, before any hook runs, instead of running them
+        elsewhere. ``work_in`` returns the scope that binds a directory of the agent's workspace for the turn's
+        tools, and raises ``ValueError`` or ``OSError`` for one the turn cannot work in.
         Call it inside the scope of ``turn``, whose end unsets the directory.
         """
-        context = await self.deps.response_hooks._emit_turn_event(
-            EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
-            self.identity,
-        )
+        if resumed:
+            if paused_workdir is not None:
+                try:
+                    self._workdir_scope.enter_context(work_in(paused_workdir))
+                except (ValueError, OSError) as error:
+                    msg = (
+                        "The approved calls did not run: the turn's working directory "
+                        f"`{paused_workdir}` can no longer be used ({error})."
+                    )
+                    raise RuntimeError(msg) from error
+            await self.deps.response_hooks._emit_turn_event(EVENT_TURN_RESUMED, self.identity)
+            return
+        context = await self.deps.response_hooks._emit_turn_event(EVENT_TURN_STARTED, self.identity)
         requested = None if context is None else context.workdir
         if requested is None:
             return
@@ -925,8 +943,7 @@ class ResponseLifecycle:
         How the block's finalization settled the turn decides the event; a block that raised before any finalization
         ends the turn cancelled for a cancellation and failed for an error. A turn with an approval, paused or resumed,
         ends when that approval ends, whose settlement emits ``turn:ended``. The working directory ``start_turn`` set
-        is unset when the block ends, however it ends, so a later turn of the task, or this one resumed, starts in its
-        workspace.
+        is unset when the block ends, however it ends, so a later turn of the task starts in its workspace.
         """
         cancelled = False
         try:

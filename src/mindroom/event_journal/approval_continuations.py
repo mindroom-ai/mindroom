@@ -217,6 +217,9 @@ class ApprovalContinuation:
     correlation_id: str | None = None
     # The paused turn's ID, which its resumed run keeps.
     turn_id: str = field(kw_only=True)
+    # The directory the paused turn's tools worked in, relative to its agent's workspace, where its resumed run works
+    # too; None for the workspace.
+    workdir: str | None = None
     history_scope: HistoryScope | None = None
     # Who sent and who requested the paused turn, restored for the resumed hooks.
     origin: TurnOrigin = field(kw_only=True)
@@ -269,6 +272,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
         "turn_id": continuation.turn_id,
+        "workdir": continuation.workdir,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin),
         "memory_prompt": continuation.memory_prompt,
@@ -386,6 +390,15 @@ def _from_rows(
         #   upgrade carry one turn ID, though not the one the paused turn's earlier hooks carried.
         # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_turn_id_loads_with_its_approval_id.
         turn_id=cast("str | None", stored.get("turn_id")) or str(row["approval_id"]),
+        # LEGACY_COMPAT: Approval continuations stored without their paused turn's working directory.
+        # Legacy format: the stored context of an approval continuation had no workdir key.
+        # Last legacy release: every release before this change ships, v2026.11.331 the newest when written, stores
+        #   continuations without it; replacement: unreleased, the first release with this change stores the paused
+        #   turn's working directory, or null for its workspace, in every continuation.
+        # Handling: absence reads as None, so a reply paused before the upgrade resumes in its agent's workspace, where
+        #   every turn worked before a hook could choose a working directory.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_working_directory_loads_with_its_workspace.
+        workdir=cast("str | None", stored.get("workdir")),
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
         origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
         memory_prompt=cast("str | None", stored["memory_prompt"]),

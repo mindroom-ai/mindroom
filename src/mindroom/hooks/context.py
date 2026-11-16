@@ -557,7 +557,8 @@ class TurnLifecycleContext(HookContext):
     # How the turn ended; set only for turn:ended.
     outcome: TurnOutcome | None = None
     # The directory inside the agent's workspace, relative to it or absolute, that the last hook to call set_workdir
-    # asked the turn's tools to work in; None for the workspace. Only turn:started and turn:resumed requests count.
+    # asked the turn's tools to work in; None for the workspace. Only turn:started requests count: a resumed turn
+    # works where its paused part worked.
     workdir: str | None = None
 
     def set_workdir(self, path: str | os.PathLike[str]) -> None:

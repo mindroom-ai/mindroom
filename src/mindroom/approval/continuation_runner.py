@@ -388,6 +388,7 @@ class ApprovalContinuationRunner:
                 dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
                 correlation_id=correlation_id_for_request(request),
                 turn_id=request.turn_id,
+                workdir=self.locked.working_directory(request, target),
                 history_scope=history_scope,
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
@@ -956,6 +957,7 @@ class ApprovalContinuationRunner:
                 final=final,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
+            paused_workdir=claimed.workdir,
         )
         ending = progress.ending
         assert ending is not None, "a settled resume has its ending"

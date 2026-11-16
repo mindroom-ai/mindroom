@@ -49,7 +49,12 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
-from mindroom.tool_system.output_files import turn_workdir
+from mindroom.tool_system.output_files import (
+    current_tool_workdir,
+    current_worker_tool_workdir,
+    relative_workdir,
+    turn_workdir,
+)
 from mindroom.tool_system.sandbox_proxy import tools_can_run_in_workers
 from mindroom.turn_origin import TurnIntent
 
@@ -486,12 +491,15 @@ class LockedTurns:
         | None = None,
         participation: ParticipationGate | None = None,
         reply_session: ReplySession | None = None,
+        paused_workdir: str | None = None,
     ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
         The turn's start and its pause or end bracket this run; a turn an approval owns ends when that approval ends.
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
+        ``paused_workdir`` is the working directory of the paused turn an approval resume continues; a resume that
+        can no longer work there raises before its response function runs.
         """
         cancelled: asyncio.CancelledError | None = None
         resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
@@ -504,7 +512,11 @@ class LockedTurns:
                 correlation_id=lifecycle.identity.correlation_id,
             ):
                 try:
-                    await lifecycle.start_turn(resumed=resumed, work_in=partial(self._work_in, request, target))
+                    await lifecycle.start_turn(
+                        resumed=resumed,
+                        work_in=partial(self._work_in, request, target),
+                        paused_workdir=paused_workdir,
+                    )
                     outcome = await self._attempt_outcome(
                         request,
                         target=target,
@@ -568,6 +580,18 @@ class LockedTurns:
             requested,
             workers_can_run=tools_can_run_in_workers(self.deps.runtime_paths),
         )
+
+    def working_directory(self, request: ResponseRequest, target: MessageTarget) -> str | None:
+        """Return the directory the running turn of this bot's agent at ``target`` works in, relative to its workspace.
+
+        None for the workspace. A turn that pauses for an approval stores it, and resumes there.
+        """
+        workdir = current_tool_workdir() or current_worker_tool_workdir()
+        if workdir is None:
+            return None
+        relative = relative_workdir(workdir, self._agent_workspace_root(request, target))
+        assert relative is not None, "a turn binds a directory of its agent's workspace"
+        return relative
 
     @asynccontextmanager
     async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:

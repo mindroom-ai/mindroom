@@ -6757,6 +6757,21 @@ class TestApprovalContinuations:
         await self.store_context(alice, stored)
         assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id="approval-1")
 
+    async def test_continuation_without_a_working_directory_loads_with_its_workspace(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A continuation keeps where its paused turn worked; one stored before continuations kept it reads the workspace."""
+        await self.admit_sources(alice)
+        continuation = replace(self.continuation(), workdir="worktrees/app")
+        await paused_for_approval(alice, continuation)
+        assert await alice.approvals.approval_continuation("approval-1") == continuation
+
+        stored = await self.stored_context(alice)
+        del stored["workdir"]
+        await self.store_context(alice, stored)
+        assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, workdir=None)
+
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,
         alice: PrincipalStore,
