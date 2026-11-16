@@ -32,6 +32,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.thread_forks import fork_parent_thread_ids
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
@@ -366,12 +367,19 @@ class InboundTurnNormalizer:
             else []
         )
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
+        # A fork's turn may use the attachments of its parents' messages it shows, registered in those threads.
+        parent_thread_ids = (
+            fork_parent_thread_ids(request.thread_history, request.media_thread_id)
+            if request.media_thread_id is not None
+            else frozenset()
+        )
         history_media_attachment_ids = await register_thread_history_media_attachments(
             self._client(),
             self.deps.storage_path,
             room_id=request.room_id,
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
+            parent_thread_ids=parent_thread_ids,
         )
         trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
@@ -388,6 +396,7 @@ class InboundTurnNormalizer:
             scoped_attachment_ids,
             room_id=request.room_id,
             thread_id=request.media_thread_id,
+            parent_thread_ids=parent_thread_ids,
         )
         trusted_records = (
             resolve_scoped_attachments(self.deps.storage_path, trusted_current_attachment_ids)

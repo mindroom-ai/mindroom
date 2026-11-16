@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -367,8 +368,12 @@ _RICH_REQUESTS: list[dict[str, object]] = [
 def test_google_docs_batch_update_sends_docs_api_requests_in_order(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
+    # A copy goes in, so that a tool reordering or changing the list it was given cannot change what is expected.
     result = json.loads(
-        tool.google_docs_batch_update("https://docs.google.com/document/d/document-id/edit", _RICH_REQUESTS),
+        tool.google_docs_batch_update(
+            "https://docs.google.com/document/d/document-id/edit",
+            copy.deepcopy(_RICH_REQUESTS),
+        ),
     )
 
     assert service.documents_resource.batch_update_calls == [

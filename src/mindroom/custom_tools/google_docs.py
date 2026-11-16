@@ -275,6 +275,7 @@ class GoogleDocsTools(GoogleApiToolkit):
 
         Use this for what the text functions cannot do, such as tables, headings, text and paragraph styles,
         lists, links, page breaks, headers, footers, footnotes, and images from a public URL.
+        A request can also delete what is in the document, as deleteContentRange does.
         Each request is one Docs API Request object, for example
         {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6, "tabId": "t.0"},
         "paragraphStyle": {"namedStyleType": "HEADING_1"}, "fields": "namedStyleType"}}.

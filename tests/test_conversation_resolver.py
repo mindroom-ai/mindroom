@@ -18,7 +18,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, FORK_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -39,6 +39,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.thread_utils import get_agents_in_thread
 from mindroom.turn_origin import TurnTrust
 from tests.conftest import (
     bind_runtime_paths,
@@ -989,3 +990,169 @@ async def test_dispatch_context_asks_for_a_model_history_refresh_only_for_a_part
 
     assert context.thread_id == _PARENT
     assert context.requires_model_history_refresh is refresh
+
+
+_FORK = "$fork:localhost"
+_AGENT_REPLY = "$agent-reply:localhost"
+
+
+def _per_thread_reader(pages: dict[str, tuple[VisibleMessage, ...]]) -> ConversationReader:
+    """Return a reader that serves one fixed page per thread_id keyword."""
+
+    async def read(*, thread_id: str, **_: object) -> ConversationPage:
+        return ConversationPage(messages=pages[thread_id], refresh_pending=(), next_cursor=None)
+
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
+            read=AsyncMock(side_effect=read),
+            read_strict=AsyncMock(side_effect=read),
+        ),
+    )
+
+
+_FORK_ROOT_CONTENT = {
+    "msgtype": "m.text",
+    "body": "fork root",
+    FORK_CONTENT_KEY: {"thread_id": _PARENT, "event_id": _AGENT_REPLY},
+}
+
+
+def _fork_pages() -> dict[str, tuple[VisibleMessage, ...]]:
+    # Roots carry no thread relation, so the projection stores them at room level.
+    parent_root = replace(_projected(_PARENT, "question"), thread_id=None, sender=_HUMAN_USER_ID)
+    agent_reply = replace(
+        _projected(_AGENT_REPLY, "answer"),
+        thread_id=_PARENT,
+        sender=_BOT_USER_ID,
+        created_ts=2_000,
+    )
+    later = replace(_projected("$later:localhost", "after the fork"), thread_id=_PARENT, created_ts=3_000)
+    fork_root = replace(
+        _projected(_FORK, "fork root"),
+        thread_id=None,
+        sender=_HUMAN_USER_ID,
+        created_ts=4_000,
+        content=_FORK_ROOT_CONTENT,
+    )
+    return {_PARENT: (parent_root, agent_reply, later), _FORK: (fork_root,)}
+
+
+@pytest.mark.asyncio
+async def test_fork_dispatch_context_counts_the_parents_agent(config: Config) -> None:
+    """Routing sees the parent's agent in a fork, because the prefix is part of the planning history."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    event = _event(
+        {"body": "go on", "m.relates_to": {"rel_type": "m.thread", "event_id": _FORK}},
+    )
+
+    context = await resolver.extract_dispatch_context(_room(), event, thread_id=_FORK)
+
+    assert [m.event_id for m in context.planning_thread_history] == [_PARENT, _AGENT_REPLY, _FORK]
+    agents = get_agents_in_thread(context.planning_thread_history, config, resolver.deps.runtime_paths)
+    assert [a.full_id for a in agents] == [_BOT_USER_ID]
+
+
+@pytest.mark.asyncio
+async def test_fork_strict_history_includes_the_prefix(config: Config) -> None:
+    """A strict read returns the prefix then the fork, reading both threads strictly."""
+    reader = _per_thread_reader(_fork_pages())
+    resolver = _resolver(config, conversation_reader=reader)
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [m.event_id for m in history] == [_PARENT, _AGENT_REPLY, _FORK]
+    awaited = {call.kwargs["thread_id"] for call in reader.read_strict.await_args_list}  # type: ignore[attr-defined]
+    assert awaited == {_PARENT, _FORK}
+
+
+@pytest.mark.asyncio
+async def test_fork_root_is_a_turn_in_its_own_thread_that_counts_the_parents_agent(config: Config) -> None:
+    """A fork's first message is routed as the parent's next message, so the parent's agent answers it unmentioned."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    root = _event(_FORK_ROOT_CONTENT, event_id=_FORK)
+
+    thread_id = await resolver.coalescing_thread_id(_room(), root)
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=thread_id,
+        reply_to_event_id=_FORK,
+        event_source=root.source,
+    )
+    context = await resolver.extract_dispatch_context(_room(), root, thread_id=target.source_thread_id)
+
+    assert thread_id == _FORK
+    assert (target.source_thread_id, target.resolved_thread_id) == (_FORK, _FORK)
+    assert [m.event_id for m in context.planning_thread_history] == [_PARENT, _AGENT_REPLY, _FORK]
+    agents = get_agents_in_thread(context.planning_thread_history, config, resolver.deps.runtime_paths)
+    assert [a.full_id for a in agents] == [_BOT_USER_ID]
+
+
+@pytest.mark.asyncio
+async def test_fork_root_stays_room_level_in_room_thread_mode(tmp_path: Path) -> None:
+    """Room thread mode has no threads, so a fork's first message is an ordinary room message there."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path),
+    )
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+
+    assert await resolver.coalescing_thread_id(_room(), _event(_FORK_ROOT_CONTENT, event_id=_FORK)) is None
+
+
+@pytest.mark.asyncio
+async def test_plain_reply_to_a_lone_fork_root_does_not_join_the_fork(config: Config) -> None:
+    """Membership proofs read the fork's own messages only, so the parent's prefix never proves the fork a thread."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    reply = _event({"body": "a reply", "m.relates_to": {"m.in_reply_to": {"event_id": _FORK}}})
+
+    assert await resolver.coalescing_thread_id(_room(), reply) is None
+
+
+@pytest.mark.asyncio
+async def test_edited_fork_root_that_keeps_the_reference_stays_a_fork(config: Config) -> None:
+    """The projection holds a root's visible revision, so an edit that keeps the reference keeps the prefix."""
+    pages = _fork_pages()
+    edited_root = replace(
+        pages[_FORK][0],
+        revision_event_id="$fork-edit:localhost",
+        revision_ts=5_000,
+        content={**_FORK_ROOT_CONTENT, "body": "edited fork root"},
+    )
+    resolver = _resolver(config, conversation_reader=_per_thread_reader({**pages, _FORK: (edited_root,)}))
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [(m.event_id, m.body) for m in history] == [
+        (_PARENT, "question"),
+        (_AGENT_REPLY, "answer"),
+        (_FORK, "edited fork root"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prefix_message_edited_in_the_parent_shows_its_edit_in_the_fork(config: Config) -> None:
+    """A fork shares the parent's prefix messages, so their edits show, and the parent's later message stays out."""
+    pages = _fork_pages()
+    parent_root, agent_reply, later = pages[_PARENT]
+    edited_reply = replace(
+        agent_reply,
+        revision_event_id="$answer-edit:localhost",
+        revision_ts=3_500,
+        content={"msgtype": "m.text", "body": "edited answer"},
+    )
+    resolver = _resolver(
+        config,
+        conversation_reader=_per_thread_reader({**pages, _PARENT: (parent_root, edited_reply, later)}),
+    )
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [(m.event_id, m.body) for m in history] == [
+        (_PARENT, "question"),
+        (_AGENT_REPLY, "edited answer"),
+        (_FORK, "fork root"),
+    ]
+    assert history.messages[1].visible_event_id == "$answer-edit:localhost"

@@ -608,6 +608,33 @@ def test_format_tool_started_survives_structured_redaction_failure(monkeypatch: 
     assert trace.args_preview == "command=[redaction failed]"
 
 
+def test_serializing_a_trace_again_redacts_each_preview_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live frames serialize the whole trace every tick, so a preview already redacted is not redacted again."""
+    redacted: list[str] = []
+    redact = redaction._redact_sensitive_text_fail_closed
+
+    def counting_redact(value: str, *, max_length: int | None) -> str:
+        redacted.append(value)
+        return redact(value, max_length=max_length)
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_text_fail_closed", counting_redact)
+    trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell",
+            args_preview="command=export API_KEY=hunter2-every-tick",
+            result_preview="exported API_KEY for every tick",
+        ),
+    ]
+
+    first = serialize_tool_trace(trace)
+    second = serialize_tool_trace(trace)
+
+    assert first == second
+    assert "hunter2-every-tick" not in str(first[0]["args_preview"])
+    assert len(redacted) == 2
+
+
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
     """Pending marker produced by format_tool_started should be completed in-place by id."""
     pending_text, _ = _format_tool_started(

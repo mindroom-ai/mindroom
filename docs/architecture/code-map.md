@@ -157,7 +157,7 @@ Matrix sync callback
 | `room_activity/note.py` | The opt-in turn-context note listing the room's other threads with messages since the agent's last reply in its thread, read in one projection snapshot (`event_journal/reads.py` `room_thread_activity`) |
 | `room_tree/note.py` | The turn-context note naming the rooms above, beside, and under a room of a room tree, with their room IDs, filtered by the requester's room access |
 | `file_access.py` | Agent `file_access` resolution, the shared path authorization its callers, such as plugin tools, read and write model-supplied paths through, and the size-checked reads of files that upload tools send |
-| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins without a worker-routed shell or python) |
+| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins whose only command tool is a primary python) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval/resume.py` | Resuming a persisted paused agent run on the agent loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |
@@ -179,8 +179,8 @@ Matrix sync callback
 | `oauth/legacy_spotify_credentials.py` | Tokens the former Spotify routes stored, adopted once into a scope's OAuth store when that store is created |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `egress_broker/` | Agent Keys: the egress broker in the primary that adds stored keys or connected-account tokens to worker HTTP(S) requests the worker never sees |
-| `egress_broker/env.py` | Whether the broker and its personal page are on, the one rule for which agents use Agent Keys (`egress_credentials` plus a worker-routed `shell` or `python`), and the worker env overlay |
-| `egress_broker/service.py` | Broker lifecycle on its own thread, secret resolution per verified worker scope, and the per-call broker env for worker-routed calls |
+| `egress_broker/env.py` | Whether the broker and its personal page are on, the one rule for which agents use Agent Keys (`egress_credentials` plus a `shell` anywhere or a worker-routed `python`), and the call env overlay |
+| `egress_broker/service.py` | Broker lifecycle on its own thread, secret resolution per verified worker scope, and the per-call broker env for worker-routed calls and primary shell calls |
 | `egress_broker/proxy.py` | Authenticated forward-proxy listener: CONNECT interception or blind tunnels, plain HTTP forwarding, and the unmatched-host policy |
 | `egress_broker/mitm.py` | TLS interception for hosts with rules: `Host` checks against the CONNECT target and per-request credential injection |
 | `egress_broker/_relay.py` | HTTP/1.1 plumbing both listener paths share: request framing, guarded dialing, body streaming, refusals, and audit rows |
@@ -486,6 +486,7 @@ Matrix sync callback
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
 | `matrix/projected_thread_membership.py` | Thread-root proofs for tools and outbound mutations, read from the conversation projection like turns |
+| `matrix/thread_forks.py` | Forked threads: the parent chain's messages up to each fork point in front of a fork's reads, fork-root detection, and the parent threads a fork's attachments may come from |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/joined_members.py` | A room's joined members, read again while the durable client refuses a read that a membership change raced |

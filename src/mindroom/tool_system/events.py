@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -21,6 +22,8 @@ _TOOL_TRACE_VERSION = 2
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 _MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+# Live frames serialize a reply's whole trace ten times a second; a preview's redaction depends only on its text.
+_redact_preview = lru_cache(maxsize=4096)(redact_sensitive_text)
 _TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
@@ -898,9 +901,9 @@ def serialize_tool_trace(
             "tool_name": entry.tool_name,
         }
         if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+            event["args_preview"] = _redact_preview(entry.args_preview)
         if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+            event["result_preview"] = _redact_preview(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
         if include_internal:

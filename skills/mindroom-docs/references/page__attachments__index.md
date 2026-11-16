@@ -42,7 +42,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 

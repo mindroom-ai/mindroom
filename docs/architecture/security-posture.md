@@ -57,7 +57,7 @@ Knowledge indexes, including private agents' indexes and their publication and r
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
-When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
+When the broker is enabled, the `shell` calls and worker-routed `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
 Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.

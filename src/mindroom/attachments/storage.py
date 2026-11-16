@@ -51,7 +51,7 @@ from .ids import normalize_attachment_id
 from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
@@ -1170,8 +1170,9 @@ def filter_attachments_for_context(
     *,
     room_id: str,
     thread_id: str | None = None,
+    parent_thread_ids: Collection[str] = (),
 ) -> tuple[list[AttachmentRecord], list[str]]:
-    """Keep only attachments registered for the current room/thread context."""
+    """Keep only attachments registered for the current room/thread context, or a forked thread's parents."""
     allowed_records: list[AttachmentRecord] = []
     rejected_attachment_ids: list[str] = []
     for record in attachment_records:
@@ -1186,7 +1187,7 @@ def filter_attachments_for_context(
                 rejected_attachment_ids.append(record.attachment_id)
             continue
 
-        if record.thread_id == thread_id:
+        if record.thread_id == thread_id or record.thread_id in parent_thread_ids:
             allowed_records.append(record)
         else:
             rejected_attachment_ids.append(record.attachment_id)
@@ -1310,9 +1311,11 @@ async def register_thread_history_media_attachments(
     room_id: str,
     thread_id: str | None,
     thread_history: Sequence[ResolvedVisibleMessage],
+    parent_thread_ids: Collection[str] = (),
 ) -> list[str]:
     """Register unannotated image/file/video events visible in thread history.
 
+    Media from a forked thread's parents registers under the parent thread it was sent in.
     The turn's download budget goes to the newest media first, so older media
     that keeps failing cannot hold back newer media turn after turn.
     """
@@ -1320,8 +1323,14 @@ async def register_thread_history_media_attachments(
     seen_attachment_ids: set[str] = set()
     downloads = 0
     for message in reversed(thread_history):
+        message_thread_id = thread_id
         if not _thread_history_message_in_scope(message, thread_id):
-            continue
+            message_thread_id = next(
+                (t for t in parent_thread_ids if _thread_history_message_in_scope(message, t)),
+                None,
+            )
+            if message_thread_id is None:
+                continue
         event = _media_event_from_thread_history_message(room_id, message)
         if event is None:
             continue
@@ -1329,7 +1338,7 @@ async def register_thread_history_media_attachments(
             client,
             storage_path,
             room_id=room_id,
-            thread_id=thread_id,
+            thread_id=message_thread_id,
             event=event,
             may_download=downloads < _MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN,
         )

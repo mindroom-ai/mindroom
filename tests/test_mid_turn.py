@@ -1300,6 +1300,187 @@ async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> Non
     assert "private input" not in str(logs)
 
 
+_REQUESTER = "@alice:localhost"
+_OTHER = "@bob:localhost"
+
+
+def _between_people(
+    event_id: str,
+    text: str | None = "Did you get the slides?",
+    visible: str | None = "",
+) -> QueuedMessage:
+    """Another person's message that mentions nobody."""
+    return QueuedMessage(event_id, text, visible, _OTHER, mentions_nobody=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ({"conversation_context": None}, "history_unavailable"),
+        ({"count": 9}, "queued_message_count"),
+        ({"active_text": None}, "active_request_unjudgeable"),
+        ({"text": None}, "queued_message_unjudgeable"),
+        ({"visible": None}, "visible_response_unavailable"),
+        ({"conversation_context": (JudgmentMessage("user", "api_key=sk-" + "x" * 48),)}, "history_unjudgeable"),
+        ({"text": "x" * 15_000}, "essential_input_too_large"),
+        ({"verdict": "error"}, "judge_error"),
+        ({"verdict": None}, "no_answer"),
+        ({"judge": False}, "only_waiting_on_jobs"),
+    ],
+    ids=[
+        "history",
+        "count",
+        "active",
+        "queued",
+        "progress",
+        "unjudgeable-history",
+        "request",
+        "error",
+        "no-answer",
+        "jobs",
+    ],
+)
+@pytest.mark.parametrize("queue", ["others", "with_requester", "with_tagged", "requester_not_a_person"])
+async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
+    setup: dict,
+    reason: str,
+    queue: str,
+) -> None:
+    """Unjudged, the reply wraps up for a queue unless only other people's messages that mention nobody wait in it.
+
+    A message of the reply's requester, or one that mentions the agent, wraps the reply up as before, and so does any
+    queue of a reply no person asked for, and of a reply that only waits on its jobs.
+    """
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if setup.get("verdict") == "error":
+            msg = "private input"
+            raise RuntimeError(msg)
+        if "verdict" in setup:
+            return setup["verdict"]
+        pytest.fail("A skipped judgment must not reach inference")
+
+    pending = [
+        _between_people(f"${i}", setup.get("text", "Did you get the slides?"), setup.get("visible", ""))
+        for i in range(setup.get("count", 2))
+    ]
+    if queue == "with_requester":
+        pending[-1] = replace(pending[-1], requester_id=_REQUESTER)
+    if queue == "with_tagged":
+        pending[-1] = replace(pending[-1], mentions_nobody=False)
+    gate = MidTurnGate(
+        active_text=setup.get("active_text", "Do the task"),
+        evaluate=evaluate,
+        conversation_context=setup.get("conversation_context", ()),
+        requester_id=None if queue == "requester_not_a_person" else _REQUESTER,
+    )
+    judge = setup.get("judge", True)
+    waits = queue == "others" and judge
+    with capture_logs() as logs:
+        assert await gate.defers(tuple(pending), current=lambda: True, judge=judge) is waits
+    skips = [log for log in logs if log["event"] == "Mid-turn judgment skipped"]
+    assert [(log["reason"], log["outcome"]) for log in skips] == [(reason, "waits" if waits else "wraps_up")]
+    assert "private input" not in str(logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester", [_REQUESTER, None], ids=["person", "not-a-person"])
+async def test_the_judge_sees_who_sent_each_queued_message_by_role_only(requester: str | None) -> None:
+    """Each queued message reaches the judge labelled as the requester's or another person's, never with a user ID."""
+    bodies: list[str] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        assert request.body is not None
+        bodies.append(request.body.decode())
+        return True
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=requester)
+    pending = (QueuedMessage("$mine", "Thanks", "", _REQUESTER), _between_people("$theirs"))
+    assert await gate.defers(pending, current=lambda: True)
+    (body,) = bodies
+    evidence = json.loads(body)["state"]["conversation"][0]["text"]
+    if requester is None:
+        assert "<queued_message>\nThanks" in evidence
+        assert "<queued_message>\nDid you get the slides?" in evidence
+    else:
+        assert '<queued_message from="requester">\nThanks' in evidence
+        assert '<queued_message from="another person">\nDid you get the slides?' in evidence
+    assert "alice" not in body
+    assert "bob" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [True, False], ids=["can-wait", "cannot-wait"])
+async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict: bool) -> None:
+    """Another person's message that the judge says cannot wait still interrupts; one that can wait waits."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdict
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    with capture_logs() as logs:
+        assert (
+            await gate.defers((_between_people("$stop", "Stop, that is the wrong file"),), current=lambda: True)
+            is verdict
+        )
+    assert _skip_reasons(logs) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester", [_REQUESTER, None], ids=["person", "not-a-person"])
+async def test_only_another_persons_untagged_waiting_message_gets_no_defer_reaction(requester: str | None) -> None:
+    """Whether the agent answers another person's untagged message is decided after the reply, so it shows no deferral."""
+    acknowledgements: list[str] = []
+
+    async def acknowledge(event_id: str) -> None:
+        acknowledgements.append(event_id)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return True
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=requester, on_defer=acknowledge)
+    pending = (
+        QueuedMessage("$mine", "Thanks", "", _REQUESTER, mentions_nobody=True),
+        _between_people("$theirs"),
+        QueuedMessage("$tagged", "Nice work", "", _OTHER),
+    )
+    assert await gate.defers(pending, current=lambda: True)
+    assert acknowledgements == (["$mine", "$tagged"] if requester is not None else ["$mine", "$theirs", "$tagged"])
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "requester"),
+    [("message", "@user:localhost"), ("scheduled", None), ("hook", None)],
+)
+def test_the_gate_knows_the_requester_only_of_a_reply_a_person_asked_for(
+    tmp_path: Path,
+    source_kind: str,
+    requester: str | None,
+) -> None:
+    """A scheduled or hook reply has no requester to tell apart from other people."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "synthetic", "id": "test"}},
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test",
+                    "mid_turn": {"judgment": {"provider": "llm", "model": "default"}},
+                },
+            },
+        },
+    )
+    gate = create_mid_turn_gate(
+        config,
+        test_runtime_paths(tmp_path),
+        request_envelope(source_kind=source_kind),
+        prompt="Do the task",
+        has_media=False,
+    )
+    assert gate is not None
+    assert gate.requester_id == requester
+
+
 _QUESTION = "What is the capital of France?"
 
 

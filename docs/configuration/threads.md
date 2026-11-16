@@ -94,6 +94,16 @@ In `thread` mode, an agent answering a room-level message starts a new thread on
 Clients and bridges that send plain replies instead of thread replies still work: a plain reply whose reply chain reaches a thread joins that thread, and one that never reaches a thread stays room-level.
 Edits, reactions, and redactions belong to the same thread as the message they target.
 
+## Forked Threads
+
+A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
+An agent that answered in the parent counts as a participant of the fork.
+Agents in the fork can use the attachments of the threads it forks from.
+An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
+Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
+Moving a fork to another room copies only the fork's own messages.
+
 ## Multi-Human Thread Protection
 
 When two or more people have posted in a thread, agents answer only when explicitly mentioned, so they do not interrupt a human conversation.
@@ -230,7 +240,7 @@ When another human message arrives while an agent is responding, MindRoom normal
 A "thanks" or "is this still running?" can therefore cut a long task short.
 These messages send the agent no wrap-up notice and get no ⏳ reaction from it: one that mentions only other agents or people who have joined the room (unless it asks for a team the agent answers for), and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
 A person's edit of a text message still waiting in the coalescing queue decides it again, though a ⏳ already on it stays; an edited media caption, or a message not yet queued, is not decided again.
-A voice message counts as waiting while it is transcribed, so a tool batch that ends before its transcript is ready still gets the notice; once the transcript shows it is for someone else, a notice not yet sent is dropped and no ⏳ appears.
+A running agent hears of a voice message only once it is transcribed, so a voice message for someone else sends no notice and gets no ⏳.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
@@ -238,7 +248,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 |-------|------|---------|-------------|
 | `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait, except another person's message that mentions nobody, which the agent may decline to answer after the task |
 
 ```yaml
 agents:
@@ -254,25 +264,29 @@ agents:
 ```
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
-When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
+It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
-The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, whether each was sent by the person the agent is answering or by another person, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
 Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
 Tool calls appear as `<tool name="..." input="..." output="..."/>` tags built from the previews the chat shows in its tool details: up to 1,200 characters of input and 500 of output per call, with recognized secrets already removed.
 Attachment contents, full tool output, system prompts, and memory are never sent, but message text and tool previews can still contain private information.
 
-The agent gets the wrap-up notice without a judgment when:
+Except for the queued messages described after this list, the agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
-- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
+- the active request has an attachment or is not typed text, such as a scheduled task or a voice message;
+- a queued message has an attachment or is not typed text, except a transcribed voice message, whose transcript the judge reads;
 - the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
 - anything the judge would see looks like a credential;
 - the agent replies in `thread_mode: room`.
 
-Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
+When the judgment is skipped, fails, or gives no answer, and every queued message comes from another person than the one the agent is answering and mentions nobody, the task continues instead, without a `defer_reaction`.
+This does not apply when the agent answers a scheduled task, a hook, or another agent.
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large` and an `outcome` of `waits` or `wraps_up`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
 With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).

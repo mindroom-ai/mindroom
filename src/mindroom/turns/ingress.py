@@ -244,6 +244,7 @@ class TurnIngress:
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
+                mentions_nobody=self._mentions_another_participant(room, event.source) is None,
             )
         await self._enqueue_for_dispatch(
             event,
@@ -472,16 +473,21 @@ class TurnIngress:
         )
         envelope = self.deps.resolver.build_envelope(event=event, facts=pending_event.facts, target=target)
         if self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope):
-            if pending_event.notice is not None:
+            # A notice a split-off turn already released stays, so no later edit asks the next requester's turn to wrap up.
+            if pending_event.notice is not None and pending_event.notice.active:
                 pending_event.notice.release()
                 pending_event.notice = None
             return
+        mentions_nobody = event.for_another_participant is None
         if pending_event.notice is None:
             pending_event.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
+                mentions_nobody=mentions_nobody,
             )
+        else:
+            pending_event.notice.update(envelope, mentions_nobody=mentions_nobody)
         # The reaction's transaction ID is stable, so a message that already shows ⏳ gets no second one.
         mark_waiting_for_approval(self.deps, target, envelope)
 

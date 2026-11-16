@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mindroom import constants
@@ -227,13 +227,28 @@ class _QueuedMessageState:
         *,
         text: str | None = None,
         requester_id: str | None = None,
+        mentions_nobody: bool = False,
     ) -> bool:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress, requester_id)
+        self._pending_messages[source_event_id] = QueuedMessage(
+            source_event_id,
+            text,
+            progress,
+            requester_id,
+            mentions_nobody,
+        )
         self._notify_changed()
         return True
+
+    def update_waiting_human_message(self, source_event_id: str, *, text: str | None, mentions_nobody: bool) -> None:
+        """Give a waiting message its edited text and mentions, keeping its place and the progress it arrived to."""
+        message = self._pending_messages.get(source_event_id)
+        if message is None:
+            return
+        self._pending_messages[source_event_id] = replace(message, text=text, mentions_nobody=mentions_nobody)
+        self._notify_changed()
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
@@ -290,6 +305,20 @@ class QueuedHumanNoticeReservation:
     _state: _QueuedMessageState
     _source_event_id: str
     _active: bool = True
+
+    @property
+    def active(self) -> bool:
+        """Return whether this message still counts as waiting for the running response."""
+        return self._active
+
+    def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
+        """Show the running response's judge an edit of this waiting message; a released one stays released."""
+        if self._active:
+            self._state.update_waiting_human_message(
+                self._source_event_id,
+                text=message_text_for_judgment(response_envelope),
+                mentions_nobody=mentions_nobody,
+            )
 
     def release(self) -> None:
         """Stop counting this message as waiting for the running response; idempotent."""
@@ -484,8 +513,10 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,
+        transcript: str | None = None,
     ) -> QueuedHumanNoticeReservation | None:
-        """Reserve an active-turn notice before queued dispatch owns the follow-up."""
+        """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -494,8 +525,9 @@ class ResponseLifecycleCoordinator:
         queued_signal = self._get_or_create_queued_signal(target)
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
-            text=message_text_for_judgment(response_envelope),
+            text=transcript if transcript is not None else message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
+            mentions_nobody=mentions_nobody,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)

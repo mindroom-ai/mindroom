@@ -1229,6 +1229,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.credentials"
 depends_on = [
+    "mindroom.config.schema_hints",
     "mindroom.constants",
     "mindroom.providers.names",
 ]
@@ -5692,8 +5693,10 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
     "mindroom.origins",
+    "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.tool_environment",
     "mindroom.workers.backend_kinds",
     "mindroom.tls_trust",
 ]
@@ -5711,6 +5714,7 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -5789,6 +5793,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.egress_broker",
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.tool_jobs.control",
@@ -6211,6 +6216,7 @@ visibility = [
 [[modules]]
 path = "mindroom.voice.ingress"
 depends_on = [
+    "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
     "mindroom.turns.queued_notice",
@@ -6770,12 +6776,16 @@ from = ["mindroom.ai"]
 
 [[interfaces]]
 expose = [
+    "api_key_env_reference",
     "dashboard_api_key",
     "gemini_uses_vertexai",
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
+    "model_with_dashboard_key",
     "own_api_key",
+    "resolve_api_key_reference",
+    "unset_api_key_variable",
     "uses_alternative_auth",
 ]
 from = ["mindroom.providers.credentials"]
@@ -6895,6 +6905,7 @@ expose = [
     "RoomJoinOutcome",
     "add_room_to_space",
     "admin_join_room_user",
+    "admin_join_room_user_failure",
     "create_room",
     "create_space",
     "ensure_room_admin_power_levels",
@@ -8175,6 +8186,7 @@ visibility = ["mindroom.providers.gemini", "mindroom.providers.ollama.adapter", 
 [[modules]]
 path = "mindroom.providers.registry"
 depends_on = [
+    "mindroom.llm",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.credentials",
