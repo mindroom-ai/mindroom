@@ -3583,3 +3583,15 @@ async def test_router_start_waits_only_for_an_admin_room_lookup_that_can_change(
         with pytest.raises(RuntimeError, match="Homeserver admin room lookup failed"):
             await bot._room_lifecycle.require_unmanaged_room()
     assert bot.client.unmanaged_room_id == unmanaged
+
+
+@pytest.mark.asyncio
+async def test_a_found_admin_room_stays_unmanaged_after_a_later_refusal(tmp_path: Path) -> None:
+    """A later lookup that finds nothing never lets the router take part in that room or leave it."""
+    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
+    await bot._room_lifecycle.require_unmanaged_room()
+    bot.client.room_resolve_alias = AsyncMock(return_value=_lookup_error("M_NOT_FOUND", 404))
+
+    await bot._room_lifecycle.require_unmanaged_room()
+
+    assert bot.client.unmanaged_room_id == "!admins:localhost"

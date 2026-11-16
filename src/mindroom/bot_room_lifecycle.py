@@ -461,11 +461,9 @@ class BotRoomLifecycle:
                 self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response), http_status=status)
                 return False
         managed = {room.room_id for room in matrix_state_for_runtime(self.deps.runtime_paths).rooms.values()}
-        client.unmanaged_room_id = (
-            response.room_id
-            if isinstance(response, nio.RoomResolveAliasResponse) and response.room_id not in managed
-            else None
-        )
+        # A room once found stays unmanaged, so a later refusal never lets the router take part in it or leave it.
+        if isinstance(response, nio.RoomResolveAliasResponse) and response.room_id not in managed:
+            client.unmanaged_room_id = response.room_id
         return True
 
     async def require_unmanaged_room(self) -> None:

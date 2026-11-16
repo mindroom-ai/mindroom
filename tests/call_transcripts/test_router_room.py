@@ -730,3 +730,16 @@ async def test_the_row_and_the_transcript_message_start_no_agent_turn(
 
     assert not delivery.owed_work
     assert delivery.handled == ()
+
+
+async def test_the_routers_homeserver_admin_room_counts_as_a_room_it_is_not_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The router keeps that room but takes no part in it, so no call there is transcribed or posted."""
+    client = FakeRouterClient(state={ROOM: [_member(ANN)]})
+    monkeypatch.setattr("mindroom.call_transcripts.router_room.unmanaged_room_id", lambda _client: ROOM)
+
+    room = _room(client)
+
+    assert room.router_joined(ROOM) is False
+    assert await room.is_member(ROOM, ANN) is False
+    assert await room.may_post(ROOM, ANN) is False
+    assert client.reads == 0

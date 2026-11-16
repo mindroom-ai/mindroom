@@ -19,6 +19,7 @@ from mindroom.call_transcripts.service import iso_time
 from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
+from mindroom.matrix.client_session import unmanaged_room_id
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_power import privileged_creators, send_power_level, user_power_level
 
@@ -95,14 +96,15 @@ class RouterCallRoom:
     def router_joined(self, room_id: str) -> bool | None:
         """Return whether the router is joined to the room, as of its last sync; None while it is not ready."""
         client = self.client()
-        return None if client is None else room_id in client.rooms
+        # The router's homeserver admin room, which it keeps but takes no part in, counts as a room it is not in.
+        return None if client is None else room_id in client.rooms and room_id != unmanaged_room_id(client)
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the person is joined to the room; nobody is a member of a room the router is not in."""
         client = self.client()
         if client is None:
             return None
-        if room_id not in client.rooms:
+        if not self.router_joined(room_id):
             return False
         state = await self._state(client, room_id)
         return None if state is None else state.content("m.room.member", user_id).get("membership") == "join"
@@ -112,7 +114,7 @@ class RouterCallRoom:
         client = self.client()
         if client is None:
             return None
-        if room_id not in client.rooms:
+        if not self.router_joined(room_id):
             return False
         state = await self._state(client, room_id)
         if state is None:

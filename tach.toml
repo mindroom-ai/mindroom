@@ -4207,6 +4207,7 @@ depends_on = ["mindroom.constants", "mindroom.failure_text", "mindroom.tls_trust
 visibility = [
     "mindroom.bot",
     "mindroom.bot_room_lifecycle",
+    "mindroom.call_transcripts.router_room",
     "mindroom.cli.doctor",
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
@@ -6984,6 +6985,7 @@ from = ["mindroom.matrix.client_session"]
 visibility = [
     "mindroom.bot",
     "mindroom.bot_room_lifecycle",
+    "mindroom.call_transcripts.router_room",
     "mindroom.matrix.room_cleanup",
     "mindroom.orchestration.rooms",
     "mindroom.router.duties",
@@ -10277,6 +10279,7 @@ depends_on = [
     "mindroom.call_transcripts",
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.room_power",
 ]
 
