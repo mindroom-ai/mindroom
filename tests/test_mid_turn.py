@@ -1475,6 +1475,37 @@ async def test_a_later_verdict_that_lets_the_queue_wait_leaves_no_mark() -> None
 
 
 @pytest.mark.asyncio
+async def test_another_persons_message_during_a_job_wait_judgment_keeps_the_correction_counted() -> None:
+    """A correction the judge stopped the reply for stays counted when another person writes during the judgment.
+
+    The job wait judges the changed queue again; its verdict is explained by the correction, so the newer message from
+    someone else is not counted.
+    """
+    calls: list[int] = []
+    queue = _QueuedMessageState()
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        calls.append(len(calls))
+        if len(calls) == 1:
+            queue.add_waiting_human_message("$bob", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+        return False
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER, mentions_nobody=True)
+    stop = QueuedHumanNoticeReservation(queue, "$stop")
+    bob = QueuedHumanNoticeReservation(queue, "$bob")
+    await asyncio.wait_for(queue.wait(), timeout=5)
+    assert len(calls) == 2
+    assert await _wraps_up_after_tool_batch(queue)
+    assert (stop.stopped_reply, bob.stopped_reply) == (True, False)
+
+
+@pytest.mark.asyncio
 async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_reply() -> None:
     """A queue the judge says cannot wait marks the messages it had not let wait before.
 

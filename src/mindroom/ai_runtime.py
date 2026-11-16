@@ -193,7 +193,7 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
             return
         # The reply wraps up here, also when a newer message arrived during the judgment, so a later verdict on a
         # reply that kept waiting cannot leave a mark behind.
-        gate.report_stop(pending)
+        gate.report_stop()
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
 
 

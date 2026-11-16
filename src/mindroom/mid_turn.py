@@ -90,15 +90,14 @@ class MidTurnGate:
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
-    # Receives the messages, as the judge read them, of a queue it said the reply cannot wait for, once the reply wraps up.
+    # Receives the messages, as the judge read them, the reply wraps up for.
     on_stop: Callable[[tuple[QueuedMessage, ...]], None] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
-    # Messages, as they read then, of a queue that could wait, and those of the checked queue the judge said the reply
-    # cannot wait for.
+    # Messages, as they read then, in a queue that could wait, and those this reply's verdicts say it cannot wait for.
     _waited: set[QueuedMessage] = field(default_factory=set)
-    _stopped_for: tuple[QueuedMessage, ...] = ()
+    _stopping: set[QueuedMessage] = field(default_factory=set)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
@@ -184,20 +183,23 @@ class MidTurnGate:
                     queued_messages=len(pending),
                     outcome="waits" if finish else "wraps_up",
                 )
-            # A message the judge let wait counts only as it read then, so an edit of it can stop the reply. One verdict
-            # covers the whole queue, so it names the rest only when one person sent them all.
-            fresh = [message for message in pending if message not in self._waited] if stops else []
-            one_sender = len({message.requester_id for message in fresh}) == 1
-            self._stopped_for = tuple(fresh) if one_sender else ()
             if finish:
                 self._waited.update(pending)
+                self._stopping.difference_update(pending)
+            elif stops and self._stopping.isdisjoint(pending):
+                # One verdict covers the whole queue, so it names the messages the judge has not let wait (as they read
+                # then, so an edit of one can count) only when one person sent them all and no earlier verdict's
+                # message, still waiting, already explains it.
+                fresh = [message for message in pending if message not in self._waited]
+                if len({message.requester_id for message in fresh}) == 1:
+                    self._stopping.update(fresh)
             self._checked, self._finish = pending, finish
             return finish
 
-    def report_stop(self, pending: tuple[QueuedMessage, ...]) -> None:
-        """Hand ``on_stop`` the messages of ``pending``, as the judge read them, that the reply wraps up for."""
-        if self.on_stop is not None and self._stopped_for and self._checked == pending:
-            self.on_stop(self._stopped_for)
+    def report_stop(self) -> None:
+        """Hand ``on_stop`` the messages, as the judge read them, that this reply's verdicts say it cannot wait for."""
+        if self.on_stop is not None and self._stopping:
+            self.on_stop(tuple(self._stopping))
 
     def _sender_label(self, message: QueuedMessage) -> str:
         """Name the sender by role only, so no user ID reaches the judge."""
