@@ -10371,6 +10371,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
+- [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -10574,6 +10575,36 @@ agents:
       - shell
       - terminal
     terminals: type
+```
+
+## [`temporary_secrets`]
+
+`temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service, a passphrase, or a pairing code.
+It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+
+- MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
+  Other people in the thread see who the card waits for.
+- The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
+  A restart forgets a value kept in memory and reads back one kept in a file.
+  The file is deleted at the first tool call or answer after the value expired.
+- Chat sends the value to this MindRoom's API with the user's client session, so it never goes through Matrix or the model.
+- While it is kept, the value is the environment variable `name` of that agent's `shell` commands (`run_shell_command`) in the same room and thread, in turns of the same requester, whether they run in the MindRoom process or in a worker.
+  MindRoom gives it to no other agent, conversation, or person's turn, and not to a [`terminal`], whose shell would keep it past its lifetime.
+  In a worker that several people's turns share, another person's command can still read the environment of a command while it runs, and a process that a command leaves running keeps the variable for as long as it runs.
+- The tool returns `provided` with the minutes the variable stays set, `declined`, or `expired` when no answer came in 15 minutes.
+  It waits, stops, and continues as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) the way [`request_secret`](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) does, and needs the same access for Chat: its origin in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and a homeserver that binds OpenID tokens to this deployment.
+
+Unlike an Agent Keys key, a temporary secret reaches the agent's commands, so a command can print it or send it elsewhere.
+MindRoom tells the agent to use the variable only inside the command that needs it, and replaces exact copies of the value in tool results and in the output a running command shows, before the model or the room reads them, but neither stops an agent that works around them.
+What a command prints can also end up in the agent's workspace, in a file the command writes or in the file MindRoom saves a large result or a `mindroom_output_path` result to; those files hold the output as the command printed it.
+Give the tool to agents you would trust with the secret, and prefer an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service for an API key that a service's hosts take in a header.
+
+```yaml
+agents:
+  ops:
+    tools:
+      - shell
+      - temporary_secrets
 ```
 
 ## [`python`]
@@ -17745,6 +17776,8 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
   Counting them would rotate the session about every ten seconds while a reply streams, each rotation sharing a new key with every device.
+- A [temporary secret](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) reaches the shell commands of the conversation whose requester gave it, in a worker too, and MindRoom removes it from tool results only on a best-effort basis; the requester accepts with each card that the agent's commands hold the value.
+  A value kept for 24 hours lies unencrypted in a file of the primary, as the credential store's files do.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
@@ -23787,6 +23820,7 @@ For a missing key, the agent calls `request_secret` with a `service` (a name fro
 
 - MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
   Other people in the thread see who the card waits for.
+  When the service already has a key in that scope, the card says that saving replaces it.
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.
@@ -23799,6 +23833,7 @@ For a missing key, the agent calls `request_secret` with a `service` (a name fro
   For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
 - The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
   The refusal names the Agent Keys page where one exists.
+- For a secret that is no service's API key, such as a password or a pairing code, an agent with the [`temporary_secrets`](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) tool asks with a card of its own, and its shell commands receive the value for a limited time.
 - Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](https://docs.mindroom.chat/deployment/sandbox-proxy/#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)).
   Without either, the tool posts no card and sends the user to the Agent Keys page instead.
 

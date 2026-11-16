@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -20,6 +21,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from structlog.testing import capture_logs
 
+from mindroom import secret_request_cards
+from mindroom import secret_requests as secret_request_store
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main, secret_requests
 from mindroom.api.client_sessions import client_session_store
@@ -28,11 +31,18 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.custom_tools import egress_credentials as egress_credentials_module
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import load_secret, save_secret
 from mindroom.message_target import MessageTarget
-from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, SECRET_REQUEST_TTL_SECONDS, secret_request_registry
+from mindroom.secret_requests import (
+    SECRET_REQUEST_CONTENT_KEY,
+    SECRET_REQUEST_TTL_SECONDS,
+    KeyTarget,
+    TemporaryTarget,
+    _SecretHolder,
+    _TemporarySecrets,
+    secret_request_registry,
+)
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room, _room
@@ -128,9 +138,11 @@ def ask() -> Iterator[Callable[..., PendingSecretRequest]]:
             room_id=room_id,
             requester_id=ALICE,
             agent_name=agent,
-            service="github",
-            worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
-            hosts=("api.github.com",),
+            target=KeyTarget(
+                service="github",
+                worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
+                hosts=("api.github.com",),
+            ),
             now=time.time() if now is None else now,
         )
         registered.append(request.request_id)
@@ -162,7 +174,7 @@ def _stored(room: _Room, request: PendingSecretRequest) -> str | None:
     stored = load_scoped_credentials(
         "egress_github",
         credentials_manager=get_runtime_credentials_manager(room.paths),
-        worker_target=request.worker_target,
+        worker_target=request.target.worker_target,
         primary_built_tool=True,
     )
     return None if stored is None else stored["secret"]
@@ -384,7 +396,7 @@ async def test_a_turn_from_a_bridge_alias_asks_the_person(tmp_path: Path, monkey
     alias = "@telegram_alice:localhost"
     config = _config(aliases={ALICE: [alias]})
     room = _answering_room(tmp_path, config, MINDROOM_COMPUTER_ALLOWED_ORIGINS='["https://chat.example.org"]')
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=True))
     bound = bind_runtime_paths(config, room.paths)
     client = make_matrix_client_mock(user_id=room.ids["code"])
     client.room_send.return_value = nio.RoomSendResponse("$card", ROOM)
@@ -491,6 +503,206 @@ async def test_value_never_logged(
             "agent": "code",
             "service": "github",
             "status": "saved" if status == 204 else "invalid",
+            "user_id": ALICE,
+        },
+    ]
+
+
+TEMPORARY = "open-sesame-123"
+HOLDER = _SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id=ALICE)
+
+
+@pytest.fixture
+def given(monkeypatch: pytest.MonkeyPatch) -> _TemporarySecrets:
+    """A store of temporary secrets of this test's own."""
+    store = _TemporarySecrets()
+    monkeypatch.setattr(secret_request_store, "_TEMPORARY_SECRETS", store)
+    return store
+
+
+@pytest.fixture
+def ask_temporary() -> Iterator[Callable[[], PendingSecretRequest]]:
+    """Register Alice's requests for the variable ``SUDO_PASSWORD`` of her conversation with ``code``."""
+    registry = secret_request_registry()
+    registered: list[str] = []
+
+    def ask() -> PendingSecretRequest:
+        request = registry.register(
+            room_id=ROOM,
+            requester_id=ALICE,
+            agent_name="code",
+            target=TemporaryTarget(name="SUDO_PASSWORD", holder=HOLDER),
+            now=time.time(),
+        )
+        registered.append(request.request_id)
+        return request
+
+    yield ask
+    for request_id in registered:
+        registry.discard(request_id)
+
+
+def _given(room: _Room, store: _TemporarySecrets) -> dict[str, str]:
+    return store.values(HOLDER, now=time.time(), storage_root=room.paths.storage_root)
+
+
+def _secret_files(room: _Room) -> list[Path]:
+    directory = room.paths.storage_root / "temporary_secrets"
+    return sorted(directory.iterdir()) if directory.exists() else []
+
+
+@pytest.mark.asyncio
+async def test_a_temporary_answer_is_given_to_the_conversation(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+) -> None:
+    """Without a keep the value stays in memory: the conversation's commands receive it and no file holds it."""
+    request = ask_temporary()
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": TEMPORARY})
+
+    assert response.status_code == 204
+    assert (request.outcome.result(), request.kept) == ("saved", "memory")
+    assert _given(room, given) == {"SUDO_PASSWORD": TEMPORARY}
+    assert _secret_files(room) == []
+
+
+@pytest.mark.asyncio
+async def test_a_temporary_answer_kept_on_disk(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+) -> None:
+    """The requester may keep the value on disk, in one private file."""
+    request = ask_temporary()
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": TEMPORARY, "keep": "disk"})
+
+    assert response.status_code == 204
+    assert (request.outcome.result(), request.kept) == ("saved", "disk")
+    assert _given(room, given) == {"SUDO_PASSWORD": TEMPORARY}
+    (file,) = _secret_files(room)
+    assert stat.S_IMODE(file.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_only_the_requester_gives_a_temporary_secret(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+) -> None:
+    """Another member of the room cannot put a value into Alice's conversation, and her card stays open."""
+    request = ask_temporary()
+
+    response = await _answer(room, BOB, request.request_id, {"secret": TEMPORARY})
+
+    assert response.status_code == 403
+    assert not request.outcome.done()
+    assert _given(room, given) == {}
+    assert (await _answer(room, ALICE, request.request_id, {"secret": TEMPORARY})).status_code == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["a\x00b", "x" * (16 * 1024 + 1), "   "], ids=["control", "too-long", "blank"])
+async def test_an_invalid_temporary_value_is_refused(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+    value: str,
+) -> None:
+    """A value a key could not have either is refused with the reason, never the value, and Alice can try again."""
+    request = ask_temporary()
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": value, "keep": "disk"})
+
+    assert response.status_code == 422
+    assert value not in response.text
+    assert not request.outcome.done()
+    assert request.kept is None
+    assert _given(room, given) == {}
+    assert _secret_files(room) == []
+
+
+@pytest.mark.asyncio
+async def test_a_temporary_decline(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+) -> None:
+    """A decline gives the conversation nothing."""
+    request = ask_temporary()
+
+    response = await _answer(room, ALICE, request.request_id, {"decline": True})
+
+    assert response.status_code == 204
+    assert (request.outcome.result(), request.kept) == ("declined", None)
+    assert _given(room, given) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep", ["memory", "disk"])
+async def test_keep_is_refused_for_a_key_request(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    keep: str,
+) -> None:
+    """A key is always stored as the agent's Agent Keys key, so its answer has no keep to choose."""
+    request = ask()
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET, "keep": keep})
+
+    assert response.status_code == 422
+    assert SECRET not in response.text
+    assert not request.outcome.done()
+    assert _stored(room, request) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [{"decline": True, "keep": "disk"}, {"secret": TEMPORARY, "keep": "forever"}],
+    ids=["decline-with-keep", "unknown-keep"],
+)
+async def test_keep_needs_a_secret_and_a_known_value(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,
+    body: dict[str, object],
+) -> None:
+    """Any other use of ``keep`` is a 422 that repeats no value and leaves the request pending."""
+    request = ask_temporary()
+
+    response = await _answer(room, ALICE, request.request_id, body)
+
+    assert response.status_code == 422
+    assert TEMPORARY not in response.text
+    assert not request.outcome.done()
+    assert _given(room, given) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_log_names_the_variable_not_the_value(
+    room: _Room,
+    ask_temporary: Callable[[], PendingSecretRequest],
+    given: _TemporarySecrets,  # noqa: ARG001
+) -> None:
+    """The answer's log line names the variable in place of a service, and never the value."""
+    request = ask_temporary()
+
+    with capture_logs() as logs:
+        response = await _answer(room, ALICE, request.request_id, {"secret": TEMPORARY, "keep": "disk"})
+
+    assert response.status_code == 204
+    assert [entry for entry in logs if TEMPORARY in repr(entry)] == []
+    assert [entry for entry in logs if entry["event"] == "secret_request_answered"] == [
+        {
+            "event": "secret_request_answered",
+            "log_level": "info",
+            "request_id": request.request_id,
+            "agent": "code",
+            "variable": "SUDO_PASSWORD",
+            "status": "saved",
             "user_id": ALICE,
         },
     ]

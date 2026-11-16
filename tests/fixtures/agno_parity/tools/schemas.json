@@ -9192,7 +9192,7 @@
       },
       {
         "name": "request_secret",
-        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27282,6 +27282,48 @@
           },
           "required": [
             "message"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "temporary_secrets": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "request_temporary_secret",
+        "description": "Ask the user for a secret your shell commands need, with a card in this conversation, and wait.\nCall this for a password, token, passphrase or code that a command needs and that you must not see: the\nuser types it into a masked field in MindRoom Chat, and it becomes the environment variable `name` of your\nshell commands in this conversation. The value never reaches you or the chat.\nThe user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than\n15 minutes.\nWhen you also have `request_secret` and need the API key of a service it can ask for, call that instead:\nsuch a key never reaches your commands.\nWaits up to 15 minutes and returns `status`:\n`provided` with `minutes`, how long the variable stays set: use `$name` inside the command that needs it,\nand never print, store or send the value;\n`declined` when the user refused: do not ask again for this secret in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The environment variable to set, such as `SUDO_PASSWORD`: letters, digits and underscores."
+            },
+            "reason": {
+              "type": "string",
+              "description": "What you need the secret for, in a sentence or two the user reads on the card."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "name",
+            "reason"
           ]
         },
         "strict": false,

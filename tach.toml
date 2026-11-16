@@ -1529,6 +1529,7 @@ visibility = [
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
     "mindroom.custom_tools.egress_credentials",
+    "mindroom.custom_tools.temporary_secrets",
 ]
 
 [[modules]]
@@ -4064,7 +4065,7 @@ visibility = [
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.chat_ui",
-    "mindroom.custom_tools.egress_credentials",
+    "mindroom.secret_request_cards",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.stop_reply",
@@ -5721,12 +5722,27 @@ path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.egress_broker",
+    "mindroom.runtime_resolution",
+    "mindroom.secret_request_cards",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.secret_request_cards"
+depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",
     "mindroom.origins",
-    "mindroom.runtime_resolution",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.temporary_secrets"
+depends_on = [
+    "mindroom.approval.tool_approval",
+    "mindroom.secret_request_cards",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
 ]
@@ -5757,6 +5773,7 @@ visibility = [
     "mindroom.api.sandbox_execute_stream",
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -5782,6 +5799,7 @@ depends_on = [
     "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.progress",
 ]
 
 [[modules]]
@@ -8947,7 +8965,7 @@ visibility = [
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.notices",
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
-    "mindroom.custom_tools.egress_credentials",
+    "mindroom.secret_request_cards",
 ]
 
 [[modules]]
@@ -8975,7 +8993,7 @@ visibility = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.custom_tools.job",
-    "mindroom.custom_tools.egress_credentials",
+    "mindroom.secret_request_cards",
 ]
 
 [[modules]]

@@ -14,6 +14,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import secret_request_cards
 from mindroom import secret_requests as secret_requests_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
@@ -979,7 +980,7 @@ _BROKER_ENV = {
 @pytest.fixture(autouse=True)
 def _homeserver_binds_openid(monkeypatch: pytest.MonkeyPatch) -> None:
     """The homeserver binds OpenID tokens, so Chat can sign in to this MindRoom with a client session."""
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=True))
 
 
 @pytest.fixture(autouse=True)
@@ -1081,6 +1082,35 @@ def _final_card(context: ToolRuntimeContext, status: str) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_a_card_for_a_service_with_a_key_says_it_replaces(tmp_path: Path) -> None:
+    """Saving over a working key is the requester's choice, so the card tells them a key is already there."""
+    tool, context = _asking(tmp_path)
+    save_secret(get_runtime_credentials_manager(context.runtime_paths), worker_target(), "github", "ghp-old")
+
+    task = _start(tool, context)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    assert card[SECRET_REQUEST_CONTENT_KEY]["replaces"] is True
+    assert _final_card(context, "declined")[SECRET_REQUEST_CONTENT_KEY]["replaces"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_key_in_another_scope_is_not_one_the_card_replaces(tmp_path: Path) -> None:
+    """Only a key in the store the card's key goes to is replaced; Bob's own key for the agent is not."""
+    tool, context = _asking(tmp_path)
+    save_secret(get_runtime_credentials_manager(context.runtime_paths), worker_target(_BOB), "github", "ghp-bob")
+
+    task = _start(tool, context)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    assert "replaces" not in card[SECRET_REQUEST_CONTENT_KEY]
+
+
+@pytest.mark.asyncio
 async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
     """The card goes into the thread with metadata only; the user's answer edits it and the agent learns `saved`."""
     tool, context = _asking(tmp_path)
@@ -1093,8 +1123,8 @@ async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
     secret_request_registry().resolve(request_id, "saved")
     result = json.loads(await task)
 
-    assert (pending.requester_id, pending.agent_name, pending.service) == (_ALICE, "code", "github")
-    assert pending.worker_target == worker_target()
+    assert (pending.requester_id, pending.agent_name, pending.target.service) == (_ALICE, "code", "github")
+    assert pending.target.worker_target == worker_target()
     assert card["msgtype"] == "m.notice"
     assert card["body"] == "🔑 Code asks for your GitHub key. Open MindRoom Chat to enter it."
     assert card["m.relates_to"] == {
@@ -1296,9 +1326,9 @@ async def test_refuses_when_chat_cannot_answer(
 ) -> None:
     """Without Chat allowed to call this MindRoom with a client session, nobody could answer, so no card is posted."""
     binding = {"no-openid-binding": False, "binding-check-failed": None}.get(case, True)
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=binding))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=binding))
     if case == "no-openid-audience":
-        monkeypatch.setattr(egress_credentials_module, "openid_audience", lambda _paths: None)
+        monkeypatch.setattr(secret_request_cards, "openid_audience", lambda _paths: None)
     tool, context = _asking(
         tmp_path,
         **_PAGE_SERVED,

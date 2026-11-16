@@ -15,13 +15,10 @@ Keys store and never passes through the tool, Matrix, or the model.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import functools
 import json
-import time
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -29,38 +26,23 @@ from mindroom.egress_broker.env import egress_agent_scope, egress_tool_without_w
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
-from mindroom.egress_broker.secrets import is_personal_target, service_status
+from mindroom.egress_broker.secrets import egress_key_path, is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
-from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix_openid import homeserver_openid_binding, openid_audience
-from mindroom.origins import allowed_client_origins
-from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.secret_requests import (
-    SECRET_REQUEST_CONTENT_KEY,
-    SECRET_REQUEST_TTL_SECONDS,
-    secret_request_body,
-    secret_request_content,
-    secret_request_hosts,
-    secret_request_registry,
-)
-from mindroom.tool_jobs.control import current_job_id, job_checkpoint
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.secret_request_cards import SecretRequestCard, ask_with_card, card_reason, chat_refusal
+from mindroom.secret_requests import SECRET_REQUEST_TTL_SECONDS, KeyTarget, secret_request_hosts
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.key_access import ServiceKeyRefusal
-    from mindroom.secret_requests import PendingSecretRequest, SecretRequestOutcome, SecretRequestStatus
+    from mindroom.secret_requests import SecretRequestOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -80,10 +62,7 @@ _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
     "and users can add services of their own on the egress page where it is available."
 )
-_MAX_REASON_LENGTH = 500
 _NO_PERSON_NOTE = "Only a person can answer a card, and this turn comes from an agent or a bot, so no card was posted."
-# How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
-_SAVE_GRACE_SECONDS = 30
 _OUTCOME_NOTES: dict[SecretRequestOutcome, str] = {
     "saved": (
         "The user saved the key. Your next request through Agent Keys uses it, so retry the request that failed. "
@@ -101,142 +80,6 @@ _ADD_ON_PAGE = (
     "The user can add the key on the Agent Keys page instead: the `link` in this result, or, when it is null, the "
     "page the operator names."
 )
-_NO_CHAT_ORIGIN_NOTE = (
-    "MindRoom Chat may not call this MindRoom (no origin in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`), so nobody could "
-    f"answer a card and none was posted. {_ADD_ON_PAGE}"
-)
-_NO_OPENID_AUDIENCE_NOTE = (
-    "MindRoom has no origin to bind MindRoom Chat's sign-in to (set `MINDROOM_PUBLIC_URL`), so Chat cannot send a key "
-    f"here and no card was posted. {_ADD_ON_PAGE}"
-)
-_NO_OPENID_BINDING_NOTE = (
-    "MindRoom could not confirm that the homeserver binds OpenID tokens to this deployment, which MindRoom Chat needs "
-    f"to send a key here, so no card was posted. {_ADD_ON_PAGE}"
-)
-
-
-@dataclass(frozen=True)
-class _SecretRequestCard:
-    """What a secret request card shows besides its request's own metadata, who answers it, and the scope its key goes to.
-
-    Never a key.
-    """
-
-    requester_id: str
-    worker_target: ResolvedWorkerTarget
-    agent_display_name: str
-    display_name: str
-    hosts: tuple[str, ...]
-    reason: str
-
-    def message(
-        self,
-        request: PendingSecretRequest,
-        status: SecretRequestStatus,
-        *,
-        thread_id: str | None = None,
-        reply_to_event_id: str | None = None,
-        latest_thread_event_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Return the card's message content in `status`, in the thread when `thread_id` is given."""
-        body = secret_request_body(status, agent_display_name=self.agent_display_name, display_name=self.display_name)
-        metadata = secret_request_content(request, display_name=self.display_name, reason=self.reason, status=status)
-        return build_message_content(
-            body,
-            thread_event_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            latest_thread_event_id=latest_thread_event_id,
-            extra_content={"msgtype": "m.notice", SECRET_REQUEST_CONTENT_KEY: metadata},
-        )
-
-
-async def _edit_card(
-    context: ToolRuntimeContext,
-    event_id: str,
-    card: _SecretRequestCard,
-    request: PendingSecretRequest,
-    status: SecretRequestStatus,
-) -> None:
-    """Replace the posted card with its final `status`; a failed edit is only logged, never the reason."""
-    content = card.message(request, status)
-    try:
-        delivered = await edit_message_result(context.client, context.room_id, event_id, content, content["body"])
-    except Exception as exc:
-        logger.warning(
-            "secret_request_edit_failed",
-            request_id=request.request_id,
-            status=status,
-            error_type=type(exc).__name__,
-        )
-    else:
-        if delivered is None:
-            logger.warning("secret_request_edit_failed", request_id=request.request_id, status=status)
-
-
-async def _await_outcome(
-    context: ToolRuntimeContext,
-    event_id: str,
-    card: _SecretRequestCard,
-    request: PendingSecretRequest,
-) -> SecretRequestOutcome:
-    """Wait for the requester's answer until the request expires, then edit the card; a stopped reply ends it too.
-
-    An answer the route claimed before the wait ended gets up to `_SAVE_GRACE_SECONDS` more to be saved, so a key
-    stored just after expiry is reported and shown as saved. The shield keeps the registry's future intact when a wait
-    ends. A timeout or cancellation settles the request before the edit, so no answer is stored while the card turns
-    expired, and a cancellation propagates after it.
-    """
-    try:
-        async with _job_awaits_requester(context.runtime_paths):
-            outcome = await asyncio.wait_for(
-                asyncio.shield(request.outcome),
-                max(0.0, request.expires_at - time.time()),
-            )
-    except TimeoutError:
-        outcome = await _answer_in_flight(request)
-        secret_request_registry().resolve(request.request_id, outcome)
-    except asyncio.CancelledError:
-        outcome = await _answer_in_flight(request)
-        secret_request_registry().resolve(request.request_id, outcome)
-        await _edit_card(context, event_id, card, request, outcome)
-        raise
-    await _edit_card(context, event_id, card, request, outcome)
-    return outcome
-
-
-@contextlib.asynccontextmanager
-async def _job_awaits_requester(runtime_paths: RuntimePaths) -> AsyncIterator[None]:
-    """Mark the background job this call runs in, if any, as awaiting a human decision while its card is open.
-
-    A Stop of the reply then cancels the job, as it does a job waiting on approval cards; one that came first cancels
-    it here. Outside a job, the Stop cancels the call itself.
-    """
-    job_id = current_job_id()
-    runtime = None if job_id is None else get_background_runtime(runtime_paths)
-    if job_id is None or runtime is None:
-        yield
-        return
-    async with runtime.human_decision_wait(job_id):
-        job_checkpoint(approval=True)
-        yield
-
-
-async def _answer_in_flight(request: PendingSecretRequest) -> SecretRequestOutcome:
-    """Return the answer that arrived or is being saved as the wait ended, else `expired`.
-
-    A save that fails gives its claim back, and after expiry nobody can claim again, so the wait ends there too.
-    """
-    if request.claimed and not request.outcome.done():
-        released = asyncio.ensure_future(request.claim_released.wait())
-        try:
-            await asyncio.wait(
-                {request.outcome, released},
-                timeout=_SAVE_GRACE_SECONDS,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            released.cancel()
-    return request.outcome.result() if request.outcome.done() else "expired"
 
 
 def _key_access_refusal(
@@ -264,17 +107,6 @@ def _key_access_refusal(
             "Only this agent's credential managers or an administrator can set its keys; "
             "ask one of them to add the key on the Agent Keys page."
         )
-    return None
-
-
-async def _chat_refusal(runtime_paths: RuntimePaths) -> str | None:
-    """Return why MindRoom Chat could not answer a card here, or None: it signs in to this API with a client session."""
-    if not allowed_client_origins(runtime_paths, COMPUTER_ALLOWED_ORIGINS_ENV):
-        return _NO_CHAT_ORIGIN_NOTE
-    if openid_audience(runtime_paths) is None:
-        return _NO_OPENID_AUDIENCE_NOTE
-    if await homeserver_openid_binding(runtime_paths) is not True:
-        return _NO_OPENID_BINDING_NOTE
     return None
 
 
@@ -370,6 +202,7 @@ class EgressCredentialsTools(Toolkit):
         (`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the
         key is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's
         Agent Keys key for the service. The key never reaches you, the chat, or your commands.
+        A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
         Waits up to 15 minutes and returns `status`:
         `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
         `declined` when the user refused: do not ask again for this service in this turn;
@@ -391,48 +224,10 @@ class EgressCredentialsTools(Toolkit):
         card = await self._card(context, target, agent_name, service, reason)
         if isinstance(card, str):
             return self._request_error(card)
-        thread_id = context.resolved_thread_id
-        latest_thread_event_id = context.reply_to_event_id
-        if thread_id is not None and latest_thread_event_id is None:
-            latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
-                room_id=context.room_id,
-                thread_id=thread_id,
-            )
-            if latest_thread_event_id is None:
-                return self._request_error("The thread's latest message could not be found, so no card was posted.")
-        # A Stop of the reply that started this call's job, before the card is posted, posts none.
-        job_checkpoint(approval=True)
-        registry = secret_request_registry()
-        request = registry.register(
-            room_id=context.room_id,
-            requester_id=card.requester_id,
-            agent_name=agent_name,
-            service=service,
-            worker_target=card.worker_target,
-            hosts=card.hosts,
-            now=time.time(),
-        )
-        try:
-            content = card.message(
-                request,
-                "pending",
-                thread_id=thread_id,
-                reply_to_event_id=context.reply_to_event_id if thread_id is not None else None,
-                latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
-            )
-            delivered = await send_message_result(context.client, context.room_id, content, operation="secret_request")
-            if delivered is None:
-                return self._request_error("The card could not be sent to the conversation.")
-            logger.info(
-                "secret_request_posted",
-                request_id=request.request_id,
-                agent=agent_name,
-                service=service,
-                room_id=context.room_id,
-            )
-            outcome = await _await_outcome(context, delivered.event_id, card, request)
-        finally:
-            registry.discard(request.request_id)
+        asked = await ask_with_card(context, card, agent_name=agent_name)
+        if isinstance(asked, str):
+            return self._request_error(asked)
+        outcome = asked.outcome.result()
         note = _OUTCOME_NOTES[outcome].format(service=service)
         return json.dumps({"status": outcome, "service": service, "note": note}, sort_keys=True)
 
@@ -443,7 +238,7 @@ class EgressCredentialsTools(Toolkit):
         agent_name: str,
         service: str,
         reason: str,
-    ) -> _SecretRequestCard | str:
+    ) -> SecretRequestCard | str:
         """Return the card asking the turn's requester for `service`'s key, or why no card may be posted.
 
         The requester is the person who answers, resolved as for approval cards: the canonical human, with a bridge
@@ -455,8 +250,8 @@ class EgressCredentialsTools(Toolkit):
         requester_id = resolve_tool_approval_approver(context.current_config, self._runtime_paths, context.requester_id)
         if requester_id is None:
             return _NO_PERSON_NOTE
-        reason = reason.strip()[:_MAX_REASON_LENGTH]
-        if not reason:
+        shown_reason = card_reason(reason)
+        if shown_reason is None:
             return "Give a reason: the card tells the user what you need the key for."
         refusal = _key_access_refusal(context, requester_id, agent_name, self._runtime_paths)
         if refusal is not None:
@@ -475,16 +270,18 @@ class EgressCredentialsTools(Toolkit):
         egress_service = _requestable_service(services, service)
         if isinstance(egress_service, str):
             return egress_service
-        if (refusal := await _chat_refusal(self._runtime_paths)) is not None:
-            return refusal
+        if (refusal := await chat_refusal(self._runtime_paths, noun="key")) is not None:
+            return f"{refusal} {_ADD_ON_PAGE}"
         agent = config.agents.get(agent_name)
-        return _SecretRequestCard(
+        # The file a saved answer is written to: one already there is the key the answer replaces.
+        key_path = egress_key_path(manager, target, service)
+        return SecretRequestCard(
             requester_id=requester_id,
-            worker_target=target,
             agent_display_name=(agent.display_name if agent is not None else "") or agent_name,
+            reason=shown_reason,
+            target=KeyTarget(service=service, worker_target=target, hosts=secret_request_hosts(egress_service)),
             display_name=egress_service.display_name or service,
-            hosts=secret_request_hosts(egress_service),
-            reason=reason,
+            replaces=key_path is not None and key_path.exists(),
         )
 
     def _settable(self) -> bool:
