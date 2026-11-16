@@ -290,6 +290,27 @@ async def test_a_long_label_or_field_hint_is_cut(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "url",
     [
+        "http://localhost:8080/keys",
+        "https://[::1]:8443/token",
+        "https://例え.example/トークン?kind=new#form",
+    ],
+)
+async def test_a_card_takes_any_http_or_https_page(tmp_path: Path, url: str) -> None:
+    """`http`, a port, an IPv6 host and a name outside ASCII are all pages a card's button can open."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, url=url)
+    content = (await _posted_card(context, task))[SECRET_REQUEST_CONTENT_KEY]
+    secret_request_registry().resolve(content["request_id"], "declined")
+    await task
+
+    assert content["url"] == url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
         "github.com/settings/tokens",
         "ftp://github.com/settings/tokens",
         "javascript:alert(1)",
