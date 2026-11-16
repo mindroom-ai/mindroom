@@ -59,7 +59,8 @@ class TemporarySecretsTools(Toolkit):
         shell commands in this conversation. The value never reaches you or the chat.
         The user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than
         15 minutes.
-        For an API key of a service that `list_egress_credentials` names, call `request_secret` instead.
+        When you also have `request_secret` and need the API key of a service it can ask for, call that instead:
+        such a key never reaches your commands.
         Waits up to 15 minutes and returns `status`:
         `provided` with `minutes`, how long the variable stays set: use `$name` inside the command that needs it,
         and never print, store or send the value;
