@@ -7,7 +7,6 @@ import asyncio
 import io
 import json
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -1187,16 +1186,24 @@ async def test_a_request_that_went_out_is_logged_even_when_its_caller_is_cancell
 def test_a_request_that_went_out_is_logged_when_the_loop_shuts_down_with_its_record_queued(tmp_path: Path) -> None:
     """A clean shutdown right after a send, which cancels every task and closes the loop, still writes the record."""
     inner = _ScriptedProvider([[_turn()]])
+    free = threading.Event()
+
+    async def free_the_writer_once_cancelled() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            free.set()
 
     async def send_and_stop() -> None:
         loop = asyncio.get_running_loop()
         loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-        loop.run_in_executor(None, time.sleep, 0.2)  # the one writer thread is busy, so the record's write waits
+        # The one writer thread stays busy until shutdown cancels every task, so the record's write is queued then.
+        loop.run_in_executor(None, free.wait, 5)
         stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
-        reply = asyncio.ensure_future(anext(stream))
+        tasks = [asyncio.ensure_future(free_the_writer_once_cancelled()), asyncio.ensure_future(anext(stream))]
         await asyncio.sleep(0)
         assert len(inner.requests) == 1
-        assert not reply.done()
+        assert not any(task.done() for task in tasks)
 
     asyncio.run(send_and_stop())
 

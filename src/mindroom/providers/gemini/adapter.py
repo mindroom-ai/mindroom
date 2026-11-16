@@ -9,6 +9,7 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
+import copy
 import re
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -326,12 +327,16 @@ def _sent_body(call: Mapping[str, Any]) -> dict[str, Any]:
 
     The config's ``http_options`` are request options, so they stay out. The SDK builds the REST body from the rest:
     camelCase names, with the system instruction, tools, and tool config at its top level and the other settings
-    under ``generationConfig``.
+    under ``generationConfig``. It rewrites a ``response_schema`` dict in place while building it, and the request log
+    reads this body as the request goes out, so the body keeps its own copy of the schema.
     """
     config = call["config"] or {}
     if not isinstance(config, dict):
         config = cast("GenerateContentConfig", config).model_dump(mode="json", exclude_none=True)
-    return {**call, "config": {key: value for key, value in config.items() if key != "http_options"}}
+    sent = {key: value for key, value in config.items() if key != "http_options"}
+    if "response_schema" in sent:
+        sent["response_schema"] = copy.deepcopy(sent["response_schema"])
+    return {**call, "config": sent}
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:

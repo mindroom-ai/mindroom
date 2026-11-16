@@ -57,7 +57,7 @@ from tests.providers.gemini_ollama_support import (
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -637,6 +637,28 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
     assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert ("responseMimeType" in body["generationConfig"]) is json_output
+
+
+@pytest.mark.asyncio
+async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Path) -> None:
+    """The SDK rewrites a ``response_schema`` dict in place while the request log may still read the body it got."""
+    schema = {"type": "object", "properties": {"note": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
+    sent: list[Mapping[str, Any]] = []
+
+    async def on_send(body: Mapping[str, Any]) -> None:
+        sent.append(body)
+
+    config = _config(GEMINI, generation_config={"response_mime_type": "application/json", "response_schema": schema})
+
+    request, _ = await run_adapter(
+        config,
+        _request(on_send=on_send),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "{}"})),
+    )
+
+    assert request["body"]["generationConfig"]["responseSchema"]["properties"]["note"]["nullable"] is True
+    assert [body["config"]["response_schema"] for body in sent] == [schema]
 
 
 @pytest.mark.asyncio
