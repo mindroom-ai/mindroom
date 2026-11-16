@@ -17,6 +17,7 @@ from mindroom.hooks import HookContext
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
+from mindroom.matrix.client_room_admin import admin_join_room_user_failure
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
@@ -354,6 +355,64 @@ async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_pat
         },
     )
     response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_path: Path) -> None:
+    """A refused admin join still reads as a plain failure to hooks."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.access_token = TEST_PASSWORD
+    response = MagicMock(status=403)
+    response.json = AsyncMock(return_value={"errcode": "M_FORBIDDEN", "error": "Only server administrators"})
+    client.send.return_value = response
+
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=True)):
+        assert await admin.force_join_user("!personal:localhost", "@user:localhost") is False
+    response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "failure"),
+    [
+        (200, {}, None),
+        (
+            403,
+            {"errcode": "M_FORBIDDEN", "error": "Only server administrators can use this endpoint"},
+            "answered HTTP 403 M_FORBIDDEN",
+        ),
+        (400, {"errcode": "M_FORBIDDEN: some free text"}, "answered HTTP 400"),
+        (500, ["not", "an", "object"], "answered HTTP 500"),
+        (502, ValueError("not JSON"), "answered HTTP 502"),
+    ],
+)
+async def test_admin_join_failure_names_only_the_http_status_and_errcode(
+    status: int,
+    body: object,
+    failure: str | None,
+) -> None:
+    """A failed admin join says its HTTP status and a well-formed Matrix errcode, never the response's free text."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_PASSWORD
+    response = MagicMock(status=status)
+    response.json = AsyncMock(side_effect=body) if isinstance(body, Exception) else AsyncMock(return_value=body)
+    client.send.return_value = response
+
+    assert await admin_join_room_user_failure(client, "!personal:localhost", "@user:localhost") == failure
+    response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_admin_join_failure_says_when_the_client_has_no_access_token() -> None:
+    """Without a token nothing is sent, and the failure says why."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = None
+
+    assert await admin_join_room_user_failure(client, "!personal:localhost", "@user:localhost") == "had no access token"
+    client.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

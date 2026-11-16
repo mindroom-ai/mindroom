@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
 from http import HTTPStatus
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+# A Matrix errcode such as M_FORBIDDEN; anything else in that field may be free text, which is not repeated.
+_MATRIX_ERRCODE = re.compile(r"[A-Za-z0-9_.]{1,64}")
 _ROOM_ENCRYPTION_EVENT_TYPE = "m.room.encryption"
 _ROOM_ENCRYPTION_CONTENT = {"algorithm": "m.megolm.v1.aes-sha2"}
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
@@ -105,8 +108,16 @@ async def kick_from_room(client: nio.AsyncClient, room_id: str, user_id: str) ->
 
 async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
     """Join one user through the Synapse-compatible admin API without changing invites."""
+    return await admin_join_room_user_failure(client, room_id, user_id) is None
+
+
+async def admin_join_room_user_failure(client: nio.AsyncClient, room_id: str, user_id: str) -> str | None:
+    """Join one user like `admin_join_room_user`; return None, or why it failed, to follow "the admin join".
+
+    The reason names only the HTTP status and a well-formed Matrix errcode, never the response's free text.
+    """
     if not client.access_token:
-        return False
+        return "had no access token"
     path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
     response = await client.send(
         "POST",
@@ -117,9 +128,19 @@ async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: s
             "Content-Type": "application/json",
         },
     )
-    succeeded = 200 <= response.status < 300
-    response.release()
-    return succeeded
+    try:
+        if 200 <= response.status < 300:
+            return None
+        try:
+            body = await response.json(content_type=None)
+        except (aiohttp.ClientError, ValueError):
+            body = None
+    finally:
+        response.release()
+    errcode = body.get("errcode") if isinstance(body, dict) else None
+    if isinstance(errcode, str) and _MATRIX_ERRCODE.fullmatch(errcode):
+        return f"answered HTTP {response.status} {errcode}"
+    return f"answered HTTP {response.status}"
 
 
 def _create_room_initial_state(
@@ -913,6 +934,7 @@ __all__ = [
     "RoomJoinOutcome",
     "add_room_to_space",
     "admin_join_room_user",
+    "admin_join_room_user_failure",
     "create_room",
     "create_space",
     "ensure_managed_room_power_levels",
