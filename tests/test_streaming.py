@@ -212,10 +212,14 @@ async def test_a_refused_flush_before_an_approval_pause_cannot_show_the_pause(co
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("ending", ["finished", "paused"])
-async def test_a_progress_edit_that_fails_while_the_stream_stops_fails_the_stream(config: Config, ending: str) -> None:
-    """A progress edit that fails while the stream stops its delivery fails the stream, which writes no ending.
+async def test_a_progress_edit_that_fails_while_the_stream_stops_leaves_the_ending_to_the_stream(
+    config: Config,
+    ending: str,
+) -> None:
+    """A progress edit that fails while the stream stops its delivery does not fail the stream by itself.
 
-    A stream pausing for approval then fails as a pause that could not be shown.
+    A finished stream's terminal update then carries the whole reply. A stream pausing for approval still fails as a
+    pause that could not be shown, because its own flush of the unsent progress fails too.
     """
     suspension = StreamingLifecycleSuspensionError("paused")
     gateway = _FakeGateway()
@@ -239,16 +243,22 @@ async def test_a_progress_edit_that_fails_while_the_stream_stops_fails_the_strea
         if ending == "paused":
             raise suspension
 
-    with (
-        patch("mindroom.streaming.edit_message_result", new=refuse_once_the_stream_stops),
-        pytest.raises(StreamingDeliveryError) as raised,
-    ):
-        await _run_stream(config, stream(), hooks=gateway.hooks())
+    with patch("mindroom.streaming.edit_message_result", new=refuse_once_the_stream_stops):
+        if ending == "paused":
+            with pytest.raises(PausePresentationError, match="Stream suspension presentation delivery failed"):
+                await _run_stream(config, stream(), hooks=gateway.hooks())
+        else:
+            outcome = await _run_stream(config, stream(), hooks=gateway.hooks())
 
-    assert type(raised.value) is (PausePresentationError if ending == "paused" else StreamingDeliveryError)
-    assert "Failed to edit streaming message" in str(raised.value.error)
-    assert [op.kind for op in gateway.ops] == ["send"]
-    assert suspension.presentation is None
+    if ending == "paused":
+        assert [op.kind for op in gateway.ops] == ["send"]
+        assert suspension.presentation is None
+        return
+    assert [op.kind for op in gateway.ops] == ["send", "edit"]
+    assert gateway.ops[-1].display_text == "I checked the input. Then more."
+    assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert outcome.rendered_body == "I checked the input. Then more."
+    assert not outcome.failed
 
 
 @pytest.mark.asyncio
@@ -1110,23 +1120,26 @@ async def test_first_progress_publication_replaces_the_prior_reply_state_at_once
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
-async def test_failed_progress_edit_stops_progress_without_failing_its_owner(config: Config) -> None:
-    """Progress is transport only, so a rejected edit ends progress while the owner keeps running."""
+async def test_failed_progress_edit_neither_stops_progress_nor_fails_its_owner(config: Config) -> None:
+    """Progress is transport only: an edit Matrix fails is resent in full by the next one, and the owner keeps running."""
     attempts: list[str] = []
     attempted = asyncio.Event()
 
-    async def rejected_edit(*_args: object, **_kwargs: object) -> None:
-        attempts.append("edit")
+    async def fail_first_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent | None:
+        attempts.append(_args[4])
         attempted.set()
+        if len(attempts) == 1:
+            return None
+        return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
-    with patch("mindroom.streaming.edit_message_result", new=rejected_edit):
+    with patch("mindroom.streaming.edit_message_result", new=fail_first_edit):
         async with _progress_edits(config) as publish:
             await publish(StructuredStreamChunk(content="Before."))
             async with asyncio.timeout(5):
                 await attempted.wait()
             await publish(StructuredStreamChunk(content="Before. After."))
 
-    assert attempts == ["edit"]
+    assert attempts == ["Before.", "Before. After."]
 
 
 @pytest.mark.asyncio

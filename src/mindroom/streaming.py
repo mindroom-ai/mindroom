@@ -986,7 +986,11 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
     ) -> bool:
-        """Send one already-prepared non-terminal or terminal payload."""
+        """Send one already-prepared non-terminal or terminal payload, and return whether it landed.
+
+        A failed initial send raises, failing the stream. A failed progress edit of an existing event returns ``False``
+        and commits nothing, so the next edit resends the whole reply. A failed terminal update returns ``False``.
+        """
         is_initial_send = self.event_id is None
         if (
             not is_final
@@ -1037,9 +1041,7 @@ class StreamingResponse:
                 self._inflight_nonterminal_capture_state = None
         if not send_succeeded:
             if not is_final:
-                action = "send initial" if is_initial_send else "edit"
-                msg = f"Failed to {action} streaming message"
-                raise RuntimeError(msg)
+                self._nonterminal_send_failed(is_initial_send=is_initial_send)
             return False
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
@@ -1056,6 +1058,25 @@ class StreamingResponse:
         else:
             self.placeholder_progress_sent = False
         return True
+
+    def _nonterminal_send_failed(self, *, is_initial_send: bool) -> None:
+        """Handle a progress send Matrix did not accept: a failed create fails the stream, a failed edit does not.
+
+        A progress edit is superseded by the next one, which carries the whole reply again, and the turn's answer lands
+        through the terminal update. So an edit Matrix refused, as during a homeserver restart, costs nothing but
+        itself: nothing is committed, so the next edit is still owed, and the throttle clock advances so an outage is
+        retried at the update cadence rather than on every streamed token.
+        """
+        if is_initial_send:
+            msg = "Failed to send initial streaming message"
+            raise RuntimeError(msg)
+        logger.warning(
+            "streaming_progress_edit_failed",
+            event_id=self.event_id,
+            room_id=self.room_id,
+            detail="The stream continues; the next progress edit retries with the full reply.",
+        )
+        self.last_update = time.time()
 
     async def _progress_permitted(
         self,
@@ -2292,8 +2313,9 @@ async def stream_progress_edits(
     counts as one in-place mutation. The first publication is delivered at
     once, so the reply leaves whatever state it showed before. Worker warm-up
     progress is shown as in ordinary streaming. Progress is transport only: a
-    rejected edit stops later progress without failing the caller, whose
-    terminal delivery still owns the reply. Leaving the scope waits until no
+    progress edit Matrix fails is resent in full by the next one, and an edit
+    the reply's records refuse, or one that raises, stops later progress; none
+    fails the caller, whose terminal delivery still owns the reply. Leaving the scope waits until no
     progress edit is in flight, even across cancellation, so the caller's
     terminal update can never race one.
     """
