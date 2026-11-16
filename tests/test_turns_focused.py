@@ -6952,7 +6952,7 @@ async def test_a_message_the_running_reply_stopped_for_is_answered_without_parti
             active_text="Write the long report",
             evaluate=evaluate,
             requester_id=_SENDER,
-            on_stop=queue.stopped_reply_event_ids.update,
+            on_stop=queue.mark_stopped_reply,
         )
     # Without text the message cannot be judged, so the reply wraps up without a verdict.
     text = None if judgment == "skipped" else "Stop, write the short summary instead"
@@ -7039,7 +7039,7 @@ async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered
         active_text="Write the long report",
         evaluate=evaluate,
         requester_id=_SENDER,
-        on_stop=queue.stopped_reply_event_ids.update,
+        on_stop=queue.mark_stopped_reply,
     )
     messages = (
         ("$remark:localhost", "@other:localhost", "Nice weather today"),

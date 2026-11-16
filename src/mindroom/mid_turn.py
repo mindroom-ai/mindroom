@@ -90,15 +90,15 @@ class MidTurnGate:
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
-    # Receives the messages of a still-current queue the judge said the reply cannot wait for.
-    on_stop: Callable[[frozenset[str]], None] | None = None
+    # Receives the messages, as the judge read them, of a queue it said the reply cannot wait for.
+    on_stop: Callable[[tuple[QueuedMessage, ...]], None] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
     # Messages, as they read then, of a queue that could wait, and those of the checked queue the judge said the reply
     # cannot wait for.
     _waited: set[QueuedMessage] = field(default_factory=set)
-    _stopped_for: frozenset[str] = frozenset()
+    _stopped_for: tuple[QueuedMessage, ...] = ()
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
@@ -140,7 +140,9 @@ class MidTurnGate:
             # Callers hand off as on a failed judgment, so a judgment that raises never costs the active reply.
             finish = False
         if not finish:
-            if self.on_stop is not None and self._stopped_for and self._checked == pending and current():
+            # A newer message can arrive during the judgment and the reply still wraps up, so this does not wait for an
+            # unchanged queue; the receiver marks only messages that still read as judged.
+            if self.on_stop is not None and self._stopped_for and self._checked == pending:
                 self.on_stop(self._stopped_for)
             return False
         for message in pending:
@@ -190,7 +192,7 @@ class MidTurnGate:
             # covers the whole queue, so it names the rest only when one person sent them all.
             fresh = [message for message in pending if message not in self._waited] if stops else []
             one_sender = len({message.requester_id for message in fresh}) == 1
-            self._stopped_for = frozenset(message.event_id for message in fresh) if one_sender else frozenset()
+            self._stopped_for = tuple(fresh) if one_sender else ()
             if finish:
                 self._waited.update(pending)
             self._checked, self._finish = pending, finish

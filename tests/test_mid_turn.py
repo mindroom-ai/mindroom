@@ -1444,7 +1444,7 @@ async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_re
         active_text="Do the task",
         evaluate=evaluate,
         requester_id=_REQUESTER,
-        on_stop=queue.stopped_reply_event_ids.update,
+        on_stop=queue.mark_stopped_reply,
     )
     queue.add_waiting_human_message(
         "$remark",
@@ -1482,7 +1482,7 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
         active_text="Do the task",
         evaluate=evaluate,
         requester_id=_REQUESTER,
-        on_stop=queue.stopped_reply_event_ids.update,
+        on_stop=queue.mark_stopped_reply,
     )
     first, edited = ("Thanks", "Stop, wrong file") if edit == "waited_into_stop" else ("Stop, wrong file", "Thanks")
     queue.add_waiting_human_message("$msg", text=first, requester_id=_OTHER, mentions_nobody=True)
@@ -1499,6 +1499,30 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
 
 
 @pytest.mark.asyncio
+async def test_an_edit_after_release_drops_the_kept_verdict() -> None:
+    """A correction whose notice a requester split released, then edited, has no verdict on its edited text."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return False
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
+    notice = QueuedHumanNoticeReservation(queue, "$stop")
+    assert await queue._interrupts()
+    notice.release()
+    assert notice.stopped_reply
+    notice.update(request_envelope(reply_to_event_id="$stop", prompt="Thanks, carry on"), mentions_nobody=True)
+    assert not notice.stopped_reply
+    assert not queue.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
 async def test_one_verdict_for_several_peoples_new_messages_marks_none() -> None:
     """The judge answers once for a queue, so new messages from two people leave both to participation."""
 
@@ -1510,7 +1534,7 @@ async def test_one_verdict_for_several_peoples_new_messages_marks_none() -> None
         active_text="Do the task",
         evaluate=evaluate,
         requester_id=_REQUESTER,
-        on_stop=queue.stopped_reply_event_ids.update,
+        on_stop=queue.mark_stopped_reply,
     )
     queue.add_waiting_human_message("$remark", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
     queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER, mentions_nobody=True)
@@ -1553,6 +1577,50 @@ async def test_a_verdict_after_a_tool_batch_marks_the_waiting_message(*, verdict
     assert notice is not None
     assert _has_notice(messages) is not verdict
     assert notice.stopped_reply is not verdict
+
+
+@pytest.mark.asyncio
+async def test_a_message_arriving_during_the_judgment_keeps_the_judged_mark() -> None:
+    """A newer message that arrives while the judge decides still lets the reply wrap up and the judged one count.
+
+    The newer message, which the judge never read, is not marked.
+    """
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    hook = queued_notice_after_tool_batch(_NOTICE)
+    notices: dict[str, QueuedHumanNoticeReservation | None] = {}
+
+    def queue(event_id: str, prompt: str) -> None:
+        envelope = request_envelope(
+            target=MessageTarget.resolve("!room:localhost", "$thread", event_id),
+            reply_to_event_id=event_id,
+            prompt=prompt,
+        )
+        notices[event_id] = lifecycle.reserve_waiting_human_message(target=envelope.target, response_envelope=envelope)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        queue("$more", "and use the new file")
+        return False
+
+    async def turn(_target: MessageTarget) -> list[Message]:
+        queue("$stop", "Stop, wrong file")
+        messages = _resumed_messages()
+        await hook(messages, ())
+        await hook(messages, ())
+        return messages
+
+    messages = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=request_envelope(target=target, reply_to_event_id="$active", prompt="Do the task"),
+        pipeline_timing=None,
+        locked_operation=turn,
+        mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate, conversation_context=()),
+    )
+    assert _has_notice(messages)
+    assert {event_id: notice is not None and notice.stopped_reply for event_id, notice in notices.items()} == {
+        "$stop": True,
+        "$more": False,
+    }
 
 
 @pytest.mark.asyncio
