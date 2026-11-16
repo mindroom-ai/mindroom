@@ -18,6 +18,7 @@
         "seq": 0,
         "meta": {
           "agent": "researcher",
+          "model": "default",
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -61,6 +62,7 @@
         "seq": 1,
         "meta": {
           "agent": "researcher",
+          "model": "default",
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -110,6 +112,7 @@
         "seq": 2,
         "meta": {
           "agent": "researcher",
+          "model": "default",
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -178,6 +181,7 @@
         "seq": 3,
         "meta": {
           "agent": "researcher",
+          "model": "default",
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -240,6 +244,7 @@
         "seq": 4,
         "meta": {
           "agent": "researcher",
+          "model": "default",
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -285,6 +290,7 @@
         "seq": 0,
         "meta": {
           "agent": "reviewer",
+          "model": "default",
           "subagent": "del-2",
           "caller": "researcher",
           "root": "lead",

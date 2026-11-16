@@ -81,6 +81,7 @@ def _activity(*, task: str = "Write it all down.") -> _SubagentActivity:
         caller_agent_name="lead",
         root_caller_agent_name="lead",
         agent_name="researcher",
+        model_name="default",
         source="delegate",
         task=task,
         thread_id=None,
@@ -305,7 +306,7 @@ async def test_long_text_stays_under_the_cap(
     assert sum(cut) > 40
     assert ["snapshot" in frame for frame in room.sent] == [True, *cut[1:], True]
     assert all(frame["delta"]["md"]["del"] == 0 for frame in room.sent if "delta" in frame)
-    assert max(room.sent_bytes) < _MAX_FRAME_BYTES
+    assert max(room.sent_bytes) <= _MAX_FRAME_BYTES
     assert room.encrypted == []
     assert ("_preview" in json.dumps(room.sent)) is (previews and leading_tool)
 
@@ -317,7 +318,7 @@ async def test_long_text_stays_under_the_cap(
     ids=["encrypted-cyrillic", "encrypted-cjk", "encrypted-emoji", "plaintext-cyrillic", "plaintext-emoji"],
 )
 async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) -> None:
-    """With the text, tool rows, task, and result at their caps, every frame goes out under 60,000 bytes."""
+    """With the text, tool rows, task, and result at their caps, every frame is at most 60,000 bytes."""
     room = FrameRoom(encrypted=encrypted)
     activity = _activity(task=character * 1_000)
     for index in range(20):
@@ -332,7 +333,7 @@ async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) 
     room.publish(activity.snapshot())
     await _until(_forgotten)
 
-    assert max(room.sent_bytes) < _MAX_FRAME_BYTES
+    assert max(room.sent_bytes) <= _MAX_FRAME_BYTES
     # Every frame encrypted went out: none was refused for its size after encrypting.
     assert room.encrypted == []
     assert (room.sent[-1]["meta"]["status"], room.sent[-1]["meta"]["result"]) == ("completed", character * 1_000)

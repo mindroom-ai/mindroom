@@ -64,6 +64,8 @@ class SubagentSnapshot:
     # The agent in the room whose turn started the delegation chain; the caller itself for a direct child.
     root_caller_agent_name: str
     agent_name: str
+    # The configured model key the child runs on, which a mid-run switch updates.
+    model_name: str
     source: Literal["delegate", "workflow"]
     # Redacted, at most 1,000 characters.
     task: str
@@ -141,6 +143,7 @@ class _SubagentActivity:
     caller_agent_name: str
     root_caller_agent_name: str
     agent_name: str
+    model_name: str
     source: Literal["delegate", "workflow"]
     # Redacted and capped once, at the start.
     task: str
@@ -174,6 +177,7 @@ class _SubagentActivity:
             caller_agent_name=child.caller_agent_name,
             root_caller_agent_name=root_caller_agent_name,
             agent_name=child.child_agent_name,
+            model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
             thread_id=identity.resolved_thread_id or identity.thread_id,
@@ -245,6 +249,7 @@ class _SubagentActivity:
             caller_agent_name=self.caller_agent_name,
             root_caller_agent_name=self.root_caller_agent_name,
             agent_name=self.agent_name,
+            model_name=self.model_name,
             source=self.source,
             task=self.task,
             thread_id=self.thread_id,
@@ -297,8 +302,9 @@ class ActivityFeed:
             )
             feed = cls(activity, sink=sink)
         else:
-            # The resumed attempt's sink publishes from now on.
+            # The resumed attempt's sink publishes from now on, with the model it runs on.
             feed._sink = sink
+            feed._activity.model_name = child.model_name
         _OPEN[child.delegation_id] = feed
         feed.status("running")
         return feed
@@ -321,6 +327,11 @@ class ActivityFeed:
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish a tool row; it goes out with the next window's snapshot."""
         self._activity.tool_completed(event)
+        self._mark()
+
+    def model(self, model_name: str) -> None:
+        """Switch to the model the child runs on now; it goes out with the next window's snapshot."""
+        self._activity.model_name = model_name
         self._mark()
 
     def status(self, status: _SubagentStatus, *, result: str | None = None) -> None:

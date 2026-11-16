@@ -501,6 +501,24 @@ async def test_a_resumed_attempt_publishes_to_its_own_sink() -> None:
 
 
 @pytest.mark.asyncio
+async def test_frames_carry_the_model_the_child_runs_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mid-run model switch and a resume's model reach the next snapshot and every frame's meta."""
+    monkeypatch.setattr(lifecycle, "update_subagent_turn_sync", lambda *_args: None)
+    seen = _Sink()
+    child = _child()
+    feed = ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(1)).model_name == "fast"
+    lifecycle.note_child_run_id(child, "run-2", _runtime_paths(tmp_path), model_name="smart")
+    switched = await seen.wait_for(2)
+    assert subagents_module._run_meta(switched, full=False)["model"] == "smart"
+    feed.status("paused")
+    await seen.wait_for(3)
+    child.model_name = "retained"
+    ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(4)).model_name == "retained"
+
+
+@pytest.mark.asyncio
 async def test_a_terminal_status_forgets_the_entry() -> None:
     """A finished run is published once with its result, and the same id later starts empty."""
     seen = _Sink()
