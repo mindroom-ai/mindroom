@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.run_storage import RunStorage
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.skills import Skill
 
 __all__ = [
@@ -75,7 +76,7 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     for index, document in enumerate(surface.context_documents):
         documents[f"context-{index + 1}"] = document
     for skill in surface.skills:
-        documents[f"skill:{skill.name}"] = _skill_document(skill)
+        documents[f"skill:{skill.name}"] = _skill_document(skill, surface.output_file_policy)
     for index, toolkit in enumerate(build.spec.toolkits):
         if toolkit.guidance:
             documents[f"toolkit-{index + 1}"] = toolkit.guidance
@@ -83,9 +84,16 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     return documents
 
 
-def _skill_document(skill: Skill) -> str:
-    """Name a skill, the directory its files live in, its reference and script files, then its instructions."""
-    lines = [skill.name, f"Directory: {skill.source_path}"]
+def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
+    """Name a skill, the directory its files live in, its reference and script files, then its instructions.
+
+    A skill in the workspace is named relative to it, where Bash starts, because a worker mounts the workspace at
+    another path than the primary's.
+    """
+    directory = skill.source_path
+    if not policy.tools_use_workdir and directory.is_relative_to(policy.workspace_root):
+        directory = directory.relative_to(policy.workspace_root)
+    lines = [skill.name, f"Directory: {directory.as_posix()}"]
     if skill.references:
         lines.append("References: " + ", ".join(f"references/{name}" for name in skill.references))
     if skill.scripts:
