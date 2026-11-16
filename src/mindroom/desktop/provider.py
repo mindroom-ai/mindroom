@@ -599,6 +599,9 @@ class PyAutoGuiDesktopProvider:
         if not self._input_enabled.is_set():
             raise DesktopControlRevokedError(_CONTROL_REVOKED_MESSAGE)
         self._check_emergency_stop()
+        # Reading the pointer can block while the local channel revokes control.
+        if not self._input_enabled.is_set():
+            raise DesktopControlRevokedError(_CONTROL_REVOKED_MESSAGE)
 
     def _check_emergency_stop(self) -> None:
         position = self._pyautogui.position()

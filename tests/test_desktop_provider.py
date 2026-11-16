@@ -1121,3 +1121,22 @@ def test_revoke_during_the_window_lookup_before_a_pointer_event_sends_nothing(mo
         provider.click(app_id="com.example.Editor", state_id="state-1", x=10, y=10, button="left")
 
     assert posted == []
+
+
+def test_revoke_during_the_last_position_lookup_sends_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revoke while checking the pointer after focus validation stops the pending key."""
+    provider, pyautogui, accessibility = _provider()
+    position = pyautogui.position
+
+    def position_with_revoke() -> SimpleNamespace:
+        point = position()
+        if any(action == "keyboard_focus" for action, _ in accessibility.calls):
+            provider.set_input_enabled(False)
+        return point
+
+    monkeypatch.setattr(pyautogui, "position", position_with_revoke)
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["tab"])
+
+    assert pyautogui.calls == []
