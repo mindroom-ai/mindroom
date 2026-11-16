@@ -945,6 +945,40 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertEqual(requests[5].1 as? [String: Bool], ["until_revoked": true])
     }
 
+    func testGrantControlSendsTheChosenDurationAndScopeOnlyWhenAsked() async throws {
+        let helper = DesktopBridgeProcess()
+        let running = configuredStatus(revision: 1, apps: ["primary-screen"], bridge: "observe_only")
+        var requests: [(String, [String: Any])] = []
+        let store = DesktopControlStore(helper: helper, request: { action, parameters, _ in
+            requests.append((action, parameters))
+            return try self.response(status: running)
+        })
+        try await publish(running, through: helper, to: store)
+        XCTAssertTrue(requests.isEmpty, "Launching and receiving status never grants control")
+        XCTAssertEqual(store.controlScope, .apps)
+        XCTAssertEqual(store.controlDuration, .minutes(15))
+
+        store.grantControl()
+        await waitUntilIdle(store)
+        store.controlScope = .computer
+        store.controlDuration = .untilStopped
+        store.grantControl()
+        await waitUntilIdle(store)
+        store.controlDuration = .minutes(60)
+        store.grantControl()
+        await waitUntilIdle(store)
+        store.controlScope = .apps
+        store.controlDuration = .untilStopped
+        store.grantControl()
+        await waitUntilIdle(store)
+
+        XCTAssertEqual(requests.map(\.0), ["grant_control", "grant_control", "grant_control", "grant_control"])
+        XCTAssertEqual(requests[0].1 as NSDictionary, ["duration_seconds": 900, "scope": "apps"])
+        XCTAssertEqual(requests[1].1 as NSDictionary, ["until_revoked": true, "scope": "computer"])
+        XCTAssertEqual(requests[2].1 as NSDictionary, ["duration_seconds": 3600, "scope": "computer"])
+        XCTAssertEqual(requests[3].1 as NSDictionary, ["until_revoked": true, "scope": "apps"])
+    }
+
     private func shellRequest(id: String, command: String) -> DesktopShellRequest {
         DesktopShellRequest(
             requestID: id, requesterID: "@person:example.org", agentName: "assistant",

@@ -116,17 +116,41 @@ struct DesktopRuntimeStatus: Codable, Equatable {
     }
 }
 
+/// Which apps a control grant covers; whole-computer scope exists only while its grant is in force and is never saved.
+enum DesktopControlScope: String, Codable, CaseIterable, Identifiable {
+    case apps, computer
+
+    var id: Self { self }
+}
+
 struct DesktopAuthorityStatus: Codable, Equatable {
     let controlAvailable: Bool
     let leaseRemainingSeconds: Double
     let leaseExpiresAtMilliseconds: Double?
     let emergencyStopLatched: Bool
+    var controlScope = DesktopControlScope.apps
+    var controlUntilRevoked = false
 
     enum CodingKeys: String, CodingKey {
         case controlAvailable = "control_available"
         case leaseRemainingSeconds = "lease_remaining_seconds"
         case leaseExpiresAtMilliseconds = "lease_expires_at_ms"
         case emergencyStopLatched = "emergency_stop_latched"
+        case controlScope = "control_scope"
+        case controlUntilRevoked = "control_until_revoked"
+    }
+}
+
+extension DesktopAuthorityStatus {
+    /// Stopped and faulted helpers report no scope, which reads as saved apps without an until-stopped grant.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        controlAvailable = try container.decode(Bool.self, forKey: .controlAvailable)
+        leaseRemainingSeconds = try container.decode(Double.self, forKey: .leaseRemainingSeconds)
+        leaseExpiresAtMilliseconds = try container.decodeIfPresent(Double.self, forKey: .leaseExpiresAtMilliseconds)
+        emergencyStopLatched = try container.decode(Bool.self, forKey: .emergencyStopLatched)
+        controlScope = try container.decodeIfPresent(DesktopControlScope.self, forKey: .controlScope) ?? .apps
+        controlUntilRevoked = try container.decodeIfPresent(Bool.self, forKey: .controlUntilRevoked) ?? false
     }
 }
 
@@ -234,7 +258,8 @@ extension DesktopShellStatus {
     }
 }
 
-enum DesktopShellAutoApproval: Hashable, Identifiable {
+/// How long a shell auto-approval or a control grant lasts; never saved.
+enum DesktopGrantDuration: Hashable, Identifiable {
     case minutes(Int), untilStopped
 
     static let choices: [Self] = [.minutes(5), .minutes(15), .minutes(60), .untilStopped]
@@ -250,7 +275,7 @@ enum DesktopShellAutoApproval: Hashable, Identifiable {
 }
 
 enum DesktopShellDecision: Equatable {
-    case reject, approveOnce, approveAndAllow(DesktopShellAutoApproval)
+    case reject, approveOnce, approveAndAllow(DesktopGrantDuration)
 
     func parameters(commandID: String) -> [String: Any] {
         var parameters: [String: Any] = ["command_id": commandID, "approved": self != .reject, "auto_approve_seconds": 0]

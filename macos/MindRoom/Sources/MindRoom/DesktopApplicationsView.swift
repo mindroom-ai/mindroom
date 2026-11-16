@@ -22,6 +22,8 @@ struct DesktopApplicationsView: View {
                 }
                 Text("Check the apps your paired agents may use, then save app access. This does not grant control or change macOS permissions.")
                     .font(.callout).foregroundStyle(.secondary)
+                Text("To let an agent use your whole Mac, you do not need to check each app: saving only Allow primary screen, under Advanced screen access, is enough to start. Whole-computer control is then granted under App control after Start, and is never saved.")
+                    .font(.caption).foregroundStyle(.secondary)
                 DesktopAccessSaveBar(
                     store: store, saveTitle: Self.saveTitle, hasChanges: store.hasAppSelectionChanges,
                     idleNote: store.selectedAppIDs.isEmpty ? "No apps are selected. Agents will not have access to any apps." : nil,

@@ -21,6 +21,23 @@ final class DesktopBridgeProtocolTests: XCTestCase {
     }
     """.data(using: .utf8)!
 
+    func testAuthorityDecodesControlScopeAndDefaultsWhenAbsent() throws {
+        // Stopped and faulted helpers omit the scope keys.
+        let base = #""control_available":true,"lease_remaining_seconds":0,"lease_expires_at_ms":null,"emergency_stop_latched":false"#
+        let omitted = try JSONDecoder().decode(DesktopAuthorityStatus.self, from: Data("{\(base)}".utf8))
+        XCTAssertEqual(omitted.controlScope, .apps)
+        XCTAssertFalse(omitted.controlUntilRevoked)
+        let granted = try JSONDecoder().decode(
+            DesktopAuthorityStatus.self,
+            from: Data(#"{\#(base),"control_scope":"computer","control_until_revoked":true}"#.utf8)
+        )
+        XCTAssertEqual(granted.controlScope, .computer)
+        XCTAssertTrue(granted.controlUntilRevoked)
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+        XCTAssertEqual(status.authority.controlScope, .apps)
+        XCTAssertFalse(status.authority.controlUntilRevoked)
+    }
+
     func testDecodesCompleteRedactedStatus() throws {
         let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
         XCTAssertEqual(status.bridge.state, "observe_only")

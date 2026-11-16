@@ -9,6 +9,7 @@ struct DesktopControlView: View {
     @State private var reconnecting = false
     @State private var showDetails = false
     @State private var isGrantConfirmationPresented = false
+    @State private var isAppControlExpanded = true
     @State private var isReplaceSessionConfirmationPresented = false
     @State private var replaceUsingPassword = false
 
@@ -42,12 +43,12 @@ struct DesktopControlView: View {
             section = nextSection
         }
         .confirmationDialog(
-            "Grant control for \(store.controlMinutes) minutes?",
+            store.status.controlGrantTitle(scope: store.controlScope, duration: store.controlDuration),
             isPresented: $isGrantConfirmationPresented, titleVisibility: .visible
         ) {
-            Button("Grant Control for \(store.controlMinutes) Minutes") { store.grantControl() }
+            Button(store.controlScope.grantButtonTitle) { store.grantControl() }
             Button("Cancel", role: .cancel) {}
-        } message: { Text(savedControlSummary) }
+        } message: { Text(store.status.controlGrantSummary(scope: store.controlScope)) }
         .confirmationDialog(
             "Replace the saved Matrix session?",
             isPresented: $isReplaceSessionConfirmationPresented, titleVisibility: .visible
@@ -380,16 +381,24 @@ struct DesktopControlView: View {
     }
 
     private var appControlOptions: some View {
-        DisclosureGroup("Optional app control") {
+        DisclosureGroup("App control", isExpanded: $isAppControlExpanded) {
             VStack(alignment: .leading, spacing: 10) {
-                Stepper("Control duration: \(store.controlMinutes) minutes", value: $store.controlMinutes, in: 1...60)
+                Picker("Scope", selection: $store.controlScope) {
+                    ForEach(DesktopControlScope.allCases) { scope in Text(scope.title).tag(scope) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Duration", selection: $store.controlDuration) {
+                    ForEach(DesktopGrantDuration.choices) { duration in Text(duration.title).tag(duration) }
+                }
                 HStack {
                     Button("Grant Control…") { isGrantConfirmationPresented = true }
                         .disabled(store.isBusy || store.status.bridge.state != "observe_only")
                     Button("Revoke Now", role: .destructive) { store.revokeControl() }
                         .disabled(!store.status.authority.controlAvailable)
                 }
-                Text("Control applies only to the saved apps and expires automatically. Revoke it at any time, or move the pointer to the upper-left corner to stop input.")
+                Text(store.controlScope == .computer
+                     ? "Whole-computer control covers every app and the primary screen except MindRoom itself, and is never saved. Revoke it here or from the menu bar at any time, or move the pointer to the upper-left corner to stop input."
+                     : "Control applies only to the saved apps and is never saved. Revoke it at any time, or move the pointer to the upper-left corner to stop input.")
                     .font(.callout).foregroundStyle(.secondary)
             }.padding(.top, 8)
         }
@@ -417,16 +426,5 @@ struct DesktopControlView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             TextField(title, text: text).textFieldStyle(.roundedBorder)
         }
-    }
-
-    private var savedControlSummary: String {
-        """
-        Controller: \(store.status.config.controllerUserID ?? "") · \(store.status.config.controllerDeviceID ?? "")
-        Fingerprint: \(store.status.pairing.controllerFingerprint ?? "")
-        Requester: \((store.status.config.allowedRequesterIDs ?? []).joined(separator: ", "))
-        Agent: \((store.status.config.allowedAgentNames ?? []).joined(separator: ", "))
-        Applications: \((store.status.config.allowedAppIDs ?? []).joined(separator: ", "))
-        Duration: \(store.controlMinutes) minutes
-        """
     }
 }

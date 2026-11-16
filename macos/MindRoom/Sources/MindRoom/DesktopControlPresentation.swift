@@ -89,11 +89,34 @@ enum DesktopShellApprovalState: Equatable {
     }
 }
 
-extension DesktopShellAutoApproval {
+extension DesktopGrantDuration {
     var title: String {
         switch self {
         case let .minutes(minutes): "\(minutes) Minutes"
         case .untilStopped: "Until I Stop"
+        }
+    }
+
+    fileprivate var grantPhrase: String {
+        switch self {
+        case let .minutes(minutes): "for \(minutes) minutes"
+        case .untilStopped: "until you stop it"
+        }
+    }
+}
+
+extension DesktopControlScope {
+    var title: String {
+        switch self {
+        case .apps: "Saved apps"
+        case .computer: "Whole computer"
+        }
+    }
+
+    var grantButtonTitle: String {
+        switch self {
+        case .apps: "Grant Control"
+        case .computer: "Allow Whole-Computer Control"
         }
     }
 }
@@ -253,8 +276,9 @@ extension DesktopStatus {
     func accessModeLabel(controlRemainingSeconds: Int) -> String {
         switch bridge.state {
         case "observe_only", "control":
-            let appMode = bridge.state == "control"
-                ? "Control · \(desktopDurationLabel(controlRemainingSeconds))" : "Observe only"
+            let duration = authority.controlUntilRevoked ? "until you stop" : desktopDurationLabel(controlRemainingSeconds)
+            if bridge.state == "control", authority.controlScope == .computer { return "Whole-computer control · \(duration)" }
+            let appMode = bridge.state == "control" ? "Control · \(duration)" : "Observe only"
             guard hasSavedLocalAccess else { return appMode }
             return needsGUIPermissions ? "Apps \(appMode.lowercased())" : "Access on"
         case "faulted":
@@ -264,7 +288,45 @@ extension DesktopStatus {
         }
     }
 
-    func shellAutoApprovalScope(_ approval: DesktopShellAutoApproval) -> String {
+    var hasWholeComputerControl: Bool { authority.controlAvailable && authority.controlScope == .computer }
+
+    var controlMenuTitle: String { hasWholeComputerControl ? "Stop Whole-Computer Control" : "Revoke Computer Control" }
+
+    /// A waiting shell command keeps the status item's attention over whole-computer control.
+    var statusItemTitle: String {
+        if shellApprovalState.isPending { return "Command waiting" }
+        return hasWholeComputerControl ? "Controlling this Mac" : ""
+    }
+
+    func controlGrantTitle(scope: DesktopControlScope, duration: DesktopGrantDuration) -> String {
+        switch scope {
+        case .apps: "Grant control of the saved apps \(duration.grantPhrase)?"
+        case .computer: "Allow control of this whole Mac \(duration.grantPhrase)?"
+        }
+    }
+
+    func controlGrantSummary(scope: DesktopControlScope) -> String {
+        let identity = """
+        Controller: \(config.controllerUserID ?? "") · \(config.controllerDeviceID ?? "")
+        Fingerprint: \(pairing.controllerFingerprint ?? "")
+        Requester: \((config.allowedRequesterIDs ?? []).joined(separator: ", "))
+        Agent: \((config.allowedAgentNames ?? []).joined(separator: ", "))
+        """
+        switch scope {
+        case .apps:
+            return "\(identity)\nApplications: \(savedAppIDs.joined(separator: ", "))"
+        case .computer:
+            return """
+            \(identity)
+            Every app and the whole primary screen, except MindRoom itself. \
+            That includes Terminal, Finder, browsers, and chat apps signed in as you, so the agent can do anything you can do on this Mac.
+            Shell command approval, read-only folders, and the browser extension keep their own settings.
+            Not saved: control ends when you revoke it, stop computer access, or quit MindRoom.
+            """
+        }
+    }
+
+    func shellAutoApprovalScope(_ approval: DesktopGrantDuration) -> String {
         let duration = switch approval {
         case let .minutes(minutes): "for \(minutes) minutes"
         case .untilStopped: "until you revoke shell access or stop computer access"

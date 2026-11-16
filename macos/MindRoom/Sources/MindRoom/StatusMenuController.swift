@@ -56,10 +56,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         var toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.connectionStatusLabel)"
         if let shell = desktop.status.shellApprovalState.label { toolTip += "\n\(shell)" }
         statusItem?.button?.toolTip = toolTip
-        // Keep a dismissed approval discoverable without reopening its popup on every status update.
-        let commandWaiting = desktop.status.shellApprovalState.isPending
-        statusItem?.button?.title = commandWaiting ? "Command waiting" : ""
-        statusItem?.button?.imagePosition = commandWaiting ? .imageLeading : .imageOnly
+        // Keep a dismissed approval and whole-computer control visible without reopening a window.
+        let title = desktop.status.statusItemTitle
+        statusItem?.button?.title = title
+        statusItem?.button?.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
         menuNeedsUpdate(menu)
     }
 
@@ -101,7 +101,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(disabledItem(label))
         }
         if desktop.status.authority.controlAvailable {
-            menu.addItem(actionItem("Revoke Computer Control", symbol: "hand.raised", action: #selector(revokeComputerControl)))
+            menu.addItem(actionItem(desktop.status.controlMenuTitle, symbol: "hand.raised", action: #selector(revokeComputerControl)))
         }
         if desktop.status.isBridgeOnline, desktop.status.shell.hasRevocableWork {
             menu.addItem(actionItem("Revoke Shell Access", symbol: "hand.raised", action: #selector(revokeShellAccess)))

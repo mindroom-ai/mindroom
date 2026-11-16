@@ -357,7 +357,69 @@ final class DesktopControlPresentationTests: XCTestCase {
         let untilStopped = value.shellAutoApprovalScope(.untilStopped)
         XCTAssertTrue(untilStopped.contains("all locally allowed agents and requesters"), untilStopped)
         XCTAssertTrue(untilStopped.contains("until you revoke shell access or stop computer access"), untilStopped)
-        XCTAssertEqual(DesktopShellAutoApproval.choices.map(\.title), ["5 Minutes", "15 Minutes", "60 Minutes", "Until I Stop"])
+        XCTAssertEqual(DesktopGrantDuration.choices.map(\.title), ["5 Minutes", "15 Minutes", "60 Minutes", "Until I Stop"])
+    }
+
+    func testControlLabelsNameScopeAndUntilStopped() {
+        func control(_ scope: DesktopControlScope, untilRevoked: Bool, shell: DesktopShellStatus = DesktopShellStatus(), shellEnabled: Bool = false) -> DesktopStatus {
+            status(
+                bridge: "control", helper: "running", config: "ready", apps: ["primary-screen"],
+                shellEnabled: shellEnabled, shell: shell,
+                authority: DesktopAuthorityStatus(
+                    controlAvailable: true, leaseRemainingSeconds: untilRevoked ? 0 : 125,
+                    leaseExpiresAtMilliseconds: nil, emergencyStopLatched: false,
+                    controlScope: scope, controlUntilRevoked: untilRevoked
+                )
+            )
+        }
+        let appsUntilStopped = control(.apps, untilRevoked: true)
+        let computerTimed = control(.computer, untilRevoked: false)
+        let computerUntilStopped = control(.computer, untilRevoked: true)
+        let computerWithShellSaved = control(.computer, untilRevoked: true, shell: DesktopShellStatus(enabled: true), shellEnabled: true)
+        let computerWithPendingShell = control(
+            .computer, untilRevoked: true, shell: DesktopShellStatus(enabled: true, pending: shellRequest()), shellEnabled: true
+        )
+        XCTAssertEqual(appsUntilStopped.accessModeLabel(controlRemainingSeconds: 0), "Control · until you stop")
+        XCTAssertEqual(computerTimed.accessModeLabel(controlRemainingSeconds: 125), "Whole-computer control · 2m 5s")
+        XCTAssertEqual(computerUntilStopped.accessModeLabel(controlRemainingSeconds: 0), "Whole-computer control · until you stop")
+        XCTAssertEqual(computerWithShellSaved.accessModeLabel(controlRemainingSeconds: 0), "Whole-computer control · until you stop")
+        XCTAssertTrue(computerUntilStopped.hasWholeComputerControl)
+        XCTAssertFalse(appsUntilStopped.hasWholeComputerControl)
+        XCTAssertEqual(computerUntilStopped.controlMenuTitle, "Stop Whole-Computer Control")
+        XCTAssertEqual(appsUntilStopped.controlMenuTitle, "Revoke Computer Control")
+        XCTAssertEqual(computerUntilStopped.statusItemTitle, "Controlling this Mac")
+        XCTAssertEqual(computerWithPendingShell.statusItemTitle, "Command waiting")
+        XCTAssertEqual(appsUntilStopped.statusItemTitle, "")
+        XCTAssertEqual(DesktopControlScope.allCases.map(\.title), ["Saved apps", "Whole computer"])
+    }
+
+    func testControlGrantConfirmationStatesScopeDurationAndWhatIsNotGranted() {
+        let value = status(
+            bridge: "observe_only", helper: "running", config: "ready", apps: ["com.apple.TextEdit", "primary-screen"],
+            requesterIDs: ["@person:example.org"], agentNames: ["assistant"]
+        )
+        XCTAssertEqual(value.controlGrantTitle(scope: .computer, duration: .untilStopped), "Allow control of this whole Mac until you stop it?")
+        XCTAssertEqual(value.controlGrantTitle(scope: .computer, duration: .minutes(15)), "Allow control of this whole Mac for 15 minutes?")
+        XCTAssertEqual(value.controlGrantTitle(scope: .apps, duration: .minutes(15)), "Grant control of the saved apps for 15 minutes?")
+        XCTAssertEqual(value.controlGrantTitle(scope: .apps, duration: .untilStopped), "Grant control of the saved apps until you stop it?")
+        XCTAssertEqual(DesktopControlScope.computer.grantButtonTitle, "Allow Whole-Computer Control")
+        XCTAssertEqual(DesktopControlScope.apps.grantButtonTitle, "Grant Control")
+        let computer = value.controlGrantSummary(scope: .computer)
+        for line in [
+            "Fingerprint: key",
+            "Requester: @person:example.org",
+            "Agent: assistant",
+            "Every app and the whole primary screen, except MindRoom itself. That includes Terminal, Finder, browsers, and chat apps signed in as you, so the agent can do anything you can do on this Mac.",
+            "Shell command approval, read-only folders, and the browser extension keep their own settings.",
+            "Not saved: control ends when you revoke it, stop computer access, or quit MindRoom.",
+        ] {
+            XCTAssertTrue(computer.contains(line), computer)
+        }
+        XCTAssertTrue(computer.hasPrefix("Controller: "), computer)
+        XCTAssertFalse(computer.contains("Applications:"), computer)
+        let apps = value.controlGrantSummary(scope: .apps)
+        XCTAssertTrue(apps.contains("Applications: com.apple.TextEdit, primary-screen"), apps)
+        XCTAssertFalse(apps.contains("Every app"), apps)
     }
 
     private func shellRequest(
@@ -373,7 +435,8 @@ final class DesktopControlPresentationTests: XCTestCase {
         bridge: String, helper: String, config: String = "missing", apps: [String] = [],
         session: DesktopSessionState = .ready, permissionsGranted: Bool = true, enabled: Bool = true,
         fileRoots: [String] = [], shellEnabled: Bool = false, shell: DesktopShellStatus = DesktopShellStatus(),
-        browserConfigured: Bool = false, requesterIDs: [String]? = nil, agentNames: [String]? = nil
+        browserConfigured: Bool = false, requesterIDs: [String]? = nil, agentNames: [String]? = nil,
+        authority: DesktopAuthorityStatus = DesktopStatus.stopped.authority
     ) -> DesktopStatus {
         let base = DesktopStatus.stopped
         return DesktopStatus(
@@ -389,7 +452,7 @@ final class DesktopControlPresentationTests: XCTestCase {
             ),
             helper: DesktopHelperStatus(state: helper, version: "test"),
             bridge: DesktopRuntimeStatus(state: bridge, activeAction: nil, lastError: nil),
-            authority: base.authority, permissions: DesktopPermissionsStatus(
+            authority: authority, permissions: DesktopPermissionsStatus(
                 accessibility: DesktopPermissionStatus(state: permissionsGranted ? "granted" : "missing", canRequest: true, recovery: nil),
                 screenRecording: DesktopPermissionStatus(state: permissionsGranted ? "granted" : "missing", canRequest: true, recovery: nil)
             ),

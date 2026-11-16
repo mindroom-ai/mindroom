@@ -37,7 +37,9 @@ final class DesktopControlStore: ObservableObject {
     @Published var browserProfile = "" { didSet { configurationFieldChanged(\.browserProfile) } }
     @Published var fileRoots: [String] = [] { didSet { configurationFieldChanged(\.fileRoots) } }
     @Published var shellEnabled = false { didSet { configurationFieldChanged(\.shellEnabled) } }
-    @Published var controlMinutes = 15
+    // Kept in memory only, so every launch starts again from saved apps for 15 minutes.
+    @Published var controlScope = DesktopControlScope.apps
+    @Published var controlDuration = DesktopGrantDuration.minutes(15)
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
     private let helper: DesktopBridgeProcess
@@ -378,7 +380,7 @@ final class DesktopControlStore: ObservableObject {
         perform("decide_shell", parameters: decision.parameters(commandID: request.requestID), urgent: true)
     }
 
-    func grantShell(_ approval: DesktopShellAutoApproval) {
+    func grantShell(_ approval: DesktopGrantDuration) {
         perform("grant_shell", parameters: approval.grantParameters, urgent: true)
     }
 
@@ -474,7 +476,7 @@ final class DesktopControlStore: ObservableObject {
     func start() { perform("start") }
     func stop() { perform("stop", timeout: .seconds(120), urgent: true) }
     func grantControl() {
-        perform("grant_control", parameters: ["duration_seconds": controlMinutes * 60])
+        perform("grant_control", parameters: controlDuration.grantParameters.merging(["scope": controlScope.rawValue]) { $1 })
     }
     func revokeControl() { perform("revoke_control", urgent: true) }
     func resetEmergencyStop() { perform("reset_emergency_stop", urgent: true) }

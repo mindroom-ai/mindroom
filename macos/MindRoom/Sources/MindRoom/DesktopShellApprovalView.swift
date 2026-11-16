@@ -80,7 +80,7 @@ struct DesktopShellApprovalView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(armedRequestID != request.requestID)
                 Menu("Approve & Allow…") {
-                    ForEach(DesktopShellAutoApproval.choices) { approval in
+                    ForEach(DesktopGrantDuration.choices) { approval in
                         Button(approval.title) { confirmation = DesktopShellConfirmation(request: request, approval: approval) }
                     }
                 }
@@ -103,7 +103,7 @@ struct DesktopShellApprovalView: View {
                 Label("Shell commands: Ask for each command", systemImage: "terminal").font(.headline)
                 Spacer()
                 Menu("Allow Without Asking…") {
-                    ForEach(DesktopShellAutoApproval.choices) { approval in
+                    ForEach(DesktopGrantDuration.choices) { approval in
                         Button(approval.title) { confirmation = DesktopShellConfirmation(request: nil, approval: approval) }
                     }
                 }
@@ -207,7 +207,7 @@ struct DesktopLeftToRightText: NSViewRepresentable {
 /// Captures the exact request being answered when the confirmation opens.
 private struct DesktopShellConfirmation: Identifiable {
     let request: DesktopShellRequest?
-    let approval: DesktopShellAutoApproval
+    let approval: DesktopGrantDuration
 
     var id: String { "\(request?.requestID ?? "grant")-\(approval.title)" }
 
