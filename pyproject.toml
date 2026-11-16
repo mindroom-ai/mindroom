@@ -160,7 +160,7 @@ custom_api = [
   "requests",
 ]
 daytona = [
-  "daytona",
+  "daytona<1",
 ]
 delegate = []
 discord = [
