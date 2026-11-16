@@ -178,8 +178,11 @@ def secret_request_content(
     display_name: str,
     reason: str,
     status: SecretRequestStatus,
+    replaces: bool = False,
 ) -> dict[str, object]:
     """Return the `io.mindroom.secret_request` object: metadata only, never a value.
+
+    A key card says `replaces` when saving would replace a key the service already has in that store.
 
     A temporary secret's card has no service fields, so a client that knows only key cards reads none in it; it
     names the variable, the keeps the requester chooses from with their lifetimes in seconds, and, once answered, the
@@ -192,6 +195,8 @@ def secret_request_content(
     else:
         content |= {"service": target.service, "display_name": display_name, "hosts": list(target.hosts)}
     content |= {"reason": reason, "status": status, "expires_at": int(request.expires_at * 1000)}
+    if replaces:
+        content["replaces"] = True
     if isinstance(target, TemporaryTarget):
         content["keep"] = dict(TEMPORARY_SECRET_KEEP_SECONDS)
         if request.kept is not None:

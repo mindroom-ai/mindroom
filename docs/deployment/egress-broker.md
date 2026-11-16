@@ -697,6 +697,7 @@ For a missing key, the agent calls `request_secret` with a `service` (a name fro
 
 - MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
   Other people in the thread see who the card waits for.
+  When the service already has a key in that scope, the card says that saving replaces it.
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.
@@ -709,6 +710,7 @@ For a missing key, the agent calls `request_secret` with a `service` (a name fro
   For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
 - The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
   The refusal names the Agent Keys page where one exists.
+- For a secret that is no service's API key, such as a password or a pairing code, an agent with the [`temporary_secrets`](../tools/execution-and-coding.md#temporary_secrets) tool asks with a card of its own, and its shell commands receive the value for a limited time.
 - Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](sandbox-proxy.md#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](../connections-portal.md#token-binding)).
   Without either, the tool posts no card and sends the user to the Agent Keys page instead.
 

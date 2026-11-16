@@ -26,7 +26,7 @@ from mindroom.egress_broker.env import egress_agent_scope, egress_tool_without_w
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
-from mindroom.egress_broker.secrets import is_personal_target, service_status
+from mindroom.egress_broker.secrets import egress_key_path, is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
@@ -202,6 +202,7 @@ class EgressCredentialsTools(Toolkit):
         (`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the
         key is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's
         Agent Keys key for the service. The key never reaches you, the chat, or your commands.
+        A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
         Waits up to 15 minutes and returns `status`:
         `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
         `declined` when the user refused: do not ask again for this service in this turn;
@@ -272,12 +273,15 @@ class EgressCredentialsTools(Toolkit):
         if (refusal := await chat_refusal(self._runtime_paths, noun="key")) is not None:
             return f"{refusal} {_ADD_ON_PAGE}"
         agent = config.agents.get(agent_name)
+        # The file a saved answer is written to: one already there is the key the answer replaces.
+        key_path = egress_key_path(manager, target, service)
         return SecretRequestCard(
             requester_id=requester_id,
             agent_display_name=(agent.display_name if agent is not None else "") or agent_name,
             reason=shown_reason,
             target=KeyTarget(service=service, worker_target=target, hosts=secret_request_hosts(egress_service)),
             display_name=egress_service.display_name or service,
+            replaces=key_path is not None and key_path.exists(),
         )
 
     def _settable(self) -> bool:

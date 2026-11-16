@@ -21,8 +21,8 @@ from mindroom.custom_tools.temporary_secrets import TemporarySecretsTools
 from mindroom.message_target import MessageTarget
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
-    _SecretHolder,
     TemporaryTarget,
+    _SecretHolder,
     secret_holder,
     secret_request_registry,
 )

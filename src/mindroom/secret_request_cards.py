@@ -56,8 +56,9 @@ class SecretRequestCard:
     agent_display_name: str
     reason: str
     target: KeyTarget | TemporaryTarget
-    # A key card's service as people read its name.
+    # A key card's service as people read its name, and whether the service already has a key the answer replaces.
     display_name: str = ""
+    replaces: bool = False
 
     def message(
         self,
@@ -77,7 +78,13 @@ class SecretRequestCard:
                 agent_display_name=self.agent_display_name,
                 display_name=self.display_name,
             )
-        metadata = secret_request_content(request, display_name=self.display_name, reason=self.reason, status=status)
+        metadata = secret_request_content(
+            request,
+            display_name=self.display_name,
+            reason=self.reason,
+            status=status,
+            replaces=self.replaces,
+        )
         return build_message_content(
             body,
             thread_event_id=thread_id,

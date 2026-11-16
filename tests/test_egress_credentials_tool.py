@@ -1082,6 +1082,35 @@ def _final_card(context: ToolRuntimeContext, status: str) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_a_card_for_a_service_with_a_key_says_it_replaces(tmp_path: Path) -> None:
+    """Saving over a working key is the requester's choice, so the card tells them a key is already there."""
+    tool, context = _asking(tmp_path)
+    save_secret(get_runtime_credentials_manager(context.runtime_paths), worker_target(), "github", "ghp-old")
+
+    task = _start(tool, context)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    assert card[SECRET_REQUEST_CONTENT_KEY]["replaces"] is True
+    assert _final_card(context, "declined")[SECRET_REQUEST_CONTENT_KEY]["replaces"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_key_in_another_scope_is_not_one_the_card_replaces(tmp_path: Path) -> None:
+    """Only a key in the store the card's key goes to is replaced; Bob's own key for the agent is not."""
+    tool, context = _asking(tmp_path)
+    save_secret(get_runtime_credentials_manager(context.runtime_paths), worker_target(_BOB), "github", "ghp-bob")
+
+    task = _start(tool, context)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    assert "replaces" not in card[SECRET_REQUEST_CONTENT_KEY]
+
+
+@pytest.mark.asyncio
 async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
     """The card goes into the thread with metadata only; the user's answer edits it and the agent learns `saved`."""
     tool, context = _asking(tmp_path)
