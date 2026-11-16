@@ -418,9 +418,10 @@ class PyAutoGuiDesktopProvider:
                 raise DesktopProviderError(msg)
             guard = self._accessibility.prepare_typing(app_id, state_id, element_index)
 
+        # The focus guard can read the whole app tree, so the gate runs after it, right before the chunk.
         def before_chunk() -> None:
-            self._check_input()
             guard()
+            self._check_input()
 
         if sys.platform == "darwin":
             self._run_input(lambda: _type_macos_unicode(text, before_chunk=before_chunk))
@@ -534,7 +535,7 @@ class PyAutoGuiDesktopProvider:
         return point, target.process_id
 
     def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
-        """Return a check for right before each Quartz pointer event: the input gate, then the window at the point.
+        """Return a check for right before each Quartz pointer event: the window at the point, then the input gate.
 
         An app target needs its own window on top; the whole-screen target, bound to no process, needs any window but
         MindRoom's.
@@ -544,12 +545,12 @@ class PyAutoGuiDesktopProvider:
         # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
         def check(point: tuple[int, int]) -> None:
             nonlocal posted
-            self._check_input()
             owner = macos_input.window_owner_at(point)
             if process_id is not None and owner != process_id:
                 _refuse_pointer("Another window covers the allowed app at the pointer", posted=posted)
             if process_id is None and owner is not None and macos_input.process_bundle_id(owner) in MINDROOM_APP_IDS:
                 _refuse_pointer("A MindRoom window is at the pointer", posted=posted)
+            self._check_input()
             # Every passing check is followed by an event.
             posted = True
 

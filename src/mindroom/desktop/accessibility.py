@@ -294,7 +294,7 @@ class MacAccessibilityBackend:
 
         self._allowed_app_ids = allowed_app_ids
         self._screen_size = screen_size
-        # Runs immediately before each press or value write and raises once local control has ended.
+        # Runs immediately before each launch, press, or value write and raises once local control has ended.
         self._before_input = before_input
         self._services: Any = ApplicationServices
         self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
@@ -338,6 +338,7 @@ class MacAccessibilityBackend:
             application = self._running_application(app_id)
         except AccessibilityError:
             _require_valid_activation_app_id(app_id)
+            self._before_input()
             try:
                 _request_application_activation(app_id)
                 application = self._wait_for_running_application(app_id)
@@ -346,6 +347,7 @@ class MacAccessibilityBackend:
             except AccessibilityError as exc:
                 msg = "Application launch was requested, but its outcome is unknown; request list_apps before retrying."
                 raise AccessibilityActionOutcomeUnknownError(msg) from exc
+        self._before_input()
         try:
             self._activate(application)
         except AccessibilityActionOutcomeUnknownError:

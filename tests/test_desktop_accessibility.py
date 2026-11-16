@@ -1099,3 +1099,38 @@ def test_mac_backend_bounds_every_accessibility_message(monkeypatch: pytest.Monk
     MacAccessibilityBackend(frozenset({"com.example.Editor"}), lambda: (1, 1), lambda: None)
 
     services.AXUIElementSetMessagingTimeout.assert_called_once_with("system", 2.0)
+
+
+def test_slow_app_holds_get_app_state_for_its_budget_plus_at_most_one_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget is checked before each re-read, so a read that starts just inside it can overrun it by one read."""
+    backend, services, _ = _fake_mac_backend()
+    now = [100.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _delay: None)
+
+    def slow_read(count: int) -> None:
+        # Each read finishes just inside its collection deadline, and the tree keeps changing.
+        now[0] += 4.9
+        services.attributes["button"]["value"] = f"draft-{count}"
+
+    services.collection_hook = slow_read
+
+    assert backend.get_app_state("com.example.Editor").stability == "unstable"
+    assert services.collection_count == 2
+    assert 8.0 < now[0] - 100.0 <= 8.0 + 7.0
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_closed_input_gate_stops_a_launch_before_it_is_requested_or_activated(running: bool) -> None:
+    """Launching or foregrounding an app is control, so a revoke stops it before macOS is asked."""
+    backend, _, workspace = _fake_mac_backend()
+    requested: list[str] = []
+    backend._before_input = _refuse_input
+    if not running:
+        workspace.applications = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("mindroom.desktop.accessibility._request_application_activation", requested.append)
+        with pytest.raises(RuntimeError, match="revoked"):
+            backend.launch_app("com.example.Editor")
+    assert requested == []
+    assert all(application.activation_options == [] for application in workspace.applications)

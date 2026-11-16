@@ -8,7 +8,7 @@ import json
 import sys
 import threading
 import time
-from contextlib import AsyncExitStack, nullcontext
+from contextlib import AsyncExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
@@ -68,7 +68,7 @@ from mindroom.matrix.olm_to_device import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -83,8 +83,6 @@ _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 # A hung app can hold a native call that no task cancellation reaches, so stop waits for it only this long.
 _STOP_ACTIVE_ACTION_TIMEOUT_SECONDS = 5.0
-# The provider's input gate interrupts these actions; browser actions run to completion.
-_GATED_ACTIONS = DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS
 _STALE_AUTHORITY_ERROR = "Desktop control ended after this command arrived, so it was not run; check the current state before sending it again."
 
 
@@ -199,7 +197,8 @@ class DesktopBridge:
     # Each grant that starts control anew is a new generation; control commands run only under the one they arrived in.
     _control_generation: int = field(default=0, init=False)
     _admitted_generations: dict[str, int] = field(default_factory=dict, init=False)
-    # Input that a revoke interrupted may still be inside a native call; no grant may reopen input until it returns.
+    # App input inside its native call, and whether a revoke interrupted it; no grant may reopen input until it returns.
+    _input_running: bool = field(default=False, init=False)
     _input_interrupted: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -253,9 +252,9 @@ class DesktopBridge:
         if command.action == "request_status":
             self._queue_response(self._request_status_response(command))
             return
+        self._journal.admit(command, fingerprint)
         if command.action in DESKTOP_CONTROL_ACTIONS:
             self._admitted_generations[command.request_id] = self._control_generation
-        self._journal.admit(command, fingerprint)
         (self._shell_work_available if command.action == "run_shell" else self._work_available).set()
 
     def _replay_cached(self, command: DesktopCommand, fingerprint: str) -> bool:
@@ -366,7 +365,6 @@ class DesktopBridge:
                     self._admitted_generations.pop(command.request_id, None)
                     if not shell_starts:
                         self._active_action = None
-                        self._input_interrupted = False
 
     async def deliver_pending(self) -> bool:
         """Retry exact recorded results without running desktop work again."""
@@ -528,7 +526,7 @@ class DesktopBridge:
         self._control_lease_deadline = None
         if self.provider is not None:
             self.provider.set_input_enabled(False)
-        if self._active_action in _GATED_ACTIONS:
+        if self._input_running:
             self._input_interrupted = True
         return self.local_status()
 
@@ -874,7 +872,8 @@ class DesktopBridge:
         if command.action == "launch_app":
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             app_id = required_str_parameter(parameters, "app")
-            await asyncio.to_thread(provider.launch_app, app_id)
+            with self._native_input():
+                await asyncio.to_thread(provider.launch_app, app_id)
             return _Execution(
                 {"action": command.action, "action_completed": True},
                 follow_up_app=app_id,
@@ -891,7 +890,7 @@ class DesktopBridge:
 
         app_id = required_str_parameter(parameters, "app")
         state_id = required_str_parameter(parameters, "state_id")
-        with self._agent_input():
+        with self._agent_input(), self._native_input():
             if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
                 await execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
             else:
@@ -900,6 +899,16 @@ class DesktopBridge:
             {"action": command.action, "action_completed": True},
             follow_up_app=app_id,
         )
+
+    @contextmanager
+    def _native_input(self) -> Iterator[None]:
+        """Mark app input as inside its native call from the moment it is handed to its worker thread until it returns."""
+        self._input_running = True
+        try:
+            yield
+        finally:
+            self._input_running = False
+            self._input_interrupted = False
 
     def _agent_input(self) -> AbstractContextManager[None]:
         """Keep app input and a shell approval card or prompt from ever being live at the same time."""

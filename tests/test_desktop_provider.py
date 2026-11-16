@@ -1067,3 +1067,57 @@ def test_status_preserves_actionable_display_mapping_error() -> None:
     provider._display_geometry = unavailable
     with pytest.raises(DesktopProviderError, match="reconnect displays and request fresh app state"):
         provider.status()
+
+
+def test_revoke_during_the_focus_check_before_a_chunk_sends_no_further_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exact-field check before each chunk reads the app's tree; a revoke landing during that read stops the chunk."""
+    provider, _, accessibility = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    quartz = SimpleNamespace(
+        CGEventCreateKeyboardEvent=lambda _source, _code, down: {"down": down},
+        CGEventKeyboardSetUnicodeString=lambda event, _length, text: event.update(text=text),
+        CGEventPost=lambda _tap, event: posted.append(event),
+        kCGHIDEventTap=0,
+    )
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    checks = 0
+
+    def focus_check_during_which_control_is_revoked() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            provider.set_input_enabled(False)
+
+    monkeypatch.setattr(
+        accessibility,
+        "prepare_typing",
+        lambda *_args: focus_check_during_which_control_is_revoked,
+        raising=False,
+    )
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41, element_index=4)
+
+    assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
+
+
+def test_revoke_during_the_window_lookup_before_a_pointer_event_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is checked after the window under the pointer is looked up, right before the event."""
+    provider, _, _ = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    posted: list[dict[str, object]] = []
+    quartz = _fake_quartz(posted, [_window(42, 0, 0, 2000)])
+
+    def windows_listed_as_control_is_revoked(_options: int, _relative: int) -> list[dict[str, object]]:
+        provider.set_input_enabled(False)
+        return [_window(42, 0, 0, 2000)]
+
+    quartz.CGWindowListCopyWindowInfo = windows_listed_as_control_is_revoked
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.click(app_id="com.example.Editor", state_id="state-1", x=10, y=10, button="left")
+
+    assert posted == []

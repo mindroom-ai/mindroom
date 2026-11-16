@@ -2685,3 +2685,35 @@ async def test_stop_does_not_wait_for_a_stuck_observation_beyond_its_bound(
     finally:
         release.set()
     await executing
+
+
+@pytest.mark.asyncio
+async def test_a_revoke_after_input_has_returned_does_not_hold_back_the_next_grant(transport: AsyncMock) -> None:
+    """Only input still inside its native call blocks a grant; the follow-up observation does not."""
+    del transport
+    reading, release = threading.Event(), threading.Event()
+
+    class SlowFollowUp(FakeProvider):
+        def get_app_state(self, app_id: str) -> AccessibilityState:
+            reading.set()
+            assert release.wait(5)
+            return super().get_app_state(app_id)
+
+    provider = SlowFollowUp()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    click = _command("click", parameters=_CLICK)
+    bridge._observations.remember(STATE, click)
+    await bridge.on_to_device_event(_event(click))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(reading.wait, 5)
+        bridge.revoke_local_control()
+        assert bridge.grant_local_control(60)["control_available"] is True
+    finally:
+        release.set()
+    await executing
