@@ -18,6 +18,12 @@
         "seq": 0,
         "meta": {
           "agent": "researcher",
+          "model": {
+            "config": "opus",
+            "display_name": "Opus 5.5",
+            "id": "anthropic/claude-opus-5.5",
+            "provider": "openrouter"
+          },
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -61,6 +67,12 @@
         "seq": 1,
         "meta": {
           "agent": "researcher",
+          "model": {
+            "config": "opus",
+            "display_name": "Opus 5.5",
+            "id": "anthropic/claude-opus-5.5",
+            "provider": "openrouter"
+          },
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -110,6 +122,12 @@
         "seq": 2,
         "meta": {
           "agent": "researcher",
+          "model": {
+            "config": "opus",
+            "display_name": "Opus 5.5",
+            "id": "anthropic/claude-opus-5.5",
+            "provider": "openrouter"
+          },
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -178,6 +196,12 @@
         "seq": 3,
         "meta": {
           "agent": "researcher",
+          "model": {
+            "config": "opus",
+            "display_name": "Opus 5.5",
+            "id": "anthropic/claude-opus-5.5",
+            "provider": "openrouter"
+          },
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -240,6 +264,12 @@
         "seq": 4,
         "meta": {
           "agent": "researcher",
+          "model": {
+            "config": "opus",
+            "display_name": "Opus 5.5",
+            "id": "anthropic/claude-opus-5.5",
+            "provider": "openrouter"
+          },
           "subagent": "del-1",
           "caller": "lead",
           "root": "lead",
@@ -285,6 +315,12 @@
         "seq": 0,
         "meta": {
           "agent": "reviewer",
+          "model": {
+            "config": "fast",
+            "display_name": "Haiku 5.5",
+            "id": "claude-haiku-5-5",
+            "provider": "anthropic"
+          },
           "subagent": "del-2",
           "caller": "researcher",
           "root": "lead",

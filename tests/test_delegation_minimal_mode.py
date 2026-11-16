@@ -20,7 +20,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
+from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import toolkit_function
@@ -359,6 +361,100 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     assert len(listings) == 2
     # Native callers support approval, but a minimal child must never pause for it.
     assert all("is_prime" in listing and "factorial" not in listing for listing in listings), listings
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("caller", "bash_runs"),
+    [("direct", True), ("native", True), ("approval_overlay", True), ("stale_approval_overlay", False)],
+)
+async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: str,
+    bash_runs: bool,
+) -> None:
+    """A reload after the caller's turn began leaves a fresh minimal child its Bash, not the caller's stale snapshot.
+
+    A Dynamic Workflow participant's pre-approval overlay is not part of the config a reload is checked against, but
+    its base is: an overlay built before a reload leaves a child whose tools that reload revokes.
+    """
+    config = _config(helper_tools=["shell"])
+    snapshot = config.model_copy(update={"timezone": "Europe/Amsterdam"})
+    paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
+    entity_ids(config, paths)
+    identity = _identity()
+    # The caller's turn holds the config it started with; the reloaded one is current.
+    live = replace(_live_context(snapshot, paths), config_provider=lambda: config)
+    listings: list[str] = []
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        assert args == "mindroom-agent tools list"
+        listing = await shell_cli_owner(live.orchestrator.agent_cli_registry).operation(
+            window=cli_window(),
+            operation=ToolListOperation(operation="tools.list"),
+        )
+        listings.append(str(listing))
+        return str(listing)
+
+    child = ScriptedModel(
+        [calls(tool_call("bash", "bash-0", command="mindroom-agent tools list")), answer("Child answer")],
+    )
+    leader = ScriptedModel([])
+    install_scripted_shell(monkeypatch, run_shell_command)
+    ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
+    toolkit = DelegateTools("leader", paths, snapshot, _workspace(tmp_path, "leader"), execution_identity=identity)
+
+    with tool_runtime_context(live):
+        if caller in {"approval_overlay", "stale_approval_overlay"}:
+            base = snapshot if caller == "stale_approval_overlay" else config
+            child_turn = prepare_child_turn(
+                "leader",
+                "helper",
+                "Report",
+                owner=identity,
+                config=config,
+                runtime_paths=paths,
+                depth=0,
+                budget_monitor=None,
+                model=None,
+                agent_mode="minimal",
+                previous=None,
+                persona=None,
+            )
+            overlay = base.model_copy(
+                update={
+                    "tool_approval": ToolApprovalConfig(
+                        rules=[ApprovalRuleConfig(match="factorial", action="require_approval")],
+                    ),
+                },
+            )
+            completed = await run_direct_child_turn(
+                child_turn,
+                owner=identity,
+                parent_run_id=None,
+                config=base,
+                runtime_paths=paths,
+                refresh_scheduler=None,
+                approval_config=overlay,
+            )
+            result = completed.text
+        else:
+            result = await _delegate(
+                toolkit,
+                snapshot,
+                paths,
+                "run_subagent",
+                leader=leader if caller == "native" else None,
+                task="Report",
+                agent_name="helper",
+                minimal=True,
+            )
+
+    assert "Child answer" in result, result
+    assert len(listings) == int(bash_runs)
+    assert ("no longer permits" in str(child.requests[-1].messages)) is not bash_runs
 
 
 @pytest.mark.asyncio

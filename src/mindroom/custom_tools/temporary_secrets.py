@@ -14,7 +14,15 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
-from mindroom.secret_request_cards import SecretRequestCard, ask_with_card, card_reason, chat_refusal
+from mindroom.secret_request_cards import (
+    LINK_REFUSAL,
+    SecretRequestCard,
+    ask_with_card,
+    card_line,
+    card_link,
+    card_reason,
+    chat_refusal,
+)
 from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
     TEMPORARY_SECRET_KEEP_SECONDS,
@@ -51,7 +59,14 @@ class TemporarySecretsTools(Toolkit):
         self._runtime_paths = runtime_paths
         super().__init__(name="temporary_secrets", tools=[self.request_temporary_secret])
 
-    async def request_temporary_secret(self, name: str, reason: str) -> str:
+    async def request_temporary_secret(
+        self,
+        name: str,
+        reason: str,
+        label: str | None = None,
+        url: str | None = None,
+        placeholder: str | None = None,
+    ) -> str:
         """Ask the user for a secret your shell commands need, with a card in this conversation, and wait.
 
         Call this for a password, token, passphrase or code that a command needs and that you must not see: the
@@ -59,6 +74,8 @@ class TemporarySecretsTools(Toolkit):
         shell commands in this conversation. The value never reaches you or the chat.
         The user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than
         15 minutes.
+        Make the card easy to answer: give `label` to say what the secret is, `url` when a page gives or creates it
+        (the card shows a button that opens it), and `placeholder` to hint at its form.
         When you also have `request_secret` and need the API key of a service it can ask for, call that instead:
         such a key never reaches your commands.
         Waits up to 15 minutes and returns `status`:
@@ -71,16 +88,28 @@ class TemporarySecretsTools(Toolkit):
         Args:
             name: The environment variable to set, such as `SUDO_PASSWORD`: letters, digits and underscores.
             reason: What you need the secret for, in a sentence or two the user reads on the card.
+            label: What the secret is, in a few words the card shows as its title, such as `GitHub token`.
+            url: An `http` or `https` page where the user gets or creates the secret, such as a token page.
+            placeholder: A hint the empty field shows, such as the secret's form (`ghp_…`). Never a real value.
 
         """
         context = get_tool_runtime_context()
         if context is None:
             return _error("No conversation is available in this context, so no card can be posted.")
-        card = await self._card(context, name, reason)
+        card = await self._card(context, name, reason, label=label, url=url, placeholder=placeholder)
         asked = card if isinstance(card, str) else await ask_with_card(context, card, agent_name=context.agent_name)
         return _error(asked) if isinstance(asked, str) else _result(name, asked)
 
-    async def _card(self, context: ToolRuntimeContext, name: str, reason: str) -> SecretRequestCard | str:
+    async def _card(
+        self,
+        context: ToolRuntimeContext,
+        name: str,
+        reason: str,
+        *,
+        label: str | None,
+        url: str | None,
+        placeholder: str | None,
+    ) -> SecretRequestCard | str:
         """Return the card asking the turn's requester for the variable `name`, or why no card may be posted.
 
         The requester is the person who answers, resolved as for approval cards. The value goes to the conversation
@@ -98,6 +127,9 @@ class TemporarySecretsTools(Toolkit):
         shown_reason = card_reason(reason)
         if shown_reason is None:
             return "Give a reason: the card tells the user what you need the secret for."
+        link = card_link(url)
+        if link is None:
+            return LINK_REFUSAL
         if (refusal := await chat_refusal(self._runtime_paths, noun="secret")) is not None:
             return refusal
         agent = context.current_config.agents.get(context.agent_name)
@@ -106,6 +138,9 @@ class TemporarySecretsTools(Toolkit):
             agent_display_name=(agent.display_name if agent is not None else "") or context.agent_name,
             reason=shown_reason,
             target=TemporaryTarget(name=name, holder=holder),
+            label=card_line(label),
+            url=link,
+            placeholder=card_line(placeholder),
         )
 
 
