@@ -208,7 +208,7 @@ mindroom desktop run --allow-control --lease-minutes 15
 After the lease expires, the bridge keeps observing but rejects every control action until a person grants another lease.
 The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
 Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
-Control actions sent before a lease ended never run under a later lease, and a new grant is refused with `Wait for the desktop action that is still running to finish before granting control again.` while an action from the ended lease is still running.
+Control actions sent before a lease ended never run under a later lease, and a new grant is refused with `Wait for the desktop action that is still running to finish before granting control again.` while input from the ended lease, including a browser control action, is still being sent.
 
 ### Approve Shell Commands in the Terminal
 
