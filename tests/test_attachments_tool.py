@@ -24,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -46,6 +47,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
+from tests.test_media_delivery import image_bytes
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -130,7 +132,7 @@ def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
     """Attachments tool should expose discovery, registration, and model viewing without send operations."""
     tool = AttachmentTools()
     exposed = {method.__name__ for method in tool.functions.values()}
-    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "view_file"}
+    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "inline_image", "view_file"}
     assert not hasattr(tool, "send_attachments")
 
 
@@ -1772,3 +1774,101 @@ def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Pat
 @pytest.fixture(autouse=True)
 def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_path", [False, True], ids=["attachment-id", "workspace-path"])
+@pytest.mark.parametrize("alt", [None, "a [cat]", r"a \[cat]", "one\ntwo"])
+async def test_inline_image_returns_embeddable_markdown(tmp_path: Path, by_path: bool, alt: str | None) -> None:
+    """Both send reference forms upload images and return markdown usable in a reply."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "cat.png"
+    source.write_bytes(image_bytes())
+    record = register_local_attachment(tmp_path, source, kind="image", mime_type="image/png")
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = False
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    reference = "cat.png" if by_path else record.attachment_id
+    with (
+        patch(
+            "mindroom.matrix.client_delivery.upload_media_bytes",
+            new=AsyncMock(return_value=(nio.UploadResponse("mxc://hs/abc"), None)),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.inline_image(reference, alt=alt))
+    assert payload["status"] == "ok"
+    assert payload["attachment_id"].startswith("att_")
+    assert payload["mxc_uri"] == "mxc://hs/abc"
+    html = markdown_to_html(payload["markdown"])
+    assert '<img src="mxc://hs/abc"' in html
+    expected_alt = (alt or "cat.png").replace("\n", " ")
+    escaped_alt = expected_alt.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    assert payload["markdown"] == f"![{escaped_alt}](mxc://hs/abc)"
+    assert load_attachment(tmp_path, payload["attachment_id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["non-image", "encrypted-room", "upload-failure", "encrypted-upload", "read-limit", "out-of-context"],
+)
+async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) -> None:
+    """Invalid images and unsafe uploads produce errors, never an embeddable URL."""
+    source = tmp_path / ("notes.txt" if case == "non-image" else "cat.png")
+    source.write_bytes(b"notes" if case == "non-image" else image_bytes())
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="file" if case == "non-image" else "image",
+        mime_type="text/plain" if case == "non-image" else "image/png",
+    )
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=() if case == "out-of-context" else (record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = case == "encrypted-room"
+    upload_result = (None, None) if case == "upload-failure" else ("mxc://hs/abc", {"file": {"key": "secret"}})
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=upload_result),
+        ) as upload,
+        patch("mindroom.custom_tools.attachments.MAX_SOURCE_BYTES", 1 if case == "read-limit" else 20 * 1024 * 1024),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))
+    assert payload["status"] == "error"
+    assert "markdown" not in payload
+    if case not in {"upload-failure", "encrypted-upload"}:
+        upload.assert_not_awaited()
+    if case in {"encrypted-room", "encrypted-upload"}:
+        assert "matrix_message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_rejects_already_encrypted_media(tmp_path: Path) -> None:
+    """Runtime-only ciphertext cannot be used in a markdown image."""
+    context = _tool_context(tmp_path)
+    media = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_media",
+        filename="cat.png",
+        url="mxc://hs/abc",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=1,
+    )
+    register_tool_runtime_media_attachment(context, media)
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().inline_image("att_media"))
+    assert payload["status"] == "error"
+    assert "plaintext" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_requires_context() -> None:
+    """Roomless tool calls fail without uploading."""
+    payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"
