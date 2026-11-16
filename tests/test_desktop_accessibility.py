@@ -39,11 +39,13 @@ class FakeRunningApplication:
         active: bool = True,
         bundle_id: str = "com.example.Editor",
         name: str = "Editor",
+        policy: int = 0,
     ) -> None:
         self.pid = pid
         self.active = active
         self.bundle_id = bundle_id
         self.name = name
+        self.policy = policy
         self.activation_hook: Callable[[], None] | None = None
         self.activation_options: list[int] = []
 
@@ -59,6 +61,9 @@ class FakeRunningApplication:
     def isActive(self) -> bool:
         return self.active
 
+    def activationPolicy(self) -> int:
+        return self.policy
+
     def activateWithOptions_(self, options: int) -> bool:
         self.activation_options.append(options)
         if self.activation_hook is not None:
@@ -72,9 +77,13 @@ class FakeWorkspace:
     def __init__(self, application: FakeRunningApplication) -> None:
         self.applications = [application]
         self.frontmost: FakeRunningApplication | None = application
+        self.installed = {"com.example.Editor"}
 
     def runningApplications(self) -> list[FakeRunningApplication]:
         return self.applications
+
+    def URLForApplicationWithBundleIdentifier_(self, app_id: str) -> str | None:
+        return f"file:///Applications/{app_id}.app" if app_id in self.installed else None
 
     def frontmostApplication(self) -> FakeRunningApplication | None:
         return self.frontmost
@@ -210,6 +219,7 @@ def _fake_mac_backend() -> tuple[MacAccessibilityBackend, FakeMacServices, FakeW
     backend._states = OrderedDict()
     backend._before_input = lambda: None
     backend._collect_deadline = None
+    backend._computer_scope = False
     return backend, services, workspace
 
 
@@ -1134,3 +1144,76 @@ def test_closed_input_gate_stops_a_launch_before_it_is_requested_or_activated(ru
             backend.launch_app("com.example.Editor")
     assert requested == []
     assert all(application.activation_options == [] for application in workspace.applications)
+
+
+def test_computer_scope_admits_any_app_except_mindroom_and_lists_running_apps() -> None:
+    """Whole-computer scope reaches every regular app and the screen but never MindRoom, and ends with its retained states."""
+    backend, _, workspace = _fake_mac_backend()
+    workspace.applications += [
+        FakeRunningApplication(pid=43, bundle_id="com.example.Other", name="other"),
+        FakeRunningApplication(pid=44, bundle_id="com.example.Agent", name="Agent", policy=1),
+        FakeRunningApplication(pid=45, bundle_id="chat.mindroom.menubar", name="MindRoom"),
+        FakeRunningApplication(pid=46, bundle_id="chat.mindroom.desktophelper", name="MindRoom Helper"),
+    ]
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.get_app_state("com.example.Other")
+    backend.set_computer_scope(True)
+    assert [app.app_id for app in backend.list_apps()] == ["primary-screen", "com.example.Editor", "com.example.Other"]
+    assert all(app.running for app in backend.list_apps())
+    other = backend.get_app_state("com.example.Other")
+    assert other.app_id == "com.example.Other"
+    assert backend.get_app_state(PRIMARY_SCREEN_APP_ID).app_id == PRIMARY_SCREEN_APP_ID
+    for mindroom_id in ("chat.mindroom.menubar", "chat.mindroom.desktophelper"):
+        with pytest.raises(AccessibilityError, match="allowlist"):
+            backend.get_app_state(mindroom_id)
+        with pytest.raises(AccessibilityError, match="allowlist"):
+            backend.launch_app(mindroom_id)
+    backend.set_computer_scope(False)
+    assert [app.app_id for app in backend.list_apps()] == ["com.example.Editor"]
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.prepare_capture("com.example.Other", other.state_id)
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.prepare_fallback(PRIMARY_SCREEN_APP_ID, "any")
+    backend.get_app_state("com.example.Editor")
+    assert {stored.public.app_id for stored in backend._states.values()} == {"com.example.Editor"}
+
+
+def test_computer_scope_lists_at_most_one_hundred_running_apps_by_name() -> None:
+    """A Mac with many apps open still gets a bounded app list, in name order."""
+    backend, _, workspace = _fake_mac_backend()
+    workspace.applications = [
+        FakeRunningApplication(pid=100 + number, bundle_id=f"com.example.App{number:03}", name=f"App {number:03}")
+        for number in reversed(range(150))
+    ]
+    backend.set_computer_scope(True)
+    apps = backend.list_apps()
+    assert len(apps) == 101
+    assert apps[0].app_id == PRIMARY_SCREEN_APP_ID
+    assert [app.name for app in apps[1:]] == [f"App {number:03}" for number in range(100)]
+
+
+@pytest.mark.parametrize("computer_scope", [False, True])
+def test_launch_refuses_a_bundle_id_that_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+    computer_scope: bool,
+) -> None:
+    """Launching an app that is not on this Mac fails plainly, without asking macOS to open anything."""
+    backend, _, workspace = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({"com.example.Editor", "com.example.Missing"})
+    workspace.applications = []
+    backend.set_computer_scope(computer_scope)
+    requested: list[str] = []
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", requested.append)
+    with pytest.raises(AccessibilityError) as caught:
+        backend.launch_app("com.example.Missing")
+    assert str(caught.value) == "No installed application has bundle ID 'com.example.Missing'."
+    assert type(caught.value) is AccessibilityError
+    assert requested == []
+
+
+def test_screenshot_only_backend_refuses_computer_scope() -> None:
+    """Without macOS accessibility there is no app to reach beyond the screen, so the scope cannot widen."""
+    backend = ScreenshotOnlyAccessibilityBackend(frozenset({PRIMARY_SCREEN_APP_ID}), lambda: (1920, 1080))
+    backend.set_computer_scope(False)
+    with pytest.raises(AccessibilityError, match="Whole-computer control needs macOS accessibility"):
+        backend.set_computer_scope(True)

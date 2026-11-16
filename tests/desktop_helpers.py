@@ -185,6 +185,8 @@ class FakeProvider:
     calls: list[tuple[str, object]] = field(default_factory=list)
     # The input gate the bridge opens and closes; None until the bridge first sets it.
     input_enabled: bool | None = None
+    # The whole-computer scope the bridge last gave the provider.
+    computer_scope: bool = False
     emergency_stop: bool = False
     screenshot_error: bool = False
     click_error: bool = False
@@ -203,6 +205,10 @@ class FakeProvider:
     def set_input_enabled(self, enabled: bool) -> None:
         """Record the input gate without counting it as a provider operation."""
         self.input_enabled = enabled
+
+    def set_computer_scope(self, active: bool) -> None:
+        """Record the whole-computer scope without counting it as a provider operation."""
+        self.computer_scope = active
 
     def check_emergency_stop(self) -> None:
         """Model the pointer fail-safe checked before every browser control call."""

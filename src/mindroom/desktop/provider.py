@@ -105,8 +105,12 @@ class DesktopProvider(Protocol):
         """Open input for a local control grant or close it at once, including for input already running."""
         ...
 
+    def set_computer_scope(self, active: bool) -> None:
+        """Admit every application except MindRoom while a whole-computer grant is in force, or the allowlist again."""
+        ...
+
     def list_apps(self) -> list[DesktopApp]:
-        """List only applications explicitly allowed by local policy."""
+        """List only applications local policy admits now."""
         ...
 
     def launch_app(self, app_id: str) -> None:
@@ -272,8 +276,12 @@ class PyAutoGuiDesktopProvider:
         else:
             self._input_enabled.clear()
 
+    def set_computer_scope(self, active: bool) -> None:
+        """Widen or narrow the applications the accessibility backend admits."""
+        self._accessibility.set_computer_scope(active)
+
     def list_apps(self) -> list[DesktopApp]:
-        """List only applications explicitly allowed on this machine."""
+        """List only applications local policy admits on this machine now."""
         return self._accessibility.list_apps()
 
     def launch_app(self, app_id: str) -> None:

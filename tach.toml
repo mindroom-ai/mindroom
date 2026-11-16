@@ -4441,6 +4441,7 @@ depends_on = [
     "mindroom.desktop.command_parameters",
     "mindroom.desktop.file_actions",
     "mindroom.desktop.gui_actions",
+    "mindroom.desktop.input",
     "mindroom.desktop.media",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.protocol",

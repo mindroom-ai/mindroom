@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import sys
 import threading
 import time
 from contextlib import AsyncExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
@@ -25,6 +26,7 @@ from mindroom.desktop.command_parameters import (
 from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.gui_actions import execute_fallback_control, execute_semantic_control
+from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
@@ -84,6 +86,8 @@ _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 # A hung app can hold a native call that no task cancellation reaches, so stop waits for it only this long.
 _STOP_ACTIVE_ACTION_TIMEOUT_SECONDS = 5.0
 _STALE_AUTHORITY_ERROR = "Desktop control ended after this command arrived, so it was not run; check the current state before sending it again."
+type DesktopControlScope = Literal["apps", "computer"]
+_CONTROL_SCOPES = frozenset({"apps", "computer"})
 
 
 async def _run_macos_application_events() -> None:
@@ -123,12 +127,15 @@ class DesktopBridgePolicy:
     allowed_app_ids: frozenset[str]
     allow_control: bool = False
     control_lease_expires_at_ms: int | None = None
+    control_until_revoked: bool = False
+    # "computer" admits every app except MindRoom, for observation and control, only while this grant is available.
+    control_scope: DesktopControlScope = "apps"
     browser_enabled: bool = False
     allowed_file_roots: tuple[Path, ...] = ()
     shell_enabled: bool = False
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists and a lease expiry exactly when control is allowed."""
+        """Require explicit caller and agent allowlists, and exactly one lease end exactly when control is allowed."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
@@ -144,11 +151,16 @@ class DesktopBridgePolicy:
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
             raise ValueError(msg)
-        if self.allow_control and self.control_lease_expires_at_ms is None:
-            msg = "Control-enabled desktop bridge requires a lease expiry."
+        if self.allow_control and (self.control_lease_expires_at_ms is None) == (not self.control_until_revoked):
+            msg = "Control-enabled desktop bridge requires either a lease expiry or an until-revoked grant."
             raise ValueError(msg)
-        if not self.allow_control and self.control_lease_expires_at_ms is not None:
-            msg = "Observe-only desktop bridge cannot carry a control lease expiry."
+        if not self.allow_control and (
+            self.control_lease_expires_at_ms is not None or self.control_until_revoked or self.control_scope != "apps"
+        ):
+            msg = "Observe-only desktop bridge cannot carry a control lease or scope."
+            raise ValueError(msg)
+        if self.control_scope not in _CONTROL_SCOPES:
+            msg = "Control scope must be apps or computer."
             raise ValueError(msg)
 
     def caller_allowed(self, command: DesktopCommand) -> bool:
@@ -427,13 +439,14 @@ class DesktopBridge:
         ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
         has no to-device size limit, unlike the remote ``status`` action reply.
         """
+        control_available = self._control_available()
         remaining = 0.0
-        if self._control_available() and self._control_lease_deadline is not None:
+        if control_available and not self.policy.control_until_revoked and self._control_lease_deadline is not None:
             remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
         return {
             **self._bridge_status(),
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "gui_mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
+            "gui_mode": "stopped" if not self._accepting else ("control" if control_available else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
@@ -490,14 +503,27 @@ class DesktopBridge:
             raise ValueError(msg)
         return shell
 
-    def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant control only through the local helper's private management channel.
+    def grant_local_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        scope: DesktopControlScope = "apps",
+    ) -> dict[str, object]:
+        """Grant control for a duration or until revoked, only through the local helper's private management channel.
 
-        A grant while control is in force extends it; any other grant starts a new authority under which commands
-        that arrived earlier do not run.
+        A grant of the same scope while control is in force extends it; any other grant, including a scope change,
+        starts a new authority under which commands that arrived earlier do not run.
         """
-        if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
-            msg = "Local control duration must be between 60 and 3600 seconds."
+        if until_revoked is True and duration_seconds is None:
+            lease_seconds = None
+        elif until_revoked is False and type(duration_seconds) is int and 60 <= duration_seconds <= 3600:
+            lease_seconds = duration_seconds
+        else:
+            msg = "Grant control for 60 to 3600 seconds or until revoked."
+            raise ValueError(msg)
+        if scope not in _CONTROL_SCOPES:
+            msg = "Control scope must be apps or computer."
             raise ValueError(msg)
         if not self._accepting or self._control_revoked:
             msg = "Restart or reset the stopped bridge before granting control."
@@ -508,24 +534,42 @@ class DesktopBridge:
         if self._input_interrupted:
             msg = "Wait for the interrupted desktop action to finish before granting control again."
             raise ValueError(msg)
+        # Running input was admitted under the last granted scope, which a lapsed lease leaves in place; it must
+        # never continue under another one.
+        if self._input_running and scope != self.policy.control_scope:
+            msg = "Wait for the running desktop action to finish before changing the control scope."
+            raise ValueError(msg)
         self.provider.check_emergency_stop()
-        if not self._control_available():
+        try:
+            self.provider.set_computer_scope(scope == "computer")
+        except (AccessibilityError, DesktopProviderError) as exc:
+            raise ValueError(str(exc)) from exc
+        if not self._control_available() or scope != self.policy.control_scope:
             self._control_generation += 1
         self.policy = replace(
             self.policy,
             allow_control=True,
-            control_lease_expires_at_ms=round((self.clock() + duration_seconds) * 1000),
+            control_lease_expires_at_ms=None if lease_seconds is None else round((self.clock() + lease_seconds) * 1000),
+            control_until_revoked=lease_seconds is None,
+            control_scope=scope,
         )
-        self._control_lease_deadline = self.monotonic_clock() + duration_seconds
+        self._control_lease_deadline = math.inf if lease_seconds is None else self.monotonic_clock() + lease_seconds
         self.provider.set_input_enabled(True)
         return self.local_status()
 
     def revoke_local_control(self) -> dict[str, object]:
-        """End control now: queued control is refused and running app input stops before its next event."""
-        self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
+        """End control and any whole-computer scope now: queued control is refused, running input stops before its next event."""
+        self.policy = replace(
+            self.policy,
+            allow_control=False,
+            control_lease_expires_at_ms=None,
+            control_until_revoked=False,
+            control_scope="apps",
+        )
         self._control_lease_deadline = None
         if self.provider is not None:
             self.provider.set_input_enabled(False)
+            self.provider.set_computer_scope(False)
         if self._input_running:
             self._input_interrupted = True
         return self.local_status()
@@ -579,6 +623,9 @@ class DesktopBridge:
             self.filesystem.close()
 
     async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
+        if self.provider is not None:
+            # A lapsed lease or a latched emergency stop ends the whole-computer scope without a local call.
+            self.provider.set_computer_scope(self._computer_scope())
         policy_error = self._policy_error(command) or self._authority_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
@@ -774,15 +821,20 @@ class DesktopBridge:
             error = self._local_capability_error(command.action)
         elif command.action in DESKTOP_BROWSER_ACTIONS:
             error = self._browser_policy_error(command)
-        elif command.action in DESKTOP_APP_ACTIONS and (
-            not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
-        ):
+        elif command.action in DESKTOP_APP_ACTIONS and not (isinstance(app_id, str) and self._app_allowed(app_id)):
             error = "Desktop command must target an application in the local allowlist."
         elif command.action in DESKTOP_CONTROL_ACTIONS:
             error = self._control_policy_error()
         else:
             error = None
         return error
+
+    def _app_allowed(self, app_id: str) -> bool:
+        """Admit a saved app, or while a whole-computer grant is available any app; never MindRoom itself."""
+        return app_id not in MINDROOM_APP_IDS and (app_id in self.policy.allowed_app_ids or self._computer_scope())
+
+    def _computer_scope(self) -> bool:
+        return self.policy.control_scope == "computer" and self._control_available()
 
     def _authority_error(self, command: DesktopCommand) -> str | None:
         """Refuse control that arrived under an earlier grant, or in an earlier run, than the one now in force."""
@@ -966,16 +1018,20 @@ class DesktopBridge:
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }
+        status["control_scope"] = "computer" if self._computer_scope() else "apps"
+        status["control_until_revoked"] = control_available and self.policy.control_until_revoked
         if self.policy.control_lease_expires_at_ms is not None:
             status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
         return status
 
     def _control_available(self) -> bool:
+        if not self.policy.allow_control or self._control_revoked:
+            return False
+        if self.policy.control_until_revoked:
+            return True
         lease_expires_at_ms = self.policy.control_lease_expires_at_ms
         return (
-            self.policy.allow_control
-            and not self._control_revoked
-            and lease_expires_at_ms is not None
+            lease_expires_at_ms is not None
             and self.clock() * 1000 < lease_expires_at_ms
             and self._control_lease_deadline is not None
             and self.monotonic_clock() < self._control_lease_deadline
@@ -1102,4 +1158,4 @@ def _browser_command_parameters(parameters: dict[str, object]) -> tuple[str, dic
     )
 
 
-__all__ = ["DesktopBridge", "DesktopBridgePolicy"]
+__all__ = ["DesktopBridge", "DesktopBridgePolicy", "DesktopControlScope"]

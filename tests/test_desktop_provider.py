@@ -160,6 +160,10 @@ class FakeAccessibilityBackend:
         """Record one allowlisted application launch."""
         self.calls.append(("launch_app", app_id))
 
+    def set_computer_scope(self, active: bool) -> None:
+        """Record the whole-computer scope the provider forwards."""
+        self.calls.append(("set_computer_scope", active))
+
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Record capture validation and return the current app window."""
         self.calls.append(("prepare_capture", (app_id, state_id)))
@@ -1121,3 +1125,12 @@ def test_revoke_during_the_window_lookup_before_a_pointer_event_sends_nothing(mo
         provider.click(app_id="com.example.Editor", state_id="state-1", x=10, y=10, button="left")
 
     assert posted == []
+
+
+def test_provider_forwards_computer_scope_to_its_backend() -> None:
+    """The backend owns which apps the scope admits, so the provider passes the scope straight through."""
+    provider, pyautogui, accessibility = _provider()
+    provider.set_computer_scope(True)
+    provider.set_computer_scope(False)
+    assert accessibility.calls == [("set_computer_scope", True), ("set_computer_scope", False)]
+    assert pyautogui.calls == []

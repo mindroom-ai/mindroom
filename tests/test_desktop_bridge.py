@@ -13,6 +13,7 @@ from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import nio
@@ -20,6 +21,7 @@ import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.accessibility import (
+    AccessibilityError,
     AccessibilityState,
     DesktopApp,
     MacAccessibilityBackend,
@@ -36,6 +38,7 @@ from mindroom.desktop.command_journal import (
     desktop_journal_path,
 )
 from mindroom.desktop.filesystem import DesktopFilesystem
+from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -1163,7 +1166,10 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         isActive=activation_published.is_set,
         activateWithOptions_=lambda _options: activation_requested.set() or True,
     )
-    workspace = SimpleNamespace(runningApplications=lambda: [application] if launch_published.is_set() else [])
+    workspace = SimpleNamespace(
+        runningApplications=lambda: [application] if launch_published.is_set() else [],
+        URLForApplicationWithBundleIdentifier_=lambda _app_id: "file:///Applications/Editor.app",
+    )
 
     def pump(mode: str, seconds: float, _return_after_source: bool) -> None:
         assert threading.current_thread() is threading.main_thread()
@@ -1443,6 +1449,8 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
     assert _response(transport).result["bridge"] == {
         "gui_mode": "control",
         "control_available": True,
+        "control_scope": "apps",
+        "control_until_revoked": False,
         "emergency_stop_latched": False,
         "allowed_app_count": 1,
         "browser_enabled": False,
@@ -2408,7 +2416,7 @@ def test_local_control_grant_expiry_and_revocation() -> None:
     bridge.grant_local_control(60)
     assert bridge.revoke_local_control()["control_available"] is False
     for duration in (True, 0, 3601):
-        with pytest.raises(ValueError, match="duration"):
+        with pytest.raises(ValueError, match="60 to 3600 seconds or until revoked"):
             bridge.grant_local_control(duration)
 
 
@@ -2717,3 +2725,289 @@ async def test_a_revoke_after_input_has_returned_does_not_hold_back_the_next_gra
     finally:
         release.set()
     await executing
+
+
+OTHER_APP = "com.example.Other"
+_NOT_ALLOWED = "Desktop command must target an application in the local allowlist."
+_SCOPE_WAIT = "Wait for the running desktop action to finish before changing the control scope."
+
+
+async def _run_for_app(bridge: DesktopBridge, transport: AsyncMock, command: DesktopCommand) -> DesktopResponse:
+    """Admit, execute, and answer one command, with an observed state of the app it targets when it needs one."""
+    state_id = command.parameters.get("state_id")
+    if isinstance(state_id, str):
+        app_id = str(command.parameters["app"])
+        bridge._observations.remember(replace(STATE, app_id=app_id, state_id=state_id), command)
+    await bridge.on_to_device_event(_event(command))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    return _response(transport)
+
+
+def _numbered(action: str, number: int, parameters: dict[str, object]) -> DesktopCommand:
+    return _command(action, request_id=f"request-{number}", sequence=number, parameters=parameters)
+
+
+def test_until_revoked_grant_reports_control_without_an_expiry() -> None:
+    """An until-stopped grant has no remaining seconds yet reads as control, across any clock jump, until revoked."""
+    wall, monotonic = [NOW_SECONDS], [100.0]
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(),
+        clock=lambda: wall[0],
+        monotonic_clock=lambda: monotonic[0],
+    )
+    bridge.grant_local_control(until_revoked=True)
+    wall[0] += 10_000_000
+    monotonic[0] += 10_000_000
+    status = bridge.local_status()
+    assert (status["gui_mode"], status["control_available"]) == ("control", True)
+    assert (status["control_scope"], status["control_until_revoked"]) == ("apps", True)
+    assert (status["lease_expires_at_ms"], status["lease_remaining_seconds"]) == (None, 0)
+    bridge.revoke_local_control()
+    status = bridge.local_status()
+    assert (status["gui_mode"], status["control_available"], status["control_until_revoked"]) == (
+        "observe_only",
+        False,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"duration_seconds": 59},
+        {"duration_seconds": 3601},
+        {"duration_seconds": True},
+        {"duration_seconds": 60, "until_revoked": True},
+        {"until_revoked": True, "scope": "all"},
+        {"duration_seconds": 60, "scope": None},
+    ],
+)
+def test_grant_rejects_an_invalid_duration_or_scope(arguments: dict[str, object]) -> None:
+    """Every other grant shape is refused before it changes authority or touches the provider."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    with pytest.raises(ValueError, match=r"60 to 3600 seconds or until revoked|scope must be apps or computer"):
+        bridge.grant_local_control(**arguments)
+    assert bridge.local_status()["control_available"] is False
+    assert (provider.input_enabled, provider.computer_scope) == (False, False)
+
+
+def test_grant_refuses_a_scope_the_provider_cannot_serve() -> None:
+    """A pixels-only provider cannot widen to the whole computer, and the refused grant leaves control off."""
+
+    class PixelsOnly(FakeProvider):
+        def set_computer_scope(self, active: bool) -> None:
+            if active:
+                msg = "Whole-computer control needs macOS accessibility."
+                raise AccessibilityError(msg)
+            super().set_computer_scope(active)
+
+    provider = PixelsOnly()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    with pytest.raises(ValueError, match="needs macOS accessibility"):
+        bridge.grant_local_control(until_revoked=True, scope="computer")
+    assert bridge.local_status()["control_available"] is False
+    assert provider.input_enabled is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry", "emergency_stop"])
+async def test_whole_computer_scope_admits_unsaved_apps_only_while_its_grant_is_available(
+    transport: AsyncMock,
+    ending: str,
+) -> None:
+    """Observation and control of unsaved apps come and go with the grant; MindRoom stays refused throughout."""
+    monotonic = [100.0]
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+    )
+    numbers = iter(range(1, 100))
+
+    async def observe(app: str) -> DesktopResponse:
+        return await _run_for_app(bridge, transport, _numbered("get_app_state", next(numbers), {"app": app}))
+
+    async def click(app: str) -> DesktopResponse:
+        number = next(numbers)
+        parameters = {"app": app, "state_id": f"state-click-{number}", "x": 10, "y": 20, "button": "left"}
+        return await _run_for_app(bridge, transport, _numbered("click", number, parameters))
+
+    assert (await observe(OTHER_APP)).error == _NOT_ALLOWED
+    assert (await observe("primary-screen")).error == _NOT_ALLOWED
+    bridge.grant_local_control(60, scope="computer")
+    assert provider.computer_scope is True
+    assert bridge.local_status()["control_scope"] == "computer"
+    assert (await observe(OTHER_APP)).ok
+    assert (await observe("primary-screen")).ok
+    assert (await click(OTHER_APP)).ok
+    assert any(name == "click" and cast("tuple", arguments)[0] == OTHER_APP for name, arguments in provider.calls)
+    for mindroom_id in sorted(MINDROOM_APP_IDS):
+        assert (await observe(mindroom_id)).error == _NOT_ALLOWED
+        assert (await click(mindroom_id)).error == _NOT_ALLOWED
+    if ending == "revoke":
+        bridge.revoke_local_control()
+        # At once, so an observation already running cannot read an unsaved app afterwards.
+        assert provider.computer_scope is False
+    elif ending == "expiry":
+        monotonic[0] += 61
+    else:
+        provider.emergency_stop = True
+        assert not (await click(APP_ID)).ok
+        provider.emergency_stop = False
+    assert bridge.local_status()["control_scope"] == "apps"
+    provider.calls.clear()
+    assert (await observe(OTHER_APP)).error == _NOT_ALLOWED
+    assert (await click(OTHER_APP)).error == _NOT_ALLOWED
+    assert provider.calls == []
+    # Every executed command hands the provider the scope now in force, so expiry and the latch reach it too.
+    assert (await observe(APP_ID)).ok
+    assert provider.computer_scope is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first", "second"), [("apps", "computer"), ("computer", "apps")])
+async def test_a_scope_change_never_runs_control_queued_under_the_previous_scope(
+    transport: AsyncMock,
+    first: str,
+    second: str,
+) -> None:
+    """A grant that changes scope while control is in force is a new authority, even for an app both scopes cover."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    bridge.grant_local_control(60, scope=first)
+    command = _command("click", parameters=_CLICK)
+    bridge._observations.remember(STATE, command)
+    await bridge.on_to_device_event(_event(command))
+    bridge.grant_local_control(until_revoked=True, scope=second)
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).error == _STALE_AUTHORITY
+    assert {name for name, _ in provider.calls} == {"check_emergency_stop"}
+
+
+@pytest.mark.asyncio
+async def test_extending_whole_computer_control_keeps_its_queued_control(transport: AsyncMock) -> None:
+    """Granting the same scope again, even until stopped, continues the authority queued control arrived under."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    bridge.grant_local_control(60, scope="computer")
+    command = _command("click", parameters={**_CLICK, "app": OTHER_APP})
+    bridge._observations.remember(replace(STATE, app_id=OTHER_APP), command)
+    await bridge.on_to_device_event(_event(command))
+    bridge.grant_local_control(until_revoked=True, scope="computer")
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert ("click", (OTHER_APP, "state-1", 10, 20, "left")) in provider.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lease", ["in_force", "expired"])
+async def test_scope_cannot_change_while_app_input_is_inside_its_native_call(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    lease: str,
+) -> None:
+    """A drag on an unsaved app never runs under a saved-apps scope: the narrowing grant waits until the drag ends.
+
+    A lapsed timed lease lets running input finish, so the refusal holds even after the whole-computer lease expired.
+    """
+    provider, _, _ = _real_provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    monkeypatch.setitem(sys.modules, "Quartz", _fake_quartz(posted, [_window(42, 0, 0, 2000)]))
+    reached, release = threading.Event(), threading.Event()
+    sleeps: list[float] = []
+
+    def sleep(_delay: float) -> None:
+        sleeps.append(_delay)
+        if len(sleeps) == 3:
+            reached.set()
+            assert release.wait(5)
+
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", sleep)
+    now = [NOW_SECONDS]
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: now[0],
+        monotonic_clock=lambda: now[0],
+    )
+    bridge.grant_local_control(60, scope="computer")
+    drag_parameters = {"app": OTHER_APP, "start_x": 0, "start_y": 0, "end_x": 1000, "end_y": 0}
+    drag = replace(_numbered("drag", 1, {**drag_parameters, "state_id": "state-1"}), expires_at_ms=120_000)
+    bridge._observations.remember(replace(STATE, app_id=OTHER_APP), drag)
+    await bridge.on_to_device_event(_event(drag))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(reached.wait, 5)
+        if lease == "expired":
+            now[0] += 61
+        with pytest.raises(ValueError, match=_SCOPE_WAIT):
+            bridge.grant_local_control(60)
+        with pytest.raises(ValueError, match=_SCOPE_WAIT):
+            bridge.grant_local_control(until_revoked=True)
+        assert bridge.local_status()["control_available"] is (lease == "in_force")
+    finally:
+        release.set()
+    await executing
+    await bridge.deliver_pending()
+    assert _response(transport).result["action_completed"] is True
+    kinds = [event["kind"] for event in posted]
+    assert kinds[-1] == 2
+    assert bridge.grant_local_control(60)["control_scope"] == "apps"
+    later = replace(_numbered("drag", 2, {**drag_parameters, "state_id": "state-2"}), expires_at_ms=120_000)
+    refused = await _run_for_app(bridge, transport, later)
+    assert refused.error == _NOT_ALLOWED
+    assert [event["kind"] for event in posted] == kinds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("app", [OTHER_APP, "primary-screen"])
+async def test_whole_computer_input_still_waits_while_a_shell_command_awaits_approval(
+    transport: AsyncMock,
+    tmp_path: Path,
+    app: str,
+) -> None:
+    """MindRoom's approval panel does not activate, so no frontmost-app check sees it: pending approval pauses input."""
+    provider = FakeProvider()
+    bridge = _control_shell_bridge(provider, _local_shell())
+    bridge.grant_local_control(until_revoked=True, scope="computer")
+    provider.calls.clear()
+    await bridge.on_to_device_event(_event(_run_shell(PRIVATE_COMMAND, tmp_path, expires_at_ms=120_000)))
+    shell_lane = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+    await _wait_for_pending_shell(bridge)
+    for sequence, (action, parameters) in enumerate(
+        [
+            ("keypress", {"keys": ["enter"]}),
+            ("click", {"x": 10, "y": 20, "button": "left"}),
+            ("type_text", {"text": "y"}),
+        ],
+        start=2,
+    ):
+        command = _command(
+            action,
+            request_id=f"{action}-{sequence}",
+            sequence=sequence,
+            parameters={"app": app, "state_id": f"state-{sequence}", **parameters},
+        )
+        bridge._observations.remember(replace(STATE, app_id=app, state_id=f"state-{sequence}"), command)
+        await bridge.on_to_device_event(_event(command))
+        await _execute(bridge)
+        await bridge.deliver_pending()
+        refused = _response(transport)
+        assert "waiting for local approval" in str(refused.error)
+    assert provider.calls == []
+    bridge.decide_local_shell("run", approved=False, auto_approve_seconds=0)
+    await shell_lane
+    assert not (tmp_path / "marker").exists()
+    bridge.close()

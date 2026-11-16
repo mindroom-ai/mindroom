@@ -29,6 +29,8 @@ class _RunningApplication(Protocol):
 
     def isActive(self) -> bool: ...  # noqa: N802
 
+    def activationPolicy(self) -> int: ...  # noqa: N802
+
     def activateWithOptions_(self, options: int) -> bool: ...  # noqa: N802
 
 
@@ -37,10 +39,15 @@ class _Workspace(Protocol):
 
     def frontmostApplication(self) -> _RunningApplication | None: ...  # noqa: N802
 
+    def URLForApplicationWithBundleIdentifier_(self, app_id: str) -> object | None: ...  # noqa: N802
+
 
 PRIMARY_SCREEN_APP_ID = "primary-screen"
 MAX_ACCESSIBILITY_ELEMENTS = 128
 MAX_RETAINED_STATES = 128
+_MAX_LISTED_RUNNING_APPS = 100
+# NSApplicationActivationPolicyRegular: an app with a Dock icon and menu bar, as opposed to agents and background apps.
+_REGULAR_ACTIVATION_POLICY = 0
 STATE_TTL_SECONDS = 120.0
 _MAX_ACCESSIBILITY_DEPTH = 12
 _MAX_VISITED_ELEMENTS = 512
@@ -208,7 +215,11 @@ class AccessibilityBackend(Protocol):
         ...
 
     def list_apps(self) -> list[DesktopApp]:
-        """List only applications named in the local allowlist."""
+        """List the applications local policy admits now."""
+        ...
+
+    def set_computer_scope(self, active: bool) -> None:
+        """Admit every application except MindRoom, or only the allowlist again."""
         ...
 
     def launch_app(self, app_id: str) -> None:
@@ -300,6 +311,8 @@ class MacAccessibilityBackend:
         self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
         self._states: OrderedDict[str, _StoredMacState] = OrderedDict()
         self._collect_deadline: _CollectionDeadline | None = None
+        # Set from the bridge's thread while a worker may be reading; only this flag crosses threads.
+        self._computer_scope = False
         # Set on the system-wide element, the timeout applies to every accessibility message this process sends.
         self._services.AXUIElementSetMessagingTimeout(  # ty: ignore[unresolved-attribute]
             self._services.AXUIElementCreateSystemWide(),  # ty: ignore[unresolved-attribute]
@@ -313,8 +326,14 @@ class MacAccessibilityBackend:
             "backend": "macos_ax",
         }
 
+    def set_computer_scope(self, active: bool) -> None:
+        """Widen to every app except MindRoom, or narrow back; states of apps left out are dropped at their next use."""
+        self._computer_scope = active
+
     def list_apps(self) -> list[DesktopApp]:
-        """List configured bundle identifiers without revealing other running apps."""
+        """List configured bundle identifiers, or every running regular app while the computer scope is on."""
+        if self._computer_scope:
+            return self._list_running_apps()
         running = {
             str(application.bundleIdentifier()): str(application.localizedName() or application.bundleIdentifier())
             for application in self._workspace.runningApplications()
@@ -328,6 +347,23 @@ class MacAccessibilityBackend:
             apps.append(DesktopApp(app_id, running.get(app_id, app_id), app_id in running))
         return apps
 
+    def _list_running_apps(self) -> list[DesktopApp]:
+        running: dict[str, str] = {}
+        for application in self._workspace.runningApplications():
+            app_id = application.bundleIdentifier()
+            if (
+                app_id is None
+                or app_id in MINDROOM_APP_IDS
+                or application.activationPolicy() != _REGULAR_ACTIVATION_POLICY
+            ):
+                continue
+            running.setdefault(str(app_id), str(application.localizedName() or app_id))
+        ordered = sorted(running.items(), key=lambda item: (item[1].casefold(), item[0]))
+        return [
+            DesktopApp(PRIMARY_SCREEN_APP_ID, "Primary Screen", True),
+            *(DesktopApp(app_id, name, True) for app_id, name in ordered[:_MAX_LISTED_RUNNING_APPS]),
+        ]
+
     def launch_app(self, app_id: str) -> None:
         """Launch or foreground one exact allowlisted application."""
         self._require_allowed(app_id)
@@ -338,6 +374,9 @@ class MacAccessibilityBackend:
             application = self._running_application(app_id)
         except AccessibilityError:
             _require_valid_activation_app_id(app_id)
+            if self._workspace.URLForApplicationWithBundleIdentifier_(app_id) is None:
+                msg = f"No installed application has bundle ID {app_id!r}."
+                raise AccessibilityError(msg) from None
             self._before_input()
             try:
                 _request_application_activation(app_id)
@@ -411,7 +450,7 @@ class MacAccessibilityBackend:
     def _prune_states(self) -> None:
         now = time.monotonic()
         for state_id, stored in list(self._states.items()):
-            if now - stored.created_at >= STATE_TTL_SECONDS:
+            if now - stored.created_at >= STATE_TTL_SECONDS or not self._allows(stored.public.app_id):
                 del self._states[state_id]
 
     def _stored_state(self, app_id: str, state_id: str) -> _StoredMacState:
@@ -1027,8 +1066,11 @@ class MacAccessibilityBackend:
         msg = "macOS accepted the accessibility value action but did not expose the requested value; the outcome is unknown."
         raise AccessibilityActionOutcomeUnknownError(msg)
 
+    def _allows(self, app_id: str) -> bool:
+        return app_id not in MINDROOM_APP_IDS and (self._computer_scope or app_id in self._allowed_app_ids)
+
     def _require_allowed(self, app_id: str) -> None:
-        if app_id not in self._allowed_app_ids:
+        if not self._allows(app_id):
             msg = f"Application {app_id!r} is not in the local desktop allowlist."
             raise AccessibilityError(msg)
 
@@ -1055,6 +1097,12 @@ class ScreenshotOnlyAccessibilityBackend:
             )
             for app_id in sorted(self._allowed_app_ids)
         ]
+
+    def set_computer_scope(self, active: bool) -> None:
+        """Refuse to widen: without semantic app scoping there is no application to admit beyond the screen."""
+        if active:
+            msg = "Whole-computer control needs macOS accessibility."
+            raise AccessibilityError(msg)
 
     def launch_app(self, app_id: str) -> None:
         """Reject application launch when semantic app scoping is unavailable."""
