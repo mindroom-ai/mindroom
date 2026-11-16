@@ -10116,6 +10116,7 @@ mindroom desktop run --allow-control --lease-minutes 15
 After the lease expires, the bridge keeps observing but rejects every control action until a person grants another lease.
 The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
 Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
+Control actions sent before a lease ended never run under a later lease, and a grant right after a revoke is refused with `Wait for the interrupted desktop action to finish before granting control again.` until the action the revoke stopped has ended.
 
 ### Approve Shell Commands in the Terminal
 
@@ -10161,6 +10162,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
 - **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because their windows grant shell auto-approval, control leases, and app access.
+  On macOS, `primary-screen` screenshots leave MindRoom's windows out, and `primary-screen` pointer or keyboard input that would land on MindRoom is refused.
 - **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
 - **Emergency stop**: Moving the pointer to the upper-left corner of the primary display stops control and keeps it off until the bridge restarts or a person selects **Reset Emergency Stop** in the macOS app; the reset does not grant control.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
@@ -10170,7 +10172,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
 
 !!! warning "Some allowlisted apps give an agent your own authority"
     Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
-    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
+    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, except MindRoom's own windows on macOS.
     Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
     Allowlist these only when you would also approve everything the agent could run or send as you.
 
@@ -10210,6 +10212,7 @@ Pass `observation="tree"` to skip the screenshot when semantic state is enough, 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
 On macOS, keyboard input fails if the app has lost focus, and pointer input fails if another window, such as a notification banner, floating panel, or Picture in Picture, covers the target point.
+An app that stops answering accessibility requests makes its request fail with `did not answer accessibility requests in time` after several seconds instead of holding up other actions, and a `primary-screen` screenshot still works while that app hangs.
 Windows on secondary displays are supported when the window lies on one display; move a window that spans displays fully onto one.
 
 ## Read-Only Folders
@@ -10345,7 +10348,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
   Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
-  An app or browser action already in progress can still finish, so observe local state before retrying it.
+  Stopping or revoking control stops app input at once, so an action in progress can end partway; a browser action already in progress can still finish, so observe local state before retrying.
 - **Stronger isolation**: Run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
 
 ### `!desktop`

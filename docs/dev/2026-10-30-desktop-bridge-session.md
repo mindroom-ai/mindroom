@@ -12,7 +12,7 @@ A run that never started its workers is not stopped: stopping gives recorded rep
 
 Closing keeps the order the resources depend on.
 The first close starts its teardown eagerly, so admission, new execution, local control, and shell access end before the close first yields, as a direct stop did before: a command admitted just before a stop never starts, and a shell command whose controller check finishes as the stop begins is refused instead of started and killed.
-Native input runs in threads that cancelling a task cannot stop, so the bridge stops first (ends shell access, waits for the active action, delivers recorded replies), and only after that are the workers cancelled and the journal, folders, browser, and Matrix owner released, with the durable source lease released before its HTTP connection.
+Native input runs in threads that cancelling a task cannot stop, so the bridge stops first (ends shell access and input, waits a bounded time for the active action, delivers recorded replies), and only after that are the workers cancelled and the journal, folders, browser, and Matrix owner released, with the durable source lease released before its HTTP connection.
 The terminal stops reading shell approvals before the bridge stops, because stopping settles a pending approval.
 Concurrent closes share one teardown that a cancelled caller cannot cut short, which is what lets the helper's stop wait for a close its failed-worker supervisor already began.
 Every release is attempted even when an earlier one fails, and that failure is the close's outcome; the helper still retires the runtime, so the next start is possible once the failed resource is free.
@@ -37,6 +37,25 @@ The Matrix client prepares the Access token before every request, so no command 
 - A two-step start, opening first and starting workers separately, so the terminal could grant shell auto-approval in between: the run-only control lease and shell grant are start parameters instead, next to each other.
 - Supervision inside the session: the terminal also waits on its approver and the helper records a fault, so a free function that reports the first worker's exit serves both.
 - Logging release failures instead of returning them: the app reads only the helper's protocol, not its logs, so a failed release must reach it as the stop's error.
+
+## Ending input that is already running
+
+Native input runs in a worker thread that no task cancellation reaches, so revoking control and stopping close the provider's input gate instead, which every pointer event, key, text chunk, and accessibility press or value write checks right before it starts.
+A button or key that input already pressed is still released, and an event already handed to macOS, such as a key chord posted in one call, still completes; focusing the target app is not input and can still happen after a revoke.
+A reusable gate alone would let a quick new grant reopen it under the old action, so a grant is refused while input interrupted by a revoke is still inside its native call.
+Each grant that starts control anew begins a new authority, and a control command runs only under the authority it arrived in, so commands queued before a revoke, an expiry, or a restart never run under a later grant; that admission is kept in memory because the Matrix command carries no grant identity, and extending a grant that is still in force keeps its queued commands.
+
+Stop waits at most 5 seconds for the running action, because a hung application can hold a native call indefinitely.
+The gate is closed first, so the abandoned call sends no further input, and the workers are cancelled before the journal closes, so its late return records nothing; its command stays started and is reported as interrupted on the next start.
+Stop's bound is not the helper's exit bound: Python waits for its worker threads when the process exits, so the helper exits only once that native call returns.
+
+## Bounded accessibility reads
+
+The helper sets a process-wide accessibility messaging timeout of 2 seconds, and one tree read checks its 5-second deadline before each message, so a read of an app that stops answering ends within about 7 seconds, not 5.
+`get_app_state` stops re-reading for a stable tree once 8 seconds have passed and returns the latest tree as unstable, so a slow app that still answers can hold the action lane for about 15 seconds.
+A `primary-screen` screenshot never reads an app's accessibility tree, so it works as soon as the lane is free.
+A second lane for screen observations was rejected: the accessibility state store would have to become thread-safe, and a capture could run during input, for a wait the deadlines already bound.
+These limits were chosen below the default 30-second command timeout without measurements on heavy trees, so a tree that legitimately takes longer than the deadline to read now fails.
 
 ## Known limits
 
