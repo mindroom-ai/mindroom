@@ -39,7 +39,7 @@ from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -1425,6 +1425,34 @@ async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict
             is verdict
         )
     assert _skip_reasons(logs) == []
+
+
+@pytest.mark.asyncio
+async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_reply() -> None:
+    """A queue the judge says cannot wait marks the messages it had not let wait before; release forgets the mark."""
+    verdicts = [True, False]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    queue.add_waiting_human_message(
+        "$remark",
+        text="Did you get the slides?",
+        requester_id=_OTHER,
+        mentions_nobody=True,
+    )
+    remark = QueuedHumanNoticeReservation(queue, "$remark")
+    assert not await queue._interrupts()
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
+    stop = QueuedHumanNoticeReservation(queue, "$stop")
+    assert await queue._interrupts()
+    assert (remark.stopped_reply, stop.stopped_reply) == (False, True)
+    stop.release()
+    assert not stop.stopped_reply
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
+    assert not QueuedHumanNoticeReservation(queue, "$stop").stopped_reply
 
 
 @pytest.mark.asyncio

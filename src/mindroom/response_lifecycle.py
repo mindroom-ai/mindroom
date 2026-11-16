@@ -188,6 +188,8 @@ class _QueuedMessageState:
     # Replaced on every change of the queue, so each waiter wakes once per change.
     _changed: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Waiting messages the mid-turn judge said the running reply cannot wait for.
+    stopped_reply_event_ids: set[str] = field(default_factory=set)
     calls: ReplyToolCalls = field(init=False)
 
     def __post_init__(self) -> None:
@@ -254,6 +256,7 @@ class _QueuedMessageState:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
+        self.stopped_reply_event_ids.discard(source_event_id)
         self._notify_changed()
 
     def _notify_changed(self) -> None:
@@ -292,7 +295,10 @@ class _QueuedMessageState:
 
         # A decision counts only for the queue it judged. A reply that does nothing but wait on jobs answers at once.
         defers = await gate.defers(pending, current=still_queued, judge=not self.calls.only_waiting())
-        return not defers and still_queued()
+        if defers or not still_queued():
+            return False
+        self.stopped_reply_event_ids |= gate.stopped_for(pending)
+        return True
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
@@ -310,6 +316,11 @@ class QueuedHumanNoticeReservation:
     def active(self) -> bool:
         """Return whether this message still counts as waiting for the running response."""
         return self._active
+
+    @property
+    def stopped_reply(self) -> bool:
+        """Return whether the mid-turn judge said the running response cannot wait for this waiting message."""
+        return self._source_event_id in self._state.stopped_reply_event_ids
 
     def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
         """Show the running response's judge an edit of this waiting message; a released one stays released."""

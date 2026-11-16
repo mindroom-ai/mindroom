@@ -838,6 +838,7 @@ class TurnDispatcher:
             correlation_id=event.event_id,
             envelope=envelope,
             current_prompt_is_structured=turn.current_prompt_is_structured,
+            stopped_reply=turn.stopped_reply,
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )

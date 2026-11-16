@@ -93,6 +93,9 @@ class MidTurnGate:
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
+    # Messages of a queue that could wait, and those of the checked queue the judge said the reply cannot wait for.
+    _waited: set[str] = field(default_factory=set)
+    _stopped_for: frozenset[str] = frozenset()
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
@@ -153,7 +156,7 @@ class MidTurnGate:
         async with self._lock:
             if judge and self._checked == pending:
                 return self._finish
-            finish = False
+            finish = stops = False
             # An earlier judgment weighed the work that ran then, not a reply that only waits on jobs.
             request = self._request(pending) if judge else "only_waiting_on_jobs"
             if isinstance(request, str):
@@ -167,7 +170,7 @@ class MidTurnGate:
                         # Logged without the exception, whose SDK message can contain private inputs.
                         reason = "judge_error"
                     else:
-                        finish = verdict is True
+                        finish, stops = verdict is True, verdict is False
                         reason = "no_answer" if verdict is None else None
             if reason is not None:
                 # Unjudged, the reply wraps up, unless only other people's messages to nobody in particular wait.
@@ -178,8 +181,16 @@ class MidTurnGate:
                     queued_messages=len(pending),
                     outcome="waits" if finish else "wraps_up",
                 )
+            event_ids = {message.event_id for message in pending}
+            self._stopped_for = frozenset(event_ids - self._waited if stops else ())
+            if finish:
+                self._waited |= event_ids
             self._checked, self._finish = pending, finish
             return finish
+
+    def stopped_for(self, pending: tuple[QueuedMessage, ...]) -> frozenset[str]:
+        """Return the messages of ``pending`` the judge said the reply cannot wait for, leaving out any it let wait."""
+        return self._stopped_for if self._checked == pending else frozenset()
 
     def _sender_label(self, message: QueuedMessage) -> str:
         """Name the sender by role only, so no user ID reaches the judge."""

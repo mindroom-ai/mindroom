@@ -111,9 +111,11 @@ from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.router.relay import execute_router_relay
@@ -171,10 +173,10 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
-    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turns.facts import IngressFacts
 
@@ -6908,6 +6910,97 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         assert [batch.facts.run_requester_id for batch in batches] == [
             requester for _, requester, _, _ in expected_turns
         ]
+    finally:
+        idle.set()
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judgment", ["cannot_wait", "can_wait", "skipped", "no_mid_turn"])
+@pytest.mark.parametrize("sender", [_SENDER, "@other:localhost"], ids=["requester", "another-person"])
+async def test_a_message_the_running_reply_stopped_for_is_answered_without_participation(
+    config: Config,
+    tmp_path: Path,
+    judgment: str,
+    sender: str,
+) -> None:
+    """A queued message the mid-turn judge said the running reply cannot wait for is answered when the reply ends.
+
+    Whoever sent it, the follow-up skips participation. A message the judge let wait, a wrap-up without a verdict,
+    and an agent without mid_turn leave the follow-up to participation.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="Write the long report", event_id="$task:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    event_id = "$correction:localhost"
+    queue = _QueuedMessageState()
+    if judgment != "no_mid_turn":
+
+        async def evaluate(_request: JudgmentRequest) -> bool | None:
+            return judgment == "can_wait"
+
+        queue.mid_turn_gate = MidTurnGate(
+            active_text="Write the long report",
+            evaluate=evaluate,
+            requester_id=_SENDER,
+        )
+    # Without text the message cannot be judged, so the reply wraps up without a verdict.
+    text = None if judgment == "skipped" else "Stop, write the short summary instead"
+    queue.add_waiting_human_message(event_id, text=text, requester_id=sender, mentions_nobody=True)
+    # Unjudged, another person's untagged message lets the reply continue instead.
+    wraps_up = judgment in {"cannot_wait", "no_mid_turn"} or (judgment == "skipped" and sender == _SENDER)
+    assert await queue._interrupts() is wraps_up
+    queue.mid_turn_gate = None
+    idle = asyncio.Event()
+    dispatched = asyncio.Event()
+
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        await harness.dispatcher.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_until_idle,
+    )
+    try:
+        pending = make_pending_event(
+            _text_event(
+                "Stop, write the short summary instead",
+                event_id=event_id,
+                thread_id=_THREAD_ROOT,
+                sender=sender,
+            ),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=sender,
+            active_follow_up=True,
+            notice=QueuedHumanNoticeReservation(queue, event_id),
+        )
+        await gate.admit(
+            active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+            ready_result=ReadyPendingEvent(pending_event=pending),
+        )
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        (request,) = harness.runner.requests
+        assert (request.participation is None) is (judgment == "cannot_wait")
+        assert not queue.has_pending_human_messages()
     finally:
         idle.set()
         await gate.drain_all()
