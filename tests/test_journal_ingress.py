@@ -313,13 +313,26 @@ class TestProvenanceMapping:
         expected: EventClass,
     ) -> None:
         """Provenance decides whether work may start."""
-        assert _event_class_for(provenance, text_event("$m", "hi"), sender_is_managed=lambda _sender: False) is expected
+        assert (
+            _event_class_for(
+                provenance,
+                text_event("$m", "hi"),
+                EventKind.MESSAGE,
+                sender_is_managed=lambda _sender: False,
+            )
+            is expected
+        )
 
     async def test_every_provenance_is_mapped(self) -> None:
         """A new provenance must not silently default to actionable."""
         for provenance in nio.TimelineEventProvenance:
             assert (
-                _event_class_for(provenance, text_event("$m", "hi"), sender_is_managed=lambda _sender: False)
+                _event_class_for(
+                    provenance,
+                    text_event("$m", "hi"),
+                    EventKind.MESSAGE,
+                    sender_is_managed=lambda _sender: False,
+                )
                 in EventClass
             )
 
@@ -741,7 +754,7 @@ class TestAgentAuthoredMarker:
         content: dict[str, Any],
         kind: EventKind,
     ) -> None:
-        """No kind of event can act for the person, whichever content layer of an edit carries the marker."""
+        """No kind a person asks with can act for them, whichever content layer of an edit carries the marker."""
         source = timeline_source(event_type, content)
 
         inbound, projected = self._views(source)
@@ -757,6 +770,28 @@ class TestAgentAuthoredMarker:
         )
 
         assert inbound.event_class is EventClass.ACTIONABLE
+
+    async def test_a_marked_membership_event_from_a_person_is_still_work(self) -> None:
+        """A join is a join whoever wrote its content, so the room's membership handlers still see it."""
+        source = {
+            **timeline_source("m.room.member", {"membership": "join", AGENT_AUTHORED_KEY: MARKING_AGENT}),
+            "state_key": ALICE,
+        }
+
+        inbound, _projected = self._views(source)
+
+        assert inbound.kind is EventKind.ROOM_LIFECYCLE
+        assert inbound.event_class is EventClass.ACTIONABLE
+
+    async def test_a_marked_redaction_from_a_person_keeps_its_class(self) -> None:
+        """A deletion ends the replies it deletes whoever wrote it, so the marker leaves it as it is."""
+        source = {**timeline_source("m.room.redaction", {AGENT_AUTHORED_KEY: MARKING_AGENT}), "redacts": "$target"}
+
+        inbound, _projected = self._views(source)
+        unmarked, _unmarked_projected = self._views(without_marker(source))
+
+        assert inbound.kind is EventKind.REDACTION
+        assert inbound.event_class is unmarked.event_class
 
 
 def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> nio.Event:
@@ -1132,7 +1167,12 @@ class TestStreamingProgressIsTransport:
         await self._admit_live(alice, placeholder)
 
         assert (
-            _event_class_for(nio.TimelineEventProvenance.LIVE, placeholder, sender_is_managed=lambda _sender: False)
+            _event_class_for(
+                nio.TimelineEventProvenance.LIVE,
+                placeholder,
+                EventKind.MESSAGE,
+                sender_is_managed=lambda _sender: False,
+            )
             is EventClass.CONTEXT_ONLY
         )
         assert (await self._one_visible(alice)).logical_event_id == "$their_placeholder"
@@ -4541,7 +4581,7 @@ class TestAdmittedWorkReachesItsCallback:
         kind = _event_kind(event)
         assert kind is not None, f"{msgtype} is projected by hydration, so admission must give it a kind"
         actionable = (
-            _event_class_for(nio.TimelineEventProvenance.LIVE, event, sender_is_managed=lambda _sender: False)
+            _event_class_for(nio.TimelineEventProvenance.LIVE, event, kind, sender_is_managed=lambda _sender: False)
             is EventClass.ACTIONABLE
         )
 

@@ -42,6 +42,10 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
+# Kinds a person sends to ask for something, the only ones the agent-authored marker demotes to context.
+_AGENT_AUTHORED_MARKER_KINDS = frozenset(
+    {EventKind.MESSAGE, EventKind.MEDIA, EventKind.REACTION, EventKind.APPROVAL, EventKind.JOB_CANCEL},
+)
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as
 # work: nio's base class for every msgtype that carries a textual body, which
@@ -141,6 +145,7 @@ def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
 def _event_class_for(
     provenance: nio.TimelineEventProvenance,
     event: nio.Event,
+    kind: EventKind,
     *,
     sender_is_managed: Callable[[str], bool],
 ) -> EventClass:
@@ -174,14 +179,17 @@ def _event_class_for(
     receives every agent's placeholder, so admitting them as work queued each
     one in every agent's ordered room lane, ahead of the prompts behind it.
 
-    An event of any kind marked agent-authored, from a sender MindRoom does not
-    manage, is the last one. Such an account acts for a person, and the marker
-    says an agent wrote the event there, so acting on it would let the agent
-    speak for the person: answer its own approval card, run a command with the
-    person's rights, or stop a reply. The marker can only take authority away,
-    so its presence decides and its value is never read. An entity's own
-    account already speaks only for that entity, so the marker takes nothing
-    from it. The event still projects, so history keeps it as it is.
+    A message, media, reaction, approval or job cancel marked agent-authored,
+    from a sender MindRoom does not manage, is the last one. Such an account
+    acts for a person, and the marker says an agent wrote the event there, so
+    acting on it would let the agent speak for the person: answer its own
+    approval card, run a command with the person's rights, or stop a reply.
+    The marker can only take authority away, so its presence decides and its
+    value is never read. An entity's own account already speaks only for that
+    entity, so the marker takes nothing from it. The event still projects, so
+    history keeps it as it is. Every other kind keeps the class it would have
+    unmarked: a membership, call or redaction event changes the room itself,
+    and its handlers must see that change whoever wrote its content.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
@@ -190,7 +198,12 @@ def _event_class_for(
     content = event.source.get("content")
     if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(content or {}):
         return EventClass.CONTEXT_ONLY
-    if isinstance(content, dict) and carries_agent_authored_marker(content) and not sender_is_managed(event.sender):
+    if (
+        kind in _AGENT_AUTHORED_MARKER_KINDS
+        and isinstance(content, dict)
+        and carries_agent_authored_marker(content)
+        and not sender_is_managed(event.sender)
+    ):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -327,7 +340,7 @@ def ingestion_timeline_views(
     kind = _ingested_kind(parsed, sender_is_managed)
     if kind is None:
         return None
-    event_class = _event_class_for(provenance, parsed, sender_is_managed=sender_is_managed)
+    event_class = _event_class_for(provenance, parsed, kind, sender_is_managed=sender_is_managed)
     return (
         _inbound_event(room_id, parsed, kind, event_class),
         _projected_event(room_id, parsed, kind, self_sender=self_sender),
