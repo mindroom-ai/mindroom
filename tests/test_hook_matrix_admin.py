@@ -358,13 +358,18 @@ async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_path: Path) -> None:
-    """A refused admin join still reads as a plain failure to hooks."""
+@pytest.mark.parametrize(
+    "body",
+    [{"errcode": "M_FORBIDDEN", "error": "Only server administrators"}, TimeoutError()],
+    ids=["errcode", "body_timeout"],
+)
+async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_path: Path, body: object) -> None:
+    """A refused admin join, even one whose body never arrives, still reads as a plain failure to hooks."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.access_token = TEST_PASSWORD
     response = MagicMock(status=403)
-    response.json = AsyncMock(return_value={"errcode": "M_FORBIDDEN", "error": "Only server administrators"})
+    response.json = AsyncMock(side_effect=body) if isinstance(body, Exception) else AsyncMock(return_value=body)
     client.send.return_value = response
 
     admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
@@ -387,6 +392,7 @@ async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_
         (400, {"errcode": "M_FORBIDDEN: some free text"}, "answered HTTP 400"),
         (500, ["not", "an", "object"], "answered HTTP 500"),
         (502, ValueError("not JSON"), "answered HTTP 502"),
+        (403, TimeoutError(), "answered HTTP 403"),
     ],
 )
 async def test_admin_join_failure_names_only_the_http_status_and_errcode(
