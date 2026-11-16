@@ -850,6 +850,10 @@ class DesktopBridge:
                     msg = "Desktop GUI is unavailable for browser control."
                     raise DesktopProtocolError(msg)
                 await asyncio.to_thread(self.provider.check_emergency_stop)
+                # Control can end, or end and be granted again, while the fail-safe check runs in its thread.
+                authority_error = self._policy_error(command) or self._authority_error(command)
+                if authority_error is not None:
+                    raise DesktopProtocolError(authority_error)
             with self._sending_input() if command.action == "browser_control" else nullcontext():
                 browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
