@@ -868,8 +868,8 @@ async def test_a_relayed_stream_closes_with_the_streams_own_code_when_the_sessio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drop", [True, False], ids=["dropped", "closed"])
-async def test_a_relayed_streams_upstream_learns_how_the_client_left(app: FastAPI, drop: bool) -> None:
+@pytest.mark.parametrize("leaving", ["dropped", "closed", "closed without a code"])
+async def test_a_relayed_streams_upstream_learns_how_the_client_left(app: FastAPI, leaving: str) -> None:
     """A client lost on the embedded server's transport ends the upstream with 1011; a closing one ends it with 1000."""
     close_codes: asyncio.Queue[int | None] = asyncio.Queue()
 
@@ -898,13 +898,16 @@ async def test_a_relayed_streams_upstream_learns_how_the_client_left(app: FastAP
             )
             await websocket.send_str("hi")
             assert await websocket.receive_str() == "hi"
-            if drop:
+            if leaving == "dropped":
                 assert websocket._response.connection is not None
                 websocket._response.connection.transport.abort()
-            else:
+            elif leaving == "closed":
                 await websocket.close()
+            else:
+                # A close frame with an empty payload, as a browser's close() sends; uvicorn reports it as 1005 too.
+                await websocket._writer.send_frame(b"", aiohttp.WSMsgType.CLOSE)
             async with asyncio.timeout(10):
-                assert await close_codes.get() == (1011 if drop else 1000)
+                assert await close_codes.get() == (1011 if leaving == "dropped" else 1000)
     finally:
         await runner.cleanup()
 
