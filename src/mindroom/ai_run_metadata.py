@@ -269,6 +269,31 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
 
 
+def model_payload(
+    config: Config,
+    model_name: str,
+    *,
+    model_id: str | None = None,
+    provider: str | None = None,
+) -> dict[str, str]:
+    """Return the ``model`` object clients show: the configured name, its display name, model ID, and provider.
+
+    ``model_id`` and ``provider`` are what the run recorded; each falls back to the configured model's.
+    """
+    model_config = config.models.get(model_name)
+    payload = {"config": model_name}
+    if model_config is not None:
+        if model_config.display_name:
+            payload["display_name"] = model_config.display_name
+        model_id = model_id or model_config.id
+        provider = provider or model_config.provider
+    if model_id is not None:
+        payload["id"] = model_id
+    if provider is not None:
+        payload["provider"] = provider
+    return payload
+
+
 def build_ai_run_metadata_content(
     *,
     config: Config,
@@ -310,14 +335,7 @@ def build_ai_run_metadata_content(
         "session_id": session_id,
         "status": status.value.lower(),
     }
-    model_payload: dict[str, Any] = {"config": model_name}
-    if model_config is not None and model_config.display_name:
-        model_payload["display_name"] = model_config.display_name
-    if model_id is not None:
-        model_payload["id"] = model_id
-    if provider is not None:
-        model_payload["provider"] = provider
-    payload["model"] = model_payload
+    payload["model"] = model_payload(config, model_name, model_id=model_id, provider=provider)
     if metrics is not None:
         usage = ReplyUsage.of(
             metrics,
