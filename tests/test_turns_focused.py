@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom import constants, interactive
+from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -102,6 +103,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
@@ -6915,6 +6917,22 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         await gate.drain_all()
 
 
+async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
+    """Run the judgment a reply makes over ``queue`` after a tool batch, and return whether the reply wraps up."""
+    notice = "WRAP UP"
+    messages = [
+        Message(role="user", content="Write the long report"),
+        Message(
+            role="assistant",
+            tool_calls=[{"id": "call", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+        ),
+        Message(role="tool", content="result", tool_call_id="call", tool_name="read_file"),
+    ]
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        await queued_notice_after_tool_batch(notice)(messages, ())
+    return any(message.content == notice for message in messages)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("judgment", ["cannot_wait", "can_wait", "skipped", "no_mid_turn"])
 @pytest.mark.parametrize("sender", [_SENDER, "@other:localhost"], ids=["requester", "another-person"])
@@ -6959,7 +6977,7 @@ async def test_a_message_the_running_reply_stopped_for_is_answered_without_parti
     queue.add_waiting_human_message(event_id, text=text, requester_id=sender, mentions_nobody=True)
     # Unjudged, another person's untagged message lets the reply continue instead.
     wraps_up = judgment in {"cannot_wait", "no_mid_turn"} or (judgment == "skipped" and sender == _SENDER)
-    assert await queue._interrupts() is wraps_up
+    assert await _wraps_up_after_tool_batch(queue) is wraps_up
     queue.mid_turn_gate = None
     idle = asyncio.Event()
     dispatched = asyncio.Event()
@@ -7047,7 +7065,7 @@ async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered
     )
     for index, (event_id, sender, body) in enumerate(messages):
         queue.add_waiting_human_message(event_id, text=body, requester_id=sender, mentions_nobody=True)
-        assert await queue._interrupts() is (index == 1)
+        assert await _wraps_up_after_tool_batch(queue) is (index == 1)
     queue.mid_turn_gate = None
     idle = asyncio.Event()
     batches: list[PreparedTurn] = []

@@ -1427,6 +1427,53 @@ async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict
     assert _skip_reasons(logs) == []
 
 
+async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
+    """Run the judgment a reply makes over ``queue`` after a tool batch, and return whether the reply wraps up."""
+    messages = _resumed_messages()
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        await queued_notice_after_tool_batch(_NOTICE)(messages, ())
+    return _has_notice(messages)
+
+
+@pytest.mark.asyncio
+async def test_a_later_verdict_that_lets_the_queue_wait_leaves_no_mark() -> None:
+    """A stop verdict the reply did not act on, because a newer message made the queue wait, marks nothing."""
+    calls: list[int] = []
+    judged_again = asyncio.Event()
+    queue = _QueuedMessageState()
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        calls.append(len(calls))
+        if len(calls) == 1:
+            queue.add_waiting_human_message(
+                "$nvm",
+                text="Never mind, the file is right, keep going",
+                requester_id=_REQUESTER,
+                mentions_nobody=True,
+            )
+            return False
+        judged_again.set()
+        return True
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
+    stop = QueuedHumanNoticeReservation(queue, "$stop")
+    # A tool call waiting on its job asks the queue, and keeps waiting once the judge lets the changed queue wait.
+    waiting = asyncio.create_task(queue.wait())
+    await asyncio.wait_for(judged_again.wait(), timeout=5)
+    assert not waiting.done()
+    assert not await _wraps_up_after_tool_batch(queue)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not stop.stopped_reply
+
+
 @pytest.mark.asyncio
 async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_reply() -> None:
     """A queue the judge says cannot wait marks the messages it had not let wait before.
@@ -1453,10 +1500,10 @@ async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_re
         mentions_nobody=True,
     )
     remark = QueuedHumanNoticeReservation(queue, "$remark")
-    assert not await queue._interrupts()
+    assert not await _wraps_up_after_tool_batch(queue)
     queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
     stop = QueuedHumanNoticeReservation(queue, "$stop")
-    assert await queue._interrupts()
+    assert await _wraps_up_after_tool_batch(queue)
     assert (remark.stopped_reply, stop.stopped_reply) == (False, True)
     stop.release()
     remark.release()
@@ -1488,13 +1535,13 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
     queue.add_waiting_human_message("$msg", text=first, requester_id=_OTHER, mentions_nobody=True)
     message = QueuedHumanNoticeReservation(queue, "$msg")
     if edit == "waited_into_stop":
-        assert not await queue._interrupts()
+        assert not await _wraps_up_after_tool_batch(queue)
     else:
-        assert await queue._interrupts()
+        assert await _wraps_up_after_tool_batch(queue)
         assert message.stopped_reply
     queue.update_waiting_human_message("$msg", text=edited, mentions_nobody=True)
     if edit == "waited_into_stop":
-        assert await queue._interrupts()
+        assert await _wraps_up_after_tool_batch(queue)
     assert message.stopped_reply is (edit == "waited_into_stop")
 
 
@@ -1514,7 +1561,7 @@ async def test_an_edit_after_release_drops_the_kept_verdict() -> None:
     )
     queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
     notice = QueuedHumanNoticeReservation(queue, "$stop")
-    assert await queue._interrupts()
+    assert await _wraps_up_after_tool_batch(queue)
     notice.release()
     assert notice.stopped_reply
     notice.update(request_envelope(reply_to_event_id="$stop", prompt="Thanks, carry on"), mentions_nobody=True)
@@ -1538,7 +1585,7 @@ async def test_one_verdict_for_several_peoples_new_messages_marks_none() -> None
     )
     queue.add_waiting_human_message("$remark", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
     queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER, mentions_nobody=True)
-    assert await queue._interrupts()
+    assert await _wraps_up_after_tool_batch(queue)
     assert queue.stopped_reply_event_ids == set()
 
 

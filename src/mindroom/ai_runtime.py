@@ -184,11 +184,16 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
     pending = state.pending_message_snapshot()
     if not pending:
         return
-    if not context.notice_fired and await context.mid_turn_gate.defers(
-        pending,
-        current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
-    ):
-        return
+    gate = context.mid_turn_gate
+    if not context.notice_fired:
+        if await gate.defers(
+            pending,
+            current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
+        ):
+            return
+        # The reply wraps up here, also when a newer message arrived during the judgment, so a later verdict on a
+        # reply that kept waiting cannot leave a mark behind.
+        gate.report_stop(pending)
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
 
 

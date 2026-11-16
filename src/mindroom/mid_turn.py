@@ -90,7 +90,7 @@ class MidTurnGate:
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
-    # Receives the messages, as the judge read them, of a queue it said the reply cannot wait for.
+    # Receives the messages, as the judge read them, of a queue it said the reply cannot wait for, once the reply wraps up.
     on_stop: Callable[[tuple[QueuedMessage, ...]], None] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
@@ -140,10 +140,6 @@ class MidTurnGate:
             # Callers hand off as on a failed judgment, so a judgment that raises never costs the active reply.
             finish = False
         if not finish:
-            # A newer message can arrive during the judgment and the reply still wraps up, so this does not wait for an
-            # unchanged queue; the receiver marks only messages that still read as judged.
-            if self.on_stop is not None and self._stopped_for and self._checked == pending:
-                self.on_stop(self._stopped_for)
             return False
         for message in pending:
             # Matrix delivery can yield to a newer correction or a concurrent handoff.
@@ -197,6 +193,11 @@ class MidTurnGate:
                 self._waited.update(pending)
             self._checked, self._finish = pending, finish
             return finish
+
+    def report_stop(self, pending: tuple[QueuedMessage, ...]) -> None:
+        """Hand ``on_stop`` the messages of ``pending``, as the judge read them, that the reply wraps up for."""
+        if self.on_stop is not None and self._stopped_for and self._checked == pending:
+            self.on_stop(self._stopped_for)
 
     def _sender_label(self, message: QueuedMessage) -> str:
         """Name the sender by role only, so no user ID reaches the judge."""
