@@ -36,6 +36,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.mid_turn import MidTurnGate
 from mindroom.response_runner import ResponseRunner
 from mindroom.room_reply_modes import (
     _store_path,
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.response_lifecycle import _QueuedMessageState
 
 ROOM_ID = "!test:localhost"
@@ -1012,9 +1014,15 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
 
     Unjudged, another person's message that mentions nobody need not cut the response short, while one that
     mentions general does, so an edit that adds the mention must count. The edited message keeps its place in the
-    queue, so the judge reads the messages in the order they were sent.
+    queue and the reply progress it arrived to, so the judge reads the messages in the order they were sent.
     """
+
+    async def never_judged(_request: JudgmentRequest) -> bool | None:
+        pytest.fail("Nothing waits on this queue")
+
     async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
+        running.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=never_judged)
+        running.mid_turn_gate.visible_response_text = "Step 1 done"
         await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$untagged", "look at this"))
         await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$tagged", "and this", "general"))
         await _queued(bot, "$untagged")
@@ -1024,6 +1032,7 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
             "$tagged": False,
         }
 
+        running.mid_turn_gate.visible_response_text = "Step 2 done"
         edit = {
             "m.new_content": {
                 "body": "look at this, general",
@@ -1034,8 +1043,12 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
         }
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
         assert [
-            (message.event_id, message.text, message.mentions_nobody) for message in running.pending_message_snapshot()
-        ] == [("$untagged", "look at this, general", False), ("$tagged", "and this", False)]
+            (message.event_id, message.text, message.mentions_nobody, message.visible_response)
+            for message in running.pending_message_snapshot()
+        ] == [
+            ("$untagged", "look at this, general", False, "Step 1 done"),
+            ("$tagged", "and this", False, "Step 1 done"),
+        ]
 
 
 @pytest.mark.asyncio
