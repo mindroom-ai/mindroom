@@ -10,7 +10,7 @@ from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTI
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from structlog.stdlib import BoundLogger
 
@@ -45,22 +45,42 @@ def _own_messages(history: ThreadHistoryResult, thread_id: str) -> list[Resolved
     return [m for m in history if thread_id in (m.event_id, m.thread_id)]
 
 
-def _root_reference(messages: list[ResolvedVisibleMessage], thread_id: str) -> _ThreadForkReference | None:
+def _root_reference(messages: Sequence[ResolvedVisibleMessage], thread_id: str) -> _ThreadForkReference | None:
     for message in messages:
         if message.event_id == thread_id:
             return _thread_fork_reference(message.content)
     return None
 
 
+def is_thread_fork_root(content: Mapping[str, Any]) -> bool:
+    """Return whether a message's content holds a valid fork reference, which makes it the root of a fork."""
+    return _thread_fork_reference(content) is not None
+
+
+def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:
+    """Return the parent threads whose messages a fork's resolved history holds, none for a plain thread."""
+    thread_ids = {thread_id}
+    reference = _root_reference(history, thread_id)
+    while (
+        reference is not None
+        and reference.thread_id not in thread_ids
+        and any(reference.thread_id in (m.event_id, m.thread_id) for m in history)
+    ):
+        thread_ids.add(reference.thread_id)
+        reference = _root_reference(history, reference.thread_id)
+    return frozenset(thread_ids - {thread_id})
+
+
 async def with_fork_prefix(
     history: ThreadHistoryResult,
     *,
+    room_id: str,
     thread_id: str,
     read_thread: Callable[[str], Awaitable[ThreadHistoryResult]],
     logger: BoundLogger,
 ) -> ThreadHistoryResult:
     """Return the history with the parent chain's messages up to each fork point in front."""
-    reference = _root_reference(list(history), thread_id)
+    reference = _root_reference(history, thread_id)
     if reference is None:
         return history
 
@@ -72,6 +92,7 @@ async def with_fork_prefix(
         if len(segments) >= _MAX_FORK_DEPTH or reference.thread_id in visited:
             logger.warning(
                 "Thread fork chain stopped",
+                room_id=room_id,
                 thread_id=thread_id,
                 parent_thread_id=reference.thread_id,
                 depth=len(segments),
@@ -79,17 +100,24 @@ async def with_fork_prefix(
             break
         visited.add(reference.thread_id)
         parent = await read_thread(reference.thread_id)
+        # A parent read that is incomplete may only lack the fork point for now, so the fork is incomplete too.
+        is_full_history = is_full_history and parent.is_full_history
+        degraded = degraded or is_thread_history_degraded(parent)
         own = _own_messages(parent, reference.thread_id)
         cut = next((i for i, m in enumerate(own) if m.event_id == reference.event_id), None)
         if cut is None:
+            if own:
+                logger.info(
+                    "Thread fork point missing from its parent",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    parent_thread_id=reference.thread_id,
+                    fork_point_event_id=reference.event_id,
+                )
             break
         segments.append(own[: cut + 1])
-        is_full_history = is_full_history and parent.is_full_history
-        degraded = degraded or is_thread_history_degraded(parent)
         reference = _root_reference(own, reference.thread_id)
 
-    if not segments:
-        return history
     prefix = [m for segment in reversed(segments) for m in segment]
     diagnostics = dict(history.diagnostics)
     if degraded:

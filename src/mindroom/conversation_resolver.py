@@ -29,7 +29,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_forks import with_fork_prefix
+from mindroom.matrix.thread_forks import is_thread_fork_root, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     RelatedEventUnavailableError,
@@ -350,6 +350,10 @@ class ConversationResolver:
                 event_info,
                 fallback_root_event_id=event.event_id,
             )
+        content = event.source.get("content")
+        if event_info.can_be_thread_root and isinstance(content, dict) and is_thread_fork_root(content):
+            # A fork's first message continues its parent's conversation, so it is a turn in its own thread.
+            return event.event_id
         resolution = await self._coalescing_thread_resolution(
             room,
             event,
@@ -633,6 +637,7 @@ class ConversationResolver:
         history = await self._read_thread_messages(room_id, thread_id, mode=mode)
         return await with_fork_prefix(
             history,
+            room_id=room_id,
             thread_id=thread_id,
             read_thread=lambda parent_id: self._read_thread_messages(room_id, parent_id, mode=mode),
             logger=self.deps.logger,
@@ -643,7 +648,7 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
-        """Read one thread without waiting for the homeserver.
+        """Read one thread, and the parents it forks from, without waiting for the homeserver.
 
         For callers that run before a turn is accepted and must not block on
         Matrix to decide whether to look at it at all.
@@ -655,7 +660,7 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
-        """Fetch complete thread history from the conversation projection."""
+        """Fetch complete thread history, and the parents it forks from, from the conversation projection."""
         return await self._with_fork_prefix(room_id, thread_id, mode=ThreadReadMode.STRICT)
 
     async def consecutive_agent_messages(self, room_id: str, thread_id: str | None, *, limit: int) -> int:

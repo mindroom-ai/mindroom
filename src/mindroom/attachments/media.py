@@ -12,6 +12,7 @@ from mindroom.timing import emit_elapsed_timing
 from .storage import AttachmentRecord, filter_attachments_for_context, resolve_attachments
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -72,12 +73,13 @@ def resolve_scoped_attachments(
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
+    parent_thread_ids: Collection[str] = (),
 ) -> list[AttachmentRecord]:
     """Resolve attachment IDs into records scoped to the current context.
 
     When *room_id* is provided, only attachments registered for the current
-    room/thread context are included. Mismatched records are dropped with a
-    debug log.
+    room/thread context, or a forked thread's parents, are included.
+    Mismatched records are dropped with a debug log.
     """
     started = time.monotonic()
     rejected_count = 0
@@ -87,6 +89,7 @@ def resolve_scoped_attachments(
             attachment_records,
             room_id=room_id,
             thread_id=thread_id,
+            parent_thread_ids=parent_thread_ids,
         )
         rejected_count = len(rejected)
         if rejected:
