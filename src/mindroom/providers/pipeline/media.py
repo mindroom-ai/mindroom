@@ -3,11 +3,11 @@
 Media a route never accepts (``Capabilities.omitted_media``) and media a route rejected earlier in this
 process are replaced up front by a note telling the model the attachment was not inspected. When the
 provider then rejects the request before the attempt committed (no visible output and no hosted tool that acts),
-the request is sent again without media. A rejection that names some of the request's media items
-(``ProviderError.rejected_media``) is retried without only those, with a note that names them; when it names none or
-all of them, or the provider rejects that retry too, the request is sent once more without any of its media, exactly
-as it would have been without the named retry. A rejection that names the missing capability is remembered for the
-route, once a request without any of the media succeeded.
+the request is sent again without the rejected media. Item-specific rejections (``ProviderError.rejected_media``)
+remove only those items where possible; otherwise an error naming media kinds removes only those kinds present.
+Untyped rejections and failed narrowed retries use the all-media-free backstop. Explicitly named unsupported kinds
+are remembered for the route only after a successful retry sends no items of those kinds. Input size/type errors
+never teach route capabilities, nor do failed, cancelled, or partially visible attempts.
 """
 
 from __future__ import annotations
@@ -57,15 +57,22 @@ _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 _NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
-_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
-# Only a rejection that names the missing capability may change later requests on the whole route.
-_CAPABILITY_GAP_ERROR = re.compile(
-    r"(?:does not|doesn't) support (?:(?:image|audio|video|file|pdf|document) inputs?|images|vision)\b"
-    r"|(?:image|audio|video|file|pdf|document) inputs? (?:is|are) not supported"
-    r"|is not a multimodal model"
-    r"|is only supported by certain models"
-    r"|no endpoints found that support (?:image|audio|video|file|pdf|document)",
-)
+_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime")
+_MEDIA_KIND_NAMES: dict[MediaKind, str] = {
+    "audio": r"audio",
+    "image": r"(?:images?|vision)",
+    "video": r"videos?",
+    "file": r"(?:files?|pdfs?|documents?)",
+}
+# Bind the unsupported claim to the named kind, not to other (possibly supported) kinds elsewhere in the error.
+_CAPABILITY_GAP_ERRORS = {
+    kind: re.compile(
+        rf"\b(?:(?:does not|doesn't) support|no endpoints found that support|unsupported) (?:inputs? )?{name}\b"
+        rf"|\b(?:input )?{name}(?: inputs?)? (?:is |are )?not supported\b"
+        rf"|\b{name}(?: inputs?)? is only supported by certain models\b",
+    )
+    for kind, name in _MEDIA_KIND_NAMES.items()
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,17 +176,28 @@ def _without_media(
     return stripped
 
 
-def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> bool:
-    """Return whether a media-free success isolates one kind the provider says the model lacks."""
-    if len(kinds) != 1 or isinstance(error, ContextWindowExceeded):
-        return False
-    # A 413 says nothing about the model; rate limits and server errors are retryable, so they never reach this check.
-    if error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
-        return False
+def _named_capability_gaps(error: ProviderError) -> frozenset[MediaKind]:
+    """Return kinds explicitly described as unsupported, ignoring unrelated media mentions."""
+    text = str(error).lower()
+    return frozenset(kind for kind, pattern in _CAPABILITY_GAP_ERRORS.items() if pattern.search(text))
+
+
+def _named_media_kinds(error: ProviderError) -> frozenset[MediaKind]:
+    """Prefer explicit unsupported kinds, otherwise narrow even input-specific failures to the kinds they name."""
+    text = str(error).lower()
+    return _named_capability_gaps(error) or frozenset(
+        kind for kind, name in _MEDIA_KIND_NAMES.items() if re.search(rf"\b{name}\b", text)
+    )
+
+
+def _names_capability_gap(error: ProviderError, removed: frozenset[MediaKind]) -> frozenset[MediaKind]:
+    """Return explicitly unsupported kinds fully removed by a successful retry, excluding input-specific errors."""
+    if isinstance(error, ContextWindowExceeded) or error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
+        return frozenset()
     text = str(error).lower()
     if any(marker in text for marker in _INPUT_SPECIFIC_ERROR_MARKERS):
-        return False
-    return _CAPABILITY_GAP_ERROR.search(text) is not None
+        return frozenset()
+    return _named_capability_gaps(error) & removed
 
 
 def _selective_removal(
@@ -246,9 +264,10 @@ async def media_fallback_stream(
     sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
     failure: ProviderError | None = None
     sent_broad = False
+    removed_kinds: frozenset[MediaKind] = frozenset()
 
     def without_rejected_media(error: ProviderError) -> Retry | None:
-        nonlocal failure, sent_broad
+        nonlocal failure, sent_broad, removed_kinds
         if sent_broad or not remaining or error.retryable or error.code in _NOT_MEDIA_RELATED_CODES:
             return None
         log = partial(
@@ -265,8 +284,24 @@ async def media_fallback_stream(
             if (selective := _selective_removal(named, sent, known)) is not None:
                 removed, ids = selective
                 log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
-                return Retry(replace(request, messages=_without_media(request.messages, removed, ids, fallback_prompt)))
+                messages = _without_media(request.messages, removed, ids, fallback_prompt)
+                removed_kinds = remaining - _media_kinds(messages)
+                return Retry(replace(request, messages=messages))
+            kinds = _named_media_kinds(error) & remaining if isinstance(error, InvalidRequest) else frozenset()
+            if kinds and kinds != remaining and not (named & sent.keys()):
+                removed_kinds = kinds
+                log(
+                    "Retrying model request without the inline media kinds its failure names",
+                    media_kinds=sorted(kinds),
+                )
+                return Retry(
+                    replace(
+                        request,
+                        messages=_without_media(request.messages, known | kinds, frozenset(), fallback_prompt),
+                    ),
+                )
         sent_broad = True
+        removed_kinds = remaining
         log("Retrying model request without inline media")
         return Retry(replace(request, messages=_without_media(request.messages, present, frozenset(), fallback_prompt)))
 
@@ -274,6 +309,6 @@ async def media_fallback_stream(
     async with closing_async_stream(events):
         async for event in events:
             yield event
-    # Only a request without any of the media isolates what the model lacks; one without some of it proves nothing.
-    if sent_broad and failure is not None and _names_capability_gap(failure, remaining):
-        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(remaining)
+    # Successful removal of a whole named kind can teach the route; partial item removal cannot.
+    if failure is not None and (unsupported := _names_capability_gap(failure, removed_kinds)):
+        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(unsupported)
