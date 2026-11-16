@@ -629,7 +629,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
     mock_home_bot: AgentBot,
     echo_error: BaseException,
 ) -> None:
-    """Post-STT failures before dispatch handoff should release the pre-STT reservation."""
+    """A post-STT echo failure before dispatch handoff leaves no queued notice behind; none is reserved before it."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -667,8 +667,11 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         ),
     )
 
+    echo_failures: list[BaseException] = []
+
     async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
+        assert queued_signal.pending_human_messages == 0
+        echo_failures.append(echo_error)
         raise echo_error
 
     replace_turn_deps(bot, agent_name=ROUTER_AGENT_NAME)
@@ -693,6 +696,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         if turn_active:
             queued_signal.finish_response_turn()
 
+    assert echo_failures == [echo_error]
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.has_pending_human_messages()
 
@@ -741,10 +745,10 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
 
 
 @pytest.mark.asyncio
-async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
+async def test_voice_message_queued_notice_uses_the_conversation_fixed_before_stt(
     mock_home_bot: AgentBot,
 ) -> None:
-    """Voice reserves the canonical dispatch target before STT normalization finishes."""
+    """Once transcribed, voice reserves its queued notice on the conversation fixed before STT, not a later one."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -821,6 +825,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         ):
             await bot._on_media_message(room, voice_event)
+            await asyncio.wait_for(_waiting(pre_stt_signal), timeout=1.0)
+            assert alternate_signal.pending_human_messages == 0
             pre_stt_signal.finish_response_turn()
             pre_stt_turn_active = False
             alternate_signal.finish_response_turn()
