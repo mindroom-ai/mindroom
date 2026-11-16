@@ -2229,6 +2229,8 @@ Provider credentials come from environment variables, stored credentials, CLI lo
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 A key in `extra_kwargs.client_params.api_key` reaches the provider's API client over all of these, so that model never needs the shared key.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
+A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
+When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
@@ -6128,6 +6130,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
 
 ```python
 list_attachments()
@@ -6168,6 +6171,19 @@ Save attachments this way before processing them with `file`, `coding`, `python`
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Inline Images
+
+`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
+using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
+Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
+The alt text defaults to the filename.
+
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
+Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
+In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 
@@ -12997,6 +13013,8 @@ matrix_api(
 
 ### Automatic Thread Summaries
 
+MindRoom starts a background title for a new thread from its first prompt, using the transcription for voice messages, without waiting for the agent's reply.
+It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
 MindRoom posts a summary notice in a thread after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`).
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 messages, the summary model sees only the first three and last three.
@@ -18110,6 +18128,8 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [response-audit-plugin](https://github.com/mindroom-ai/response-audit-plugin) | Hooks | Audits delivered answers with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and asks the agent to verify facts that no lookup supported. |
 | [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Hooks | Re-activates threads tagged `pending-restart` after a bot restart. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
+| [thread-worktree-plugin](https://github.com/mindroom-ai/thread-worktree-plugin) | Hooks and tools | Ties a thread to a git worktree in Matrix room state and tells the agent that tied it to work there on every turn. |
+| [pull-request-plugin](https://github.com/mindroom-ai/pull-request-plugin) | Hooks and tools | Links GitHub pull requests to a thread in Matrix room state, by a tool and automatically when an agent creates one. |
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 

@@ -1229,6 +1229,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.credentials"
 depends_on = [
+    "mindroom.config.schema_hints",
     "mindroom.constants",
     "mindroom.providers.names",
 ]
@@ -6257,6 +6258,7 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_sources",
     "mindroom.teams",
+    "mindroom.thread_summary",
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",
     "mindroom.turn_record",
@@ -6775,12 +6777,16 @@ from = ["mindroom.ai"]
 
 [[interfaces]]
 expose = [
+    "api_key_env_reference",
     "dashboard_api_key",
     "gemini_uses_vertexai",
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
+    "model_with_dashboard_key",
     "own_api_key",
+    "resolve_api_key_reference",
+    "unset_api_key_variable",
     "uses_alternative_auth",
 ]
 from = ["mindroom.providers.credentials"]
@@ -8181,6 +8187,7 @@ visibility = ["mindroom.providers.gemini", "mindroom.providers.ollama.adapter", 
 [[modules]]
 path = "mindroom.providers.registry"
 depends_on = [
+    "mindroom.llm",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.credentials",
