@@ -1210,6 +1210,32 @@ async def test_a_request_that_went_out_is_logged_even_when_its_caller_is_cancell
     assert [record["body"] for record in _log_records(tmp_path)] == [scripted_body(_IDENTITY, _request())]
 
 
+@pytest.mark.asyncio
+async def test_usage_reported_while_the_record_is_written_is_logged_when_the_caller_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """A partial usage report that waits for the request's record still counts when its caller is cancelled meanwhile."""
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    free = threading.Event()
+    busy = loop.run_in_executor(None, free.wait, 5)  # the record's write waits in the queue behind this
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+    reply = asyncio.ensure_future(anext(stream))
+
+    with capture_logs() as logs:
+        await asyncio.sleep(0)
+        reply.cancel()
+        free.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reply
+        await busy
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+
+
 def test_a_request_that_went_out_is_logged_when_the_loop_shuts_down_with_its_record_queued(tmp_path: Path) -> None:
     """A clean shutdown right after a send, which cancels every task and closes the loop, still writes the record."""
     inner = _ScriptedProvider([[_turn()]])

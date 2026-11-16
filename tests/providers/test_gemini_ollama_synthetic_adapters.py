@@ -641,8 +641,8 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["response_schema", "responseSchema"])
-async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Path, field: str) -> None:
-    """The SDK rewrites a ``response_schema`` dict in place while the request log may still read the body it got."""
+async def test_the_gemini_sdk_does_not_edit_the_body_handed_to_on_send(tmp_path: Path, field: str) -> None:
+    """The SDK rewrites a ``response_schema`` dict in place as it builds the request; the body keeps its own copy."""
     schema = {"type": "object", "properties": {"note": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
     sent: list[Mapping[str, Any]] = []
 

@@ -205,13 +205,13 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         events = inner.stream(request)
         async with closing_async_stream(events):
             async for event in events:
-                if record is not None:
-                    # The caller sees the reply only once the request's record is written.
-                    await asyncio.shield(record)
                 reported.observe(event)
                 if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
                     stop_reason = event.stop_reason
+                if record is not None:
+                    # The caller sees the reply only once the request's record is written.
+                    await asyncio.shield(record)
                 yield event
     finally:
         # A report whose counters are all zero is one the provider did not make.
