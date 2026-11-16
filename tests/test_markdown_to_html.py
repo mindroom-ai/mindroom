@@ -543,3 +543,10 @@ def test_no_raw_markdown_leaks(md: str, forbidden_markers: tuple[str, ...], requ
     for marker in forbidden_markers:
         assert marker not in html
     assert required_html in html
+
+
+def test_mxc_image_source_is_preserved() -> None:
+    """Inline Matrix images survive markdown rendering and HTML sanitization."""
+    html = markdown_to_html("![cat](mxc://hs/abc)")
+    assert '<img src="mxc://hs/abc"' in html
+    assert 'alt="cat"' in html
