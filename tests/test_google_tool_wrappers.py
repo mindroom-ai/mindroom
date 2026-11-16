@@ -1066,7 +1066,7 @@ def test_google_docs_partial_create_401_preserves_non_retryable_result(
     assert "provider-controlled-partial-write-secret" not in result
 
 
-@pytest.mark.parametrize("operation", ["create", "read", "insert", "replace"])
+@pytest.mark.parametrize("operation", ["create", "read", "insert", "replace", "batch"])
 def test_google_docs_provider_failures_preserve_status_without_provider_text(
     runtime_paths: RuntimePaths,
     operation: str,
@@ -1112,8 +1112,10 @@ def test_google_docs_provider_failures_preserve_status_without_provider_text(
         result = tool.google_docs_get_document("document-id")
     elif operation == "insert":
         result = tool.google_docs_insert_text("document-id", "text")
-    else:
+    elif operation == "replace":
         result = tool.google_docs_replace_text("document-id", "old", "new")
+    else:
+        result = tool.google_docs_batch_update("document-id", [{"insertPageBreak": {"endOfSegmentLocation": {}}}])
 
     assert json.loads(result) == {"error": "Google Docs request failed (HTTP 403)"}
     assert "provider-controlled" not in result

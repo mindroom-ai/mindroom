@@ -8,7 +8,7 @@ import re
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
@@ -394,8 +394,16 @@ class GoogleDriveTools(
         folder_id: str | None = None,
         name: str | None = None,
         mime_type: str | None = None,
+        convert_to: Literal["document", "spreadsheet", "presentation"] | None = None,
     ) -> str:
-        """Upload one local file, resolving relative paths from the agent workspace."""
+        """Upload one local file, resolving relative paths from the agent workspace.
+
+        With convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:
+        "document" makes a Google Doc from HTML, Markdown, Word, or plain text, keeping headings, tables, lists,
+        links, and embedded images; "spreadsheet" a Google Sheet from Excel or CSV; "presentation" Google Slides
+        from PowerPoint.
+        The converted file takes the local file's name without its extension unless name is given.
+        """
         try:
             authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
@@ -405,6 +413,9 @@ class GoogleDriveTools(
         body: dict[str, object] = {"name": name or authorized.name}
         if folder_id:
             body["parents"] = [folder_id]
+        if convert_to:
+            body["name"] = name or Path(authorized.name).stem
+            body["mimeType"] = f"{_GOOGLE_WORKSPACE_MIME_PREFIX}{convert_to}"
         try:
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
@@ -427,24 +438,17 @@ class GoogleDriveTools(
 
     @authenticate
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
-        """Replace the contents of one binary Drive file from the agent workspace."""
+        """Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.
+
+        A Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's
+        convert_to converts it, and comments on the replaced content lose their place.
+        """
         try:
             authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
         try:
-            metadata = self._get_file_metadata(file_id, "id,name,mimeType")
-            existing_mime_type = metadata.get("mimeType")
-            if isinstance(existing_mime_type, str) and existing_mime_type.startswith(_GOOGLE_WORKSPACE_MIME_PREFIX):
-                return json.dumps(
-                    {
-                        "error": (
-                            "Google Drive content replacement only supports binary files; "
-                            f"{existing_mime_type} requires its Google Workspace API"
-                        ),
-                    },
-                )
             resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:

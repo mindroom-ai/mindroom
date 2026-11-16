@@ -18,7 +18,9 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -348,6 +350,62 @@ def test_google_docs_replace_text_can_target_selected_tabs(tmp_path: Path) -> No
         },
     ]
     assert result["update"]["replies"][0]["replaceAllText"]["occurrencesChanged"] == 2
+
+
+_RICH_REQUESTS: list[dict[str, object]] = [
+    {"insertTable": {"rows": 2, "columns": 3, "endOfSegmentLocation": {}}},
+    {
+        "updateParagraphStyle": {
+            "range": {"startIndex": 1, "endIndex": 6},
+            "paragraphStyle": {"namedStyleType": "HEADING_1"},
+            "fields": "namedStyleType",
+        },
+    },
+]
+
+
+def test_google_docs_batch_update_sends_docs_api_requests_in_order(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_batch_update("https://docs.google.com/document/d/document-id/edit", _RICH_REQUESTS),
+    )
+
+    assert service.documents_resource.batch_update_calls == [
+        {"documentId": "document-id", "body": {"requests": _RICH_REQUESTS}},
+    ]
+    assert result["update"]["documentId"] == "document-id"
+    assert result["documentUrl"] == "https://docs.google.com/document/d/document-id/edit"
+
+
+def test_google_docs_batch_update_schema_accepts_docs_api_requests(tmp_path: Path) -> None:
+    tool, _service = _connected_tool(tmp_path)
+
+    validate_tool_arguments(
+        dict(toolkit_offers(tool, "google_docs_batch_update").parameters),
+        {"document_id": "document-id", "requests": _RICH_REQUESTS},
+    )
+
+
+def test_google_docs_batch_update_refuses_an_empty_request_list(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(tool.google_docs_batch_update("document-id", []))
+
+    assert result == {"error": "Google Docs requests must not be empty"}
+    assert service.documents_resource.batch_update_calls == []
+
+
+def test_google_docs_batch_update_returns_sanitized_http_error(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    service.documents_resource.batch_update_error = HttpError(
+        Response({"status": "400", "reason": "Bad Request"}),
+        b'{"error":{"message":"provider detail"}}',
+    )
+
+    result = json.loads(tool.google_docs_batch_update("document-id", _RICH_REQUESTS))
+
+    assert result == {"error": "Google Docs request failed (HTTP 400)"}
 
 
 def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -> None:

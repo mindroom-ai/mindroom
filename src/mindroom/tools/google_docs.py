@@ -53,7 +53,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow inserting and replacing text in Google Docs.",
+            description="Allow editing Google Docs: text insertion, text replacement, and batch updates.",
         ),
     ],
     managed_init_args=(
@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         "google_docs_get_document",
         "google_docs_insert_text",
         "google_docs_replace_text",
+        "google_docs_batch_update",
     ),
 )
 def google_docs_tools() -> type[GoogleDocsTools]:
