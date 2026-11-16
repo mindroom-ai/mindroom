@@ -1036,24 +1036,26 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
     straddling_body = _body_for_file_size(output_dir, straddling_id, read_cap + 1)
     payloads[straddling_id] = _thread_with_bodies(straddling_id, ["first", straddling_body])
     write_thread_payload(output_dir, room, "$stale:localhost", _thread_with_bodies("$stale:localhost", ["earlier"]))
-    written = {
-        thread_id: write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()
-    }
-    assert all(result.replaced for result in written.values())
-    written[straddling_id] = write_thread_payload(
-        output_dir,
-        room,
-        straddling_id,
-        _thread_with_bodies(straddling_id, ["first", straddling_body], exported_at=datetime(2026, 10, 2, tzinfo=UTC)),
+    assert all(
+        write_thread_payload(output_dir, room, thread_id, value).replaced for thread_id, value in payloads.items()
     )
-    assert written[straddling_id].replaced is False
-    sizes = {path.name: path.stat().st_size for path in room_dir.glob("*.yaml")}
-    assert sizes[_thread_filename("$at-read-cap:localhost")] == read_cap
-    assert sizes[_thread_filename(straddling_id)] == read_cap + 1
     # The oldest file is left out of the budget, which charges each file the bytes a capped read returns.
     files = sorted(room_dir.glob("*.yaml"), key=lambda path: path.name != _thread_filename("$value-0:localhost"))
     for position, path in enumerate(files):
         os.utime(path, ns=(position * 1_000_000_000, position * 1_000_000_000))
+    # A later pass finds every thread unchanged, and the straddling one only by a shorter exported_at.
+    payloads[straddling_id] = _thread_with_bodies(
+        straddling_id,
+        ["first", straddling_body],
+        exported_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    written = {
+        thread_id: write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()
+    }
+    assert not any(result.replaced for result in written.values())
+    sizes = {path.name: path.stat().st_size for path in files}
+    assert sizes[_thread_filename("$at-read-cap:localhost")] == read_cap
+    assert sizes[_thread_filename(straddling_id)] == read_cap + 1
     budget = sum(min(size, read_cap + 1) for size in sizes.values()) - 1
     monkeypatch.setattr(thread_export_storage, "_MAX_ROOM_INDEX_BYTES", budget)
 
@@ -1083,3 +1085,28 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
         assert participants[thread_id] == ["@alice:localhost", "@bob:localhost"]
     for thread_id in ("$one-past-node-limit:localhost", "$above-read-cap:localhost", straddling_id):
         assert participants[thread_id] == []
+
+
+@pytest.mark.parametrize("change", ["replaced", "edited_in_place"])
+def test_written_entry_is_not_used_for_a_file_changed_since(tmp_path: Path, change: str) -> None:
+    """An overlapping pass or worker code can change a thread file after a pass wrote it, so the index parses that file."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    first = write_thread_payload(
+        output_dir,
+        room,
+        "$thread:localhost",
+        _thread_with_bodies("$thread:localhost", ["a", "b"]),
+    )
+    newer = _thread_with_bodies("$thread:localhost", ["a", "b", "c"])
+    if change == "replaced":
+        assert write_thread_payload(output_dir, room, "$thread:localhost", newer).replaced is True
+    else:
+        path = output_dir / "lobby" / _thread_filename("$thread:localhost")
+        path.write_bytes(yaml_io.safe_dump(newer, sort_keys=False, allow_unicode=True, encoding="utf-8"))
+    assert first.index_entry is not None
+
+    write_room_index(output_dir, room, written_entries=[first.index_entry])
+
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["message_count"] == 3

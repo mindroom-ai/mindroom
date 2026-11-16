@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.projected_history import ProjectedThreadReader
-    from mindroom.thread_export.storage import ThreadIndexEntry
+    from mindroom.thread_export.storage import WrittenIndexEntry
 
 type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], str | None]
 
@@ -132,7 +132,7 @@ async def _write_thread_to_targets(
     current_summary: _CurrentSummary,
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
-    index_entries: dict[int, list[ThreadIndexEntry]],
+    index_entries: dict[int, list[WrittenIndexEntry]],
 ) -> None:
     """Fetch one thread once and write it independently to each target."""
     try:
@@ -176,7 +176,7 @@ def _finish_room_exports_blocking(
     truncated: bool,
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
-    index_entries: dict[int, list[ThreadIndexEntry]],
+    index_entries: dict[int, list[WrittenIndexEntry]],
 ) -> None:
     """Reconcile removed threads and update indexes for one enumerated room.
 
@@ -304,7 +304,7 @@ async def _export_enumerated_room_threads(
 ) -> None:
     """Export one enumerated room's threads to every authorized accumulator."""
     changed_accumulator_ids: set[int] = set()
-    index_entries: dict[int, list[ThreadIndexEntry]] = {}
+    index_entries: dict[int, list[WrittenIndexEntry]] = {}
 
     for thread_id in thread_ids:
         await _write_thread_to_targets(
