@@ -469,6 +469,24 @@ def test_doctor_checks_an_ollama_server_with_the_key_the_dashboard_saved_for_its
     assert _servers_and_keys(probed) == [("http://gpu.example:11434/api/tags", "Bearer saved-key")]
 
 
+def test_doctor_skips_the_ollama_server_of_a_model_whose_key_variable_is_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A key written as ``${NAME}`` with no value is never sent to the server as the key."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed = _ollama_servers(monkeypatch)
+    model = ModelConfig(provider="ollama", id="m", host="https://ollama.example", api_key="${OLLAMA_TEAM_API_KEY}")
+    config = Config(models={"default": model}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 2)
+    assert probed == []
+    output = capsys.readouterr().out
+    assert "ollama: Set OLLAMA_TEAM_API_KEY (models: default)" in output
+    assert "models.default: could not read its Ollama settings (OLLAMA_TEAM_API_KEY not set)" in output
+
+
 def test_doctor_fails_an_ollama_server_that_rejects_the_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
