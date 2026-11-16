@@ -906,15 +906,20 @@ async def test_a_message_for_another_agent_does_not_nudge_a_running_response(
 @asynccontextmanager
 async def _general_answering_in_its_thread(
     tmp_path: Path,
+    *,
+    voice: bool = False,
     **agents: AgentConfig,
 ) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _QueuedMessageState]]:
     """Run general's response in THREAD_ID, held by an approval, while the body sends messages to general's ingress.
 
     Yield general's bot, the room, the runtime paths, and the running response's queue of waiting messages. A message
-    waits in its queue until the body ends.
+    waits in its queue until the body ends. ``voice`` turns voice messages on.
     """
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General", rooms=[ROOM_ID]), **agents}),
+        Config(
+            agents={"general": AgentConfig(display_name="General", rooms=[ROOM_ID]), **agents},
+            voice={"enabled": voice, "visible_router_echo": False},
+        ),
         test_runtime_paths(tmp_path),
     )
     paths = runtime_paths_for(config)
@@ -1083,6 +1088,121 @@ async def test_editing_a_waiting_message_handed_to_a_later_turn_asks_the_running
         }
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this one", **edit))
         assert not running.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("released_by_split", [True, False], ids=["released-by-a-split", "still-waiting"])
+async def test_editing_a_waiting_message_away_from_general_and_back_keeps_a_released_notice_released(
+    tmp_path: Path,
+    *,
+    released_by_split: bool,
+) -> None:
+    """A message whose notice a split-off turn released stays released through an edit to research and back.
+
+    Otherwise the edit back would ask the next requester's running turn to wrap up. A message that still waits for
+    general's running response, edited to research and back, waits for it again.
+    """
+    research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this"))
+        await _queued(bot, "$follow-up")
+        keys = (
+            requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER),
+            active_follow_up_coalescing_key(ROOM_ID, THREAD_ID),
+        )
+        (pending,) = [
+            pending
+            for key in keys
+            for pending in bot._coalescing_gate.queued_pending_events(key)
+            if pending.event.event_id == "$follow-up"
+        ]
+        assert pending.notice is not None
+        if released_by_split:
+            pending.notice.release()
+
+        for edit_id, mentions in (("$to-research", ("research",)), ("$back", ())):
+            edit = {
+                "m.new_content": {
+                    "body": "look at this",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": [_mention_id(paths, name) for name in mentions]},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+            }
+            await bot._turn_ingress.handle_text_event(room, _text_message(paths, edit_id, "* look at this", **edit))
+        assert running.has_pending_human_messages() is (not released_by_split)
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_makes_a_message_wait_records_that_it_mentions_nobody(tmp_path: Path) -> None:
+    """A message for research, edited to mention nobody in general's thread, waits for general as mentioning nobody.
+
+    Unjudged, another person's message that mentions nobody need not cut general's running response short.
+    """
+    research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this", "research"))
+        await _queued(bot, "$follow-up")
+        assert not running.has_pending_human_messages()
+
+        edit = {
+            "m.new_content": {"body": "look at this", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
+        assert [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()] == [
+            ("$follow-up", True),
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transcript", "judged_text", "mentions_nobody"),
+    [
+        pytest.param("🎤 look at this", "🎤 look at this", True, id="mentions-nobody"),
+        pytest.param("🎤 @general look at this", "🎤 @general look at this", False, id="mentions-general"),
+        pytest.param(None, None, False, id="not-transcribed"),
+    ],
+)
+async def test_a_voice_message_waits_for_generals_running_response_once_transcribed(
+    tmp_path: Path,
+    transcript: str | None,
+    judged_text: str | None,
+    *,
+    mentions_nobody: bool,
+) -> None:
+    """General's running response hears of a voice message once it is transcribed; its judge reads the transcript.
+
+    The message records whom the transcript mentions, as text does. One that cannot be transcribed waits unjudged, and
+    whom it mentions is unknown, so it counts as mentioning someone.
+    """
+    async with _general_answering_in_its_thread(tmp_path, voice=True) as (bot, room, _paths, running):
+
+        async def transcribe(*_args: object, **_kwargs: object) -> str | None:
+            assert not running.has_pending_human_messages()
+            return transcript
+
+        voice = {
+            "msgtype": "m.audio",
+            "body": "voice.ogg",
+            "url": "mxc://localhost/voice",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID},
+        }
+        event = {"event_id": "$voice", "sender": SENDER, "origin_server_ts": 1, "room_id": ROOM_ID, "content": voice}
+        transcribed = AsyncMock(side_effect=transcribe)
+        with (
+            patch(
+                "mindroom.voice.handler._download_audio",
+                new=AsyncMock(return_value=Audio(content=b"voice", mime_type="audio/ogg")),
+            ),
+            patch("mindroom.voice.handler._handle_voice_message", new=transcribed),
+        ):
+            await bot._turn_ingress.handle_media_event(room, nio.RoomMessageAudio.from_dict(event))
+            await _queued(bot, "$voice")
+        transcribed.assert_awaited_once()
+        assert [
+            (message.event_id, message.text, message.mentions_nobody) for message in running.pending_message_snapshot()
+        ] == [("$voice", judged_text, mentions_nobody)]
 
 
 @pytest.mark.asyncio

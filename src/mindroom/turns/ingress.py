@@ -473,7 +473,8 @@ class TurnIngress:
         )
         envelope = self.deps.resolver.build_envelope(event=event, facts=pending_event.facts, target=target)
         if self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope):
-            if pending_event.notice is not None:
+            # A notice a split-off turn already released stays, so no later edit asks the next requester's turn to wrap up.
+            if pending_event.notice is not None and pending_event.notice.active:
                 pending_event.notice.release()
                 pending_event.notice = None
             return

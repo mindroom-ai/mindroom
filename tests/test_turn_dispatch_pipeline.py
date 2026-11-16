@@ -1878,7 +1878,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("mentions", "waits"), [((), True), (("@other:localhost",), False)])
-    async def test_voice_follow_up_for_someone_else_stops_waiting_once_transcribed(
+    async def test_voice_follow_up_for_someone_else_never_waits_for_the_running_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1886,9 +1886,10 @@ class TestAgentBot(AgentBotTestBase):
         *,
         waits: bool,
     ) -> None:
-        """A voice follow-up whose transcript mentions only someone else no longer asks the running response to wrap up.
+        """A voice follow-up whose transcript mentions only someone else never asks the running response to wrap up.
 
-        Like every voice message it counts as waiting while it is transcribed; it then drops that notice and gets no ⏳.
+        The running response hears of a voice message only once it is transcribed, so this one sends no notice and gets
+        no ⏳.
         """
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -1934,8 +1935,8 @@ class TestAgentBot(AgentBotTestBase):
 
         reservation = reserve.return_value
         pending_event = admit.await_args.kwargs["ready_result"].pending_event
+        assert reserve.called is waits
         assert (pending_event.notice is reservation) is waits
-        assert reservation.release.called is not waits
         assert shows_waiting.called is waits
         pending_event.close()
 

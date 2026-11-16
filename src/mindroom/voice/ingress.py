@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.coalescing.batch import PendingEvent, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.thread_utils import mentions_another_participant
@@ -23,12 +24,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.dispatch_handoff import DispatchEvent
-    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import AudioMessageEvent
     from mindroom.message_target import MessageTarget
-    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.turn_policy import TurnPolicy
@@ -100,30 +98,6 @@ class VoiceIngress:
         ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id)
         return TurnDispatchOutcome.DEFERRED
 
-    def _final_queued_notice(
-        self,
-        *,
-        target: MessageTarget,
-        envelope: MessageEnvelope,
-        reservation: QueuedHumanNoticeReservation | None,
-        may_be_for_me: bool,
-    ) -> QueuedHumanNoticeReservation | None:
-        """Keep the queued notice while a response still holds the voice's conversation once readiness ends.
-
-        Release it if that conversation went idle while the voice was transcribed, or if the transcript is not this
-        agent's to answer (it mentions only someone else, or the room's reply mode leaves it to nobody), or reserve one
-        if it became busy.
-        """
-        if not may_be_for_me or not self.deps.response_runner.has_active_response_for_target(target):
-            if reservation is not None:
-                reservation.release()
-            return None
-        return reservation or queued_notice_reservation_if_busy(
-            self.deps.response_runner,
-            target=target,
-            envelope=envelope,
-        )
-
     async def _ready_voice_event(
         self,
         *,
@@ -137,19 +111,6 @@ class VoiceIngress:
         """Normalize a raw voice event after its conversation key is fixed; its lane holds the turn claim."""
         queued_notice_reservation = None
         try:
-            envelope = self.deps.resolver.build_envelope(
-                event=cast("DispatchEvent", event),
-                facts=facts,
-                target=voice_target,
-            )
-            # Until it is transcribed the audio mentions no one, so it counts as waiting for this agent unless the room's
-            # reply mode needs a mention; the transcript decides again below.
-            if not self.deps.turn_policy.not_for_this_agent(room, event.source, voice_target, envelope):
-                queued_notice_reservation = queued_notice_reservation_if_busy(
-                    self.deps.response_runner,
-                    target=voice_target,
-                    envelope=envelope,
-                )
             normalized_event = await self.deps.readiness.prepare(
                 room=room,
                 event=event,
@@ -165,24 +126,30 @@ class VoiceIngress:
                 voice_target,
                 envelope,
             )
-            queued_notice_reservation = self._final_queued_notice(
-                target=voice_target,
-                envelope=envelope,
-                reservation=queued_notice_reservation,
-                may_be_for_me=may_be_for_me,
+            for_another_participant = mentions_another_participant(
+                normalized_event.source,
+                self.deps.matrix_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                room=room,
             )
+            # A running response hears of a voice message only once it is transcribed, so its judge reads the
+            # transcript. Without one, what the message says and whom it mentions stay unknown.
+            transcribed = normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True
+            if may_be_for_me:
+                queued_notice_reservation = queued_notice_reservation_if_busy(
+                    self.deps.response_runner,
+                    target=voice_target,
+                    envelope=envelope,
+                    mentions_nobody=transcribed and for_another_participant is None,
+                    transcript=normalized_event.body if transcribed else None,
+                )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
                     event=replace(
                         normalized_event,
                         turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                        for_another_participant=mentions_another_participant(
-                            normalized_event.source,
-                            self.deps.matrix_id,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                            room=room,
-                        ),
+                        for_another_participant=for_another_participant,
                     ),
                     room=room,
                     facts=facts,
