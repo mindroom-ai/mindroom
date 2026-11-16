@@ -13,7 +13,7 @@ from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import nio
@@ -83,6 +83,9 @@ from tests.desktop_helpers import (
 from tests.desktop_helpers import _provider as _real_provider
 from tests.desktop_helpers import selected_root as selected_root  # noqa: PLC0414
 from tests.test_olm_to_device import olm_transport
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
 # request bodies at 200 * 65,536 bytes and Tuwunel at 24 MiB, and one federation transaction carries up to
@@ -2816,10 +2819,12 @@ def test_grant_refuses_a_scope_the_provider_cannot_serve() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["revoke", "expiry", "emergency_stop"])
+@pytest.mark.parametrize("ending", ["revoke", "expiry", "emergency_stop", "stop"])
+@pytest.mark.parametrize("until_revoked", [False, True])
 async def test_whole_computer_scope_admits_unsaved_apps_only_while_its_grant_is_available(
     transport: AsyncMock,
     ending: str,
+    until_revoked: bool,
 ) -> None:
     """Observation and control of unsaved apps come and go with the grant; MindRoom stays refused throughout."""
     monotonic = [100.0]
@@ -2843,8 +2848,12 @@ async def test_whole_computer_scope_admits_unsaved_apps_only_while_its_grant_is_
 
     assert (await observe(OTHER_APP)).error == _NOT_ALLOWED
     assert (await observe("primary-screen")).error == _NOT_ALLOWED
-    bridge.grant_local_control(60, scope="computer")
+    if until_revoked:
+        bridge.grant_local_control(until_revoked=True, scope="computer")
+    else:
+        bridge.grant_local_control(60, scope="computer")
     assert provider.computer_scope is True
+    assert bridge.local_status()["control_until_revoked"] is until_revoked
     assert bridge.local_status()["control_scope"] == "computer"
     assert (await observe(OTHER_APP)).ok
     assert (await observe("primary-screen")).ok
@@ -2855,15 +2864,35 @@ async def test_whole_computer_scope_admits_unsaved_apps_only_while_its_grant_is_
         assert (await click(mindroom_id)).error == _NOT_ALLOWED
     if ending == "revoke":
         bridge.revoke_local_control()
-        # At once, so an observation already running cannot read an unsaved app afterwards.
+        # At once, so the backend admits no unsaved app for a new read.
         assert provider.computer_scope is False
     elif ending == "expiry":
         monotonic[0] += 61
+        if until_revoked:
+            # Time never ends an until-revoked grant.
+            assert bridge.local_status()["control_scope"] == "computer"
+            assert (await observe(OTHER_APP)).ok
+            return
+    elif ending == "stop":
+        await bridge.stop()
+        assert provider.computer_scope is False
+        status = bridge.local_status()
+        assert (status["gui_mode"], status["control_scope"], status["control_until_revoked"]) == (
+            "stopped",
+            "apps",
+            False,
+        )
+        return
     else:
         provider.emergency_stop = True
         assert not (await click(APP_ID)).ok
         provider.emergency_stop = False
-    assert bridge.local_status()["control_scope"] == "apps"
+    status = bridge.local_status()
+    assert (status["control_scope"], status["control_until_revoked"], status["control_available"]) == (
+        "apps",
+        False,
+        False,
+    )
     provider.calls.clear()
     assert (await observe(OTHER_APP)).error == _NOT_ALLOWED
     assert (await click(OTHER_APP)).error == _NOT_ALLOWED
@@ -3184,3 +3213,86 @@ async def test_browser_control_rechecks_authority_after_its_fail_safe_check(
     assert _response(transport).error == (
         _STALE_AUTHORITY if regrant else "Desktop control is disabled; this bridge is observe-only."
     )
+
+
+class _ScopeEndsDuringRead(FakeProvider):
+    """Ends the grant while an app's state is being read, as a revoke or a lapsing lease can."""
+
+    def __init__(self, end: Callable[[], None]) -> None:
+        super().__init__()
+        self.end = end
+        self.ending = False
+
+    def get_app_state(self, app_id: str) -> AccessibilityState:
+        state = super().get_app_state(app_id)
+        if self.ending:
+            self.ending = False
+            self.end()
+        return replace(state, app_id=app_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+async def test_an_unsaved_app_read_when_whole_computer_control_ends_is_not_returned(
+    transport: AsyncMock,
+    ending: str,
+) -> None:
+    """An observation that finishes after the scope ended returns nothing from the unsaved app."""
+    monotonic = [100.0]
+    bridge: DesktopBridge
+
+    def end() -> None:
+        if ending == "revoke":
+            bridge.revoke_local_control()
+        else:
+            monotonic[0] += 61
+
+    provider = _ScopeEndsDuringRead(end)
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+    )
+    bridge.grant_local_control(60, scope="computer")
+    provider.ending = True
+    response = await _run_for_app(bridge, transport, _numbered("get_app_state", 1, {"app": OTHER_APP}))
+    assert response.error == _NOT_ALLOWED
+    assert response.screenshot is None
+    assert ("screenshot", (OTHER_APP, "state-1")) not in provider.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+async def test_a_control_action_whose_scope_ends_before_its_follow_up_returns_no_unsaved_state(
+    transport: AsyncMock,
+    ending: str,
+) -> None:
+    """The action itself completed, so its reply says so, but the unsaved app's fresh state is withheld."""
+    monotonic = [100.0]
+    bridge: DesktopBridge
+
+    def end() -> None:
+        if ending == "revoke":
+            bridge.revoke_local_control()
+        else:
+            monotonic[0] += 61
+
+    provider = _ScopeEndsDuringRead(end)
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+    )
+    bridge.grant_local_control(60, scope="computer")
+    provider.ending = True
+    parameters = {"app": OTHER_APP, "state_id": "state-click", "x": 10, "y": 20, "button": "left"}
+    response = await _run_for_app(bridge, transport, _numbered("click", 1, parameters))
+    assert response.ok
+    assert response.result["action_completed"] is True
+    assert "state" not in response.result
+    assert response.result["follow_up_state"] == "failed"
+    assert response.screenshot is None

@@ -85,6 +85,7 @@ _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
 # A hung app can hold a native call that no task cancellation reaches, so stop waits for it only this long.
 _STOP_ACTIVE_ACTION_TIMEOUT_SECONDS = 5.0
+_APP_NOT_ALLOWED_ERROR = "Desktop command must target an application in the local allowlist."
 _STALE_AUTHORITY_ERROR = "Desktop control ended after this command arrived, so it was not run; check the current state before sending it again."
 type DesktopControlScope = Literal["apps", "computer"]
 _CONTROL_SCOPES = frozenset({"apps", "computer"})
@@ -655,12 +656,12 @@ class DesktopBridge:
         mode: DesktopObservationMode,
     ) -> DesktopResponse:
         """Collect the requested fresh observation after an action."""
+        if isinstance(execution, _Execution) and execution.follow_up_app is not None:
+            execution = await self._attach_follow_up_state(command, execution)
+        if isinstance(execution, _Execution):
+            execution = self._withheld_observation(command, execution) or execution
         if isinstance(execution, DesktopResponse):
             return execution
-        if execution.follow_up_app is not None:
-            execution = await self._attach_follow_up_state(command, execution)
-            if isinstance(execution, DesktopResponse):
-                return execution
         if command.action in DESKTOP_APP_ACTIONS:
             result = {**execution.result, "observation": {"mode": mode}}
             state_result = result.get("state")
@@ -731,6 +732,19 @@ class DesktopBridge:
                 return self._unknown_control_response(command)
             return self._error_response(command, "Local desktop operation failed.")
 
+    def _withheld_observation(self, command: DesktopCommand, execution: _Execution) -> DesktopResponse | None:
+        """Withhold a read of an app that the scope stopped admitting while it ran, such as when control ended."""
+        if execution.capture_app is None or self._app_allowed(execution.capture_app):
+            return None
+        if command.action not in DESKTOP_CONTROL_ACTIONS:
+            return self._error_response(command, _APP_NOT_ALLOWED_ERROR)
+        warning = (
+            "The desktop action completed, but its app is no longer in scope, so its fresh state was not returned; "
+            "do not repeat the action automatically."
+        )
+        result = {key: value for key, value in execution.result.items() if key != "state"}
+        return success_response(command, result={**result, "warning": warning, "follow_up_state": "failed"})
+
     async def _attach_follow_up_state(
         self,
         command: DesktopCommand,
@@ -776,6 +790,8 @@ class DesktopBridge:
                 app_id=app_id,
                 state_id=state_id,
             )
+            if (withheld := self._withheld_observation(command, _Execution(result, capture_app=app_id))) is not None:
+                return withheld
             screenshot = await upload_encrypted_media(
                 self.client,
                 capture.content,
@@ -819,7 +835,7 @@ class DesktopBridge:
         elif command.action in DESKTOP_BROWSER_ACTIONS:
             error = self._browser_policy_error(command)
         elif command.action in DESKTOP_APP_ACTIONS and not (isinstance(app_id, str) and self._app_allowed(app_id)):
-            error = "Desktop command must target an application in the local allowlist."
+            error = _APP_NOT_ALLOWED_ERROR
         elif command.action in DESKTOP_CONTROL_ACTIONS:
             error = self._control_policy_error()
         else:

@@ -2236,6 +2236,7 @@ def test_grant_control_takes_a_duration_or_until_revoked_and_an_optional_scope(
         {"duration_seconds": True},
         {"until_revoked": True, "scope": "all"},
         {"until_revoked": True, "scope": None},
+        {"until_revoked": True, "scope": []},
         {"until_revoked": True, "extra": 1},
     ],
 )

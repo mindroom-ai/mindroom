@@ -1107,7 +1107,7 @@ def _control_grant(parameters: dict[str, object]) -> tuple[int | None, DesktopCo
     """Parse exactly a duration or until_revoked: true, plus an optional scope; a None duration means until revoked."""
     remaining = {key: value for key, value in parameters.items() if key != "scope"}
     requested_scope = parameters.get("scope", "apps")
-    if requested_scope not in {"apps", "computer"}:
+    if not isinstance(requested_scope, str) or requested_scope not in {"apps", "computer"}:
         raise NativeProtocolError("invalid_request", "Native desktop grant_control scope must be apps or computer.")
     scope: DesktopControlScope = "computer" if requested_scope == "computer" else "apps"
     if set(remaining) == {"until_revoked"} and remaining["until_revoked"] is True:
