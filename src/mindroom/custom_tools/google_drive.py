@@ -399,9 +399,9 @@ class GoogleDriveTools(
         """Upload one local file, resolving relative paths from the agent workspace.
 
         With convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:
-        "document" makes a Google Doc from HTML, Markdown, Word, or plain text, keeping headings, tables, lists,
-        links, and embedded images; "spreadsheet" a Google Sheet from Excel or CSV; "presentation" Google Slides
-        from PowerPoint.
+        "document" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs
+        supports, such as headings, tables, lists, links, and images a Word file embeds or a public URL serves;
+        "spreadsheet" a Google Sheet from Excel or CSV; "presentation" Google Slides from PowerPoint.
         The converted file takes the local file's name without its extension unless name is given.
         """
         try:
@@ -441,7 +441,9 @@ class GoogleDriveTools(
         """Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.
 
         A Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's
-        convert_to converts it, and comments on the replaced content lose their place.
+        convert_to converts it: formatting the local file lacks is gone, and comments on the replaced content lose
+        their place.
+        To change part of such a file, use the Google Docs or Google Sheets tool instead.
         """
         try:
             authorized = self._resolve_upload_file(local_path)

@@ -356,7 +356,7 @@ _RICH_REQUESTS: list[dict[str, object]] = [
     {"insertTable": {"rows": 2, "columns": 3, "endOfSegmentLocation": {}}},
     {
         "updateParagraphStyle": {
-            "range": {"startIndex": 1, "endIndex": 6},
+            "range": {"startIndex": 1, "endIndex": 6, "tabId": "tab-2"},
             "paragraphStyle": {"namedStyleType": "HEADING_1"},
             "fields": "namedStyleType",
         },

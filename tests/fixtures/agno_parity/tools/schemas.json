@@ -14470,7 +14470,7 @@
       },
       {
         "name": "google_docs_batch_update",
-        "description": "Apply Google Docs API batchUpdate requests to a document, in order and all or none.\nUse this for what the text functions cannot do, such as tables, headings, text and paragraph styles,\nlists, links, images, page breaks, headers, footers, and footnotes.\nEach request is one Docs API Request object, for example\n{\"updateParagraphStyle\": {\"range\": {\"startIndex\": 1, \"endIndex\": 6},\n\"paragraphStyle\": {\"namedStyleType\": \"HEADING_1\"}, \"fields\": \"namedStyleType\"}}.\nIndexes are the positions google_docs_get_document reports, and each request sees the document as the\nrequests before it left it, so make several edits from the end of the document toward its start.",
+        "description": "Apply Google Docs API batchUpdate requests to a document, in order and all or none.\nUse this for what the text functions cannot do, such as tables, headings, text and paragraph styles,\nlists, links, page breaks, headers, footers, footnotes, and images from a public URL.\nEach request is one Docs API Request object, for example\n{\"updateParagraphStyle\": {\"range\": {\"startIndex\": 1, \"endIndex\": 6, \"tabId\": \"t.0\"},\n\"paragraphStyle\": {\"namedStyleType\": \"HEADING_1\"}, \"fields\": \"namedStyleType\"}}.\nIndexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location\nwithout a tabId is in the first tab.\nEach request sees the document as the requests before it left it, so make several edits from the end of\nthe document toward its start.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14665,7 +14665,7 @@
       },
       {
         "name": "google_drive_upload_file",
-        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, keeping headings, tables, lists,\nlinks, and embedded images; \"spreadsheet\" a Google Sheet from Excel or CSV; \"presentation\" Google Slides\nfrom PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
+        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs\nsupports, such as headings, tables, lists, links, and images a Word file embeds or a public URL serves;\n\"spreadsheet\" a Google Sheet from Excel or CSV; \"presentation\" Google Slides from PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14733,7 +14733,7 @@
       },
       {
         "name": "google_drive_update_file",
-        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it, and comments on the replaced content lose their place.",
+        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it: formatting the local file lacks is gone, and comments on the replaced content lose\ntheir place.\nTo change part of such a file, use the Google Docs or Google Sheets tool instead.",
         "parameters": {
           "type": "object",
           "properties": {

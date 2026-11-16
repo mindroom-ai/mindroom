@@ -880,11 +880,6 @@ def test_google_drive_update_replaces_file_content(
     replacement = workspace_root / "reports" / "plan.md"
     replacement.parent.mkdir()
     replacement.write_text("revised plan")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "plan.md",
-        "mimeType": "text/markdown",
-    }
 
     result = json.loads(tool.update_file("file-id", "reports/plan.md"))
 
@@ -992,7 +987,7 @@ def test_google_drive_update_replaces_a_google_doc_with_the_converted_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Google Doc keeps its ID while Drive converts the file sent into its new contents."""
+    """A Google Doc is sent its new contents as any file is, without first asking Drive what kind of file it is."""
     tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
     replacement = workspace_root / "plan.html"
     replacement.write_text("<h1>Revised plan</h1>")
@@ -1005,6 +1000,7 @@ def test_google_drive_update_replaces_a_google_doc_with_the_converted_file(
     result = json.loads(tool.update_file("file-id", "plan.html"))
 
     assert result == {"id": "file-id"}
+    assert service.files_resource.get_kwargs is None
     assert service.files_resource.update_kwargs is not None
     media = service.files_resource.update_kwargs["media_body"]
     assert media.content == replacement.read_bytes()

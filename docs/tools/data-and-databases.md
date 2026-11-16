@@ -271,8 +271,8 @@ Downloads larger than `max_download_size` are refused without leaving a partial 
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
-To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: the Doc keeps the file's headings, tables, lists, links, and embedded images.
-Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so comments on the replaced content lose their place.
+To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: Drive imports the formatting Google Docs supports, such as headings, tables, lists, and links.
+Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting the local file lacks is gone and comments on the replaced content lose their place.
 To change part of a Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).

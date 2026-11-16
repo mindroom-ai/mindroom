@@ -274,12 +274,14 @@ class GoogleDocsTools(GoogleApiToolkit):
         """Apply Google Docs API batchUpdate requests to a document, in order and all or none.
 
         Use this for what the text functions cannot do, such as tables, headings, text and paragraph styles,
-        lists, links, images, page breaks, headers, footers, and footnotes.
+        lists, links, page breaks, headers, footers, footnotes, and images from a public URL.
         Each request is one Docs API Request object, for example
-        {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6},
+        {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6, "tabId": "t.0"},
         "paragraphStyle": {"namedStyleType": "HEADING_1"}, "fields": "namedStyleType"}}.
-        Indexes are the positions google_docs_get_document reports, and each request sees the document as the
-        requests before it left it, so make several edits from the end of the document toward its start.
+        Indexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location
+        without a tabId is in the first tab.
+        Each request sees the document as the requests before it left it, so make several edits from the end of
+        the document toward its start.
 
         Args:
             document_id: Google Docs document ID.
