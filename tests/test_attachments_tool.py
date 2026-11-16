@@ -22,7 +22,7 @@ from mindroom.attachments.storage import load_attachment, register_local_attachm
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
-from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -1779,32 +1779,44 @@ def _reset_matrix_message_rate_limit() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("by_path", [False, True], ids=["attachment-id", "workspace-path"])
 @pytest.mark.parametrize("alt", [None, "a [cat]", r"a \[cat]", "one\ntwo"])
-async def test_inline_image_returns_embeddable_markdown(tmp_path: Path, by_path: bool, alt: str | None) -> None:
+@pytest.mark.parametrize("filename", ["cat.png", "cat.jpg"])
+async def test_inline_image_returns_embeddable_markdown(
+    tmp_path: Path,
+    by_path: bool,
+    alt: str | None,
+    filename: str,
+) -> None:
     """Both send reference forms upload images and return markdown usable in a reply."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    source = workspace / "cat.png"
+    source = workspace / filename
     source.write_bytes(image_bytes())
-    record = register_local_attachment(tmp_path, source, kind="image", mime_type="image/png")
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="image",
+        mime_type="image/png" if filename.endswith(".png") else "image/jpeg",
+    )
     assert record is not None
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
     context.client.rooms[context.room_id].encrypted = False
     tool = AttachmentTools(tool_output_workspace_root=workspace)
-    reference = "cat.png" if by_path else record.attachment_id
+    reference = filename if by_path else record.attachment_id
     with (
         patch(
             "mindroom.matrix.client_delivery.upload_media_bytes",
             new=AsyncMock(return_value=(nio.UploadResponse("mxc://hs/abc"), None)),
-        ),
+        ) as upload,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.inline_image(reference, alt=alt))
     assert payload["status"] == "ok"
+    assert upload.await_args.kwargs["content_type"] == "image/png"
     assert payload["attachment_id"].startswith("att_")
     assert payload["mxc_uri"] == "mxc://hs/abc"
     html = markdown_to_html(payload["markdown"])
     assert '<img src="mxc://hs/abc"' in html
-    expected_alt = (alt or "cat.png").replace("\n", " ")
+    expected_alt = (alt or filename).replace("\n", " ")
     escaped_alt = expected_alt.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
     assert payload["markdown"] == f"![{escaped_alt}](mxc://hs/abc)"
     assert load_attachment(tmp_path, payload["attachment_id"]) is not None
@@ -1847,9 +1859,73 @@ async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) ->
 
 
 @pytest.mark.asyncio
+async def test_inline_image_rejects_non_image_bytes(tmp_path: Path) -> None:
+    """An image filename does not make arbitrary bytes safe to upload as an image."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "fake.png").write_bytes(b"not an image")
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=("mxc://hs/abc", {"url": "mxc://hs/abc"})),
+        ) as upload,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("fake.png"))
+    assert payload["status"] == "error"
+    assert "image" in payload["message"]
+    assert "markdown" not in payload
+    upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_checks_encryption_before_resolving(tmp_path: Path) -> None:
+    """Encrypted rooms must not resolve or retain a workspace file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "cat.png").write_bytes(image_bytes())
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = True
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", wraps=resolve_send_attachment) as resolve,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert "matrix_message" in payload["message"]
+    resolve.assert_not_called()
+    assert not list_tool_runtime_attachment_ids(context)
+    assert not (tmp_path / "incoming_media").exists()
+    assert not (tmp_path / "attachments").exists()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_resolves_in_worker_thread(tmp_path: Path) -> None:
+    """File registration must not copy and hash bytes on the event loop."""
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+
+    def resolve_off_loop(*_args: object, **_kwargs: object) -> str:
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return "test resolution error"
+
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", side_effect=resolve_off_loop),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert payload["message"] == "test resolution error"
+
+
+@pytest.mark.asyncio
 async def test_inline_image_rejects_already_encrypted_media(tmp_path: Path) -> None:
     """Runtime-only ciphertext cannot be used in a markdown image."""
     context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
     media = RuntimeEncryptedMediaAttachment(
         attachment_id="att_media",
         filename="cat.png",

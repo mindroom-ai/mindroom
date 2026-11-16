@@ -6179,7 +6179,8 @@ using the same path rules as sending attachments. It uploads the image to Matrix
 Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
 The alt text defaults to the filename.
 
-Only images with an `image/*` MIME type are accepted, up to the existing 20 MiB media read limit.
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
 Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
 In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 

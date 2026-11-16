@@ -723,7 +723,16 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        resolved = resolve_send_attachment(
+        encrypted_message = (
+            "Inline images require an unencrypted room. Send the image as an attachment with matrix_message instead."
+        )
+        if (
+            await resolve_room_encryption_outcome(context.client, context.room_id, operation="inline_image")
+            is not False
+        ):
+            return _attachment_tool_payload("error", message=encrypted_message)
+        resolved = await asyncio.to_thread(
+            resolve_send_attachment,
             context,
             reference.strip(),
             workspace_root=self._tool_output_workspace_root,
@@ -742,14 +751,6 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Inline images require an image attachment (image/* MIME type).",
             )
-        encrypted_message = (
-            "Inline images require an unencrypted room. Send the image as an attachment with matrix_message instead."
-        )
-        if (
-            await resolve_room_encryption_outcome(context.client, context.room_id, operation="inline_image")
-            is not False
-        ):
-            return _attachment_tool_payload("error", message=encrypted_message)
         data, error = await asyncio.to_thread(
             _read_attachment_bytes,
             record,
@@ -758,13 +759,16 @@ class AttachmentTools(Toolkit):
         )
         if error is not None or data is None:
             return _attachment_tool_payload("error", message=error or "Attachment is unavailable.")
+        mime_type = resolve_image_mime_type(data, record.mime_type).detected_mime_type
+        if mime_type is None:
+            return _attachment_tool_payload("error", message="Attachment bytes are not a recognized image.")
         filename = record.filename or record.local_path.name
         mxc_uri, upload_payload = await upload_media_bytes_as_mxc(
             context.client,
             context.room_id,
             data,
             filename=filename,
-            mimetype=record.mime_type,
+            mimetype=mime_type,
         )
         if upload_payload is not None and "file" in upload_payload:
             return _attachment_tool_payload("error", message=encrypted_message)
