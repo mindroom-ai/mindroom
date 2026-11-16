@@ -20,7 +20,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
+from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import toolkit_function
@@ -363,13 +365,17 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
-@pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
+@pytest.mark.parametrize("caller", ["direct", "native", "approval_overlay"])
 async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    native: bool,
+    caller: str,
 ) -> None:
-    """A reload after the caller's turn began leaves a fresh minimal child its Bash, not the caller's stale snapshot."""
+    """A reload after the caller's turn began leaves a fresh minimal child its Bash, not the caller's stale snapshot.
+
+    A Dynamic Workflow participant's pre-approval overlay changes only what its agent is built from, never the config a
+    later reload is checked against.
+    """
     config = _config(helper_tools=["shell"])
     snapshot = config.model_copy(update={"timezone": "Europe/Amsterdam"})
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
@@ -397,16 +403,49 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
     toolkit = DelegateTools("leader", paths, snapshot, _workspace(tmp_path, "leader"), execution_identity=identity)
 
     with tool_runtime_context(live):
-        result = await _delegate(
-            toolkit,
-            snapshot,
-            paths,
-            "run_subagent",
-            leader=leader if native else None,
-            task="Report",
-            agent_name="helper",
-            minimal=True,
-        )
+        if caller == "approval_overlay":
+            child_turn = prepare_child_turn(
+                "leader",
+                "helper",
+                "Report",
+                owner=identity,
+                config=config,
+                runtime_paths=paths,
+                depth=0,
+                budget_monitor=None,
+                model=None,
+                agent_mode="minimal",
+                previous=None,
+                persona=None,
+            )
+            overlay = config.model_copy(
+                update={
+                    "tool_approval": ToolApprovalConfig(
+                        rules=[ApprovalRuleConfig(match="factorial", action="require_approval")]
+                    )
+                }
+            )
+            completed = await run_direct_child_turn(
+                child_turn,
+                owner=identity,
+                parent_run_id=None,
+                config=config,
+                runtime_paths=paths,
+                refresh_scheduler=None,
+                approval_config=overlay,
+            )
+            result = completed.text
+        else:
+            result = await _delegate(
+                toolkit,
+                snapshot,
+                paths,
+                "run_subagent",
+                leader=leader if caller == "native" else None,
+                task="Report",
+                agent_name="helper",
+                minimal=True,
+            )
 
     assert "Child answer" in result, result
     assert len(listings) == 1
