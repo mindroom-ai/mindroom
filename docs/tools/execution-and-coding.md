@@ -16,6 +16,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
+- [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -219,6 +220,34 @@ agents:
       - shell
       - terminal
     terminals: type
+```
+
+## [`temporary_secrets`]
+
+`temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](../deployment/egress-broker.md) service, a passphrase, or a pairing code.
+It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+
+- MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
+  Other people in the thread see who the card waits for.
+- The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
+  A restart forgets a value kept in memory and reads back one kept in a file.
+  The file is deleted at the first tool call or answer after the value expired.
+- Chat sends the value to this MindRoom's API with the user's client session, so it never goes through Matrix or the model.
+- While it is kept, the value is the environment variable `name` of that agent's `shell` commands in the same room and thread, in turns of the same requester, whether they run in the MindRoom process or in a worker.
+  Other agents, other conversations, and other people's turns never receive it.
+- The tool returns `provided` with the minutes the variable stays set, `declined`, or `expired` when no answer came in 15 minutes.
+  It waits, stops, and continues as a [background job](agent-orchestration.md#background-jobs) the way [`request_secret`](../deployment/egress-broker.md#asking-in-chat) does, and needs the same access for Chat: its origin in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and a homeserver that binds OpenID tokens to this deployment.
+
+Unlike an Agent Keys key, a temporary secret reaches the agent's commands, so a command can print it or send it elsewhere.
+MindRoom tells the agent to use the variable only inside the command that needs it, and replaces exact copies of the value in tool results before the model reads them, but neither stops an agent that works around them.
+Give the tool to agents you would trust with the secret, and prefer an [Agent Keys](../deployment/egress-broker.md) service for an API key that a service's hosts take in a header.
+
+```yaml
+agents:
+  ops:
+    tools:
+      - shell
+      - temporary_secrets
 ```
 
 ## [`python`]

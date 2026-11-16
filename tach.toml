@@ -5721,12 +5721,7 @@ path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.egress_broker",
-    "mindroom.matrix.client_delivery",
-    "mindroom.matrix_openid",
-    "mindroom.origins",
     "mindroom.runtime_resolution",
-    "mindroom.tool_jobs.control",
-    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
 ]

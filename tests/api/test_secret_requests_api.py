@@ -38,8 +38,8 @@ from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
     SECRET_REQUEST_TTL_SECONDS,
     KeyTarget,
-    SecretHolder,
     TemporaryTarget,
+    _SecretHolder,
     _TemporarySecrets,
     secret_request_registry,
 )
@@ -509,7 +509,7 @@ async def test_value_never_logged(
 
 
 TEMPORARY = "open-sesame-123"
-HOLDER = SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id=ALICE)
+HOLDER = _SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id=ALICE)
 
 
 @pytest.fixture

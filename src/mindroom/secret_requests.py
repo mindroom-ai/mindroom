@@ -50,7 +50,7 @@ class TemporaryTarget:
     """An answer becomes the variable `name` of `holder`'s shell commands, for as long as the requester keeps it."""
 
     name: str
-    holder: SecretHolder
+    holder: _SecretHolder
 
 
 @dataclass
@@ -205,7 +205,7 @@ def secret_request_log_fields(target: KeyTarget | TemporaryTarget) -> dict[str, 
 
 
 @dataclass(frozen=True)
-class SecretHolder:
+class _SecretHolder:
     """The conversation a temporary secret was given to: one agent's turns for one requester in one room and thread."""
 
     agent_name: str
@@ -214,11 +214,11 @@ class SecretHolder:
     requester_id: str
 
 
-def secret_holder(identity: ToolExecutionIdentity | None) -> SecretHolder | None:
+def secret_holder(identity: ToolExecutionIdentity | None) -> _SecretHolder | None:
     """Return the conversation a tool call runs in, or None for a call outside a requester's Matrix conversation."""
     if identity is None or not identity.agent_name or identity.room_id is None or identity.requester_id is None:
         return None
-    return SecretHolder(
+    return _SecretHolder(
         agent_name=identity.agent_name,
         room_id=identity.room_id,
         thread_id=identity.resolved_thread_id,
@@ -243,12 +243,12 @@ class _TemporarySecrets:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._given: dict[tuple[SecretHolder, str], _Given] = {}
+        self._given: dict[tuple[_SecretHolder, str], _Given] = {}
         self._loaded: set[Path] = set()
 
     def give(
         self,
-        holder: SecretHolder,
+        holder: _SecretHolder,
         name: str,
         value: str,
         *,
@@ -267,7 +267,7 @@ class _TemporarySecrets:
                 earlier.path.unlink(missing_ok=True)
             self._given[(holder, name)] = _Given(value, expires_at, path)
 
-    def values(self, holder: SecretHolder, *, now: float, storage_root: Path) -> dict[str, str]:
+    def values(self, holder: _SecretHolder, *, now: float, storage_root: Path) -> dict[str, str]:
         """Return `holder`'s live values by variable name."""
         with self._lock:
             self._refresh(storage_root / _TEMPORARY_SECRETS_DIRECTORY, now)
@@ -291,7 +291,7 @@ class _TemporarySecrets:
                     given.path.unlink(missing_ok=True)
 
 
-def _write_file(directory: Path, holder: SecretHolder, name: str, value: str, expires_at: float) -> Path:
+def _write_file(directory: Path, holder: _SecretHolder, name: str, value: str, expires_at: float) -> Path:
     """Write one value's private file, named after its holder and variable so a new value replaces it."""
     identity = {**asdict(holder), "name": name}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
@@ -306,11 +306,11 @@ def _write_file(directory: Path, holder: SecretHolder, name: str, value: str, ex
     return directory / f"{digest}.json"
 
 
-def _read_file(path: Path) -> tuple[tuple[SecretHolder, str], _Given] | None:
+def _read_file(path: Path) -> tuple[tuple[_SecretHolder, str], _Given] | None:
     """Return the value a file holds, or None when it is not one this store wrote."""
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
-        holder = SecretHolder(
+        holder = _SecretHolder(
             agent_name=stored["agent_name"],
             room_id=stored["room_id"],
             thread_id=stored["thread_id"],

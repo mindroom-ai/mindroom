@@ -13,8 +13,8 @@ from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
     TEMPORARY_SECRET_KEEP_SECONDS,
     KeyTarget,
-    SecretHolder,
     TemporaryTarget,
+    _SecretHolder,
     _SecretRequestRegistry,
     _TemporarySecrets,
     secret_holder,
@@ -148,7 +148,7 @@ def test_bodies() -> None:
     assert secret_request_body("expired", **kwargs) == "🔑 GitHub key request expired."
 
 
-HOLDER = SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id="@alice:example.org")
+HOLDER = _SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id="@alice:example.org")
 IDENTITY = ToolExecutionIdentity(
     channel="matrix",
     agent_name="code",
@@ -189,7 +189,7 @@ def test_a_given_value_is_read_until_it_expires(tmp_path: Path, keep: SecretKeep
 @pytest.mark.parametrize("keep", ["memory", "disk"])
 def test_only_the_same_agent_room_thread_and_requester_reads_a_value(
     tmp_path: Path,
-    other: SecretHolder,
+    other: _SecretHolder,
     keep: SecretKeep,
 ) -> None:
     """A value belongs to one agent's conversation with one requester."""
