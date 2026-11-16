@@ -196,10 +196,11 @@ class ChatUITools(Toolkit):
         lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
         if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
-        if "show_canvas" in enabled and self._canvas_libraries:
-            lines.append(_CANVAS_LIBRARIES_HINT)
+        # Remote assets include the library source, and the libraries hint says no other source works.
         if "show_canvas" in enabled and self._canvas_remote_assets:
             lines.append(_CANVAS_REMOTE_ASSETS_HINT)
+        elif "show_canvas" in enabled and self._canvas_libraries:
+            lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @staticmethod

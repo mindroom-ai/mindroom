@@ -1252,6 +1252,19 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
 
 
+def test_chat_ui_remote_assets_replace_the_library_hint(tmp_path: Path) -> None:
+    """Remote assets include the library source, so the agent is not told that no other source works."""
+    raw = _base_config_data()
+    options = {"enable_show_canvas": True, "enable_canvas_libraries": True, "enable_canvas_remote_assets": True}
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    prompt = _build_prompt(_code_agent(config, tmp_path))
+
+    assert "from any https: address" in prompt
+    assert "no other source works" not in prompt
+
+
 @pytest.mark.parametrize(
     ("options", "named"),
     [
