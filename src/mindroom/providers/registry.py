@@ -16,9 +16,9 @@ from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPT
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.credentials import (
+    api_key_env_reference,
     model_with_dashboard_key,
     resolve_api_key_reference,
-    unset_api_key_variable,
 )
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
@@ -142,7 +142,8 @@ def build_model_provider(
     """
     model_config = configured_model(config, runtime_paths, model_name)
     adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
-    if variable := unset_api_key_variable(model_config, runtime_paths):
+    # A reference ``configured_model`` left in place has no value, so it must not be sent as the key.
+    if variable := api_key_env_reference(model_config):
         adapter = WrappedProvider(adapter, partial(_unset_key_stage, variable=variable))
     logger.info(
         "Using AI model",

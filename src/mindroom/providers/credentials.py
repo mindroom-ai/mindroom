@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = [
+    "api_key_env_reference",
     "dashboard_api_key",
     "gemini_uses_vertexai",
     "missing_model_api_key_provider",
@@ -66,41 +67,50 @@ def own_api_key(model_config: ModelConfig) -> str | None:
     return client_params.get("api_key") or model_config.configured_api_key()
 
 
-def _api_key_env_reference(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
-    """Return ``NAME`` when the key the model's route sends is written as the whole value ``${NAME}``, else None.
-
-    A model that authenticates another way (``uses_alternative_auth``) sends only a ``client_params`` key.
-    """
-    client_params = (model_config.extra_kwargs or {}).get("client_params") or {}
-    key = client_params.get("api_key")
-    if not key and not uses_alternative_auth(model_config, runtime_paths):
-        key = model_config.configured_api_key()
+def api_key_env_reference(model_config: ModelConfig) -> str | None:
+    """Return ``NAME`` when the key the model's route sends is written as the whole value ``${NAME}``, else None."""
+    key = own_api_key(model_config)
     if provider_route(model_config.provider) in _KEYLESS_ROUTES or not isinstance(key, str):
         return None
     reference = ENV_PLACEHOLDER_PATTERN.fullmatch(key)
     return reference.group(1) if reference else None
 
 
+def _needs_no_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the model authenticates another way and sets no ``client_params`` key, so it needs no key."""
+    client_params = (model_config.extra_kwargs or {}).get("client_params") or {}
+    return not client_params.get("api_key") and uses_alternative_auth(model_config, runtime_paths)
+
+
 def unset_api_key_variable(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
-    """Return the variable the model's key references when the runtime environment sets no value for it."""
-    name = _api_key_env_reference(model_config, runtime_paths)
-    return name if name and get_secret_from_env(name, runtime_paths) is None else None
+    """Return the variable the model's key references when the model needs it and the runtime environment sets none."""
+    name = api_key_env_reference(model_config)
+    if not name or get_secret_from_env(name, runtime_paths) is not None or _needs_no_key(model_config, runtime_paths):
+        return None
+    return name
 
 
 def resolve_api_key_reference(model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
     """Return the model with the ``${NAME}`` key its route sends replaced by that runtime env variable's value.
 
-    A model whose variable is unset comes back unchanged; ``unset_api_key_variable`` names the variable.
+    When the variable is unset, a model that authenticates another way loses the key, and any other model comes back
+    unchanged; ``unset_api_key_variable`` names its variable.
     """
-    name = _api_key_env_reference(model_config, runtime_paths)
-    if not name or (value := get_secret_from_env(name, runtime_paths)) is None:
+    name = api_key_env_reference(model_config)
+    if not name:
+        return model_config
+    value = get_secret_from_env(name, runtime_paths)
+    if value is None and not _needs_no_key(model_config, runtime_paths):
         return model_config
     extra_kwargs = model_config.extra_kwargs or {}
     client_params = extra_kwargs.get("client_params") or {}
     if client_params.get("api_key"):
         client_params = {**client_params, "api_key": value}
         return model_config.model_copy(update={"extra_kwargs": {**extra_kwargs, "client_params": client_params}})
-    return model_config.model_copy(update={"api_key": value})
+    update: dict[str, object] = {"api_key": value}
+    if "api_key" in extra_kwargs:
+        update["extra_kwargs"] = {key: setting for key, setting in extra_kwargs.items() if key != "api_key"}
+    return model_config.model_copy(update=update)
 
 
 def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
