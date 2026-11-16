@@ -1087,26 +1087,31 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
         assert participants[thread_id] == []
 
 
-@pytest.mark.parametrize("change", ["replaced", "edited_in_place"])
-def test_written_entry_is_not_used_for_a_file_changed_since(tmp_path: Path, change: str) -> None:
-    """An overlapping pass or worker code can change a thread file after a pass wrote it, so the index parses that file."""
+@pytest.mark.parametrize("changed", ["inode", "size", "mtime"])
+def test_written_entry_is_not_used_for_a_file_changed_since(tmp_path: Path, changed: str) -> None:
+    """An overlapping pass or worker code can replace or edit a thread file after a pass wrote it, so the index parses it."""
     output_dir = tmp_path / "thread_exports"
     room = _room()
+    path = output_dir / "lobby" / _thread_filename("$thread:localhost")
     first = write_thread_payload(
         output_dir,
         room,
         "$thread:localhost",
         _thread_with_bodies("$thread:localhost", ["a", "b"]),
     )
-    newer = _thread_with_bodies("$thread:localhost", ["a", "b", "c"])
-    if change == "replaced":
+    written_mtime = path.stat().st_mtime_ns
+    # Carol's ID is as long as Alice's, so only the changed part of the file's identity differs.
+    bodies = ["a", "b", "c"] if changed == "size" else ["a", "b"]
+    newer = _thread_with_bodies("$thread:localhost", bodies, sender="@carol:localhost")
+    if changed == "inode":
         assert write_thread_payload(output_dir, room, "$thread:localhost", newer).replaced is True
     else:
-        path = output_dir / "lobby" / _thread_filename("$thread:localhost")
         path.write_bytes(yaml_io.safe_dump(newer, sort_keys=False, allow_unicode=True, encoding="utf-8"))
+    mtime = written_mtime + (1_000_000_000 if changed == "mtime" else 0)
+    os.utime(path, ns=(mtime, mtime))
     assert first.index_entry is not None
 
     write_room_index(output_dir, room, written_entries=[first.index_entry])
 
     [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
-    assert entry["message_count"] == 3
+    assert entry["participants"] == ["@bob:localhost", "@carol:localhost"]
