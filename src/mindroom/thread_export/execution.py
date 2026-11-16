@@ -180,7 +180,7 @@ def _finish_room_exports_blocking(
 ) -> None:
     """Reconcile removed threads and update indexes for one enumerated room.
 
-    Re-reads the room's thread files this pass did not write, so it runs off the event loop.
+    Parses the room's thread files this pass did not export or that changed since, so it runs off the event loop.
     """
     for accumulator in accumulators:
         try:

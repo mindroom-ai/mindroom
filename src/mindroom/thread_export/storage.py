@@ -69,7 +69,7 @@ type _FileIdentity = tuple[int, int, int]
 
 
 class WrittenIndexEntry(NamedTuple):
-    """The room index pair built from the payload a pass wrote to one thread file, and that file's identity after the write."""
+    """The room index pair built from the payload a pass exported to one thread file, and that file's identity right after."""
 
     filename: str
     file_identity: _FileIdentity
@@ -591,7 +591,7 @@ def _written_index_entry(room_fd: int, filename: str, payload: dict[str, object]
     try:
         status = os.stat(filename, dir_fd=room_fd, follow_symlinks=False)
     except OSError:
-        # The write succeeded, so a file this check cannot see is left for the index rebuild to read.
+        # The export is on disk either way, so a file this check cannot see is left for the index rebuild to read.
         return None
     # A rebuild indexes a file past the read cap, or one the bounded loader refuses whole, from its header.
     # Of that loader's limits only the node count can refuse a built payload's dump, and libyaml gives every value back.
@@ -657,7 +657,7 @@ def _room_index_payload(
     for position, (filename, status) in enumerate(newest_first):
         written = written_entries.get(filename)
         if written is not None and written.file_identity == _file_identity(status):
-            # The file is still the one this pass wrote, so it is charged the bytes a read would return and not parsed.
+            # The file is still the one this pass exported, so it is charged the bytes a read would return and not parsed.
             read_bytes += min(status.st_size, MAX_READ_BYTES + 1)
             indexed_entry = written.pair
         else:
