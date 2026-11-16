@@ -6,7 +6,7 @@ import json
 import os
 import tracemalloc
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
@@ -994,12 +994,19 @@ def _thread_with_bodies(
     )
 
 
+def _body_for_file_size(output_dir: Path, thread_id: str, file_size: int) -> str:
+    """Write a two-message thread and return the second body that makes its export file take ``file_size`` bytes."""
+    write_thread_payload(output_dir, _room(), thread_id, _thread_with_bodies(thread_id, ["first", "y"]))
+    return "y" * (1 + file_size - (output_dir / "lobby" / _thread_filename(thread_id)).stat().st_size)
+
+
 def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pass indexes the threads it wrote from their payloads, byte for byte as parsing every file would."""
-    monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", 4_096)
+    read_cap = 4_096
+    monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", read_cap)
     output_dir = tmp_path / "thread_exports"
     room = _room()
     room_dir = output_dir / "lobby"
@@ -1010,25 +1017,25 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
     payloads["$empty:localhost"] = _thread_with_bodies("$empty:localhost", [])
     payloads["$above-read-cap:localhost"] = _thread_with_bodies("$above-read-cap:localhost", ["first", "x" * 5_000])
     payloads["$at-node-limit:localhost"] = _thread_with_bodies("$at-node-limit:localhost", ["short"] * 8)
-    payloads["$above-node-limit:localhost"] = _thread_with_bodies("$above-node-limit:localhost", ["short"] * 9)
     at_limit = yaml_io.safe_dump(payloads["$at-node-limit:localhost"], sort_keys=False, allow_unicode=True)
     monkeypatch.setattr(
         yaml_io,
         "_MAX_UNTRUSTED_NODES",
         sum(isinstance(event, yaml.NodeEvent) for event in yaml.parse(at_limit)),
     )
+    # A scalar in the message list is one more node, though not a message.
+    one_past = _thread_with_bodies("$one-past-node-limit:localhost", ["short"] * 8)
+    payloads["$one-past-node-limit:localhost"] = {
+        **one_past,
+        "messages": [*cast("list[object]", one_past["messages"]), "note"],
+    }
+    at_cap_body = _body_for_file_size(output_dir, "$at-read-cap:localhost", read_cap)
+    payloads["$at-read-cap:localhost"] = _thread_with_bodies("$at-read-cap:localhost", ["first", at_cap_body])
     # This thread's existing file passes the read cap only by its longer exported_at.
     straddling_id = "$straddles-read-cap:localhost"
-    straddling_path = room_dir / _thread_filename(straddling_id)
-    write_thread_payload(output_dir, room, straddling_id, _thread_with_bodies(straddling_id, ["first", "y"]))
-    straddling_body = "y" * (2 + thread_export_storage.MAX_READ_BYTES - straddling_path.stat().st_size)
+    straddling_body = _body_for_file_size(output_dir, straddling_id, read_cap + 1)
     payloads[straddling_id] = _thread_with_bodies(straddling_id, ["first", straddling_body])
-    write_thread_payload(
-        output_dir,
-        room,
-        "$stale:localhost",
-        _thread_with_bodies("$stale:localhost", ["earlier pass"]),
-    )
+    write_thread_payload(output_dir, room, "$stale:localhost", _thread_with_bodies("$stale:localhost", ["earlier"]))
     written = {
         thread_id: write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()
     }
@@ -1040,12 +1047,14 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
         _thread_with_bodies(straddling_id, ["first", straddling_body], exported_at=datetime(2026, 10, 2, tzinfo=UTC)),
     )
     assert written[straddling_id].replaced is False
-    assert straddling_path.stat().st_size == thread_export_storage.MAX_READ_BYTES + 1
+    sizes = {path.name: path.stat().st_size for path in room_dir.glob("*.yaml")}
+    assert sizes[_thread_filename("$at-read-cap:localhost")] == read_cap
+    assert sizes[_thread_filename(straddling_id)] == read_cap + 1
     # The oldest file is left out of the budget, which charges each file the bytes a capped read returns.
     files = sorted(room_dir.glob("*.yaml"), key=lambda path: path.name != _thread_filename("$value-0:localhost"))
     for position, path in enumerate(files):
         os.utime(path, ns=(position * 1_000_000_000, position * 1_000_000_000))
-    budget = sum(min(path.stat().st_size, thread_export_storage.MAX_READ_BYTES + 1) for path in files) - 1
+    budget = sum(min(size, read_cap + 1) for size in sizes.values()) - 1
     monkeypatch.setattr(thread_export_storage, "_MAX_ROOM_INDEX_BYTES", budget)
 
     with patch.object(
@@ -1070,7 +1079,7 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
     participants = {entry["thread_id"]: entry["participants"] for entry in index["threads"]}
     assert len(participants) == len(files) - 1
     assert participants["$value-2:localhost"] == ["@bob:localhost", "true"]
-    assert participants["$at-node-limit:localhost"] == ["@alice:localhost", "@bob:localhost"]
-    assert participants["$above-node-limit:localhost"] == []
-    assert participants["$above-read-cap:localhost"] == []
-    assert participants[straddling_id] == []
+    for thread_id in ("$at-node-limit:localhost", "$at-read-cap:localhost"):
+        assert participants[thread_id] == ["@alice:localhost", "@bob:localhost"]
+    for thread_id in ("$one-past-node-limit:localhost", "$above-read-cap:localhost", straddling_id):
+        assert participants[thread_id] == []
