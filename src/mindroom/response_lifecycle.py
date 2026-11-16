@@ -306,6 +306,11 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
+    @property
+    def active(self) -> bool:
+        """Return whether this message still counts as waiting for the running response."""
+        return self._active
+
     def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
         """Show the running response's judge an edit of this waiting message; a released one stays released."""
         if self._active:

@@ -107,21 +107,26 @@ class VoiceIngress:
         envelope: MessageEnvelope,
         reservation: QueuedHumanNoticeReservation | None,
         may_be_for_me: bool,
+        mentions_nobody: bool,
     ) -> QueuedHumanNoticeReservation | None:
         """Keep the queued notice while a response still holds the voice's conversation once readiness ends.
 
         Release it if that conversation went idle while the voice was transcribed, or if the transcript is not this
         agent's to answer (it mentions only someone else, or the room's reply mode leaves it to nobody), or reserve one
-        if it became busy.
+        if it became busy. A kept notice learns whom the transcript mentions.
         """
         if not may_be_for_me or not self.deps.response_runner.has_active_response_for_target(target):
             if reservation is not None:
                 reservation.release()
             return None
-        return reservation or queued_notice_reservation_if_busy(
+        if reservation is not None:
+            reservation.update(envelope, mentions_nobody=mentions_nobody)
+            return reservation
+        return queued_notice_reservation_if_busy(
             self.deps.response_runner,
             target=target,
             envelope=envelope,
+            mentions_nobody=mentions_nobody,
         )
 
     async def _ready_voice_event(
@@ -165,24 +170,26 @@ class VoiceIngress:
                 voice_target,
                 envelope,
             )
+            for_another_participant = mentions_another_participant(
+                normalized_event.source,
+                self.deps.matrix_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                room=room,
+            )
             queued_notice_reservation = self._final_queued_notice(
                 target=voice_target,
                 envelope=envelope,
                 reservation=queued_notice_reservation,
                 may_be_for_me=may_be_for_me,
+                mentions_nobody=for_another_participant is None,
             )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
                     event=replace(
                         normalized_event,
                         turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                        for_another_participant=mentions_another_participant(
-                            normalized_event.source,
-                            self.deps.matrix_id,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                            room=room,
-                        ),
+                        for_another_participant=for_another_participant,
                     ),
                     room=room,
                     facts=facts,
