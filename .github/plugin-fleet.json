@@ -8,5 +8,6 @@
   "mindroom-ai/restart-resume-plugin",
   "mindroom-ai/shell-guard-plugin",
   "mindroom-ai/thread-goal-plugin",
+  "mindroom-ai/thread-worktree-plugin",
   "mindroom-ai/voice-enrich-plugin"
 ]
