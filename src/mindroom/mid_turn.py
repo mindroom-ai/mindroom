@@ -93,8 +93,9 @@ class MidTurnGate:
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
-    # Messages of a queue that could wait, and those of the checked queue the judge said the reply cannot wait for.
-    _waited: set[str] = field(default_factory=set)
+    # Messages, as they read then, of a queue that could wait, and those of the checked queue the judge said the reply
+    # cannot wait for.
+    _waited: set[QueuedMessage] = field(default_factory=set)
     _stopped_for: frozenset[str] = frozenset()
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -181,10 +182,11 @@ class MidTurnGate:
                     queued_messages=len(pending),
                     outcome="waits" if finish else "wraps_up",
                 )
-            event_ids = {message.event_id for message in pending}
-            self._stopped_for = frozenset(event_ids - self._waited if stops else ())
+            # A message the judge let wait counts only as it read then, so an edit of it can stop the reply.
+            stopped = (message.event_id for message in pending if message not in self._waited) if stops else ()
+            self._stopped_for = frozenset(stopped)
             if finish:
-                self._waited |= event_ids
+                self._waited.update(pending)
             self._checked, self._finish = pending, finish
             return finish
 

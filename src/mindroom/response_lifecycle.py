@@ -250,6 +250,8 @@ class _QueuedMessageState:
         if message is None:
             return
         self._pending_messages[source_event_id] = replace(message, text=text, mentions_nobody=mentions_nobody)
+        # A verdict covered the text the judge read, not the edit.
+        self.stopped_reply_event_ids.discard(source_event_id)
         self._notify_changed()
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
@@ -311,6 +313,7 @@ class QueuedHumanNoticeReservation:
     _state: _QueuedMessageState
     _source_event_id: str
     _active: bool = True
+    _stopped_reply: bool = False
 
     @property
     def active(self) -> bool:
@@ -319,7 +322,9 @@ class QueuedHumanNoticeReservation:
 
     @property
     def stopped_reply(self) -> bool:
-        """Return whether the mid-turn judge said the running response cannot wait for this waiting message."""
+        """Return whether the mid-turn judge said the running response cannot wait for this message, kept on release."""
+        if not self._active:
+            return self._stopped_reply
         return self._source_event_id in self._state.stopped_reply_event_ids
 
     def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
@@ -335,6 +340,8 @@ class QueuedHumanNoticeReservation:
         """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
+        # A follow-up a requester split held back releases its notice before it dispatches, and still answers.
+        self._stopped_reply = self.stopped_reply
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
 

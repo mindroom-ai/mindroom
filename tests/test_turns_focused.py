@@ -7007,6 +7007,89 @@ async def test_a_message_the_running_reply_stopped_for_is_answered_without_parti
 
 
 @pytest.mark.asyncio
+async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Another person's remark the judge let wait, then the requester's correction that stopped the reply.
+
+    The follow-ups split by requester: the remark goes through participation, and the correction, whose notice the
+    remark's turn released, is answered without it.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="Write the long report", event_id="$task:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    verdicts = [True, False]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(active_text="Write the long report", evaluate=evaluate, requester_id=_SENDER)
+    messages = (
+        ("$remark:localhost", "@other:localhost", "Nice weather today"),
+        ("$correction:localhost", _SENDER, "Stop, write the short summary instead"),
+    )
+    for index, (event_id, sender, body) in enumerate(messages):
+        queue.add_waiting_human_message(event_id, text=body, requester_id=sender, mentions_nobody=True)
+        assert await queue._interrupts() is (index == 1)
+    queue.mid_turn_gate = None
+    idle = asyncio.Event()
+    batches: list[PreparedTurn] = []
+    dispatched = asyncio.Event()
+
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+        await harness.dispatcher.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        if len(batches) == len(messages):
+            dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_until_idle,
+    )
+    try:
+        for event_id, sender, body in messages:
+            pending = make_pending_event(
+                _text_event(body, event_id=event_id, thread_id=_THREAD_ROOT, sender=sender),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=sender,
+                active_follow_up=True,
+                notice=QueuedHumanNoticeReservation(queue, event_id),
+            )
+            await gate.admit(
+                active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+                ready_result=ReadyPendingEvent(pending_event=pending),
+            )
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        assert [
+            (batch.handled_turn.source_event_ids, request.participation is None)
+            for batch, request in zip(batches, harness.runner.requests, strict=True)
+        ] == [(("$remark:localhost",), False), (("$correction:localhost",), True)]
+    finally:
+        idle.set()
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("by_agent", [False, True], ids=["person", "agent"])
 async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_agent_made_it(
     config: Config,

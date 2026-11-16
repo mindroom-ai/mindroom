@@ -1429,7 +1429,11 @@ async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict
 
 @pytest.mark.asyncio
 async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_reply() -> None:
-    """A queue the judge says cannot wait marks the messages it had not let wait before; release forgets the mark."""
+    """A queue the judge says cannot wait marks the messages it had not let wait before.
+
+    A released notice keeps its mark for its own follow-up, and the queue forgets it, so the same event queued again
+    starts unmarked.
+    """
     verdicts = [True, False]
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
@@ -1450,9 +1454,38 @@ async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_re
     assert await queue._interrupts()
     assert (remark.stopped_reply, stop.stopped_reply) == (False, True)
     stop.release()
-    assert not stop.stopped_reply
+    remark.release()
+    assert (remark.stopped_reply, stop.stopped_reply) == (False, True)
     queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_OTHER, mentions_nobody=True)
     assert not QueuedHumanNoticeReservation(queue, "$stop").stopped_reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", ["waited_into_stop", "stop_into_small_talk"])
+async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> None:
+    """A message the judge let wait and then edited into a correction stops the reply when the judge says so.
+
+    A correction edited after its verdict loses the mark, since no verdict covered the edited text.
+    """
+    verdicts = [True, False] if edit == "waited_into_stop" else [False]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    first, edited = ("Thanks", "Stop, wrong file") if edit == "waited_into_stop" else ("Stop, wrong file", "Thanks")
+    queue.add_waiting_human_message("$msg", text=first, requester_id=_OTHER, mentions_nobody=True)
+    message = QueuedHumanNoticeReservation(queue, "$msg")
+    if edit == "waited_into_stop":
+        assert not await queue._interrupts()
+    else:
+        assert await queue._interrupts()
+        assert message.stopped_reply
+    queue.update_waiting_human_message("$msg", text=edited, mentions_nobody=True)
+    if edit == "waited_into_stop":
+        assert await queue._interrupts()
+    assert message.stopped_reply is (edit == "waited_into_stop")
 
 
 @pytest.mark.asyncio
