@@ -355,6 +355,7 @@ async def test_a_marked_message_is_kept_as_history_and_never_dispatched(
     assert handled == []
     page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)
     assert [(visible.logical_event_id, visible.content["body"]) for visible in page.messages] == [("$marked", "hello")]
+    assert session.dispatched == []
     assert session.acked == [batch]
 
 

@@ -1049,8 +1049,9 @@ def find_config_path(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
-# Says an agent wrote this event, whoever's account sent it: from an account MindRoom does not manage, the event is
-# conversation history and never acts as its sender. Only the key's presence counts, never its value.
+# Says an agent wrote this event, whoever's account sent it: from an account MindRoom does not manage, a message,
+# reaction, approval or job cancel is conversation history and never acts as its sender. Only the key's presence
+# counts, never its value.
 AGENT_AUTHORED_KEY = "com.mindroom.agent_authored"
 # The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
 ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"

@@ -567,6 +567,17 @@ async def test_a_marked_edit_from_a_person_is_not_heard(listening: _Listening) -
     assert listening.turns.contexts == []
 
 
+async def test_a_marked_message_from_a_managed_sender_is_still_heard(listening: _Listening) -> None:
+    """An agent's own account already speaks only for that agent, so the marker takes nothing from its reply."""
+    helper = entity_ids(listening.config, listening.runtime_paths)["helper"].full_id
+    await listening.service._poll_once(T0)
+    marked = {**text("Written by an agent"), ACTING_REQUESTER_KEY: ALICE, AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$marked", room_id=ROOM, sender=helper, ts=_ms(10), content=marked)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$marked"]
+
+
 @pytest.mark.parametrize("source_kind", [TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND])
 async def test_a_relayed_message_is_heard_as_its_original_sender(listening: _Listening, source_kind: str) -> None:
     """A message the router relays for a person is judged as that person, as a reply judges it, and shown as theirs."""
