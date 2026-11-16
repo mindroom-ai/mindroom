@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -885,6 +886,24 @@ def _internal_fields(entry: ToolTraceEntry) -> dict[str, object]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+# Live frames re-serialize each streaming reply's whole tool trace every tick, and previews rarely change,
+# so each distinct preview is redacted once. The cache is bounded on entry count and on the preview length
+# allowed in, the longest preview a tool call builds, so it holds a few MB; a longer one bypasses it.
+_REDACTED_PREVIEW_CACHE_SIZE = 2048
+_MAX_CACHED_PREVIEW_CHARS = _MAX_TOOL_ARGS_PREVIEW_CHARS
+
+
+@lru_cache(maxsize=_REDACTED_PREVIEW_CACHE_SIZE)
+def _cached_redacted_preview(preview: str) -> str:
+    return redact_sensitive_text(preview)
+
+
+def _redacted_preview(preview: str) -> str:
+    if len(preview) > _MAX_CACHED_PREVIEW_CHARS:
+        return redact_sensitive_text(preview)
+    return _cached_redacted_preview(preview)
+
+
 def serialize_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
     *,
@@ -898,9 +917,9 @@ def serialize_tool_trace(
             "tool_name": entry.tool_name,
         }
         if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+            event["args_preview"] = _redacted_preview(entry.args_preview)
         if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+            event["result_preview"] = _redacted_preview(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
         if include_internal:

@@ -9,6 +9,7 @@ from mindroom import redaction
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system import events as tool_events
 from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,
     _TOOL_TRACE_KEY,
@@ -606,6 +607,31 @@ def test_format_tool_started_survives_structured_redaction_failure(monkeypatch: 
     )
 
     assert trace.args_preview == "command=[redaction failed]"
+
+
+def test_serialize_tool_trace_redacts_each_unchanged_preview_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live frames re-serialize a trace every tick, so an unchanged preview must not be redacted again."""
+    redacted: list[str] = []
+
+    def counting_redactor(value: str) -> str:
+        redacted.append(value)
+        return redaction.redact_sensitive_text(value)
+
+    monkeypatch.setattr(tool_events, "redact_sensitive_text", counting_redactor)
+    tool_events._cached_redacted_preview.cache_clear()
+    entry = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="run_shell",
+        args_preview="command=export OPENAI_API_KEY=sk-memo-test-0123456789abcdef",
+        result_preview="memoized preview result",
+    )
+
+    first = serialize_tool_trace([entry])
+    second = serialize_tool_trace([entry])
+
+    assert second == first
+    assert "sk-memo-test-0123456789abcdef" not in str(first)
+    assert redacted == [entry.args_preview, entry.result_preview]
 
 
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
