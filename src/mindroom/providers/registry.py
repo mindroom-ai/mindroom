@@ -7,13 +7,19 @@ limit, the media fallback prompt, and the request log.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast, get_args
 
+from mindroom.llm.errors import AuthenticationFailed
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
-from mindroom.providers.credentials import dashboard_api_key, resolve_api_key_references
+from mindroom.providers.credentials import (
+    model_with_dashboard_key,
+    resolve_api_key_reference,
+    unset_api_key_variable,
+)
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
@@ -24,14 +30,17 @@ from mindroom.providers.openai.build import accepted_extra_kwargs as openai_acce
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, TokenCounter
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent, TokenCounter
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
@@ -62,16 +71,14 @@ _SETTINGS_KEYS = {
 def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
     """Return the model configured as ``model_name``, with the key the dashboard saved for it applied.
 
-    A key written as ``${NAME}`` becomes that runtime env variable's value.
+    A key written as ``${NAME}`` becomes that runtime env variable's value, and stays as written when it is unset.
     """
     if model_name not in config.models:
         available = ", ".join(sorted(config.models))
         msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
-    model_config = config.models[model_name]
-    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
-        model_config = model_config.model_copy(update={"api_key": dashboard_key})
-    return resolve_api_key_references(model_config, runtime_paths)
+    model_config = model_with_dashboard_key(model_name, config.models[model_name], runtime_paths)
+    return resolve_api_key_reference(model_config, runtime_paths)
 
 
 def _build_adapter(
@@ -114,6 +121,12 @@ def _build_adapter(
     raise ValueError(msg)
 
 
+def _unset_key_stage(inner: ModelProvider, _request: ModelRequest, *, variable: str) -> AsyncIterator[StreamEvent]:
+    """Fail a request of a model whose key references an unset variable, so the reference is never sent as a key."""
+    msg = f"{variable} not set. This model's api_key reads the {variable} environment variable."
+    raise AuthenticationFailed(msg, provider=inner.identity.provider, status_code=401)
+
+
 def build_model_provider(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -129,6 +142,8 @@ def build_model_provider(
     """
     model_config = configured_model(config, runtime_paths, model_name)
     adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
+    if variable := unset_api_key_variable(model_config, runtime_paths):
+        adapter = WrappedProvider(adapter, partial(_unset_key_stage, variable=variable))
     logger.info(
         "Using AI model",
         model=model_name,

@@ -1030,16 +1030,24 @@ def find_missing_env_variables(config: Config, runtime_paths: RuntimePaths) -> l
     reaches the local one.
     """
     # The credential modules open the credential store, which CLI startup must not import.
-    from mindroom.providers.credentials import missing_model_api_key_provider  # noqa: PLC0415
+    from mindroom.providers.credentials import (  # noqa: PLC0415
+        missing_model_api_key_provider,
+        model_with_dashboard_key,
+        unset_api_key_variable,
+    )
 
     missing: dict[tuple[str, str], list[str]] = {}
     for name, model in config.models.items():
         route = provider_route(model.provider)
         try:
             has_key = missing_model_api_key_provider(config, runtime_paths, name) is None
+            # A key written as ``${NAME}`` reads that variable instead of the route's.
+            variable = unset_api_key_variable(model_with_dashboard_key(name, model, runtime_paths), runtime_paths)
         except (OSError, ValueError):
             # Without the credential store, the model's stored values are unknown, so it needs its route's variable.
-            has_key = False
+            has_key, variable = False, None
+        if variable:
+            missing.setdefault((route, variable), []).append(name)
         for variables in _variables_a_model_reads(route, model, has_key=has_key):
             if runtime_paths.first_env_value(variables) is None:
                 missing.setdefault((route, variables[0]), []).append(name)

@@ -13,7 +13,6 @@ from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider
-from mindroom.llm.errors import AuthenticationFailed
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -27,8 +26,10 @@ __all__ = [
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
+    "model_with_dashboard_key",
     "own_api_key",
-    "resolve_api_key_references",
+    "resolve_api_key_reference",
+    "unset_api_key_variable",
     "uses_alternative_auth",
 ]
 
@@ -38,11 +39,21 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
     "azure": ("azure_ad_token", "azure_ad_token_provider"),
 }
 
+# Routes that authenticate without an API key and ignore a configured one.
+_KEYLESS_ROUTES = frozenset({"bedrock_claude", "codex", "kimi", "synthetic", "vertexai_claude"})
+
 
 def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
     """Return the key the dashboard saved for one model config (``model:<name>``), if any."""
     model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
     return model_creds.get("api_key") if model_creds else None
+
+
+def model_with_dashboard_key(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
+    """Return the model with the key the dashboard saved for it as its ``api_key``, which beats a configured one."""
+    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
+        return model_config.model_copy(update={"api_key": dashboard_key})
+    return model_config
 
 
 def own_api_key(model_config: ModelConfig) -> str | None:
@@ -55,30 +66,35 @@ def own_api_key(model_config: ModelConfig) -> str | None:
     return client_params.get("api_key") or model_config.configured_api_key()
 
 
-def resolve_api_key_references(model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
-    """Return the model with each key written as ``${NAME}`` replaced by that runtime env variable's value.
+def _api_key_env_reference(model_config: ModelConfig) -> str | None:
+    """Return ``NAME`` when the key the model's route sends is written as the whole value ``${NAME}``, else None."""
+    key = own_api_key(model_config)
+    if provider_route(model_config.provider) in _KEYLESS_ROUTES or not isinstance(key, str):
+        return None
+    reference = ENV_PLACEHOLDER_PATTERN.fullmatch(key)
+    return reference.group(1) if reference else None
 
-    Covers ``api_key``, ``extra_kwargs.api_key`` and ``extra_kwargs.client_params.api_key``; only a whole-value
-    reference resolves. An unset or blank variable raises ``AuthenticationFailed`` naming it.
+
+def unset_api_key_variable(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return the variable the model's key references when the runtime environment sets no value for it."""
+    name = _api_key_env_reference(model_config)
+    return name if name and get_secret_from_env(name, runtime_paths) is None else None
+
+
+def resolve_api_key_reference(model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
+    """Return the model with the ``${NAME}`` key its route sends replaced by that runtime env variable's value.
+
+    A model whose variable is unset comes back unchanged; ``unset_api_key_variable`` names the variable.
     """
-
-    def resolve(key: object) -> object:
-        if not (isinstance(key, str) and (reference := ENV_PLACEHOLDER_PATTERN.fullmatch(key))):
-            return key
-        name = reference.group(1)
-        if (value := get_secret_from_env(name, runtime_paths)) is None:
-            msg = f"{name} not set. This model's api_key reads the {name} environment variable."
-            raise AuthenticationFailed(msg, provider=model_config.provider, status_code=401)
-        return value
-
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-    if "api_key" in extra_kwargs:
-        extra_kwargs["api_key"] = resolve(extra_kwargs["api_key"])
+    name = _api_key_env_reference(model_config)
+    if not name or (value := get_secret_from_env(name, runtime_paths)) is None:
+        return model_config
+    extra_kwargs = model_config.extra_kwargs or {}
     client_params = extra_kwargs.get("client_params") or {}
-    if "api_key" in client_params:
-        extra_kwargs["client_params"] = {**client_params, "api_key": resolve(client_params["api_key"])}
-    update = {"api_key": resolve(model_config.api_key), "extra_kwargs": extra_kwargs or model_config.extra_kwargs}
-    return model_config.model_copy(update=update)
+    if client_params.get("api_key"):
+        client_params = {**client_params, "api_key": value}
+        return model_config.model_copy(update={"extra_kwargs": {**extra_kwargs, "client_params": client_params}})
+    return model_config.model_copy(update={"api_key": value})
 
 
 def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
