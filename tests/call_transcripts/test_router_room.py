@@ -732,6 +732,7 @@ async def test_the_row_and_the_transcript_message_start_no_agent_turn(
     assert delivery.handled == ()
 
 
+@pytest.mark.asyncio
 async def test_the_routers_homeserver_admin_room_counts_as_a_room_it_is_not_in(monkeypatch: pytest.MonkeyPatch) -> None:
     """The router keeps that room but takes no part in it, so no call there is transcribed or posted."""
     client = FakeRouterClient(state={ROOM: [_member(ANN)]})

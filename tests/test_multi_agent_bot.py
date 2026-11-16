@@ -315,7 +315,9 @@ class TestAgentBot(AgentBotTestBase):
             after_admission: object,
             on_decryption_failure: object,
             schedule_trigger_sender_is_managed: object,
+            ignores_room: object,
         ) -> None:
+            assert callable(ignores_room)
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
             assert before_admission == bot._before_ingestion_admission
