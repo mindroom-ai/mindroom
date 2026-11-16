@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
@@ -62,6 +63,7 @@ def _write_request_record(
     body: Mapping[str, Any],
     log: RequestLog,
     *,
+    start: threading.Event,
     model_id: str,
     model_params: dict[str, Any],
     deferred_tool_names: list[str],
@@ -71,10 +73,13 @@ def _write_request_record(
     """Build and append the request record, in the thread that writes it; return its file, or None if it failed.
 
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
-    built in the writer thread, and long enough to delay the request, so the adapter sends the body meanwhile. Adapters
-    and their SDKs only read the body they hand ``on_send``, and the caller sees nothing of the reply before the write
-    ends, so nothing edits the body while it is read here.
+    built in the writer thread, and long enough to delay the request, so the adapter sends the body meanwhile. It holds
+    the GIL while it runs, which would slow the SDK's own serialization of the request on the loop, so it waits for
+    ``start``, set once the request's task first waits, normally on the provider. Adapters and their SDKs only read the
+    body they hand ``on_send``, and the caller sees nothing of the reply before the write ends, so nothing edits the
+    body while it is read here.
     """
+    start.wait()
     try:
         _write_line(
             path,
@@ -174,11 +179,14 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
 
         async def write_request_record(body: Mapping[str, Any]) -> None:
             nonlocal record
+            loop = asyncio.get_running_loop()
+            start = threading.Event()
             write = partial(
                 _write_request_record,
                 log_path,
                 body,
                 log,
+                start=start,
                 model_id=inner.identity.id,
                 model_params=inner.model_params,
                 deferred_tool_names=deferred_tool_names,
@@ -186,7 +194,8 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 context=context,
             )
             # The copied context keeps the request's log fields on a failure the thread reports.
-            record = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, write)
+            record = loop.run_in_executor(None, contextvars.copy_context().run, write)
+            loop.call_soon(start.set)
 
         request = replace(request, on_send=write_request_record)
     reported = ReportedUsage()

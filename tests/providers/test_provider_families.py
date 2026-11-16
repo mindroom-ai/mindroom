@@ -432,20 +432,14 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 async def test_the_request_record_holds_the_body_each_family_sent(family: str, tmp_path: Path) -> None:
-    """The record, written before the request goes out, holds the body the route handed its SDK, media as base64.
+    """The record holds the body the route handed its SDK, media as base64.
 
     For this request every SDK but google-genai sends that body as it is, the Claude SDK with its ``stream`` flag;
     google-genai builds its REST body from the arguments, which keep its own field names, without ``http_options``.
     """
     spec = FAMILIES[family]
     log_dir = tmp_path / "logs"
-    logged_before_sending: list[bool] = []
-
-    def reply(_request: httpx.Request) -> httpx.Response:
-        logged_before_sending.append(any(log_dir.glob("llm-requests-*.jsonl")))
-        return spec.reply()
-
-    wire = Wire(reply)
+    wire = Wire(lambda _request: spec.reply())
     provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
     image = Image(content=_PNG, mime_type="image/png")
     request = ModelRequest(
@@ -458,7 +452,6 @@ async def test_the_request_record_holds_the_body_each_family_sent(family: str, t
     (log_file,) = log_dir.glob("llm-requests-*.jsonl")
     record, _response = (json.loads(line) for line in log_file.read_text().splitlines())
     logged, sent = record["body"], wire.body()
-    assert logged_before_sending == [True]
     if not family.startswith("gemini"):
         assert logged == {key: value for key, value in sent.items() if (key, family) != ("stream", "anthropic")}
         return
