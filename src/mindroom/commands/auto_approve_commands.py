@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_USAGE = "Usage: `!auto_approve <minutes>`, `!auto_approve <hours>h`, `!auto_approve off`, or `!auto_approve` to show the current window"
+_USAGE = "Usage: `/auto_approve <minutes>`, `/auto_approve <hours>h`, `/auto_approve off`, or `/auto_approve` to show the current window"
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
 
@@ -143,7 +143,7 @@ async def handle_auto_approve_command(
         return (
             f"Auto-approve for all your tool calls is off in {place}.\n\n{_USAGE}"
             if expires_at is None
-            else f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}.\n\nUse `!auto_approve off` to end it."
+            else f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}.\n\nUse `/auto_approve off` to end it."
         )
 
     if requested == "off":
@@ -179,5 +179,5 @@ async def handle_auto_approve_command(
     return (
         f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}: "
         f"they run without asking for approval.{approved_text}\n\n"
-        "Use `!auto_approve off` to end it."
+        "Use `/auto_approve off` to end it."
     )

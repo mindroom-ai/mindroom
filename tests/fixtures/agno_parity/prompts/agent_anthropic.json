@@ -741,7 +741,7 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
+          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -1640,7 +1640,7 @@
         },
         {
           "name": "schedule",
-          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
+          "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
           "parameters": {
             "type": "object",
             "properties": {

@@ -514,7 +514,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
         elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
-                "❌ Use `!desktop` in a private room containing only you, the serving bot, "
+                "❌ Use `/desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
         else:

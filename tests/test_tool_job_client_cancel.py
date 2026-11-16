@@ -253,8 +253,8 @@ async def test_jobs_command_lists_this_conversations_jobs(tmp_path: Path) -> Non
         assert "run_tests" in reply
         assert "job_elsewhere" not in reply
         # Without a jobs bar, the listing is where a person learns how to stop them.
-        assert "`!cancel_job <id>`" in reply
-        assert "`!cancel_job all`" in reply
+        assert "`/cancel_job <id>`" in reply
+        assert "`/cancel_job all`" in reply
     finally:
         await runtime.shutdown()
 
@@ -366,7 +366,7 @@ async def test_cancel_job_command_refuses_a_sender_without_access(tmp_path: Path
             access=ResponderAccessConfig(users=["@bob:test"], current_room_members=False),
         )
         reply = await _command(tmp_path, "!cancel_job job_a", agent=restricted)
-        assert reply == "No running background job here has that ID; `!jobs` lists them."
+        assert reply == "No running background job here has that ID; `/jobs` lists them."
         assert _status(runtime, "job_a") == "running"
     finally:
         await runtime.shutdown()

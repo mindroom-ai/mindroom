@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
-_USAGE = "Usage: `!reply_mode [auto|mentions|reset|show]`"
+_USAGE = "Usage: `/reply_mode [auto|mentions|reset|show]`"
 _MODE_EFFECTS: dict[RoomReplyMode, str] = {
     "auto": "The router or the room's only agent or team may answer a message that mentions no one.",
     "mentions": (
@@ -41,7 +41,7 @@ def _show_room_reply_mode(config: Config, runtime_paths: RuntimePaths, room_id: 
         )
     return (
         f"This room uses the `{mode}` reply mode override.\n\n{_MODE_EFFECTS[mode]}\n\n"
-        "Use `!reply_mode reset` to restore the configured mode."
+        "Use `/reply_mode reset` to restore the configured mode."
     )
 
 
@@ -78,5 +78,5 @@ async def handle_reply_mode_command(
     set_room_reply_mode_override(runtime_paths, room_id=room_id, mode=mode)
     return (
         f"✅ This room now uses `{mode}` reply mode.\n\n{_MODE_EFFECTS[mode]}\n\n"
-        "Use `!reply_mode reset` to restore the configured mode."
+        "Use `/reply_mode reset` to restore the configured mode."
     )
