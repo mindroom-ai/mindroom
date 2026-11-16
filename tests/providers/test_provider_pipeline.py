@@ -669,6 +669,28 @@ async def test_coordinated_media_rejection_preserves_images_and_learns_all_rejec
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        "This model does not support audio and images are supported",
+        "This model does not support audio, images are supported",
+    ],
+)
+async def test_affirmative_clause_after_unsupported_kind_keeps_its_kind(error: str) -> None:
+    """A kind that starts its own "are supported" clause is not part of the unsupported list."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        assert attempt.messages[0].images == [_image()]
+        assert attempt.messages[0].audio is None
+
+
+@pytest.mark.asyncio
 async def test_kind_retry_failure_uses_backstop_without_learning_unrelated_images() -> None:
     inner = _ScriptedProvider(
         [

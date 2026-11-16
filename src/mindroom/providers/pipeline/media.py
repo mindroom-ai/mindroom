@@ -56,6 +56,8 @@ _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 # A retried media-free request must not repeat a failure the media cannot have caused.
 _NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED})
 _PAYLOAD_TOO_LARGE_STATUS = 413
+# Provider errors naming a capability are short; capping the scan keeps the list patterns cheap on huge errors.
+_MAX_SCANNED_ERROR_CHARS = 2000
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "size", "format", "media_type", "media type", "mime")
 _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
@@ -66,9 +68,11 @@ _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
 }
 _MEDIA_KIND = rf"(?:{'|'.join(_MEDIA_KIND_NAMES.values())})"
 _MEDIA_KIND_LIST = rf"{_MEDIA_KIND}(?:(?:,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+){_MEDIA_KIND})*"
-# Bind the unsupported claim to its coordinated kind list, not to supported kinds elsewhere in the error.
+# Bind the unsupported claim to its coordinated kind list, not to supported kinds elsewhere in the error;
+# a kind that opens its own "is/are ..." clause ends the list.
 _CAPABILITY_GAP_ERRORS = re.compile(
     rf"\b(?:(?:does not|doesn't) support|no endpoints found that support) (?:inputs? )?{_MEDIA_KIND_LIST}\b"
+    r"(?!\s+(?:is|are)\b)"
     rf"|\b(?:input )?{_MEDIA_KIND_LIST}(?: inputs?)? (?:is |are )?not supported\b"
     rf"|\b{_MEDIA_KIND_LIST}(?: inputs?)? is only supported by certain models\b",
 )
@@ -177,7 +181,7 @@ def _without_media(
 
 def _named_capability_gaps(error: ProviderError) -> frozenset[MediaKind]:
     """Return kinds explicitly described as unsupported, ignoring unrelated media mentions."""
-    text = str(error).lower()
+    text = str(error).lower()[:_MAX_SCANNED_ERROR_CHARS]
     return frozenset(
         kind
         for clause in _CAPABILITY_GAP_ERRORS.finditer(text)
