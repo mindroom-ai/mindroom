@@ -46,6 +46,8 @@ _RETRY_DELAY_S = 2.0
 _TIMEOUT_S = 180
 _MAX_QUERY_CHARS = 5000
 _MAX_HIT_CHARS = 6000
+# A whole reply wrapped in one ```json (or bare ```) fence.
+_CODE_FENCE = re.compile(r"```(?:json)?[ \t]*\n(.*)\n[ \t]*```", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -163,12 +165,15 @@ async def _request_verdicts(
 
 
 def _parse(content: str) -> list[Verdict]:
-    """Return the verdicts in the judge's JSON reply; raise ValueError when it is malformed."""
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if match is None:
-        msg = "no JSON object in judge reply"
-        raise ValueError(msg)
-    entries: list[Any] = json.loads(match.group(0))["hits"]
+    """Return the verdicts in the judge's JSON reply; raise ValueError when it is malformed.
+
+    The reply must be one whole JSON document, optionally in a single code fence; prose around it is malformed.
+    """
+    document = content.strip()
+    fenced = _CODE_FENCE.fullmatch(document)
+    if fenced:
+        document = fenced.group(1)
+    entries: list[Any] = json.loads(document)["hits"]
     verdicts = []
     for entry in entries:
         relevance = entry["relevance"]

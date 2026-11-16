@@ -147,10 +147,54 @@ async def test_bad_response_retries_then_none(tmp_path: Path, respond: Callable[
     assert len(requests) == 3
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Sure! " + _verdicts(1, 2),
+        _verdicts(1, 2) + " Hope that helps.",
+        "Here you go:\n```json\n" + _verdicts(1, 2) + "\n```",
+        "```json\n" + _verdicts(1, 2) + "\n```\n```json\n" + _verdicts(1, 2) + "\n```",
+    ],
+    ids=["prose-before", "prose-after", "prose-before-fence", "two-fences"],
+)
+@pytest.mark.asyncio
+async def test_json_wrapped_in_prose_retries_then_none(tmp_path: Path, content: str) -> None:
+    """A reply that is not one whole JSON document fails every attempt and caches nothing."""
+    client, requests = _client(lambda _request: _reply(content))
+    async with client:
+        with JudgeCache(tmp_path / "cache.sqlite") as cache:
+            verdicts = await _judge(HITS, cache, client)
+            assert all(cache.get(cache_key(MODEL, QUERY, hit)) is None for hit in HITS)
+
+    assert verdicts == [None, None]
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "  \n" + _verdicts(1, 2) + "\n  ",
+        "```json\n" + _verdicts(1, 2) + "\n```",
+        "\n```\n" + _verdicts(1, 2) + "\n```\n",
+    ],
+    ids=["whitespace", "json-fence", "bare-fence"],
+)
+@pytest.mark.asyncio
+async def test_accepts_whitespace_and_one_code_fence(tmp_path: Path, content: str) -> None:
+    """Surrounding whitespace and a single code fence around the JSON are accepted."""
+    client, requests = _client(lambda _request: _reply(content))
+    async with client:
+        with JudgeCache(tmp_path / "cache.sqlite") as cache:
+            verdicts = await _judge(HITS, cache, client)
+
+    assert verdicts == [Verdict(1, "r1"), Verdict(2, "r2")]
+    assert len(requests) == 1
+
+
 @pytest.mark.asyncio
 async def test_recovers_after_a_bad_attempt(tmp_path: Path) -> None:
-    """A good reply after a bad one is used, even with text around its JSON."""
-    responses = iter([_reply("garbage"), _reply("Sure! " + _verdicts(1, 2))])
+    """A good reply after a bad one is used."""
+    responses = iter([_reply("Sure! " + _verdicts(1, 2)), _reply(_verdicts(1, 2))])
     client, requests = _client(lambda _request: next(responses))
     async with client:
         with JudgeCache(tmp_path / "cache.sqlite") as cache:
