@@ -503,7 +503,7 @@ async def test_a_resumed_attempt_publishes_to_its_own_sink() -> None:
 
 @pytest.mark.asyncio
 async def test_frames_carry_the_model_the_child_runs_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mid-run model switch and a resume's model reach the next snapshot and every frame's meta."""
+    """A mid-run model switch and a resume's model reach the next snapshot, and the switched one its run's meta."""
     monkeypatch.setattr(lifecycle, "update_subagent_turn_sync", lambda *_args: None)
     seen = _Sink()
     child = _child()

@@ -343,6 +343,7 @@ def _open_feed(observation: ChildRunObservation, context: ToolRuntimeContext | N
     try:
         sink = None if context is None else _subagent_sink(context, observation)
         if sink is None:
+            _publish(child.delegation_id, lambda feed: feed.model(child.model_name))
             _publish(child.delegation_id, lambda feed: feed.status("running"))
         else:
             ActivityFeed.open(

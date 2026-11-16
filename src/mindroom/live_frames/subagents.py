@@ -53,6 +53,8 @@ _WORKING_STATUSES = frozenset({"running", "awaiting_approval"})
 # How long a homeserver whose relay check failed or said no gets no frames, so its runs' updates neither start a
 # publisher nor ask it again.
 _RELAY_OFF_SECONDS = 60.0
+# Each value of a run's model object, which config does not bound, so the frame without any text still fits.
+_MAX_MODEL_CHARACTERS = 200
 
 type _Frame = dict[str, object]
 
@@ -92,9 +94,10 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
 
 def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
     """Return what every frame says about its run; ``full``, for a snapshot, adds the task and an ended run's result."""
+    model = snapshot.model or {"config": snapshot.model_name}
     meta: dict[str, object] = {
         "agent": snapshot.agent_name,
-        "model": snapshot.model or {"config": snapshot.model_name},
+        "model": {key: value[:_MAX_MODEL_CHARACTERS] for key, value in model.items()},
         "subagent": snapshot.subagent_id,
         "caller": snapshot.caller_agent_name,
         "root": snapshot.root_caller_agent_name,
