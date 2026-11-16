@@ -1157,29 +1157,37 @@ async def test_an_edit_that_makes_a_message_wait_records_that_it_mentions_nobody
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("transcript", "mentions_nobody"),
+    ("transcript", "busy_from_start", "mentions_nobody"),
     [
-        pytest.param("🎤 look at this", True, id="mentions-nobody"),
-        pytest.param("🎤 @general look at this", False, id="mentions-general"),
-        pytest.param(None, False, id="not-transcribed"),
+        pytest.param("🎤 look at this", True, True, id="mentions-nobody"),
+        pytest.param("🎤 look at this", False, True, id="mentions-nobody-reply-started-while-transcribing"),
+        pytest.param("🎤 @general look at this", True, False, id="mentions-general"),
+        pytest.param(None, True, False, id="not-transcribed"),
     ],
 )
 async def test_a_waiting_voice_message_records_whether_its_transcript_mentions_anyone(
     tmp_path: Path,
     transcript: str | None,
     *,
+    busy_from_start: bool,
     mentions_nobody: bool,
 ) -> None:
     """Once transcribed, a voice message waiting for general's running response records whom it mentions, as text does.
 
-    Until then, or when it cannot be transcribed, whom it mentions is unknown, so it counts as mentioning someone.
+    Until then, or when it cannot be transcribed, whom it mentions is unknown, so it counts as mentioning someone. A
+    response that starts while the voice message is transcribed learns the same once the transcript is ready.
     """
     async with _general_answering_in_its_thread(tmp_path, voice=True) as (bot, room, _paths, running):
+        if not busy_from_start:
+            running.finish_response_turn()
 
         async def transcribe(*_args: object, **_kwargs: object) -> str | None:
-            assert [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()] == [
-                ("$voice", False),
-            ]
+            waiting = [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()]
+            if busy_from_start:
+                assert waiting == [("$voice", False)]
+            else:
+                assert waiting == []
+                running.begin_response_turn()
             return transcript
 
         voice = {
