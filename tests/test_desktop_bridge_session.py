@@ -51,11 +51,11 @@ from tests.desktop_helpers import (
     offline_session_deps,
     runtime_paths,
 )
+from tests.desktop_helpers import _fake_quartz as fake_quartz
+from tests.desktop_helpers import _provider as real_provider
+from tests.desktop_helpers import _window as window
 from tests.desktop_helpers import empty_selected_root as empty_selected_root  # noqa: PLC0414
 from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
-from tests.test_desktop_provider import _fake_quartz as fake_quartz
-from tests.test_desktop_provider import _provider as real_provider
-from tests.test_desktop_provider import _window as window
 
 if TYPE_CHECKING:
     from collections.abc import Callable
