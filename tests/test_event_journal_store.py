@@ -9863,6 +9863,7 @@ class TestHotQueriesAreIndexCovered:
 
         assert len(plans) == 4
         for plan in plans:
+            assert "held_source USING INDEX reply_span_sources_event (principal_id=? AND event_id=?)" in plan, plan
             assert not any(step in plan for step in ("SCAN ", "TEMP B-TREE", "AUTOMATIC", "MATERIALIZE")), plan
 
     async def test_a_deep_page_seeks_its_cursor_instead_of_filtering_down_to_it(self, tmp_path: Path) -> None:
