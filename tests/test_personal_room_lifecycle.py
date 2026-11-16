@@ -732,6 +732,33 @@ async def test_reloads_do_not_restart_the_count_toward_an_error(coordination: Co
 
 
 @pytest.mark.asyncio
+async def test_a_live_success_ends_the_failure_count(coordination: Coordination, clock: Clock) -> None:
+    """A lobby command that succeeds logs the recovery, so the same failure coming back counts toward a new error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    failure = RuntimeError("temporarily unavailable")
+    coordination.owner.ensure.side_effect = [failure] * 3 + [None] + [failure] * 3
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60):
+            clock.now += delay
+            await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        for delay in (120, 240, 480):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_RECOVERED, "info", False, 3),
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_new_error_after_the_third_failure_is_one_new_error(coordination: Coordination, clock: Clock) -> None:
     """A different failure in a candidate already past the threshold is a new problem: one error with its traceback."""
     lifecycle = coordination.lifecycle

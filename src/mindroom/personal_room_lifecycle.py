@@ -382,6 +382,7 @@ class PersonalRoomLifecycle:
             self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         else:
             self._roster_mismatches.pop(candidate, None)
+            self._end_failure_streak(candidate)
             self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
 
     def _queue_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> None:
@@ -619,14 +620,7 @@ class PersonalRoomLifecycle:
         finally:
             self._changes_during_attempt = None
         self._roster_mismatches.pop(candidate, None)
-        streak = self._failure_streaks.pop(candidate, None)
-        if streak is not None:
-            logger.info(
-                "Personal-room reconciliation recovered",
-                user_id=user_id,
-                room_id=room_id,
-                failed_attempts=streak.failures,
-            )
+        self._end_failure_streak(candidate)
         # Its own owner invite comes back as a change, and the attempt already validated the room after it.
         self._membership_changed.discard(candidate)
         if revision == self._config_revision:
@@ -635,6 +629,18 @@ class PersonalRoomLifecycle:
             if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
                 self._completed_candidates.add(candidate)
         return True
+
+    def _end_failure_streak(self, candidate: tuple[str, str]) -> None:
+        """Say once that a candidate whose reconciliation failed has succeeded, so a later failure counts anew."""
+        streak = self._failure_streaks.pop(candidate, None)
+        if streak is not None:
+            user_id, room_id = candidate
+            logger.info(
+                "Personal-room reconciliation recovered",
+                user_id=user_id,
+                room_id=room_id,
+                failed_attempts=streak.failures,
+            )
 
     def retained_room_ids(self) -> set[str]:
         """Return recorded rejoin authority, including when provisioning is disabled."""
