@@ -36,7 +36,8 @@ _CONTINUATION_COLUMNS = """
 
 # A continuation holds the pending sources of the span whose pause created it.
 # Join on ``held_source.event_id``; ``held_source.ordinal = 0`` is the source
-# recovery dispatches.
+# recovery dispatches. ``journal._pending_rows`` spells these holds as two LEFT
+# JOINs, so a change here belongs there too.
 HELD_SOURCES = """
     reply_span_sources AS held_source
     JOIN approval_continuations AS continuations
