@@ -1104,11 +1104,12 @@ async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordin
 
 @pytest.mark.asyncio
 async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coordination) -> None:
-    """A clean pass that no longer finds a requester drops what it reported and its pending immediate retry."""
+    """A clean pass that no longer finds a requester drops what it reported, its failure count, and its immediate retry."""
     lifecycle = coordination.lifecycle
     record_intent(lifecycle, "alice")
     coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
     await lifecycle._reconcile()
+    assert lifecycle._failure_streaks
     personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
 
     lifecycle.membership_changed("!personal:localhost", "$left")
@@ -1118,6 +1119,7 @@ async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coord
     assert lifecycle._reconciled
     assert not lifecycle._roster_mismatches
     assert not lifecycle._membership_changed
+    assert not lifecycle._failure_streaks
 
 
 @pytest.mark.asyncio
