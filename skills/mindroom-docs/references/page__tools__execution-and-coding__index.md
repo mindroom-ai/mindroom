@@ -237,6 +237,7 @@ It provides `request_temporary_secret(name, reason)`, where `name` is the enviro
 
 Unlike an Agent Keys key, a temporary secret reaches the agent's commands, so a command can print it or send it elsewhere.
 MindRoom tells the agent to use the variable only inside the command that needs it, and replaces exact copies of the value in tool results and in the output a running command shows, before the model or the room reads them, but neither stops an agent that works around them.
+What a command prints can also end up in the agent's workspace, in a file the command writes or in the file MindRoom saves a large result or a `mindroom_output_path` result to; those files hold the output as the command printed it.
 Give the tool to agents you would trust with the secret, and prefer an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service for an API key that a service's hosts take in a header.
 
 ```yaml

@@ -684,7 +684,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
     # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
     # types there.
-    given = _given_secrets(resolved_context)
+    given = await _given_secrets(resolved_context)
     if given and (registered_toolkit, tool_name) == _SECRET_RECEIVER:
         environment = environment.then(ToolEnvironment(values=given))
 
@@ -718,12 +718,21 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     return await answer(result, "error" if _answered_failure(result) else "success")
 
 
-def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
-    """Return the temporary secrets the call's requester gave its conversation, by variable name."""
+async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
+    """Return the temporary secrets the call's requester gave its conversation, by variable name.
+
+    Every call reads the store, so the read here touches no file; the store's first read after a start and the
+    deletion of an expired value's file run in a thread.
+    """
     holder = secret_holder(resolved_context.execution_identity)
     if holder is None:
         return {}
-    return temporary_secrets().values(holder, storage_root=resolved_context.runtime_paths.storage_root)
+    store = temporary_secrets()
+    storage_root = resolved_context.runtime_paths.storage_root
+    given = store.values_in_memory(holder, storage_root=storage_root)
+    if given is None:
+        given = await asyncio.to_thread(store.values, holder, storage_root=storage_root)
+    return given
 
 
 def _without_given_secrets(
@@ -733,24 +742,34 @@ def _without_given_secrets(
     """Return the tool with the exact copies of the conversation's given secrets removed from what it shows.
 
     Every call in the conversation is covered, since a later call may read what a command wrote. The reply's record
-    of the call, its tool trace, its hooks and the model all read the string result this returns, and live reply
-    frames the progress it reports. Best effort, like all redaction: a command that encodes the value, or a result
-    that is no string, passes.
+    of the call, its tool trace, its hooks and the model all read the result this returns, masked in its text and in
+    the texts of a mapping or a list, such as the receipt of output saved to a file; live reply frames read the
+    progress it reports. Best effort, like all redaction: a command that encodes the value passes, and so does
+    what a command, or MindRoom on its behalf, writes to a file in the workspace.
     """
     if not given:
         return func
     # The longest first, so a value that holds another leaves no tail beside the shorter one's mask.
     values = sorted(given.values(), key=lambda value: -len(value))
 
-    def redacted(text: str) -> str:
+    def masked_text(text: str) -> str:
         for value in values:
             text = text.replace(value, REDACTED)
         return text
 
+    def masked(result: object) -> object:
+        if isinstance(result, str):
+            return masked_text(result)
+        if isinstance(result, dict):
+            return {key: masked(item) for key, item in result.items()}
+        if isinstance(result, list):
+            return [masked(item) for item in result]
+        return result
+
     async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
-        with tool_progress_through(redacted):
+        with tool_progress_through(masked_text):
             result = await func(**arguments)
-        return redacted(result) if isinstance(result, str) else result
+        return masked(result)
 
     return without_given_secrets
 

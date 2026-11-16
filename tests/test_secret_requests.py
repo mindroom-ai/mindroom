@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -351,3 +352,62 @@ def test_a_file_left_by_an_interrupted_write_is_deleted(tmp_path: Path) -> None:
 
     assert _TemporarySecrets().values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
     assert _files(tmp_path) == []
+
+
+def test_a_read_in_memory_needs_the_complete_read_first_and_for_a_file_to_delete(tmp_path: Path) -> None:
+    """The read tool calls make on the event loop touches no file: it defers to the complete read instead."""
+    store = _TemporarySecrets()
+    assert store.values_in_memory(HOLDER, now=1000.0, storage_root=tmp_path) is None
+    assert store.values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+    assert store.values_in_memory(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+
+    store.give(HOLDER, "KEPT", "on disk", keep="disk", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "SHORT", "in memory", keep="memory", now=1000.0, storage_root=tmp_path)
+    assert store.values_in_memory(HOLDER, now=1001.0, storage_root=tmp_path) == {
+        "KEPT": "on disk",
+        "SHORT": "in memory",
+    }
+    # A value kept in memory expires without a file to delete.
+    after_memory = 1000.0 + TEMPORARY_SECRET_KEEP_SECONDS["memory"]
+    assert store.values_in_memory(HOLDER, now=after_memory, storage_root=tmp_path) == {"KEPT": "on disk"}
+    # The expired file is the complete read's to delete.
+    after_disk = 1000.0 + TEMPORARY_SECRET_KEEP_SECONDS["disk"]
+    assert store.values_in_memory(HOLDER, now=after_disk, storage_root=tmp_path) is None
+    assert len(_files(tmp_path)) == 1
+    assert store.values(HOLDER, now=after_disk, storage_root=tmp_path) == {}
+    assert _files(tmp_path) == []
+    assert store.values_in_memory(HOLDER, now=after_disk, storage_root=tmp_path) == {}
+
+
+def test_a_read_in_memory_never_waits_for_a_write_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An answer being written to a slow disk must not hold up the tool calls of every conversation."""
+    store = _TemporarySecrets()
+    assert store.values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+    writing, finish = threading.Event(), threading.Event()
+    write_file = secret_requests._write_file
+
+    def slow_write(*args: object) -> Path:
+        writing.set()
+        assert finish.wait(timeout=10)
+        return write_file(*args)
+
+    monkeypatch.setattr(secret_requests, "_write_file", slow_write)
+    answer = threading.Thread(
+        target=store.give,
+        args=(HOLDER, "TOKEN", "s3cret"),
+        kwargs={"keep": "disk", "now": 1000.0, "storage_root": tmp_path},
+    )
+    answer.start()
+    try:
+        assert writing.wait(timeout=10)
+        read: list[dict[str, str] | None] = []
+        reader = threading.Thread(
+            target=lambda: read.append(store.values_in_memory(HOLDER, now=1001.0, storage_root=tmp_path)),
+        )
+        reader.start()
+        reader.join(timeout=5)
+        assert read == [{}]
+    finally:
+        finish.set()
+        answer.join(timeout=10)
+    assert store.values_in_memory(HOLDER, now=1001.0, storage_root=tmp_path) == {"TOKEN": "s3cret"}

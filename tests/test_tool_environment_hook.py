@@ -889,3 +889,29 @@ async def test_a_secret_that_holds_another_is_removed_whole(tmp_path: Path, give
     assert not outcome.is_error, outcome.content
     assert "and-more" not in outcome.content
     assert outcome.content.count(REDACTED) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_structured_result_loses_a_given_secret_too(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """A result that is a receipt, such as that of output saved to a file, is masked in its texts."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def receipt(_call: ToolCall, _call_next: ToolNext) -> object:
+        return {"status": "saved", "preview": "raw:open-sesame-123", "lines": ["open-sesame-123", 7]}
+
+    function = replace(shell.function, middleware=(receipt,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert recorded == [{"status": "saved", "preview": f"raw:{REDACTED}", "lines": [REDACTED, 7]}]
+    assert "open-sesame-123" not in str(outcome.content)

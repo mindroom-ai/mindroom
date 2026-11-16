@@ -246,17 +246,19 @@ class _Given:
 class _TemporarySecrets:
     """The values requesters gave conversations, by holder and variable name, until each expires.
 
-    Every value is in memory; one kept on disk also has a file under the storage root, which the first use of that
-    root reads back after a restart. Every tool call reads the store on the event loop, so a read takes only the lock
-    that guards the values, never a write to disk, and no trouble with a file fails it.
+    Every value is in memory; one kept on disk also has a file under the storage root, which the first complete read
+    of that root reads back after a restart. Every tool call reads the store on the event loop, with
+    `values_in_memory`, which touches no file and waits for none: file work runs under a lock of its own, and the
+    lock that guards the values is never held across it.
     """
 
     def __init__(self) -> None:
+        # Guards the two fields below, and is never held while a file is read, written or deleted.
         self._lock = threading.Lock()
-        # One answer writes its file at a time, outside the lock that reads take.
-        self._writes = threading.Lock()
         self._given: dict[tuple[_SecretHolder, str], _Given] = {}
         self._loaded: set[Path] = set()
+        # One answer or complete read works on the files at a time.
+        self._files = threading.Lock()
 
     def give(
         self,
@@ -268,13 +270,14 @@ class _TemporarySecrets:
         now: float,
         storage_root: Path,
     ) -> None:
-        """Keep `value` as `holder`'s variable `name` for the lifetime of `keep`, in place of an earlier value."""
+        """Keep `value` as `holder`'s variable `name` for the lifetime of `keep`, in place of an earlier value.
+
+        Writes a kept value's file, so it runs in a thread.
+        """
         directory = storage_root / _TEMPORARY_SECRETS_DIRECTORY
         expires_at = now + TEMPORARY_SECRET_KEEP_SECONDS[keep]
-        with self._lock:
-            # The directory's files are read before this process writes any, so a read never meets a write under way.
-            self._refresh(directory, now)
-        with self._writes:
+        with self._files:
+            self._load(directory)
             path = _write_file(directory, holder, name, value, expires_at) if keep == "disk" else None
             with self._lock:
                 earlier = self._given.get((holder, name))
@@ -283,22 +286,54 @@ class _TemporarySecrets:
                 _delete_file(earlier.path)
 
     def values(self, holder: _SecretHolder, *, storage_root: Path, now: float | None = None) -> dict[str, str]:
-        """Return `holder`'s live values by variable name, at `now` or else at this moment."""
+        """Return `holder`'s live values by variable name, at `now` or else at this moment.
+
+        The complete read: it reads the root's files at its first use and deletes the files of expired values, so it
+        runs in a thread wherever an event loop runs.
+        """
+        now = time.time() if now is None else now
+        with self._files:
+            self._load(storage_root / _TEMPORARY_SECRETS_DIRECTORY)
+            with self._lock:
+                expired = [key for key, given in self._given.items() if now >= given.expires_at]
+                paths = [given.path for key in expired if (given := self._given.pop(key)).path is not None]
+                values = {name: given.value for (owner, name), given in self._given.items() if owner == holder}
+            for path in paths:
+                _delete_file(path)
+        return values
+
+    def values_in_memory(
+        self,
+        holder: _SecretHolder,
+        *,
+        storage_root: Path,
+        now: float | None = None,
+    ) -> dict[str, str] | None:
+        """Return `holder`'s live values without touching a file, or None when `values` has to run first.
+
+        None before the root's files were read, and while an expired value's file waits to be deleted.
+        """
+        now = time.time() if now is None else now
         with self._lock:
-            self._refresh(storage_root / _TEMPORARY_SECRETS_DIRECTORY, time.time() if now is None else now)
+            if storage_root / _TEMPORARY_SECRETS_DIRECTORY not in self._loaded:
+                return None
+            expired = [key for key, given in self._given.items() if now >= given.expires_at]
+            if any(self._given[key].path is not None for key in expired):
+                return None
+            for key in expired:
+                del self._given[key]
             return {name: given.value for (owner, name), given in self._given.items() if owner == holder}
 
-    def _refresh(self, directory: Path, now: float) -> None:
-        """Read `directory`'s files at its first use, then drop every expired value with its file."""
-        if directory not in self._loaded:
+    def _load(self, directory: Path) -> None:
+        """Read `directory`'s files at its first use; the caller holds the files' lock."""
+        with self._lock:
+            if directory in self._loaded:
+                return
+        stored = _stored_values(directory)
+        with self._lock:
             self._loaded.add(directory)
-            for key, given in _stored_values(directory):
+            for key, given in stored:
                 self._given.setdefault(key, given)
-        for key, given in list(self._given.items()):
-            if now >= given.expires_at:
-                del self._given[key]
-                if given.path is not None:
-                    _delete_file(given.path)
 
 
 def _stored_values(directory: Path) -> list[tuple[tuple[_SecretHolder, str], _Given]]:
