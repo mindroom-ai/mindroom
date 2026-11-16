@@ -14,7 +14,6 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.ai import TurnResult, run_delegated_child_response
-from mindroom.approval.tool_owners import check_prepared_catalog_authority
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
@@ -32,11 +31,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
-from mindroom.tool_system.runtime_context import (
-    current_execution_identity,
-    get_tool_runtime_context,
-    tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -712,61 +707,3 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
         assert current_execution_identity() == identity
 
     assert seen == [child_execution_identity(child)]
-
-
-@pytest.mark.asyncio
-async def test_a_child_s_tools_run_under_the_config_it_was_built_from(tmp_path: Path) -> None:
-    """A reload after the caller's turn began must not leave its fresh child's tools on the caller's snapshot.
-
-    A minimal child's prepared CLI catalog refuses every call whose context's config holds other authority than the
-    current one, so a child built from the live config but handed its caller's stale snapshot could run nothing.
-    """
-    _toolkit, stale, runtime_paths = _tools(tmp_path)
-    live = stale.model_copy(update={"timezone": "Europe/Amsterdam"})
-    identity = _identity()
-    context = replace(
-        _delegate_runtime_context(stale, runtime_paths, execution_identity=identity),
-        config_provider=lambda: live,
-    )
-    seen: list[object] = []
-
-    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
-        child_context = get_tool_runtime_context()
-        assert child_context is not None
-        seen.append(child_context.config)
-        check_prepared_catalog_authority(child_context)
-        return TurnResult("child answer")
-
-    with tool_runtime_context(context), patch("mindroom.ai.ai_response", respond):
-        child = prepare_child_turn(
-            "leader",
-            "child",
-            "Do the work",
-            owner=identity,
-            config=live,
-            runtime_paths=runtime_paths,
-            depth=0,
-            budget_monitor=None,
-            model=None,
-            agent_mode="minimal",
-            previous=None,
-            persona=None,
-        )
-        await start_child_turn(
-            child,
-            parent_run_id=None,
-            config=live,
-            runtime_paths=runtime_paths,
-            caller_execution_identity=identity,
-        )
-        async with child_run_context(child, config=live, runtime_paths=runtime_paths):
-            await run_delegated_child_response(
-                child,
-                prompt=child.task,
-                config=live,
-                runtime_paths=runtime_paths,
-                refresh_scheduler=None,
-                supports_native_tool_approval=False,
-            )
-
-    assert seen == [live]

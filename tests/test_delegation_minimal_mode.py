@@ -363,6 +363,58 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
+async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+) -> None:
+    """A reload after the caller's turn began leaves a fresh minimal child its Bash, not the caller's stale snapshot."""
+    config = _config(helper_tools=["shell"])
+    snapshot = config.model_copy(update={"timezone": "Europe/Amsterdam"})
+    paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
+    entity_ids(config, paths)
+    identity = _identity()
+    # The caller's turn holds the config it started with; the reloaded one is current.
+    live = replace(_live_context(snapshot, paths), config_provider=lambda: config)
+    listings: list[str] = []
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        assert args == "mindroom-agent tools list"
+        listing = await shell_cli_owner(live.orchestrator.agent_cli_registry).operation(
+            window=cli_window(),
+            operation=ToolListOperation(operation="tools.list"),
+        )
+        listings.append(str(listing))
+        return str(listing)
+
+    child = ScriptedModel(
+        [calls(tool_call("bash", "bash-0", command="mindroom-agent tools list")), answer("Child answer")],
+    )
+    leader = ScriptedModel([])
+    install_scripted_shell(monkeypatch, run_shell_command)
+    ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
+    toolkit = DelegateTools("leader", paths, snapshot, _workspace(tmp_path, "leader"), execution_identity=identity)
+
+    with tool_runtime_context(live):
+        result = await _delegate(
+            toolkit,
+            snapshot,
+            paths,
+            "run_subagent",
+            leader=leader if native else None,
+            task="Report",
+            agent_name="helper",
+            minimal=True,
+        )
+
+    assert "Child answer" in result, result
+    assert len(listings) == 1
+    assert "no longer permits" not in str(child.requests[-1].messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
