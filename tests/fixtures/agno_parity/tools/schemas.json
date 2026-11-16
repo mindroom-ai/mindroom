@@ -1036,6 +1036,46 @@
         "stop_after_tool_call": false
       },
       {
+        "name": "inline_image",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string"
+            },
+            "alt": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "reference"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
         "name": "view_file",
         "description": "View an image in your own model context without posting or invoking another model.\nTo view an attachment ID, use get_attachment with view instead.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
         "parameters": {

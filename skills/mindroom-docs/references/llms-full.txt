@@ -3127,7 +3127,8 @@ An agent judges a message only when all of these hold:
 Configured human aliases count as one participant, while agents, the internal service account, and `bot_accounts` do not count as humans.
 Agents merely present in the room never join: with 50 agents in a room and two already in the thread, only those two can judge, and only if each opted in.
 Each eligible agent decides separately.
-Commands and scheduled work never use adaptive participation.
+Commands, scheduled work, and a queued message the [mid-turn judge](#mid-turn-coalescing) said a running reply cannot wait for never use adaptive participation, so the agent answers that message once the reply ends.
+The judge decides once for all queued messages, so when new messages from two people were judged together, or a message was edited after the judgment, participation still decides.
 
 An agent that declines sends no reply; with `decline_reaction` set, it reacts once to the latest message of the turn.
 Choose the emoji with care, because 👍 can read as agreement with the message.
@@ -6129,6 +6130,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
 
 ```python
 list_attachments()
@@ -6169,6 +6171,19 @@ Save attachments this way before processing them with `file`, `coding`, `python`
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Inline Images
+
+`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
+using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
+Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
+The alt text defaults to the filename.
+
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
+Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
+In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 
@@ -9173,6 +9188,7 @@ If shell permissions or deployment settings change after minimal mode was select
 ### Prompt and `minimal_instructions`
 
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
+When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
@@ -12998,6 +13014,8 @@ matrix_api(
 
 ### Automatic Thread Summaries
 
+MindRoom starts a background title for a new thread from its first prompt, using the transcription for voice messages, without waiting for the agent's reply.
+It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
 MindRoom posts a summary notice in a thread after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`).
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 messages, the summary model sees only the first three and last three.
@@ -13021,6 +13039,7 @@ These models always use their provider's default: Vertex AI Claude, Claude Opus 
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.
+These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 
 ## Related Docs
 

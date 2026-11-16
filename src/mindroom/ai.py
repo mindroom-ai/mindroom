@@ -1068,7 +1068,10 @@ async def run_delegated_child_response(
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
-    child_context = child_tool_runtime_context(context, child) if context is not None else None
+    # The child's tools check reloads against the config its agent was built from, without the caller's approval
+    # overlay: the overlay's base, or the live config it was authorized under, never the caller turn's older snapshot.
+    built_from = config if approval_config is not None else authorized_config
+    child_context = child_tool_runtime_context(context, child, config=built_from) if context is not None else None
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,
