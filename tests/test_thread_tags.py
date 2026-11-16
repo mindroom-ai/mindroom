@@ -691,7 +691,6 @@ async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
     write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None, TimeoutError("timed out")])
 
     with (
-        patch("mindroom.thread_tags._assert_thread_tags_write_allowed", new=AsyncMock()),
         patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
         capture_logs() as logs,
     ):
@@ -712,6 +711,30 @@ async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
         had_existing_tags=False,
         applied_tags=("second",),
     )
+
+
+@pytest.mark.asyncio
+async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller() -> None:
+    """Power levels that refuse a tag, also partway through the batch, stop it without an error of its own."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response()
+    write_tag = AsyncMock(side_effect=[None, ThreadTagsPermissionError("refused"), None])
+
+    with (
+        patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
+        capture_logs() as logs,
+        pytest.raises(ThreadTagsPermissionError),
+    ):
+        await set_thread_tags_if_empty(
+            client,
+            "!room:localhost",
+            "$refused-root:localhost",
+            ["first", "second", "third"],
+            set_by="@automatic:localhost",
+        )
+
+    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
+    assert [log for log in logs if log["log_level"] == "error"] == []
 
 
 @pytest.mark.asyncio

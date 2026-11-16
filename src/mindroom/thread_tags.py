@@ -941,8 +941,6 @@ async def set_thread_tags_if_empty(
                 skipped_due_to_prior_mutation=True,
             )
 
-        # Power levels that refuse the write raise ThreadTagsPermissionError here, before any tag is attempted.
-        await _assert_thread_tags_write_allowed(client, room_id, requester_user_id=normalized_set_by)
         applied_tags: list[str] = []
         failed_tags: list[str] = []
         first_failure: Exception | None = None
@@ -955,6 +953,9 @@ async def set_thread_tags_if_empty(
                     tag,
                     set_by=normalized_set_by,
                 )
+            except ThreadTagsPermissionError:
+                # Power levels that refuse the write refuse every tag, checked before a tag is written; the caller decides.
+                raise
             except Exception as exc:
                 first_failure = first_failure or exc
                 failed_tags.append(tag)
