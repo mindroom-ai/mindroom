@@ -347,6 +347,10 @@ async def _sole_untitled_prompt(
     ]
     if len(ordinary) != 1 or ordinary[0].event_id != prompt_event_id:
         return None
+    # An edit keeps the prompt's event ID but changes its text, so the prompt
+    # this title would be made from is no longer what the thread shows.
+    if ordinary[0].latest_event_id != prompt_event_id:
+        return None
     # Resolution lives in room state, which a history read cannot see.
     if await _thread_is_resolved(client, room_id, thread_id):
         return None
@@ -430,7 +434,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             if not history.is_full_history:
                 return
             # Everything that made the thread eligible can change while the model
-            # runs: another title or pin, a resolution, or a deleted prompt.
+            # runs: another title or pin, a resolution, or a deleted or edited prompt.
             if await sole_untitled_prompt(history) is None:
                 return
             await send_thread_summary_notice(

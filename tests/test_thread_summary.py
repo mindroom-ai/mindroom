@@ -117,6 +117,13 @@ def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
     ]
 
 
+def _edited_prompt_history() -> list[ResolvedVisibleMessage]:
+    """Build a one-prompt thread whose prompt was edited, so it keeps ``$event0`` but shows ``$edit``."""
+    history = _make_thread_history(1)
+    history[0].apply_edit(body="Edited request", timestamp=1700000500, latest_event_id="$edit", content=None)
+    return history
+
+
 # Every automatic pass is queued by a delivery, so the production caller always
 # names the answer it just sent. These fixtures already list the whole thread
 # including that answer, so the delivered fact names a message they contain:
@@ -934,6 +941,28 @@ class TestMaybeGenerateThreadSummary:
         await self._provisional()
 
         assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_skips_prompt_edited_during_generation(self) -> None:
+        """A prompt edited while the model ran keeps its event ID, but the title would describe the old text."""
+
+        async def edit_prompt() -> None:
+            self._history(_edited_prompt_history())
+
+        model = self._summarizer(Await(edit_prompt))
+        self._history(_make_thread_history(1))
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_skips_prompt_already_edited(self) -> None:
+        """A prompt edited before the read means the turn's text is stale, so no model call is made."""
+        model = self._summarizer()
+        self._history(_edited_prompt_history())
+        await self._provisional()
+
+        assert not model.requests
         assert not _sent_summaries(self.client)
 
     async def test_provisional_title_generation_failure_is_contained(self) -> None:
