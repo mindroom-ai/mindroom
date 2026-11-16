@@ -1147,7 +1147,8 @@ class AgentBot:
         content = self._server_state_content(self.config)
         if client is None or content == self._server_state_content(previous_config):
             return
-        await asyncio.gather(*(publish_server_state(client, room_id, content) for room_id in sorted(client.rooms)))
+        rooms = sorted(room_id for room_id in client.rooms if room_id != unmanaged_room_id(client))
+        await asyncio.gather(*(publish_server_state(client, room_id, content) for room_id in rooms))
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""

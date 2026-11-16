@@ -69,8 +69,9 @@ def room_state(tmp_path: Path) -> RoomState:
     events = {
         ("m.room.member", ids[name].full_id): {"membership": "join"} for name in (ROUTER_AGENT_NAME, "agent1", "agent2")
     }
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = AsyncMock(spec=MindRoomAsyncClient)
     client.user_id = ids[ROUTER_AGENT_NAME].full_id
+    client.unmanaged_room_id = None
     room = nio.MatrixRoom(ROOM_ID, client.user_id)
     for name in (ROUTER_AGENT_NAME, "agent1", "agent2"):
         room.add_member(ids[name].full_id, None, None)
@@ -1245,7 +1246,6 @@ async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_wait
 async def test_router_publishes_no_room_state_in_its_homeserver_admin_room(room_state: RoomState) -> None:
     """Startup, reload, membership changes, and joins write no thread mode or accounts state into that room."""
     config, paths, ids, events, client = room_state
-    client.__class__ = MindRoomAsyncClient
     client.unmanaged_room_id = ROOM_ID
     duties = _router_duties(room_state)
 

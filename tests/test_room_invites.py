@@ -51,6 +51,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.rooms import RoomSetup
 from mindroom.thread_summary import notices
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import joined_members_response, with_responder_access
@@ -3491,3 +3492,65 @@ async def test_orphan_cleanup_skips_the_routers_homeserver_admin_room(
 
     assert result == {"!other:localhost": ["@mindroom_retired:localhost"]}
     client.room_kick.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_room_setup_invites_no_one_into_the_routers_homeserver_admin_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Room setup invites the internal user into the router's other rooms, not into its homeserver admin room."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default"), mindroom_user={"username": "mindroom_user", "display_name": "U"}),
+        test_runtime_paths(tmp_path),
+    )
+    client = MindRoomAsyncClient("http://localhost:8008", "@mindroom_router:localhost")
+    client.unmanaged_room_id = "!admins:localhost"
+    client.room_invite = AsyncMock(return_value=nio.RoomInviteResponse())
+    monkeypatch.setattr(
+        "mindroom.orchestration.rooms.get_joined_rooms",
+        AsyncMock(return_value=["!admins:localhost", "!lobby:localhost"]),
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.rooms.get_room_members",
+        AsyncMock(return_value={"@mindroom_router:localhost"}),
+    )
+    setup = RoomSetup(runtime_paths_for(config), lambda: config, lambda: client, AsyncMock())
+
+    await setup._ensure_room_invitations({})
+
+    assert [invite.args[0] for invite in client.room_invite.await_args_list] == ["!lobby:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_router_writes_no_server_state_into_its_homeserver_admin_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reload that changes the router's server state publishes it in its other rooms only."""
+    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
+    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    bot.client.rooms = {"!admins:localhost": MagicMock(), "!lobby:localhost": MagicMock()}
+    previous = bot.config.model_copy()
+    monkeypatch.setattr(bot, "_server_state_content", lambda config: {"current": config is bot.config})
+    publish = AsyncMock()
+    monkeypatch.setattr("mindroom.bot.publish_server_state", publish)
+
+    await bot.refresh_server_state(previous)
+
+    assert [published.args[1] for published in publish.await_args_list] == ["!lobby:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_a_managed_room_under_the_admin_alias_stays_managed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A room MindRoom manages as `admins` keeps its alias on a homeserver where that is no admin room."""
+    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
+    managed = MatrixState()
+    managed.add_room("admins", "!admins:localhost", "#admins:localhost", "Admins")
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: managed)
+
+    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    assert bot.client.unmanaged_room_id is None

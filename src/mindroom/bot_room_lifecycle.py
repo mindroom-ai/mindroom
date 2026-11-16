@@ -446,16 +446,20 @@ class BotRoomLifecycle:
         """Find the router's homeserver admin room, which it keeps but takes no part in; False when the lookup failed.
 
         On Tuwunel, an account is a server admin while it is joined to `#admins:<server_name>`, and the router needs
-        that for the admin join API. A homeserver without that alias leaves no room unmanaged.
+        that for the admin join API. A homeserver without that alias, or a room MindRoom manages under it, such as
+        one configured as `admins`, leaves no room unmanaged.
         """
         client = self._client()
         if self.deps.agent_name != ROUTER_AGENT_NAME or not isinstance(client, MindRoomAsyncClient):
             return True
         response = await client.room_resolve_alias(f"#admins:{self.deps.agent_user.user_id.partition(':')[2]}")
-        if isinstance(response, nio.RoomResolveAliasResponse):
+        managed = {room.room_id for room in matrix_state_for_runtime(self.deps.runtime_paths).rooms.values()}
+        if isinstance(response, nio.RoomResolveAliasResponse) and response.room_id not in managed:
             client.unmanaged_room_id = response.room_id
             return True
-        if isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomResolveAliasResponse) or (
+            isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND"
+        ):
             client.unmanaged_room_id = None
             return True
         self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response))

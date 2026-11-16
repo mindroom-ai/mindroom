@@ -239,6 +239,8 @@ class RoomSetup:
         )
 
         for room_id in joined_rooms:
+            if room_id == unmanaged_room_id(client):
+                continue
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
             managed = bool(configured_bots) or is_configured_room(config, room_id, self.runtime_paths)
             if not managed and internal_user_id is None:
