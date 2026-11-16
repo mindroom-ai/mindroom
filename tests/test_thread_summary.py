@@ -23,7 +23,7 @@ from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, resolve_runtime_paths
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY, resolve_runtime_paths
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, RequestOverrides
@@ -33,6 +33,7 @@ from mindroom.matrix.conversation_reads import DeliveredResponse, complete_threa
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -763,6 +764,174 @@ class TestMaybeGenerateThreadSummary:
 
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
+
+    async def _provisional(self, prompt: str = "Plan a trip", *, config: Config | None = None) -> None:
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            _THREAD,
+            config or _mock_config(),
+            self.rp,
+            prompt_event_id="$event0",
+            prompt=prompt,
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+    async def test_provisional_title_uses_prompt_and_keeps_first_threshold(self) -> None:
+        """A provisional title must not consume the first post-reply summary or request tags."""
+        model = self._summarizer(_title("Trip plan"), _title("Trip answer"))
+        self._history(_make_thread_history(1))
+        config = _mock_config(first_threshold=2)
+
+        await self._provisional(config=config)
+
+        assert "Plan a trip" in _prompt(model.requests[0])
+        assert "Message 0" not in _prompt(model.requests[0])
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Trip plan"
+        assert sent["message_count"] == 0
+        assert "initial_enrichment_complete" not in sent
+        assert not self.room_state.tags(_THREAD)
+        assert self._count() == 0
+
+        self._history(
+            [
+                *_make_thread_history(2),
+                _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None),
+            ],
+        )
+        await self._maybe_generate(config)
+
+        assert len(model.requests) == 2
+        assert _sent_summaries(self.client)[1]["message_count"] == 2
+        assert not self.room_state.tags(_THREAD)
+
+    @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
+    async def test_provisional_title_skips_existing_threads(self, case: str) -> None:
+        """Only the sole prompt of an untitled, unresolved thread earns a provisional title."""
+        history = _make_thread_history(2 if case == "more_messages" else 1)
+        if case in {"automatic", "manual", "pinned"}:
+            history.append(
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=0,
+                    model="default" if case == "automatic" else "manual",
+                    pinned=case == "pinned",
+                ),
+            )
+        if case == "wrong_prompt":
+            history[0].event_id = "$different"
+        if case == "resolved":
+            self.room_state.tag(_THREAD, "resolved")
+        self._history(history)
+        model = self._summarizer()
+
+        await self._provisional()
+
+        assert not model.requests
+        assert not _sent_summaries(self.client)
+        assert self._count() == 0
+
+    async def test_provisional_title_once_across_agents_before_sync_echo(self) -> None:
+        """A fresh server read sees another sender's title even while the projection is stale."""
+        history = _make_thread_history(1)
+        serve_source_thread(self.conversation_reader, history)
+        self._history(history)
+        model = self._summarizer(_title("One title"))
+
+        async def send(*, content: dict[str, Any], **_kwargs: object) -> nio.RoomSendResponse:
+            history.append(
+                ResolvedVisibleMessage.synthetic(
+                    sender=_ROUTER,
+                    body="One title",
+                    event_id="$provisional",
+                    timestamp=1800000000,
+                    content=content,
+                    thread_id=_THREAD,
+                ),
+            )
+            return nio.RoomSendResponse(event_id="$provisional", room_id=_ROOM)
+
+        self.client.room_send.side_effect = send
+        await asyncio.gather(*(self._provisional() for _ in range(3)))
+
+        assert len(model.requests) == 1
+        assert len(_sent_summaries(self.client)) == 1
+        assert self._count() == 0
+
+    async def test_provisional_title_waiting_behind_after_reply_keeps_its_title(self) -> None:
+        """A queued provisional pass rechecks state after acquiring the post-reply lock."""
+        self._history(_make_thread_history(1))
+        model = self._summarizer()
+        async with self.baselines.lock(_ROOM, _THREAD):
+            task = asyncio.create_task(self._provisional())
+            await asyncio.sleep(0)
+            self._history(
+                [
+                    *_make_thread_history(1),
+                    _make_summary_notice_message(_THREAD, message_count=2),
+                ],
+            )
+        await task
+
+        assert not model.requests
+        assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_rechecks_during_generation(self) -> None:
+        """A title written by another runtime during generation must also win."""
+
+        async def title_elsewhere() -> None:
+            self._history(
+                [
+                    *_make_thread_history(1),
+                    _make_summary_notice_message(_THREAD, message_count=2),
+                ],
+            )
+
+        model = self._summarizer(Await(title_elsewhere))
+        self._history(_make_thread_history(1))
+        await self._provisional()
+
+        assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_generation_failure_is_contained(self) -> None:
+        """A failing title model cannot propagate into the reply path or advance its schedule."""
+
+        async def fail() -> None:
+            msg = "summary unavailable"
+            raise RuntimeError(msg)
+
+        self._summarizer(Await(fail))
+        self._history(_make_thread_history(1))
+        await self._provisional()
+        assert not _sent_summaries(self.client)
+        assert self._count() == 0
+
+    @pytest.mark.parametrize("trusted_echo", [True, False])
+    async def test_provisional_voice_title_ignores_only_trusted_transcript_echo(self, trusted_echo: bool) -> None:
+        """The router publishes its voice echo before dispatch; that echo is not a second prompt."""
+        model = self._summarizer(*([_title("Trip plan")] if trusted_echo else []))
+        self._history(
+            [
+                *_make_thread_history(1),
+                ResolvedVisibleMessage.synthetic(
+                    sender=_ROUTER if trusted_echo else "@human:localhost",
+                    body="Voice transcript",
+                    event_id="$echo",
+                    timestamp=1800000000,
+                    thread_id=_THREAD,
+                    content={"body": "Voice transcript", VISIBLE_ROUTER_VOICE_ECHO_KEY: True},
+                ),
+            ],
+        )
+        await self._provisional("Transcribed trip request")
+        assert len(model.requests) == int(trusted_echo)
+        if trusted_echo:
+            assert "Transcribed trip request" in _prompt(model.requests[0])
+            assert "Voice transcript" not in _prompt(model.requests[0])
 
     async def test_pinned_thread_skips_generation_and_advances_baseline(self) -> None:
         """A pinned thread past the threshold must not call the LLM, and bailing advances the baseline.

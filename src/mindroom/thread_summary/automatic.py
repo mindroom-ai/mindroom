@@ -1,10 +1,12 @@
-"""The automatic pass after a reply: summarize a due thread, and tag it on its first refresh."""
+"""Automatic prompt titles and post-reply summaries, with tags on the first refresh."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
@@ -311,6 +313,108 @@ async def _countable_thread_history(
             thread_id=thread_id,
         )
         return None
+
+
+async def maybe_generate_prompt_summary(  # noqa: PLR0911
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt_event_id: str,
+    prompt: str,
+    conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+) -> None:
+    """Title a new thread from its prompt without advancing the post-reply schedule."""
+    if not prompt.strip():
+        return
+    try:
+        async with schedule.THREAD_SUMMARY_BASELINES.lock(room_id, thread_id):
+            # Other bots may have sent a title that this client's sync has not
+            # echoed yet. Rewalk under the shared lock before claiming absence.
+            history = await refetched_thread_history(
+                conversation_reader,
+                room_id,
+                thread_id,
+                unreadable_is_missing=True,
+            )
+            if not history.is_full_history:
+                return
+            trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+            authorize_human = human_summary_authorizer(
+                client,
+                room_id,
+                config,
+                runtime_paths,
+                entity_name,
+                membership_index,
+            )
+            state = summary_state(
+                history,
+                thread_id=thread_id,
+                trusted_sender_ids=trusted_sender_ids,
+                authorize_human=authorize_human,
+            )
+            if state is None:
+                return
+            # Voice readiness publishes the router's transcript before dispatch.
+            # It repeats the prompt; only this eligibility check excludes it.
+            ordinary = [
+                message
+                for message in state.ordinary_messages
+                if not (
+                    message.sender in trusted_sender_ids and message.content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+                )
+            ]
+            if (
+                state.summary_event_ids
+                or len(ordinary) != 1
+                or ordinary[0].event_id != prompt_event_id
+                or await _thread_is_resolved(client, room_id, thread_id)
+            ):
+                return
+            model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
+            generated = await generate_summary(
+                [replace(ordinary[0], body=prompt)],
+                config,
+                runtime_paths,
+                model_name=model_name,
+                tag_vocabulary=None,
+            )
+            if generated is None:
+                return
+            # A different runtime can title or pin the thread while the model
+            # runs. Keep that title even though this runtime holds its lock.
+            history = await refetched_thread_history(
+                conversation_reader,
+                room_id,
+                thread_id,
+                unreadable_is_missing=True,
+            )
+            if not history.is_full_history:
+                return
+            state = summary_state(
+                history,
+                thread_id=thread_id,
+                trusted_sender_ids=trusted_sender_ids,
+                authorize_human=authorize_human,
+            )
+            if state is None or state.summary_event_ids or await _thread_is_resolved(client, room_id, thread_id):
+                return
+            await send_thread_summary_notice(
+                client,
+                room_id,
+                thread_id,
+                generated.summary,
+                0,
+                model_name,
+                conversation_reader,
+            )
+    except Exception:
+        logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
 async def maybe_generate_thread_summary(  # noqa: PLR0911

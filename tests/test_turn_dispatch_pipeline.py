@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -22,6 +22,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
+    VOICE_PREFIX,
     RuntimePaths,
 )
 from mindroom.conversation_resolver import MessageContext
@@ -30,7 +31,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_handoff import DispatchPayloadMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
@@ -54,7 +55,7 @@ from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import SourceVisibleEcho, TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
@@ -2727,3 +2728,85 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         await assert_no_turn_answered(bot)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("voice", [False, True])
+    @pytest.mark.parametrize("plan_kind", ["ignore", "route", "respond"])
+    async def test_prompt_title_is_queued_before_execution_without_waiting(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        voice: bool,
+        plan_kind: Literal["ignore", "route", "respond"],
+    ) -> None:
+        """Reply and routing plans queue raw prompts without waiting; ignored turns never title threads."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$prompt",
+            body=f"{VOICE_PREFIX if voice else ''}Plan a trip",
+            source={
+                "content": {
+                    "body": "recording.ogg" if voice else "Plan a trip",
+                    "msgtype": "m.audio" if voice else "m.text",
+                },
+            },
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id="$prompt", reply_to_event_id="$prompt")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$prompt",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$prompt",
+            envelope=_hook_envelope(body="ENRICHED CONTEXT", source_event_id="$prompt", target=target),
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        plan = DispatchPlan(kind=plan_kind)
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+
+        async def summarize(*_args: object, **kwargs: object) -> None:
+            assert kwargs["prompt"] == "Plan a trip"
+            assert kwargs["prompt_event_id"] == "$prompt"
+            started.set()
+            await release.wait()
+
+        async def execute(*_args: object, **_kwargs: object) -> None:
+            if plan_kind != "ignore":
+                await asyncio.wait_for(started.wait(), timeout=1)
+                assert not release.is_set()
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock(side_effect=execute)),
+            patch(
+                "mindroom.turns.dispatch.maybe_generate_prompt_summary",
+                new=AsyncMock(side_effect=summarize),
+            ) as summary,
+        ):
+            try:
+                await dispatch_test_turn(
+                    bot._turn_dispatcher,
+                    room,
+                    event,
+                    event.sender,
+                    payload_metadata=DispatchPayloadMetadata(voice_transcript=voice),
+                    coalescing_key=requester_coalescing_key(room.room_id, "$prompt", event.sender),
+                )
+                if plan_kind == "ignore":
+                    summary.assert_not_called()
+                else:
+                    summary.assert_awaited_once()
+            finally:
+                release.set()

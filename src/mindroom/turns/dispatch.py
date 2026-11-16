@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
+from mindroom.background_tasks import create_background_task
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
+    VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
     RuntimePaths,
@@ -44,6 +46,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
+from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_utils import mentions_another_participant
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
@@ -338,6 +341,8 @@ class TurnDispatcher:
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
+                if plan.kind != "ignore":
+                    self._queue_prompt_summary(prepared)
                 await self._apply_turn_plan(
                     turn.room,
                     prepared,
@@ -351,6 +356,39 @@ class TurnDispatcher:
                 held.release()
             if timing_scope_token is not None:
                 timing_scope_context.reset(timing_scope_token)
+
+    def _queue_prompt_summary(self, prepared: _PreparedTextDispatch) -> None:
+        """Start a new thread's title once selected to route or respond, before execution can block."""
+        turn = prepared.turn
+        thread_id = prepared.dispatch.target.resolved_thread_id
+        if (
+            thread_id is None
+            or thread_id != turn.event.event_id
+            or turn.handled_turn.is_coalesced
+            or turn.payload.raw_audio_fallback
+        ):
+            return
+        # A single-event turn has no coalescing wrapper or reply enrichment;
+        # voice normalization has already replaced the audio filename with text.
+        prompt = turn.event.body
+        if turn.payload.voice_transcript:
+            prompt = prompt.removeprefix(VOICE_PREFIX)
+        create_background_task(
+            maybe_generate_prompt_summary(
+                self._client(),
+                turn.room.room_id,
+                thread_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                prompt_event_id=turn.event.event_id,
+                prompt=prompt,
+                conversation_reader=self.deps.resolver.deps.conversation_reader,
+                entity_name=self.deps.agent_name,
+                membership_index=self.deps.runtime.agent_reply_memberships,
+            ),
+            name=f"prompt_summary_{turn.room.room_id}_{thread_id}",
+            owner=self.deps.runtime,
+        )
 
     async def _prepare_text_dispatch(
         self,
