@@ -877,7 +877,11 @@ For homeservers behind Cloudflare Access, install `cloudflared`; see [Homeserver
 ### Control Applications
 
 Applications start observe-only.
-**Grant Control…** shows the identities, allowed applications, and duration for confirmation, and control ends when that lease expires; it is never renewed at launch or restart.
+In **App control** on the Start step, choose a **Scope** of **Saved apps** or **Whole computer** and a **Duration** of **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**, then select **Grant Control…**.
+The confirmation shows the identities and either the saved applications or what whole-computer control reaches; see [Grant Whole-Computer Control](https://docs.mindroom.chat/tools/desktop/#grant-whole-computer-control).
+To use the whole Mac without choosing apps, save only **Allow primary screen** under **Advanced screen access**, start, and grant whole-computer control.
+While whole-computer control is in force, the status reads **Whole-computer control · until you stop** or its remaining time, the menu bar shows **Controlling this Mac**, and its menu offers **Stop Whole-Computer Control**.
+Control ends when its duration expires and is never saved or renewed at launch or restart, and the two choices return to **Saved apps** and **15 Minutes** each time MindRoom opens.
 **Revoke Now** removes input authority while observation continues, and **Stop Access** ends the session.
 Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you gives the agent your own authority; see [Security Model](https://docs.mindroom.chat/tools/desktop/#security-model).
 Optional browser settings and redacted diagnostics are in expandable sections; see the [Desktop guide](https://docs.mindroom.chat/tools/desktop/#use-the-signed-in-browser-profile) for browser-extension setup.
@@ -9915,6 +9919,7 @@ If the browser stops responding, recycle the dedicated worker; profiles and file
 The `desktop` tool lets a cloud-hosted MindRoom agent use a local computer without opening an inbound port.
 It can inspect and operate explicitly allowlisted applications, read explicitly selected folders, and run shell commands that a person at the computer approves.
 Applications, [read-only folders](#read-only-folders), and [shell commands](#shell-commands) are separate local choices, and each starts disabled.
+On a Mac, a person at the computer can also grant [whole-computer control](#grant-whole-computer-control) for one session instead of allowlisting each app.
 The computer runs an outbound Matrix client, and commands and responses are end-to-end encrypted between the paired devices.
 Set up and run the bridge from the [macOS app](https://docs.mindroom.chat/installation/macos-app/#computer-access) or from the terminal; both use the same saved setup.
 
@@ -10070,6 +10075,7 @@ mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 ```
 
 Add only the applications needed for the current task.
+To let the agent use every app, save only `primary-screen` and grant [whole-computer control](#grant-whole-computer-control) after starting instead of allowlisting each app.
 The special app ID `primary-screen` exposes the whole primary display without semantic elements; on Linux and Windows it is the only usable target.
 Controlling `primary-screen`, a terminal emulator, a scripting or automation app, or a browser or Matrix client signed in as you hands the agent your own authority, as the [Security Model](#security-model) warning explains.
 
@@ -10106,7 +10112,7 @@ The `!desktop confirm` reply prints a `mindroom desktop run` command with these 
 ### Grant Application Control
 
 Applications start observe-only.
-To allow input, a person at the computer grants a control lease with **Grant Control…** in the macOS app or by restarting the terminal bridge with `--allow-control`:
+To allow input, a person at the computer grants a control lease with **Grant Control…** in the macOS app, for 5, 15, or 60 minutes or until they stop it, or by restarting the terminal bridge with `--allow-control`:
 
 ```bash
 mindroom desktop run --allow-control --lease-minutes 15
@@ -10116,7 +10122,20 @@ mindroom desktop run --allow-control --lease-minutes 15
 After the lease expires, the bridge keeps observing but rejects every control action until a person grants another lease.
 The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
 Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
-Control actions sent before a lease ended never run under a later lease, and a new grant is refused with `Wait for the desktop action that is still running to finish before granting control again.` while input from the ended lease, including a browser control action, is still being sent.
+Control actions sent before a lease ended or its scope changed never run under a later lease, and a new grant is refused with `Wait for the desktop action that is still running to finish before granting control again.` while input from the ended lease, including a browser control action, is still being sent.
+
+### Grant Whole-Computer Control
+
+In the macOS app's **App control** section on the Start step, choose **Scope: Whole computer** and a duration, select **Grant Control…**, and confirm with **Allow Whole-Computer Control**.
+While it is in force, the agent can observe and control every app and the whole primary screen except MindRoom itself: `list_apps` lists the running apps, and `launch_app` opens any installed app by bundle ID.
+It needs at least one saved app, such as `primary-screen` alone, and only the macOS app can grant it.
+It is never saved: revoking it, **Stop Access**, the emergency corner, quitting MindRoom, and restarting the Mac end it, while sleep and screen lock do not.
+When it ends, the agent can again reach only the saved apps.
+Shell command approval, read-only folders, and the browser extension keep their own settings.
+
+!!! warning "Whole-computer control gives the agent your own authority"
+    It reaches Terminal, script editors, Finder, and every browser or chat app signed in as you, so the agent can do anything your account can, including answering its own Matrix tool approvals.
+    Grant it only when you would approve everything the agent could do as you, and revoke it when the task is done.
 
 ### Approve Shell Commands in the Terminal
 
@@ -10156,14 +10175,14 @@ For app-level control of the browser window, or for Safari and other browsers, a
 
 ## Security Model
 
-- **Control is local**: Applications are observe-only until a person at the computer grants a control lease in the macOS app's **Computer access** section or the local terminal.
+- **Control is local**: Applications are observe-only until a person at the computer grants a control lease, for a duration or until stopped, in the macOS app's **Computer access** section or the local terminal.
 - **Exact identities**: The bridge accepts commands only from the paired cloud agent device, for locally allowed requesters, agents, and apps, and rejects expired or replayed commands.
-- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled.
+- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, except while a person at the computer has granted [whole-computer control](#grant-whole-computer-control).
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
 - **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because their windows grant shell auto-approval, control leases, and app access.
   On macOS, `primary-screen` screenshots leave MindRoom's windows out, and `primary-screen` pointer or keyboard input that would land on MindRoom is refused.
-- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
+- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, widen control to the whole computer, change local allowlists or folders, enable shell commands, or approve one.
 - **Emergency stop**: Moving the pointer to the upper-left corner of the primary display stops control and keeps it off until the bridge restarts or a person selects **Reset Emergency Stop** in the macOS app; the reset does not grant control.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
 - **One bridge per session**: While a shell command waits for local approval, the bridge refuses every control action except `launch_app`, so its own agents cannot click or type into the approval.
@@ -10195,7 +10214,7 @@ On macOS, `get_app_state` returns the app's accessibility tree with roles, names
 The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
 Taking a screenshot on macOS brings the selected app to the front.
 
-Observation actions are `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
+Observation actions are `status` (screen, lease, control scope, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
 Control actions require a control lease:
@@ -10374,6 +10393,7 @@ The agent can report setup status, but it cannot start, confirm, rotate, or disc
 ## Current Limits
 
 There is no live screen stream, multi-monitor selector, or unattended service installer.
+Whole-computer control screenshots only the primary display and allows the same key chords as app control.
 
 # Execution & Coding
 

@@ -913,6 +913,8 @@ def test_provider_forwards_computer_scope_to_its_backend() -> None:
     provider.set_computer_scope(False)
     assert accessibility.calls == [("set_computer_scope", True), ("set_computer_scope", False)]
     assert pyautogui.calls == []
+
+
 def test_revoke_during_the_last_position_lookup_sends_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """A revoke while checking the pointer after focus validation stops the pending key."""
     provider, pyautogui, accessibility = _provider()
