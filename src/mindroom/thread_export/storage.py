@@ -633,10 +633,9 @@ def _room_index_payload(
     read_bytes = 0
     index_bytes = 0
     for position, (filename, size) in enumerate(newest_first):
-        if filename in written_entries:
+        if (indexed_entry := written_entries.get(filename)) is not None:
             # This pass built the file's entry when it wrote it, so the file is charged the bytes a read would return.
             read_bytes += min(size, MAX_READ_BYTES + 1)
-            indexed_entry = written_entries[filename] if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
         else:
             try:
                 # One byte past the cap shows whether the file was cut there.
