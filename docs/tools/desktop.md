@@ -440,7 +440,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
   Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
-  Stopping or revoking control stops app input at once, so an action in progress can end partway; a browser action already in progress can still finish, so observe local state before retrying.
+  Stopping or revoking control stops app input before its next event, so an action in progress can end partway; a browser action already in progress can still finish, so observe local state before retrying.
 - **Stronger isolation**: Run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
 
 ### `!desktop`

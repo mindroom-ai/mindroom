@@ -40,19 +40,21 @@ The Matrix client prepares the Access token before every request, so no command 
 
 ## Ending input that is already running
 
-Native input runs in a worker thread that no task cancellation reaches, so revoking control and stopping close the provider's input gate instead, which every pointer event, key, text chunk, and accessibility press or value write checks right before it starts.
-A button or key that input already pressed is still released, and an event already handed to macOS, such as a key chord posted in one call, still completes; focusing the target app is not input and can still happen after a revoke.
-A reusable gate alone would let a quick new grant reopen it under the old action, so a grant is refused while input interrupted by a revoke is still inside its native call.
+Native input runs in a worker thread that no task cancellation reaches, so revoking control and stopping close the provider's input gate instead, which every pointer event, key, text chunk, app launch, and accessibility press or value write checks right before it starts, after any slower check of the target.
+A button or key that input already pressed is still released, and an event already handed to the system, such as a key chord posted in one call or a whole Linux or Windows pointer motion, still completes; focusing the target app before its input is not gated, because observations focus apps too.
+A reusable gate alone would let a quick new grant reopen it under the old action, so a grant is refused while input interrupted by a revoke is still inside its native call; the follow-up observation after that call does not hold the grant back.
 Each grant that starts control anew begins a new authority, and a control command runs only under the authority it arrived in, so commands queued before a revoke, an expiry, or a restart never run under a later grant; that admission is kept in memory because the Matrix command carries no grant identity, and extending a grant that is still in force keeps its queued commands.
 
 Stop waits at most 5 seconds for the running action, because a hung application can hold a native call indefinitely.
 The gate is closed first, so the abandoned call sends no further input, and the workers are cancelled before the journal closes, so its late return records nothing; its command stays started and is reported as interrupted on the next start.
 Stop's bound is not the helper's exit bound: Python waits for its worker threads when the process exits, so the helper exits only once that native call returns.
+The bound also covers folder reads on the same lane, so a read stuck past it, such as on an unresponsive network volume, is abandoned while its folder descriptors close; its result is discarded.
 
 ## Bounded accessibility reads
 
 The helper sets a process-wide accessibility messaging timeout of 2 seconds, and one tree read checks its 5-second deadline before each message, so a read of an app that stops answering ends within about 7 seconds, not 5.
-`get_app_state` stops re-reading for a stable tree once 8 seconds have passed and returns the latest tree as unstable, so a slow app that still answers can hold the action lane for about 15 seconds.
+`get_app_state` stops re-reading for a stable tree once 8 seconds have passed and returns the latest tree as unstable, so its tree takes up to about 15 seconds from a slow app that still answers.
+Its default screenshot then re-reads the tree up to twice more and captures within 5 seconds, so one such command can outlast the default 30-second command timeout; a hung app instead fails its first read within about 7 seconds.
 A `primary-screen` screenshot never reads an app's accessibility tree, so it works as soon as the lane is free.
 A second lane for screen observations was rejected: the accessibility state store would have to become thread-safe, and a capture could run during input, for a wait the deadlines already bound.
 These limits were chosen below the default 30-second command timeout without measurements on heavy trees, so a tree that legitimately takes longer than the deadline to read now fails.
