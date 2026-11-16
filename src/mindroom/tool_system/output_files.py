@@ -114,9 +114,13 @@ class ToolOutputFileHandled:
 
 
 _active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
-# The directory a headless run's caller, or an agent turn's turn:started or turn:resumed hook, chose for the tools to
-# work in, in place of their agents' workspaces.
+# The directory the tools this process runs work in, in place of their agents' workspaces: the one a headless run's
+# caller chose, an agent turn's where no tool call can run in a worker, and in a worker the one a request names.
 _TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
+# An agent turn's directory where tool calls can run in a worker. Only worker requests carry it: worker code can
+# rearrange a workspace after this process checked a path inside it, so the tools this process runs keep the
+# workspace, and each worker confines the directory to what it may see.
+_WORKER_TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("worker_tool_workdir", default=None)
 
 
 @contextmanager
@@ -132,6 +136,40 @@ def tool_workdir(workdir: Path | None) -> Iterator[None]:
 def current_tool_workdir() -> Path | None:
     """Return the workdir bound for the tools built now, if any."""
     return _TOOL_WORKDIR.get()
+
+
+def current_worker_tool_workdir() -> Path | None:
+    """Return the workdir bound for the worker-routed tools built now, if any."""
+    return _WORKER_TOOL_WORKDIR.get()
+
+
+@contextmanager
+def turn_workdir(workspace_root: Path, requested: str, *, workers_can_run: bool) -> Iterator[None]:
+    """Build the tools of the block's agent turn to work in ``requested``, an existing directory in its workspace.
+
+    With ``workers_can_run``, for a runtime whose tool calls can run in a worker, only the worker-routed tools work
+    there, and the tools this process runs keep the workspace. Raises ``ValueError`` saying why ``requested`` is no
+    such directory.
+    """
+    variable = _WORKER_TOOL_WORKDIR if workers_can_run else _TOOL_WORKDIR
+    token = variable.set(confined_workdir(workspace_root, requested))
+    try:
+        yield
+    finally:
+        variable.reset(token)
+
+
+def relative_workdir(workdir: Path | None, workspace_root: Path | None) -> str | None:
+    """Return ``workdir`` relative to ``workspace_root`` with POSIX separators, as a worker request names it.
+
+    None without either, and for a directory outside the workspace, such as the one a subagent with its own workspace
+    inherits from its caller's turn.
+    """
+    if workdir is None or workspace_root is None:
+        return None
+    # A turn confines its working directory to the canonical workspace.
+    workspace = workspace_root.expanduser().resolve()
+    return workdir.relative_to(workspace).as_posix() if workdir.is_relative_to(workspace) else None
 
 
 def confined_workdir(workspace_root: Path, requested: str) -> Path:

@@ -3375,6 +3375,8 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.streaming",
     "mindroom.thread_summary",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 visibility = [
     "mindroom.bot",
@@ -3486,7 +3488,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.post_response_effects",
     "mindroom.streaming",
-    "mindroom.tool_system.output_files",
 ]
 visibility = [
     "mindroom.bot",
@@ -7598,6 +7599,7 @@ expose = [
     "sandbox_proxy_config",
     "save_attachment_to_worker",
     "tool_placement",
+    "tools_can_run_in_workers",
     "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",

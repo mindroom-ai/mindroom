@@ -73,7 +73,12 @@ from mindroom.tool_system.declarations import (
     is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
+from mindroom.tool_system.output_files import (
+    ToolOutputFilePolicy,
+    current_tool_workdir,
+    current_worker_tool_workdir,
+    relative_workdir,
+)
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -159,8 +164,9 @@ class _AgentToolAssembly:
     instructions: tuple[str, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
-    # Whether the toolkits that work on workspace paths run in a worker, which mounts the workspace at its own path.
-    workspace_in_worker: bool
+    # The turn's working directory when only the worker-routed toolkits that work on workspace paths work in it, named
+    # inside the workspace, which a worker mounts at its own path.
+    worker_workdir: str | None
     cli_deferred: tuple[DeferredAgentToolkit, ...]
     # The tool-call policy the loop runs around every call, the hook bridge; a browser's computer announcement is
     # its functions' own.
@@ -875,14 +881,18 @@ def _render_tool_execution_environment(
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
     workdir: Path | None,
+    worker_workdir: str | None,
     workspace_root: Path,
-    workspace_in_worker: bool,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
     pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
-    """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
+    """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them.
+
+    ``workdir`` is the directory the tools of this process work in. ``worker_workdir`` is the one only the
+    worker-routed path tools work in, named inside the workspace, which a worker mounts at its own path.
+    """
 
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
@@ -890,36 +900,34 @@ def _render_tool_execution_environment(
     if not worker_routed_tool_names and not local_tool_names:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
+    # Where only worker requests carry the directory, only the worker-routed tools work in it.
+    routed = "" if workdir is not None else "worker-routed "
     file_access_description = {
         "workspace": "agent workspace and attachments only"
-        if workdir is None
-        else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
+        if workdir is None and worker_workdir is None
+        else f"{routed}`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
         "`view_file`: the workdir; other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
-    if workdir is not None:
+    if workdir is not None or worker_workdir is not None:
         # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
-        # A worker mounts the workspace at its own path, so there this primary's paths name nothing.
-        workspace = workspace_root.expanduser().resolve()
-        in_worker = workspace_in_worker and workdir.is_relative_to(workspace)
-        workdir_name = (
-            f"`{workdir.relative_to(workspace).as_posix()}` in your workspace" if in_worker else f"`{workdir}`"
-        )
+        workdir_name = f"`{workdir}`" if workdir is not None else f"`{worker_workdir}` in your workspace"
         workspace_name = (
-            "`$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed shell and python tools)"
+            f"`{workspace_root}`; name files there by absolute path"
+            if workdir is not None
+            else "`$MINDROOM_AGENT_WORKSPACE` (also `~` in worker-routed shell and python tools)"
             + (
                 "; name files there by the absolute path `echo $MINDROOM_AGENT_WORKSPACE` prints"
                 if "shell" in worker_routed_tool_names
                 else ""
             )
-            if in_worker
-            else f"`{workspace_root}`; name files there by absolute path"
         )
         file_access_lines.append(
-            f"- Workdir: {workdir_name}, where `shell` runs and `file` and `coding` resolve relative paths; "
-            "code that `python` runs uses this process's current directory, so give it absolute paths. "
-            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+            f"- Workdir: {workdir_name}, where {routed}`shell` runs and {routed}`file` and `coding` resolve relative "
+            "paths; code that `python` runs uses this process's current directory, so give it absolute paths. "
+            + ("" if workdir is not None else "Tools in the primary MindRoom runtime work in your workspace. ")
+            + "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
             f"is {workspace_name}.",
         )
     if shared_directories:
@@ -1422,7 +1430,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
-        workspace_in_worker=workspace_in_worker,
+        worker_workdir=(
+            relative_workdir(current_worker_tool_workdir(), agent_runtime.workspace.root)
+            if workspace_in_worker
+            else None
+        ),
         tool_middleware=(hook_middleware,),
     )
     return assembly
@@ -1441,7 +1453,7 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    workspace_in_worker: bool,
+    worker_workdir: str | None,
     tools: ToolRegistry,
     file_access: FileAccess,
     include_identity: bool,
@@ -1463,8 +1475,8 @@ def _build_agent_role_context(
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
                 workdir=current_tool_workdir(),
+                worker_workdir=worker_workdir,
                 workspace_root=agent_runtime.workspace.root,
-                workspace_in_worker=workspace_in_worker,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     tools=tools,
@@ -1561,10 +1573,12 @@ def _build_agent_instructions(
     native_deferred_tool_names: tuple[str, ...],
     portable_deferred_toolkits: Sequence[DeferredToolkit],
     skill_authoring: bool,
+    worker_workdir: str | None,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
     ``skill_authoring`` adds the note on writing workspace skills, for agents that can use skills.
+    ``worker_workdir`` is the working directory of the agent's worker-routed path tools, if they have one.
     """
     instructions = [*configured_instructions, *skill_instructions]
     if native_deferred_tool_names:
@@ -1581,7 +1595,7 @@ def _build_agent_instructions(
         instructions.append(dynamic_tooling_block)
 
     # Beside a workdir the tools resolve relative paths there, so notes on writing into the workspace would misdirect.
-    if not disable_runtime_capabilities and current_tool_workdir() is None:
+    if not disable_runtime_capabilities and current_tool_workdir() is None and worker_workdir is None:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
         # A conditional expression keeps this builder within the complexity limit.
         instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())
@@ -1882,7 +1896,7 @@ def create_agent(
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
-        workspace_in_worker=tool_assembly.workspace_in_worker,
+        worker_workdir=tool_assembly.worker_workdir,
         file_access=agent.file_access,
         include_identity=persona is None,
     )
@@ -1914,6 +1928,7 @@ def create_agent(
         native_deferred_tool_names=() if portable_deferred_tools else tool_assembly.deferred_tool_names,
         portable_deferred_toolkits=tool_assembly.deferred_toolkits if portable_deferred_tools else (),
         skill_authoring=persona is None and tool_names is None,
+        worker_workdir=tool_assembly.worker_workdir,
     )
 
     toolkits = tool_assembly.toolkits

@@ -29,7 +29,7 @@ from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, current_tool_workdir
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, relative_workdir
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -532,8 +532,8 @@ def view_file_from_worker(
 
     ``workdir`` is the turn's working directory the viewing toolkit was built in, where the worker resolves ``path``.
     """
-    relative_workdir = _relative_workdir(workdir, workspace_root)
-    view_root = workdir if relative_workdir is not None else workspace_root
+    route_workdir = relative_workdir(workdir, workspace_root)
+    view_root = workdir if route_workdir is not None else workspace_root
     proxy_config = sandbox_proxy_config(runtime_paths)
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         route, worker_handle = worker_route(
@@ -544,7 +544,7 @@ def view_file_from_worker(
             worker_target=worker_target,
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
-            workdir=relative_workdir,
+            workdir=route_workdir,
         )
         if view_root is not None:
             # Translate the mount spelling only; resolve and authorize the path inside the worker.
@@ -695,6 +695,15 @@ def tool_placement(runtime_paths: RuntimePaths, tools: ToolRegistry) -> ToolPlac
     return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths), tools=tools)
 
 
+def tools_can_run_in_workers(runtime_paths: RuntimePaths) -> bool:
+    """Return whether a tool call of this runtime can run in a worker: a dedicated backend's, or the shared runner's.
+
+    Where none can, every tool runs in this process, so no worker code writes the agents' workspaces. Where one can,
+    worker code writes the workspaces its worker mounts, which on some backends and scopes are several agents'.
+    """
+    return worker_backend_kind(runtime_paths).dedicated or bool(sandbox_proxy_config(runtime_paths).proxy_url)
+
+
 def primary_owns_tool_settings(tool_name: str, tools: ToolRegistry, *, runtime_paths: RuntimePaths) -> bool:
     """Return whether this primary process owns the settings of a tool in ``tools``.
 
@@ -746,19 +755,6 @@ def _worker_call_arguments(
                 bound.arguments["agent"] = None
                 args, kwargs = bound.args, {**bound.kwargs, **output_path}
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
-
-
-def _relative_workdir(workdir: Path | None, workspace_root: Path | None) -> str | None:
-    """Return a turn's working directory ``workdir`` as a request carries it, relative to ``workspace_root``.
-
-    None without either, and for a directory outside the workspace, such as the one a subagent with its own workspace
-    inherits from its caller's turn, which a request never names.
-    """
-    if workdir is None or workspace_root is None:
-        return None
-    # The turn confined its working directory to the canonical workspace.
-    workspace = workspace_root.expanduser().resolve()
-    return workdir.relative_to(workspace).as_posix() if workdir.is_relative_to(workspace) else None
 
 
 def _build_execute_request(
@@ -1016,27 +1012,22 @@ def worker_stand_ins(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
-    workspace_root: Path | None = None,
+    workdir: str | None = None,
     tools: ToolRegistry,
 ) -> WorkerStandIns:
     """Return the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
 
-    ``workspace_root`` is the workspace of the agent it is built for, in this primary's paths, when known. A toolkit
-    built while a turn's working directory is bound has that directory as its ``base_dir``; its calls name the
-    workspace instead, as without one, and carry the directory beside it, so the worker keeps HOME, the saved outputs
-    and the workspace's own files on the workspace. Both are fixed here, so a call matches its toolkit.
+    ``workdir`` is the turn's working directory the toolkit was built in, relative to the workspace its calls name.
+    The calls carry it beside that workspace, so the worker keeps HOME, the saved outputs and the workspace's own
+    files on the workspace; it is fixed here, so a call matches its toolkit.
     """
-    workdir = current_tool_workdir()
-    init_overrides = dict(tool_init_overrides or {})
-    if workdir is not None and workspace_root is not None and init_overrides.get("base_dir") is not None:
-        init_overrides["base_dir"] = str(workspace_root)
     return WorkerStandIns(
         tool_name=tool_name,
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         tools=tools,
         tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=init_overrides or None,
+        tool_init_overrides=tool_init_overrides,
         execution_env=_execution_env_payload(
             tool_name,
             runtime_paths=runtime_paths,
@@ -1045,7 +1036,7 @@ def worker_stand_ins(
         extra_env_passthrough=extra_env_passthrough,
         worker_target=worker_target,
         runtime_config=runtime_config,
-        workdir=_relative_workdir(workdir, workspace_root),
+        workdir=workdir,
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
 
@@ -1111,6 +1102,7 @@ __all__ = [
     "save_attachment_to_worker",
     "to_json_compatible",
     "tool_placement",
+    "tools_can_run_in_workers",
     "view_file_from_worker",
     "worker_call",
     "worker_proxy_client_config",

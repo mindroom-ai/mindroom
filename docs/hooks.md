@@ -413,7 +413,9 @@ async def work_in_thread_worktree_after_approval(ctx: TurnLifecycleContext) -> N
 
 - `ctx.set_workdir(path)` asks that the turn's tools work in `path`, relative to the agent's workspace or an absolute path inside it; a private agent's workspace is the requester's own.
   When several hooks call it, the last in hook order decides, and each hook sees the request so far in `ctx.workdir`; an empty `path` raises `ValueError`.
-- For the whole turn, `shell` runs in that directory, and `file`, `coding`, and `python`'s file functions resolve paths there, for the agent and the subagents and background jobs it starts, whether its tools run in MindRoom's process or in a worker.
+- For the whole turn, `shell` runs in that directory, and `file`, `coding`, and `python`'s file functions resolve paths there, for the agent and the subagents and background jobs it starts.
+  Where tool calls can run in [workers](deployment/sandbox-proxy.md), with a Docker or Kubernetes worker backend or a sandbox runner, only the worker-routed tools work in the directory, and every tool that runs in MindRoom's own process keeps the workspace, also for an agent with no worker-routed tool.
+  There, route `shell`, `file`, and `coding` to the worker together, so they share the directory.
   The tools work there as with a [headless run's `workdir`](headless.md#files), so `file_access: workspace` confines `file` and `coding` to the directory.
   `$MINDROOM_AGENT_WORKSPACE` still holds the workspace, as does `HOME` in a worker, which also still reads `.mindroom/worker-env.sh` from the workspace.
   A `browser` that runs in a dedicated worker keeps saving its files under the workspace, as without a working directory.

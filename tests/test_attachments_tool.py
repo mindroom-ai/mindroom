@@ -29,7 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.output_files import tool_workdir
+from mindroom.tool_system.output_files import turn_workdir
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -829,16 +829,25 @@ def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
 
 
 def test_view_file_in_a_worker_finds_files_in_the_working_directory_it_was_built_in(tmp_path: Path) -> None:
-    """Built beside a working directory, a worker's view_file finds under workspace access only paths inside it."""
+    """Built beside a worker's working directory, a worker's view_file finds under workspace access only paths inside it.
+
+    A view_file that reads in this process keeps the workspace: only worker requests carry that directory.
+    """
     workspace = tmp_path / "workspace"
     (workspace / "wt").mkdir(parents=True)
+    (workspace / "plot.png").write_bytes(b"png")
+    (workspace / "wt" / "plot.png").write_bytes(b"png")
 
-    with tool_workdir(workspace / "wt"):
+    with turn_workdir(workspace, "wt", workers_can_run=True):
         in_worker = AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True)
+        here = AttachmentTools(tool_output_workspace_root=workspace)
 
     assert in_worker.views("only-in-the-worker.png")
     assert in_worker.views(str(workspace / "wt" / "plot.png"))
     assert not in_worker.views(str(workspace / "plot.png"))
+    assert here.views("plot.png")
+    assert here.views(str(workspace / "plot.png"))
+    assert here._view_root == workspace
 
 
 @pytest.mark.asyncio

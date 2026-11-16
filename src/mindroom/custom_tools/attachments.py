@@ -32,6 +32,7 @@ from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     current_tool_workdir,
+    current_worker_tool_workdir,
     saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
@@ -397,8 +398,9 @@ class AttachmentTools(Toolkit):
         # Whether the agent's workspace-path tools run in a worker, away from runtime attachment storage.
         self._workspace_in_worker = workspace_in_worker
         self._tool_output_workspace_root = tool_output_workspace_root
-        # view_file reads where the file tools work: a turn's or headless run's workdir, else the workspace.
-        self._workdir = current_tool_workdir()
+        # view_file reads where the file tools work: here, a turn's or headless run's workdir, else the workspace; in
+        # a worker, the turn's working directory, which only worker requests carry.
+        self._workdir = current_worker_tool_workdir() if workspace_in_worker else current_tool_workdir()
         self._view_root = self._workdir or tool_output_workspace_root
         super().__init__(
             name="attachments",

@@ -86,7 +86,7 @@ from mindroom.tool_system.metadata import (
     ToolValidationInfo,
     get_tool_by_name,
 )
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, tool_workdir
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, turn_workdir
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -155,6 +155,7 @@ from tests.test_attachments_tool import _tool_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Mapping
+    from contextlib import AbstractContextManager
 
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.workers.backend import WorkerBackend
@@ -7941,12 +7942,13 @@ _WORKDIR_IDENTITY = ToolExecutionIdentity(
 def _shared_worker_shell_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    workdir: Callable[[Path], Path | None],
+    turn: Callable[[Path], AbstractContextManager[None]],
 ) -> dict[str, Any]:
-    """Build agent ``general``'s shell, which runs in its shared worker, as a turn bound to ``workdir`` does, and call it.
+    """Build agent ``general``'s shell, which runs in its shared worker, inside the scope of ``turn``, and call it.
 
-    ``workdir`` maps the agent's workspace to the turn's working directory; the sent request is returned. The call
-    runs after the turn's variable is unset, so the request follows what the toolkit was built with.
+    ``turn`` maps the agent's workspace to the scope of a turn, which binds its working directory, if any; the sent
+    request is returned. The call runs after the turn's variable is unset, so the request follows what the toolkit
+    was built with.
     """
     captured: dict[str, Any] = {}
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
@@ -7964,7 +7966,7 @@ def _shared_worker_shell_call(
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
     (workspace / "wt").mkdir(parents=True)
 
-    with tool_workdir(workdir(workspace.resolve())):
+    with turn(workspace):
         shell = build_agent_toolkit(
             "shell",
             agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
@@ -7984,7 +7986,11 @@ def test_proxy_sends_a_turn_working_directory_beside_the_workspace(
     bound: bool,
 ) -> None:
     """The request names the agent's workspace as it would without a working directory, and the directory beside it."""
-    sent = _shared_worker_shell_call(monkeypatch, tmp_path, lambda workspace: workspace / "wt" if bound else None)
+    sent = _shared_worker_shell_call(
+        monkeypatch,
+        tmp_path,
+        lambda workspace: turn_workdir(workspace, "wt", workers_can_run=True) if bound else contextlib.nullcontext(),
+    )
 
     assert sent["worker_key"] is not None
     assert sent["base_dir"] == "agents/general/workspace"
@@ -7996,12 +8002,18 @@ def test_proxy_sends_the_workspace_alone_for_a_working_directory_outside_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A working directory outside the tool's workspace is never sent; the request names the workspace, without a log."""
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
+    """A working directory outside the tool's workspace is never sent; the request names the workspace, without a log.
+
+    A subagent with its own workspace builds its tools in the turn of its caller, whose directory is in another one.
+    """
+    (tmp_path / "callers-workspace" / "wt").mkdir(parents=True)
 
     with capture_logs() as logs:
-        sent = _shared_worker_shell_call(monkeypatch, tmp_path, lambda _workspace: elsewhere.resolve())
+        sent = _shared_worker_shell_call(
+            monkeypatch,
+            tmp_path,
+            lambda _workspace: turn_workdir(tmp_path / "callers-workspace", "wt", workers_can_run=True),
+        )
 
     assert sent["base_dir"] == "agents/general/workspace"
     assert sent.get("workdir") is None
@@ -8040,8 +8052,9 @@ async def test_view_file_sends_the_working_directory_beside_the_workspace(
         _recording_client_class(captured=captured, responder=lambda _url, _json: {"ok": True, "result": envelope}),
     )
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "general").resolve()
+    (workspace / "wt").mkdir(parents=True)
 
-    with tool_workdir(workspace / "wt" if bound else None):
+    with turn_workdir(workspace, "wt", workers_can_run=True) if bound else contextlib.nullcontext():
         toolkit = AttachmentTools(
             runtime_paths=runtime_paths,
             worker_target=_worker_target(runtime_paths, "shared", "general", _WORKDIR_IDENTITY),

@@ -55,11 +55,10 @@ from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_context
-from mindroom.tool_system.output_files import confined_workdir, tool_workdir
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
-    from pathlib import Path
+    from contextlib import AbstractContextManager
 
     from structlog.stdlib import BoundLogger
 
@@ -891,11 +890,12 @@ class ResponseLifecycle:
         # Holds the working directory start_turn's hooks chose until the scope of ``turn`` ends.
         self._workdir_scope = ExitStack()
 
-    async def start_turn(self, *, resumed: bool, agent_workspace_root: Callable[[], Path]) -> None:
+    async def start_turn(self, *, resumed: bool, work_in: Callable[[str], AbstractContextManager[None]]) -> None:
         """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it, in the scope of ``turn``.
 
-        An agent's turn then runs its tools in the directory its hooks asked for, inside the workspace
-        ``agent_workspace_root`` returns, until that scope ends; a team's turn ignores the request.
+        An agent's turn then runs its tools in the directory its hooks asked for until that scope ends; a team's turn
+        ignores the request. ``work_in`` returns the scope that binds a directory of the agent's workspace for the
+        turn's tools, and raises ``ValueError`` or ``OSError`` for one the turn cannot work in.
         Call it inside the scope of ``turn``, whose end unsets the directory.
         """
         context = await self.deps.response_hooks._emit_turn_event(
@@ -914,11 +914,9 @@ class ResponseLifecycle:
             self.deps.logger.warning("turn_workdir_refused", workdir=requested, reason=reason)
             return
         try:
-            workdir = confined_workdir(agent_workspace_root(), requested)
+            self._workdir_scope.enter_context(work_in(requested))
         except (ValueError, OSError) as error:
             self.deps.logger.warning("turn_workdir_refused", workdir=requested, reason=str(error))
-            return
-        self._workdir_scope.enter_context(tool_workdir(workdir))
 
     @asynccontextmanager
     async def turn(self, *, approval_owns_end: Callable[[TurnOutcome], Awaitable[bool]]) -> AsyncIterator[None]:

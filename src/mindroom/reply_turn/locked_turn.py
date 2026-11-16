@@ -49,10 +49,13 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
+from mindroom.tool_system.output_files import turn_workdir
+from mindroom.tool_system.sandbox_proxy import tools_can_run_in_workers
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
+    from contextlib import AbstractContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -501,10 +504,7 @@ class LockedTurns:
                 correlation_id=lifecycle.identity.correlation_id,
             ):
                 try:
-                    await lifecycle.start_turn(
-                        resumed=resumed,
-                        agent_workspace_root=partial(self._agent_workspace_root, request, target),
-                    )
+                    await lifecycle.start_turn(resumed=resumed, work_in=partial(self._work_in, request, target))
                     outcome = await self._attempt_outcome(
                         request,
                         target=target,
@@ -550,6 +550,24 @@ class LockedTurns:
             self.deps.runtime_paths,
             execution_identity,
         ).workspace.root
+
+    def _work_in(
+        self,
+        request: ResponseRequest,
+        target: MessageTarget,
+        requested: str,
+    ) -> AbstractContextManager[None]:
+        """Return the scope in which the tools of this bot's agent turn at ``target`` work in ``requested``.
+
+        Where a tool call can run in a worker, only the worker-routed tools work there: worker code, of this agent
+        or of another whose worker mounts the same workspace, can replace a parent of the directory after it was
+        checked, and a tool of this process that took the directory as its root would follow it out of the workspace.
+        """
+        return turn_workdir(
+            self._agent_workspace_root(request, target),
+            requested,
+            workers_can_run=tools_can_run_in_workers(self.deps.runtime_paths),
+        )
 
     @asynccontextmanager
     async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:

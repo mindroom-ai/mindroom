@@ -807,14 +807,23 @@ def get_tool_by_name(
             configure_toolkit_functions,
             toolkit_function_names,
         )
-        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
+        from mindroom.tool_system.output_files import (  # noqa: PLC0415
+            ToolOutputFilePolicy,
+            current_tool_workdir,
+            current_worker_tool_workdir,
+            relative_workdir,
+        )
 
+        # A toolkit whose calls go to a worker works in the turn's working directory that its requests carry beside
+        # the workspace; one whose calls run here, in this process's working directory.
+        worker_workdir = relative_workdir(current_worker_tool_workdir(), tool_output_workspace_root) if routed else None
+        workdir = worker_workdir if routed else current_tool_workdir()
         output_file_policy = (
             ToolOutputFilePolicy.from_runtime(
                 tool_output_workspace_root,
                 runtime_paths,
                 auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-                tools_use_workdir=current_tool_workdir() is not None,
+                tools_use_workdir=workdir is not None,
             )
             if tool_output_workspace_root is not None
             else None
@@ -894,7 +903,7 @@ def get_tool_by_name(
                 extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
                 worker_target=worker_target,
                 runtime_config=runtime_config,
-                workspace_root=tool_output_workspace_root,
+                workdir=worker_workdir,
                 tools=tools,
             )
             if routed
