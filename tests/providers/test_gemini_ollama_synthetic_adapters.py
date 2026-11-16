@@ -640,7 +640,8 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
 
 
 @pytest.mark.asyncio
-async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["response_schema", "responseSchema"])
+async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Path, field: str) -> None:
     """The SDK rewrites a ``response_schema`` dict in place while the request log may still read the body it got."""
     schema = {"type": "object", "properties": {"note": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
     sent: list[Mapping[str, Any]] = []
@@ -648,7 +649,7 @@ async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Pa
     async def on_send(body: Mapping[str, Any]) -> None:
         sent.append(body)
 
-    config = _config(GEMINI, generation_config={"response_mime_type": "application/json", "response_schema": schema})
+    config = _config(GEMINI, generation_config={"response_mime_type": "application/json", field: schema})
 
     request, _ = await run_adapter(
         config,
@@ -658,7 +659,7 @@ async def test_gemini_leaves_the_body_handed_to_on_send_as_authored(tmp_path: Pa
     )
 
     assert request["body"]["generationConfig"]["responseSchema"]["properties"]["note"]["nullable"] is True
-    assert [body["config"]["response_schema"] for body in sent] == [schema]
+    assert [body["config"][field] for body in sent] == [schema]
 
 
 @pytest.mark.asyncio

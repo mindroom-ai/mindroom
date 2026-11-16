@@ -334,8 +334,10 @@ def _sent_body(call: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         config = cast("GenerateContentConfig", config).model_dump(mode="json", exclude_none=True)
     sent = {key: value for key, value in config.items() if key != "http_options"}
-    if "response_schema" in sent:
-        sent["response_schema"] = copy.deepcopy(sent["response_schema"])
+    # The SDK accepts the field under either name.
+    for key in ("response_schema", "responseSchema"):
+        if key in sent:
+            sent[key] = copy.deepcopy(sent[key])
     return {**call, "config": sent}
 
 

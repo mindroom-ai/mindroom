@@ -1163,18 +1163,18 @@ async def test_the_record_is_built_only_once_the_sending_task_waits(
 ) -> None:
     """Building the record holds the GIL, so it must not start while the SDK still serializes the request."""
     began = threading.Event()
-    write_line = request_log_stage._write_line
+    json_safe = request_log_stage.json_safe
 
-    def note_the_start(path: Path, payload: dict[str, object]) -> None:
+    def note_the_start(value: object) -> object:
         began.set()
-        write_line(path, payload)
+        return json_safe(value)
 
     began_while_sending: list[bool] = []
 
     async def serialize_without_yielding() -> None:
         began_while_sending.append(began.wait(timeout=0.2))
 
-    monkeypatch.setattr(request_log_stage, "_write_line", note_the_start)
+    monkeypatch.setattr(request_log_stage, "json_safe", note_the_start)
     inner = _ScriptedProvider([[Await(serialize_without_yielding), _turn()]])
 
     await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
