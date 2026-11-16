@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
-    from mindroom.call_transcripts.service import CallTranscriptService
+    from mindroom.call_transcripts.service import AgentCallRoom, CallTranscriptService
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -63,6 +63,8 @@ class EmbeddedRuntime:
     script_worker_keepalive: Callable[[WorkerBackend], None]
     # The call transcript service while `calls.transcripts.enabled` is on, the same one each time; None while off.
     call_transcripts: Callable[[], CallTranscriptService | None]
+    # A room as the agent answering calls in it reads it, with that agent's call there; None if no agent answers there.
+    agent_call_room: Callable[[str], AgentCallRoom | None]
 
 
 @dataclass(frozen=True)

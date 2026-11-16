@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -34,18 +34,21 @@ from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import secret_holder, temporary_secrets
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.progress import tool_progress_through
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
     from concurrent.futures import Executor
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
@@ -69,6 +72,8 @@ type _ToolApprovalGate = Callable[[BackgroundScriptToolOrigin, str, dict[str, An
 
 
 logger = get_logger(__name__)
+# The one call a temporary secret is a variable of, by toolkit and function.
+_SECRET_RECEIVER = ("shell", "run_shell_command")
 
 
 @dataclass(slots=True)
@@ -676,6 +681,12 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     )
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
+    # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
+    # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
+    # types there.
+    given = await _given_secrets(resolved_context)
+    if given and (registered_toolkit, tool_name) == _SECRET_RECEIVER:
+        environment = environment.then(ToolEnvironment(values=given))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -688,7 +699,12 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     tool_body_started_at = time.perf_counter()
     try:
         with collected_tool_environment(environment):
-            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_context.agent_name)
+            result = await _call_recorded_tool(
+                _without_given_secrets(func, given),
+                args,
+                tool_name=tool_name,
+                agent_name=resolved_context.agent_name,
+            )
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
@@ -700,6 +716,65 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     return await answer(result, "error" if _answered_failure(result) else "success")
+
+
+async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
+    """Return the temporary secrets the call's requester gave its conversation, by variable name.
+
+    Every call reads the store, so the read here touches no file; the store's first read after a start and the
+    deletion of an expired value's file run in a thread.
+    """
+    holder = secret_holder(resolved_context.execution_identity)
+    if holder is None:
+        return {}
+    store = temporary_secrets()
+    storage_root = resolved_context.runtime_paths.storage_root
+    given = store.values_in_memory(holder, storage_root=storage_root)
+    if given is None:
+        given = await asyncio.to_thread(store.values, holder, storage_root=storage_root)
+    return given
+
+
+def _without_given_secrets(
+    func: Callable[..., Awaitable[_ToolHookResult]],
+    given: Mapping[str, str],
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Return the tool with the exact copies of the conversation's given secrets removed from what it shows.
+
+    Every call in the conversation is covered, since a later call may read what a command wrote. The reply's record
+    of the call, its tool trace, its hooks and the model all read the result this returns, masked in its text, in the
+    text of a value that carries media, and in the texts of a mapping or a list, such as the receipt of output saved
+    to a file; live reply frames read the progress it reports. Best effort, like all redaction: a command that encodes the value passes, and so does
+    what a command, or MindRoom on its behalf, writes to a file in the workspace.
+    """
+    if not given:
+        return func
+    # The longest first, so a value that holds another leaves no tail beside the shorter one's mask.
+    values = sorted(given.values(), key=lambda value: -len(value))
+
+    def masked_text(text: str) -> str:
+        for value in values:
+            text = text.replace(value, REDACTED)
+        return text
+
+    def masked(result: object) -> object:
+        if isinstance(result, str):
+            return masked_text(result)
+        if isinstance(result, ToolValue):
+            # A result with media beside its text, as a shell command that used the agent CLI returns.
+            return replace(result, content=masked_text(result.content))
+        if isinstance(result, dict):
+            return {key: masked(item) for key, item in result.items()}
+        if isinstance(result, list):
+            return [masked(item) for item in result]
+        return result
+
+    async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        with tool_progress_through(masked_text):
+            result = await func(**arguments)
+        return masked(result)
+
+    return without_given_secrets
 
 
 async def dispatch_external_tool_hooks(

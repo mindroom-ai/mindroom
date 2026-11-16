@@ -3,9 +3,11 @@
   "mindroom-ai/location-enrich-plugin",
   "mindroom-ai/openviking-plugin",
   "mindroom-ai/ping-hook-plugin",
+  "mindroom-ai/pull-request-plugin",
   "mindroom-ai/response-audit-plugin",
   "mindroom-ai/restart-resume-plugin",
   "mindroom-ai/shell-guard-plugin",
   "mindroom-ai/thread-goal-plugin",
+  "mindroom-ai/thread-worktree-plugin",
   "mindroom-ai/voice-enrich-plugin"
 ]

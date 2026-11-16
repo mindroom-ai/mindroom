@@ -6415,7 +6415,7 @@ def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: 
     assert status_response.json()["credential_service"] == "google_docs_oauth"
     assert status_response.json()["tool_config_service"] == "google_docs"
     assert status_response.json()["client_config_service"] == "google_docs_oauth_client"
-    assert status_response.json()["capabilities"] == ["Docs create and read", "Docs text editing"]
+    assert status_response.json()["capabilities"] == ["Docs create and read", "Docs editing"]
     assert status_response.json()["connected"] is True
 
 

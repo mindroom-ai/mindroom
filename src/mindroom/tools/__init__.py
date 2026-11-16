@@ -272,7 +272,8 @@ def _homeassistant_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Egress Credentials",
     description=(
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
+        "and ask the user for a missing key"
     ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
@@ -285,10 +286,36 @@ def _homeassistant_tools() -> type[Toolkit]:
         ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[],
-    function_names=("list_egress_credentials",),
+    function_names=("list_egress_credentials", "request_secret"),
 )
 def _egress_credentials_tools() -> type[Toolkit]:
     """Return the egress broker credential status tool."""
     from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 
     return EgressCredentialsTools
+
+
+@register_tool_with_metadata(
+    name="temporary_secrets",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Temporary Secrets",
+    description=(
+        "Ask the user for a password, token or code with a card in the conversation; this agent's shell commands "
+        "receive it as an environment variable for as long as the user chose, and the agent never sees it"
+    ),
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    config_fields=[],
+    function_names=("request_temporary_secret",),
+)
+def _temporary_secrets_tools() -> type[Toolkit]:
+    """Return the tool that asks the user for a temporary secret."""
+    from mindroom.custom_tools.temporary_secrets import TemporarySecretsTools
+
+    return TemporarySecretsTools

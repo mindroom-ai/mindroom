@@ -9167,7 +9167,7 @@
     "functions": [
       {
         "name": "list_egress_credentials",
-        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key`, `oauth`, or\n`github_app`). A `github_app` service lists the repositories its GitHub App covers in\n`github_app_repositories`, each `read` or `read_write`; it takes no key and covers no other repository.\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\n`oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`\nwhether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with\nnothing configured also says whether the user can connect an account instead of adding a key\n(`can_connect_account`), with the account's\n`provider` when it can or when the account still needs allowing. `separate_account: true` marks a service\nof the user's own that takes no API key, only an account of its own, which a request uses by naming it in an\n`X-Agent-Keys-Service` header.\nThe result carries the link\nwhere the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key\ninto the chat; send them to the link instead.",
+        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key`, `oauth`, or\n`github_app`). A `github_app` service lists the repositories its GitHub App covers in\n`github_app_repositories`, each `read` or `read_write`; it takes no key and covers no other repository.\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\n`oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`\nwhether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with\nnothing configured also says whether the user can connect an account instead of adding a key\n(`can_connect_account`), with the account's\n`provider` when it can or when the account still needs allowing. `separate_account: true` marks a service\nof the user's own that takes no API key, only an account of its own, which a request uses by naming it in an\n`X-Agent-Keys-Service` header.\nThe result carries the link\nwhere the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key\ninto the chat: call `request_secret` for a missing key; the link is the fallback.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -9185,6 +9185,42 @@
             }
           },
           "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "request_secret",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "service": {
+              "type": "string",
+              "description": "The service's `name` from `list_egress_credentials`."
+            },
+            "reason": {
+              "type": "string",
+              "description": "What you need the key for, in a sentence or two the user reads on the card."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "service",
+            "reason"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -14467,6 +14503,49 @@
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
+      },
+      {
+        "name": "google_docs_batch_update",
+        "description": "Apply Google Docs API batchUpdate requests to a document, in order and all or none.\nUse this for what the text functions cannot do, such as tables, headings, text and paragraph styles,\nlists, links, page breaks, headers, footers, footnotes, and images from a public URL.\nEach request is one Docs API Request object, for example\n{\"updateParagraphStyle\": {\"range\": {\"startIndex\": 1, \"endIndex\": 6, \"tabId\": \"t.0\"},\n\"paragraphStyle\": {\"namedStyleType\": \"HEADING_1\"}, \"fields\": \"namedStyleType\"}}.\nIndexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location\nwithout a tabId is in the first tab.\nEach request sees the document as the requests before it left it, so make several edits from the end of\nthe document toward its start.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "document_id": {
+              "type": "string",
+              "description": "Google Docs document ID."
+            },
+            "requests": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "description": "Docs API batchUpdate Request objects."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "document_id",
+            "requests"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
       }
     ]
   },
@@ -14622,7 +14701,7 @@
       },
       {
         "name": "google_drive_upload_file",
-        "description": "Upload one local file, resolving relative paths from the agent workspace.",
+        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs\nsupports, such as headings, tables, lists, links, and the images a Word file embeds; \"spreadsheet\" a\nGoogle Sheet from Excel or CSV; \"presentation\" Google Slides from PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14659,6 +14738,14 @@
                 }
               ]
             },
+            "convert_to": {
+              "type": "string",
+              "enum": [
+                "document",
+                "spreadsheet",
+                "presentation"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -14682,7 +14769,7 @@
       },
       {
         "name": "google_drive_update_file",
-        "description": "Replace the contents of one binary Drive file from the agent workspace.",
+        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it, so formatting that is not in the local file is lost and comments on the replaced\ncontent lose their place.\nTo change part of such a file, use the Google Docs or Google Sheets tool instead.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27195,6 +27282,48 @@
           },
           "required": [
             "message"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "temporary_secrets": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "request_temporary_secret",
+        "description": "Ask the user for a secret your shell commands need, with a card in this conversation, and wait.\nCall this for a password, token, passphrase or code that a command needs and that you must not see: the\nuser types it into a masked field in MindRoom Chat, and it becomes the environment variable `name` of your\nshell commands in this conversation. The value never reaches you or the chat.\nThe user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than\n15 minutes.\nWhen you also have `request_secret` and need the API key of a service it can ask for, call that instead:\nsuch a key never reaches your commands.\nWaits up to 15 minutes and returns `status`:\n`provided` with `minutes`, how long the variable stays set: use `$name` inside the command that needs it,\nand never print, store or send the value;\n`declined` when the user refused: do not ask again for this secret in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The environment variable to set, such as `SUDO_PASSWORD`: letters, digits and underscores."
+            },
+            "reason": {
+              "type": "string",
+              "description": "What you need the secret for, in a sentence or two the user reads on the card."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "name",
+            "reason"
           ]
         },
         "strict": false,

@@ -799,6 +799,19 @@ async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers(
 
 
 @pytest.mark.asyncio
+async def test_openrouters_missing_audio_endpoint_is_learned() -> None:
+    """OpenRouter names the gap as no endpoint supporting input audio, so the next request leaves the audio out."""
+    gap = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
+    inner = _ScriptedProvider([[gap], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert [attempt.messages[0].audio for attempt in inner.requests] == [[_CLIP], None, None]
+
+
+@pytest.mark.asyncio
 async def test_a_named_retry_leaves_the_media_the_route_omits_out_and_names_it_too() -> None:
     """Media the route never takes stays out of the named retry, and the one note names it beside the rejected item."""
     inner = _ScriptedProvider(

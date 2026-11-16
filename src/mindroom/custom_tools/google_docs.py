@@ -65,6 +65,7 @@ class GoogleDocsTools(GoogleApiToolkit):
                 [
                     self.google_docs_insert_text,
                     self.google_docs_replace_text,
+                    self.google_docs_batch_update,
                 ],
             )
         super().__init__(
@@ -77,7 +78,7 @@ class GoogleDocsTools(GoogleApiToolkit):
             **kwargs,
         )
 
-    def _batch_update(self, document_id: str, requests: list[dict[str, object]]) -> dict[str, object]:
+    def _batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> dict[str, object]:
         service = self._google_api_service()
         return cast(
             "dict[str, object]",
@@ -268,3 +269,40 @@ class GoogleDocsTools(GoogleApiToolkit):
             )
         except HttpError as exc:
             return google_http_error_result("Google Docs", "replace_text", exc)
+
+    def google_docs_batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> str:
+        """Apply Google Docs API batchUpdate requests to a document, in order and all or none.
+
+        Use this for what the text functions cannot do, such as tables, headings, text and paragraph styles,
+        lists, links, page breaks, headers, footers, footnotes, and images from a public URL.
+        Each request is one Docs API Request object, for example
+        {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6, "tabId": "t.0"},
+        "paragraphStyle": {"namedStyleType": "HEADING_1"}, "fields": "namedStyleType"}}.
+        Indexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location
+        without a tabId is in the first tab.
+        Each request sees the document as the requests before it left it, so make several edits from the end of
+        the document toward its start.
+
+        Args:
+            document_id: Google Docs document ID.
+            requests: Docs API batchUpdate Request objects.
+
+        Returns:
+            JSON containing one reply per request in the Google Docs batch-update response.
+
+        """
+        document_id = _normalize_document_id(document_id)
+        if not document_id:
+            return json.dumps({"error": "Google Docs document_id must not be empty"})
+        if not requests:
+            return json.dumps({"error": "Google Docs requests must not be empty"})
+        try:
+            response = self._batch_update(document_id, requests)
+            return json.dumps(
+                {
+                    "update": response,
+                    "documentUrl": _document_url(document_id),
+                },
+            )
+        except HttpError as exc:
+            return google_http_error_result("Google Docs", "batch_update", exc)

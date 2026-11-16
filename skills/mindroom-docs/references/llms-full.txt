@@ -3055,6 +3055,16 @@ In `thread` mode, an agent answering a room-level message starts a new thread on
 Clients and bridges that send plain replies instead of thread replies still work: a plain reply whose reply chain reaches a thread joins that thread, and one that never reaches a thread stays room-level.
 Edits, reactions, and redactions belong to the same thread as the message they target.
 
+## Forked Threads
+
+A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
+An agent that answered in the parent counts as a participant of the fork.
+Agents in the fork can use the attachments of the threads it forks from.
+An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
+Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
+Moving a fork to another room copies only the fork's own messages.
+
 ## Multi-Human Thread Protection
 
 When two or more people have posted in a thread, agents answer only when explicitly mentioned, so they do not interrupt a human conversation.
@@ -5901,6 +5911,7 @@ When the call ends, file memory stores a reference to the transcript, Mem0 store
 MindRoom transcribes calls between people in rooms where its router is a member, for people who call from MindRoom Chat.
 Each person's MindRoom Chat finds stretches of speech in the microphone it already sends to the call and uploads them to MindRoom, which turns them into text, so each line is under the right name and nobody extra joins the call.
 Calls with a MindRoom agent are not transcribed this way; the agent posts its own transcript, as described in [Calling an agent about a thread](#calling-an-agent-about-a-thread).
+MindRoom Chat still shows a call with an agent live, through the same route as a call between people, also while `calls.transcripts.enabled` is off and in rooms without the router.
 
 ```yaml
 calls:
@@ -5973,7 +5984,8 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 
 A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
 A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
-Every route answers 404 while `calls.transcripts.enabled` is off.
+`GET /rooms/{room_id}/call` asks for a client session first in every room (401 without one), so nobody without one learns which rooms an agent answers calls in. Every route answers 404 while `calls.transcripts.enabled` is off, except that read in a room an agent answers calls in; the other routes answer 404 before they ask for a session.
+In such a room without a live call between people, `GET /rooms/{room_id}/call` answers its caller with the agent's call while it runs (other members of the room read no call): `members` are the caller and the agent, `rowEventId` and `pausedBy` are null, each line is a `speech` line with `seconds` 0 in the order it was heard, and the agent's name is its configured `display_name`.
 A call's routes take the room from the call and answer 404 to anyone not in that room.
 Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
@@ -6092,7 +6104,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
@@ -10372,6 +10384,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
+- [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -10575,6 +10588,36 @@ agents:
       - shell
       - terminal
     terminals: type
+```
+
+## [`temporary_secrets`]
+
+`temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service, a passphrase, or a pairing code.
+It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+
+- MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
+  Other people in the thread see who the card waits for.
+- The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
+  A restart forgets a value kept in memory and reads back one kept in a file.
+  The file is deleted at the first tool call or answer after the value expired.
+- Chat sends the value to this MindRoom's API with the user's client session, so it never goes through Matrix or the model.
+- While it is kept, the value is the environment variable `name` of that agent's `shell` commands (`run_shell_command`) in the same room and thread, in turns of the same requester, whether they run in the MindRoom process or in a worker.
+  MindRoom gives it to no other agent, conversation, or person's turn, and not to a [`terminal`], whose shell would keep it past its lifetime.
+  In a worker that several people's turns share, another person's command can still read the environment of a command while it runs, and a process that a command leaves running keeps the variable for as long as it runs.
+- The tool returns `provided` with the minutes the variable stays set, `declined`, or `expired` when no answer came in 15 minutes.
+  It waits, stops, and continues as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) the way [`request_secret`](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) does, and needs the same access for Chat: its origin in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and a homeserver that binds OpenID tokens to this deployment.
+
+Unlike an Agent Keys key, a temporary secret reaches the agent's commands, so a command can print it or send it elsewhere.
+MindRoom tells the agent to use the variable only inside the command that needs it, and replaces exact copies of the value in tool results and in the output a running command shows, before the model or the room reads them, but neither stops an agent that works around them.
+What a command prints can also end up in the agent's workspace, in a file the command writes or in the file MindRoom saves a large result or a `mindroom_output_path` result to; those files hold the output as the command printed it.
+Give the tool to agents you would trust with the secret, and prefer an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service for an API key that a service's hosts take in a header.
+
+```yaml
+agents:
+  ops:
+    tools:
+      - shell
+      - temporary_secrets
 ```
 
 ## [`python`]
@@ -11135,8 +11178,8 @@ agents:
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
 | `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
 | `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
-| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
-| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
+| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None, convert_to=None)` | Uploads a local file; relative paths start at the agent workspace. With `convert_to` set to `document`, `spreadsheet`, or `presentation`, Drive converts the file into a Google Doc, Sheet, or Slides file. |
+| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing file, which keeps its ID, link, and sharing. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
@@ -11148,7 +11191,9 @@ Downloads larger than `max_download_size` are refused without leaving a partial 
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
-To change the content of a native Google Doc, use [`google_docs`](#google_docs).
+To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: Drive imports the formatting Google Docs supports, such as headings, tables, lists, and links.
+Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting that is not in the local file is lost and comments on the replaced content lose their place.
+To change part of a Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](https://docs.mindroom.chat/deployment/google-services-oauth/#scope-rationale).
 Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API quota and billing to that Google Cloud project.
@@ -11190,6 +11235,7 @@ tool_approval:
 | `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
 | `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
 | `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
+| `google_docs_batch_update(document_id, requests)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -11200,7 +11246,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | --- | --- | --- | --- |
 | `create_document` | `boolean` | `true` | Enable document creation. |
 | `read_document` | `boolean` | `true` | Enable structure and content reads. |
-| `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
+| `edit_document` | `boolean` | `true` | Enable text insertion, text replacement, and batch updates. |
 
 ## [`google_sheets`]
 
@@ -15274,7 +15320,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 Related tools documented elsewhere:
 
 - [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -17471,6 +17517,7 @@ A shared-scope link would skip that sign-in, and any process in a shared worker 
 A shared Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) is never injected, so the broker cannot be used to spend it.
 On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers on `private` agents when requesters must not be able to use each other's brokered credentials (see [Shared workspaces on non-private agents](https://docs.mindroom.chat/deployment/egress-broker/#shared-workspaces-on-non-private-agents)), because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox.
 Only administrators and an agent's credential managers can change the keys, services, account connection, and account opt-in of a shared or unscoped agent.
+Besides the Agent Keys pages, a MindRoom Chat client session can set a key through an agent's secret request card, under the same rule and only for the scope and service the card names.
 The credential managers of one key scope, and of all unscoped agents, can change each other's keys and services (see [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#secrets-and-identity)).
 Users can define egress services of their own, which apply only to their own scope, route only that scope's keys and accounts, never widen the administrator's policy, and cannot take a config service's name or set `oauth_on_shared_workers`, `admin_key`, `agents`, or `github_app`.
 A `github_app` service's tokens are minted in the primary from the App private key named by a stored credential, which the primary reads and workers never see; the tokens cover only the listed repositories, and GitHub enforces that scope.
@@ -17682,6 +17729,8 @@ A plugin route reaches the same terminals through `RoomReader.terminals()`, for 
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/rooms/` take the same sessions and admit the caller through `RoomReader.agents()` or `agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`, which needs a writing toolkit that works in the workspace: in the primary, a dedicated worker, or a `static_runner` the deployment says mounts the agents' storage, since only there could the agent itself change those files.
 The workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
+The [secret request route](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) `POST /api/rooms/<room_id>/secret-requests/<request_id>` takes the same sessions through `require_room_member` and answers only the person the agent asked, for a request registered in that room, once, while it is pending; under the config the API serves when the answer arrives, it checks again that the caller may manage the agent's Agent Keys, that the agent still keeps the caller's keys in the store the card was made for, and that the service still takes a user's key and has the hosts the card showed, and it writes the key only into that store, never into a scope the agent moved to.
+The key never appears in a response, a log line, or a Matrix event.
 The change stream rechecks `agent()` every 15 seconds under the config served then, closing once the workspace is no longer open to the caller or its `root` moved; it registers no watch by path, but scans the workspace by opening every folder from the root without following a link, as the file routes do, and reports only what those scans saw, so a link planted or swapped in the workspace never makes the primary look at or report anything outside it.
 `require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
 A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, at any depth, and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
@@ -17700,6 +17749,7 @@ Each host is an origin of its own, so its pages share no origin with the dashboa
 Every answer on the listener carries `Content-Security-Policy: frame-ancestors 'self'` with the origins `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, as a separate policy a route can tighten but never loosen, so a page there loads only in MindRoom Chat's frames or the host's own; no other header is forced, because core never knows what a plugin serves.
 On any other host, `GET /ask?domain=<host>` tells an on-demand TLS proxy whether the host's plugin says it serves it now, so certificates are issued only for hosts a plugin vouches for; the listener writes no access log line for its HTTP requests, since a path or query may carry a one-use link, while Uvicorn still logs each websocket handshake with its path.
 The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
+In a room an agent answers calls in, while no live call between people takes precedence, reading the room's live call checks room membership through that agent instead, also while call transcripts are off, and a call with the agent is read from the agent's transcript in memory, by its caller only, since other members could not tell they were heard.
 CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, and `/api/rooms/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, and room routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
@@ -17739,6 +17789,8 @@ Do not report or "fix" these; they are deliberate.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
   Counting them would rotate the session about every ten seconds while a reply streams, each rotation sharing a new key with every device.
+- A [temporary secret](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) reaches the shell commands of the conversation whose requester gave it, in a worker too, and MindRoom removes it from tool results only on a best-effort basis; the requester accepts with each card that the agent's commands hold the value.
+  A value kept for 24 hours lies unencrypted in a file of the primary, as the credential store's files do.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
@@ -17751,6 +17803,7 @@ Do not report or "fix" these; they are deliberate.
   It shows a published role likewise only from agents on the viewer's homeserver, so a person writing the same state under their own user ID shows no role.
 - An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
+- A secret request card shows a `reason` the model wrote, so a manipulated agent can ask for the key of any service it may request with misleading text; the key still reaches only that service's hosts, which the card shows.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
@@ -23736,7 +23789,7 @@ agents:
       - egress_credentials
 ```
 
-Its one function, `list_egress_credentials`, takes no arguments and returns JSON:
+`list_egress_credentials` takes no arguments and returns JSON:
 
 ```json
 {
@@ -23771,8 +23824,31 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers, or an Atlassian connection with `requester_scoped=False`, on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
-- The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
+- The tool never returns secret values, access tokens, or connect links, and its note tells the agent to ask for a missing key with [`request_secret`](#asking-in-chat), never by having users paste it into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
+
+### Asking in chat
+
+For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+
+- MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
+  Other people in the thread see who the card waits for.
+  When the service already has a key in that scope, the card says that saving replaces it.
+- Chat sends the key to this MindRoom's API with the user's client session.
+  MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
+  The key never goes through Matrix, the model, the worker, or the logs.
+- The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  A card expires after 15 minutes or when the reply is stopped, and a restart of MindRoom ends every pending request.
+  It also expires when an answer arrives after its service changed or the agent's keys moved to another scope; the agent can then ask again with a new card.
+- When the call runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs), the reply waits for the answer for `background_tool_jobs.approval_wait_timeout` seconds (default 300) and then goes on; the outcome arrives later as the job's result.
+  Stop withdraws the card only while the reply still waits for it.
+- The requester answers.
+  For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
+- The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+  The refusal names the Agent Keys page where one exists.
+- For a secret that is no service's API key, such as a password or a pairing code, an agent with the [`temporary_secrets`](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) tool asks with a card of its own, and its shell commands receive the value for a limited time.
+- Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](https://docs.mindroom.chat/deployment/sandbox-proxy/#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)).
+  Without either, the tool posts no card and sends the user to the Agent Keys page instead.
 
 ## Deployment
 

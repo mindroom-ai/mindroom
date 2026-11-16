@@ -381,6 +381,19 @@ async def test_a_command_without_a_timeout_runs_until_it_ends(
 
 
 @pytest.mark.asyncio
+async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priority(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A busy build an agent starts must not take the CPU from the process that runs MindRoom."""
+    child = shlex.join([sys.executable, "-c", "import os; print(os.nice(0))"])
+
+    message = await _run(registry, ["/bin/sh", "-c", f"sleep 0.2; {child}"], tmp_path)
+
+    assert message == "19"
+
+
+@pytest.mark.asyncio
 async def test_a_running_command_reports_its_latest_output_as_progress(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,

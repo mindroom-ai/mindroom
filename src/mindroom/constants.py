@@ -1043,6 +1043,8 @@ SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 # On a thread-move copy, which is skip-marked: the user IDs its original counted as mentioning earlier in its thread,
 # which the copy keeps counting while waking nobody.
 COPIED_MENTIONS_KEY = "io.mindroom.copied_mentions"
+# On a forked thread's root: the parent thread and the last parent message the fork includes.
+FORK_CONTENT_KEY = "io.mindroom.fork"
 # Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.
 EXACT_MENTIONS_KEY = "io.mindroom.exact_mentions"
 # False on a message whose mentions must not wake the agents among them.

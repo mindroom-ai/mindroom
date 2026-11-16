@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import os
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import secret_requests
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
@@ -31,13 +33,18 @@ from mindroom.hooks import (
     default_timeout_ms_for_event,
     hook,
 )
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import _TemporarySecrets, secret_holder
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
-from mindroom.tool_system.tool_environment import ToolEnvironment
+from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
@@ -61,7 +68,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tool_system.invocation import ToolCall, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _ALICE = _MIND_EXECUTION_IDENTITY
@@ -733,3 +740,218 @@ def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: obj
 
     with pytest.raises(ValueError, match="one absolute directory"):
         ctx.prepend_path(directory)
+
+
+@pytest.fixture
+def given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[str, str], None]:
+    """Give Alice's conversation with the agent a temporary secret, in a store of this test's own."""
+    store = _TemporarySecrets()
+    monkeypatch.setattr(secret_requests, "_TEMPORARY_SECRETS", store)
+    holder = secret_holder(_ALICE)
+    assert holder is not None
+
+    def give(name: str, value: str) -> None:
+        store.give(holder, name, value, keep="memory", now=time.time(), storage_root=tmp_path / "given")
+
+    return give
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_reaches_the_command_wherever_it_runs(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """A value the requester gave the conversation is a variable of its shell commands, with no hook involved."""
+    given("PASSPHRASE", "open sesame")
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "$PASSPHRASE" | wc -c') == "11"
+    if shell.sent:
+        assert shell.sent[-1]["execution_env"]["PASSPHRASE"] == "open sesame"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_goes_over_a_hook_s_variable(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """The person's own value wins over a plugin's for the same name."""
+    given("PLUGIN_VALUE", "from the person")
+
+    output = await shell.run(_registry(_shell_environment), 'printf %s "$PLUGIN_VALUE" | wc -c')
+
+    assert output == str(len("from the person"))
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_stays_with_its_requester(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """Another person's turn in the same room never receives the value."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:-unset}"', identity=_BOB) == "unset"
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:+set}"', identity=_ALICE) == "set"
+
+
+@pytest.mark.asyncio
+async def test_a_result_never_repeats_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """Every exact copy of a live value is removed from a tool result before the model reads it."""
+    given("PASSPHRASE", "open-sesame-123")
+    command = 'echo "$PASSPHRASE $PASSPHRASE x${PASSPHRASE}y"'
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", command]})
+
+    assert not outcome.is_error, outcome.content
+    assert "open-sesame-123" not in outcome.content
+    assert outcome.content.count(REDACTED) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_reply_s_record_of_a_call_never_holds_a_given_secret(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """The durable record of a call, which a tool trace and a replay read, gets the result the model gets."""
+    given("PASSPHRASE", "open-sesame-123")
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$PASSPHRASE"']})
+
+    assert not outcome.is_error, outcome.content
+    assert len(recorded) == 1
+    assert "open-sesame-123" not in str(recorded[0])
+    assert REDACTED in str(recorded[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("toolkit", "function_name", "received"),
+    [
+        ("shell", "run_shell_command", True),
+        ("shell", "check_shell_command", False),
+        ("terminal", "terminal_open", False),
+    ],
+)
+async def test_a_given_secret_is_a_variable_of_shell_commands_only(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    toolkit: str,
+    function_name: str,
+    received: bool,
+) -> None:
+    """No other call gets the variable: a terminal opened with it would keep it past its lifetime, for anyone."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    async def capture(_call: ToolCall, _call_next: ToolNext) -> object:
+        seen.update(current_tool_environment().values)
+        return "done"
+
+    function = replace(shell.function, name=function_name, registered_toolkit=toolkit, middleware=(capture,))
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert ("PASSPHRASE" in seen) is received
+
+
+@pytest.mark.asyncio
+async def test_live_progress_never_shows_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """What a running call reports for live reply frames loses the value before any listener gets it."""
+    given("PASSPHRASE", "open-sesame-123")
+    reports: list[str] = []
+
+    async def report(call: ToolCall, call_next: ToolNext) -> object:
+        report_tool_progress("typed open-sesame-123, waiting")
+        return await call_next(call.arguments)
+
+    function = replace(shell.function, middleware=(*shell.function.middleware, report))
+    with tool_progress_reporter(reports.append):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert f"typed {REDACTED}, waiting" in reports
+    assert not any("open-sesame-123" in text for text in reports)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_that_holds_another_is_removed_whole(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """The longer value goes first, so no tail of it stays beside the shorter one's mask."""
+    given("SHORT", "open-sesame")
+    given("LONG", "open-sesame-and-more")
+    shell = _local_shell(tmp_path)
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$LONG"']})
+
+    assert not outcome.is_error, outcome.content
+    assert "and-more" not in outcome.content
+    assert outcome.content.count(REDACTED) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_structured_result_loses_a_given_secret_too(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """A result that is a receipt, such as that of output saved to a file, is masked in its texts."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def receipt(_call: ToolCall, _call_next: ToolNext) -> object:
+        return {"status": "saved", "preview": "raw:open-sesame-123", "lines": ["open-sesame-123", 7]}
+
+    function = replace(shell.function, middleware=(receipt,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert recorded == [{"status": "saved", "preview": f"raw:{REDACTED}", "lines": [REDACTED, 7]}]
+    assert "open-sesame-123" not in str(outcome.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        ToolValue(content="raw:open-sesame-123"),
+        ToolOutcome(content="failed with open-sesame-123", is_error=True, stop_after_call=True),
+    ],
+    ids=["value", "outcome"],
+)
+async def test_a_result_that_carries_media_loses_a_given_secret_in_its_text(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    value: ToolValue,
+) -> None:
+    """A shell result with media attached, as a command that used the agent CLI returns, is masked in its text."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def answer(_call: ToolCall, _call_next: ToolNext) -> object:
+        return value
+
+    function = replace(shell.function, middleware=(answer,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    masked = value.content.replace("open-sesame-123", REDACTED)
+    assert recorded == [replace(value, content=masked)]
+    assert outcome.content == masked
+    assert outcome.is_error is isinstance(value, ToolOutcome)

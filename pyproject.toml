@@ -427,6 +427,7 @@ tavily = [
 telegram = [
   "pytelegrambotapi>=4.32",
 ]
+temporary_secrets = []
 terminal = []
 thread_model = []
 thread_move = []

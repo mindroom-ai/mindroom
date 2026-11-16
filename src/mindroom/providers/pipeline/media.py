@@ -64,7 +64,7 @@ _CAPABILITY_GAP_ERROR = re.compile(
     r"|(?:image|audio|video|file|pdf|document) inputs? (?:is|are) not supported"
     r"|is not a multimodal model"
     r"|is only supported by certain models"
-    r"|no endpoints found that support (?:image|audio|video|file|pdf|document)",
+    r"|no endpoints found that support (?:input )?(?:image|audio|video|file|pdf|document)",
 )
 
 

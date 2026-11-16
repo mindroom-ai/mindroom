@@ -204,7 +204,12 @@ Matrix sync callback
 | `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections and opt-ins, and the caller's request log |
 | `api/egress_status.py` | Service status, preset, and request-log responses and the account-connection gate shared by both egress APIs |
 | `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
-| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, and where to add missing ones |
+| `egress_broker/key_access.py` | Who may use and manage an agent's Agent Keys, shared by the Agent Keys pages and secret requests |
+| `secret_requests.py` | In-memory registry of pending secret requests, the card content they post, and the store of temporary secrets requesters gave conversations (in memory, or also one private file each) |
+| `secret_request_cards.py` | The card a secret request posts and the wait for its answer, shared by `request_secret` and `request_temporary_secret` |
+| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope, gives their temporary secret to the conversation that asked, or records a decline |
+| `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
@@ -233,7 +238,7 @@ Matrix sync callback
 | `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/server_state.py` | Each entity's runtime origin, worker computer, and role, published per room as state so MindRoom Chat finds its server and shows what the entity does |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
-| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), and the service the API routes reach |
+| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
@@ -481,6 +486,7 @@ Matrix sync callback
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
 | `matrix/projected_thread_membership.py` | Thread-root proofs for tools and outbound mutations, read from the conversation projection like turns |
+| `matrix/thread_forks.py` | Forked threads: the parent chain's messages up to each fork point in front of a fork's reads, fork-root detection, and the parent threads a fork's attachments may come from |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/joined_members.py` | A room's joined members, read again while the durable client refuses a read that a membership change raced |
@@ -492,11 +498,11 @@ Matrix sync callback
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, the speech-to-text call transcripts share |
 | `voice/openai_realtime_speech.py` | OpenAI text-to-speech through the Realtime API, shared by voice messages, the `openai` toolkit, and cascaded calls |
-| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message |
+| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message; and a call with an agent read as a live call, after any call between people in its room |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
 | `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, the row, its edits and the transcript message it posts, each at most once per call, and the request that the router title the row's thread from the notes |
-| `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off |
+| `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off, except the live call in a room an agent answers calls in |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |
 | `call_transcripts/notes.py` | A finished call's notes from `calls.transcripts.notes_model`: what it was about, decisions, action items, and open questions |
 | `matrix_rtc/realtime_tts.py` | LiveKit TTS for cascaded calls on `gpt-realtime` models |

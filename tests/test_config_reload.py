@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from contextlib import suppress
@@ -914,6 +915,29 @@ def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     assert hooks_path in snapshot
     assert git_head not in snapshot
     assert git_ref not in snapshot
+
+
+def test_plugin_tree_snapshot_never_reads_ignored_directories(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The watcher scans every plugin root each second, so it must not stat what it ignores, such as Git objects."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    hooks_path = plugin_root / "hooks.py"
+    ignored = [plugin_root / ".git" / "objects" / "ab" / "cdef", plugin_root / "__pycache__" / "hooks.cpython-314.pyc"]
+    for path in [hooks_path, *ignored]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    statted: list[str] = []
+    real_stat = os.stat
+
+    def recording_stat(path: str | os.PathLike[str], *, follow_symlinks: bool = True) -> os.stat_result:
+        statted.append(os.fspath(path))
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", recording_stat)
+
+    snapshot = _tree_snapshot(plugin_root)
+
+    assert list(snapshot) == [hooks_path]
+    assert not [path for path in statted if "/.git/" in path or "/__pycache__/" in path]
 
 
 @pytest.mark.asyncio

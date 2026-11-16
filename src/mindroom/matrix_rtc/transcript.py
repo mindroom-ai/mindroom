@@ -87,6 +87,8 @@ class CallTranscript:
     started_at: datetime
     reference_root: Path
     execution_identity: ToolExecutionIdentity | None
+    id: str = field(default_factory=lambda: uuid4().hex, init=False)
+    """Names this call while it is read live; each media session of a call has its own transcript."""
     _started_monotonic: float = field(default_factory=time.monotonic, init=False)
     #: Spoken items in arrival order: speaker, text, seconds from the call start, and whether it continued a turn.
     _spoken: list[tuple[str, str, float, bool]] = field(default_factory=list, init=False)
@@ -146,6 +148,11 @@ class CallTranscript:
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
         self._schedule_flush()
+
+    def spoken_items(self) -> tuple[tuple[str, str, float], ...]:
+        """Return each finalized item so far in arrival order: its speaker, its text, and the Unix time it started."""
+        started_at = self.started_at.timestamp()
+        return tuple((speaker, text, started_at + since_start) for speaker, text, since_start, _ in self._spoken)
 
     @property
     def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
