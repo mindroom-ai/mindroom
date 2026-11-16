@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.constants import FORK_CONTENT_KEY
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, is_thread_history_degraded
-from mindroom.matrix.thread_forks import MAX_FORK_DEPTH, ThreadForkReference, thread_fork_reference, with_fork_prefix
+from mindroom.matrix.thread_forks import _MAX_FORK_DEPTH, _thread_fork_reference, _ThreadForkReference, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from tests.conftest import make_visible_message
 
@@ -44,13 +44,13 @@ def _ids(history: ThreadHistoryResult) -> list[str]:
 
 def test_reference_parses_only_two_event_ids() -> None:
     """Reference parses only two event ids."""
-    assert thread_fork_reference(_fork_content("$p", "$p2")) == ThreadForkReference("$p", "$p2")
-    assert thread_fork_reference({}) is None
-    assert thread_fork_reference({FORK_CONTENT_KEY: "$p"}) is None
-    assert thread_fork_reference(_fork_content("", "$p2")) is None
-    assert thread_fork_reference(_fork_content("$p", "")) is None
-    assert thread_fork_reference(_fork_content("p", "$p2")) is None
-    assert thread_fork_reference(_fork_content("$p", "p2")) is None
+    assert _thread_fork_reference(_fork_content("$p", "$p2")) == _ThreadForkReference("$p", "$p2")
+    assert _thread_fork_reference({}) is None
+    assert _thread_fork_reference({FORK_CONTENT_KEY: "$p"}) is None
+    assert _thread_fork_reference(_fork_content("", "$p2")) is None
+    assert _thread_fork_reference(_fork_content("$p", "")) is None
+    assert _thread_fork_reference(_fork_content("p", "$p2")) is None
+    assert _thread_fork_reference(_fork_content("$p", "p2")) is None
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_chain_stops_after_eight_parents() -> None:
     read = _reader(threads)
     logger = MagicMock()
     result = await with_fork_prefix(threads["$t0"], thread_id="$t0", read_thread=read, logger=logger)
-    assert MAX_FORK_DEPTH == 8
+    assert _MAX_FORK_DEPTH == 8
     assert read.await_count == 8
     assert _ids(result) == [x for i in range(8, 0, -1) for x in (f"$t{i}", f"$t{i}r")] + ["$t0", "$t0r"]
     assert logger.warning.call_count == 1

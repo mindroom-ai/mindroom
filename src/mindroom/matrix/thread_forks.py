@@ -16,18 +16,18 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
-MAX_FORK_DEPTH = 8
+_MAX_FORK_DEPTH = 8
 
 
 @dataclass(frozen=True, slots=True)
-class ThreadForkReference:
+class _ThreadForkReference:
     """The parent thread and last parent message a forked thread includes."""
 
     thread_id: str
     event_id: str
 
 
-def thread_fork_reference(content: Mapping[str, Any]) -> ThreadForkReference | None:
+def _thread_fork_reference(content: Mapping[str, Any]) -> _ThreadForkReference | None:
     """Parse the fork reference from a thread root's content, or None when it is not a fork."""
     value = content.get(FORK_CONTENT_KEY)
     if not isinstance(value, dict):
@@ -38,17 +38,17 @@ def thread_fork_reference(content: Mapping[str, Any]) -> ThreadForkReference | N
         return None
     if not (thread_id.startswith("$") and event_id.startswith("$")):
         return None
-    return ThreadForkReference(thread_id=thread_id, event_id=event_id)
+    return _ThreadForkReference(thread_id=thread_id, event_id=event_id)
 
 
 def _own_messages(history: ThreadHistoryResult, thread_id: str) -> list[ResolvedVisibleMessage]:
     return [m for m in history if thread_id in (m.event_id, m.thread_id)]
 
 
-def _root_reference(messages: list[ResolvedVisibleMessage], thread_id: str) -> ThreadForkReference | None:
+def _root_reference(messages: list[ResolvedVisibleMessage], thread_id: str) -> _ThreadForkReference | None:
     for message in messages:
         if message.event_id == thread_id:
-            return thread_fork_reference(message.content)
+            return _thread_fork_reference(message.content)
     return None
 
 
@@ -69,7 +69,7 @@ async def with_fork_prefix(
     is_full_history = history.is_full_history
     degraded = False
     while reference is not None:
-        if len(segments) >= MAX_FORK_DEPTH or reference.thread_id in visited:
+        if len(segments) >= _MAX_FORK_DEPTH or reference.thread_id in visited:
             logger.warning(
                 "Thread fork chain stopped",
                 thread_id=thread_id,
