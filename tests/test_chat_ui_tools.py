@@ -82,7 +82,9 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "path",
         "canvas_event_id",
         "share_state",
+        "inline",
     )
+    assert inspect.signature(ChatUITools.show_canvas).parameters["inline"].default is False
     assert tuple(inspect.signature(ChatUITools.read_canvas_state).parameters) == ("self", "canvas_event_id")
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = toolkit_offers(ChatUITools(), "open_panel")
@@ -1416,6 +1418,50 @@ async def test_large_update_of_a_foreign_canvas_uploads_nothing(tmp_path: Path) 
     assert "Only your own canvases" in result["message"]
     context.client.upload.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inline", [None, False, True])
+async def test_show_canvas_inline_marks_request(tmp_path: Path, inline: bool | None) -> None:
+    """Only an explicitly inline new canvas asks Chat to show the page in the conversation."""
+    context = _context(tmp_path)
+    options = {} if inline is None else {"inline": inline}
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html=CANVAS_HTML, **options))
+
+    assert result["status"] == "ok"
+    metadata = _sent_content(context)["io.mindroom.ui_action"]
+    if inline:
+        assert metadata["inline"] is True
+    else:
+        assert "inline" not in metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_inline", [False, True])
+@pytest.mark.parametrize("inline", [False, True])
+async def test_show_canvas_update_keeps_original_inline(tmp_path: Path, original_inline: bool, inline: bool) -> None:
+    """An edit repeats the first request's display mode, regardless of the update's argument."""
+    context = _context(tmp_path)
+    original = _canvas_source(context, **({"inline": True} if original_inline else {}))
+    _serve_event(context, original)
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        result = json.loads(
+            await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas", inline=inline),
+        )
+
+    assert result["status"] == "ok"
+    metadata = _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]
+    if original_inline:
+        assert metadata["inline"] is True
+    else:
+        assert "inline" not in metadata
+    assert {key: value for key, value in metadata.items() if key != "canvas"} == {
+        key: value for key, value in original["content"]["io.mindroom.ui_action"].items() if key != "canvas"
+    }
 
 
 @pytest.mark.asyncio

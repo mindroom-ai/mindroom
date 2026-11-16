@@ -101,7 +101,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
         "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply."
+        "options, just ask in your reply. With inline=True the page appears in the conversation itself, "
+        "for mockups, diagrams and charts."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -439,6 +440,7 @@ class ChatUITools(Toolkit):
         path: str | None = None,
         canvas_event_id: str | None = None,
         share_state: bool = False,
+        inline: bool = False,
     ) -> str:
         """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
 
@@ -449,6 +451,14 @@ class ChatUITools(Toolkit):
         to an HTML file, which suits pages you build and refine such as slides. Pages up
         to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
         whatever the user types into it could leave the panel.
+
+        With ``inline=True`` the page appears in the conversation at the width of a
+        reply (about 700px on desktop, about 360px on phones) instead of the panel:
+        use it for mockups, diagrams, charts and previews the user should see in the
+        flow. Leave ``html`` and ``body`` without a background, outer card, title
+        banner or side padding; give charts fixed pixel heights; let content set the
+        height and do not use ``vh`` units or ``height:100%`` on ``html`` or ``body``.
+        An inline page cannot send answers or save state; for that, show a panel canvas.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
         and JavaScript. Fetch, XHR, and WebSocket requests and external images are
@@ -515,6 +525,8 @@ class ChatUITools(Toolkit):
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
             share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
+            inline: Show the page in the conversation instead of the side panel;
+                decided when the canvas is first shown, updates keep it.
 
         """
         validated = self._validated_context("show_canvas")
@@ -541,7 +553,11 @@ class ChatUITools(Toolkit):
                 requester_id,
                 "show_canvas",
                 body,
-                {"canvas": canvas, **({"share_state": True} if share_state else {})},
+                {
+                    "canvas": canvas,
+                    **({"share_state": True} if share_state else {}),
+                    **({"inline": True} if inline else {}),
+                },
                 formatted_body=html_lib.escape(body),
             )
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
@@ -619,6 +635,8 @@ class ChatUITools(Toolkit):
         # Chat accepts an edit only when its authority fields equal the original request's, and
         # whether a canvas shares its state is one of them, so the user is told before anything is shared.
         metadata["thread_id"] = original.get("thread_id")
+        if original.get("inline") is True:
+            metadata["inline"] = True
         if original.get("share_state") is True:
             metadata["share_state"] = True
         elif share_state:
