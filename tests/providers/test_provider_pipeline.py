@@ -633,6 +633,42 @@ async def test_named_media_kind_aliases_retry_and_learn_only_that_kind(error: st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "rejects_files"),
+    [
+        ("Audio and video inputs are not supported", False),
+        ("Audio or video inputs are not supported", False),
+        ("Audio, video and file inputs are not supported", True),
+        ("Audio, video, and files are not supported; images are supported", True),
+        ("No endpoints found that support input audio and video", False),
+        ("No endpoints found that support input audio, video and file", True),
+        ("This model does not support audio or video inputs; images are supported", False),
+        ("Images are supported, but audio and video inputs are not supported", False),
+    ],
+)
+async def test_coordinated_media_rejection_preserves_images_and_learns_all_rejected_kinds(
+    error: str,
+    rejects_files: bool,
+) -> None:
+    """A coordinated unsupported clause removes and teaches every named kind, not unrelated supported kinds."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    video = Video(content=b"video", mime_type="video/mp4")
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP], videos=[video], files=[_REPORT])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        message = attempt.messages[0]
+        assert message.images == [_image()]
+        assert message.audio is None
+        assert message.videos is None
+        assert message.files == (None if rejects_files else [_REPORT])
+        assert message.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
 async def test_kind_retry_failure_uses_backstop_without_learning_unrelated_images() -> None:
     inner = _ScriptedProvider(
         [

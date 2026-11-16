@@ -64,15 +64,14 @@ _MEDIA_KIND_NAMES: dict[MediaKind, str] = {
     "video": r"videos?",
     "file": r"(?:files?|pdfs?|documents?)",
 }
-# Bind the unsupported claim to the named kind, not to other (possibly supported) kinds elsewhere in the error.
-_CAPABILITY_GAP_ERRORS = {
-    kind: re.compile(
-        rf"\b(?:(?:does not|doesn't) support|no endpoints found that support) (?:inputs? )?{name}\b"
-        rf"|\b(?:input )?{name}(?: inputs?)? (?:is |are )?not supported\b"
-        rf"|\b{name}(?: inputs?)? is only supported by certain models\b",
-    )
-    for kind, name in _MEDIA_KIND_NAMES.items()
-}
+_MEDIA_KIND = rf"(?:{'|'.join(_MEDIA_KIND_NAMES.values())})"
+_MEDIA_KIND_LIST = rf"{_MEDIA_KIND}(?:(?:,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+){_MEDIA_KIND})*"
+# Bind the unsupported claim to its coordinated kind list, not to supported kinds elsewhere in the error.
+_CAPABILITY_GAP_ERRORS = re.compile(
+    rf"\b(?:(?:does not|doesn't) support|no endpoints found that support) (?:inputs? )?{_MEDIA_KIND_LIST}\b"
+    rf"|\b(?:input )?{_MEDIA_KIND_LIST}(?: inputs?)? (?:is |are )?not supported\b"
+    rf"|\b{_MEDIA_KIND_LIST}(?: inputs?)? is only supported by certain models\b",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +178,12 @@ def _without_media(
 def _named_capability_gaps(error: ProviderError) -> frozenset[MediaKind]:
     """Return kinds explicitly described as unsupported, ignoring unrelated media mentions."""
     text = str(error).lower()
-    return frozenset(kind for kind, pattern in _CAPABILITY_GAP_ERRORS.items() if pattern.search(text))
+    return frozenset(
+        kind
+        for clause in _CAPABILITY_GAP_ERRORS.finditer(text)
+        for kind, name in _MEDIA_KIND_NAMES.items()
+        if re.search(rf"\b{name}\b", clause.group())
+    )
 
 
 def _named_media_kinds(error: ProviderError) -> frozenset[MediaKind]:
