@@ -78,10 +78,11 @@ def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
 
 @dataclass(frozen=True)
 class _FailureStreak:
-    """One candidate's failed reconciliation attempts in a row and the kinds of error they raised."""
+    """One candidate's failed reconciliation attempts in a row, the kinds of error they raised, and whether one logged an error."""
 
     failures: int
     error_types: frozenset[type[Exception]]
+    logged_error: bool
 
 
 @dataclass(frozen=True)
@@ -382,8 +383,9 @@ class PersonalRoomLifecycle:
             self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         else:
             self._roster_mismatches.pop(candidate, None)
-            self._end_failure_streak(candidate)
-            self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
+            # A trigger without re-invite authority leaves a failing re-invite pending, so it ends no failures.
+            if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
+                self._end_failure_streak(candidate)
 
     def _queue_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> None:
         """Hand a live trigger that did not finish to the next reconciliation pass."""
@@ -581,10 +583,21 @@ class PersonalRoomLifecycle:
             backoff = _next_backoff(previous)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset()))
-            new_error = type(error) not in streak.error_types
+            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset(), logged_error=False))
             failures = streak.failures + 1
-            self._failure_streaks[candidate] = _FailureStreak(failures, streak.error_types | {type(error)})
+            new_error = type(error) not in streak.error_types
+            # A roster mismatch waits for a person and never logs an error; another failure logs one once the
+            # threshold is reached, and one for each kind of error first seen after that.
+            persistent = (
+                not isinstance(error, PersonalRoomRosterMismatchError)
+                and failures >= _RECONCILIATION_ERROR_FAILURES
+                and (new_error or not streak.logged_error)
+            )
+            self._failure_streaks[candidate] = _FailureStreak(
+                failures,
+                streak.error_types | {type(error)},
+                logged_error=streak.logged_error or persistent,
+            )
             retry = {"attempt": failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):
                 # Expected until a person changes the room, so no traceback, and a warning only when the members change.
@@ -603,10 +616,6 @@ class PersonalRoomLifecycle:
                     # The room changed while this attempt read it, possibly before the router knew it was this room.
                     self._retry_at_once({candidate})
             else:
-                # One error when the failures reach the threshold, and one for each kind of error first seen after it.
-                persistent = failures == _RECONCILIATION_ERROR_FAILURES or (
-                    failures > _RECONCILIATION_ERROR_FAILURES and new_error
-                )
                 (logger.error if persistent else logger.warning)(
                     "Personal-room reconciliation failed",
                     user_id=user_id,

@@ -781,6 +781,50 @@ async def test_a_new_error_after_the_third_failure_is_one_new_error(coordination
 
 
 @pytest.mark.asyncio
+async def test_a_failure_behind_roster_mismatches_still_reaches_an_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Roster mismatches never log an error, so the first other failure at or past the threshold does, once."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable = RuntimeError("Personal-room ownership state unavailable")
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [unavailable, mismatch, mismatch, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lobby_command_that_leaves_a_reinvite_pending_does_not_end_the_failure_count(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """A command without re-invite authority does not do the failing re-invite, so it is no recovery."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    await lifecycle._reconcile()
+    invite_failed = RuntimeError("Personal-room invite failed")
+    coordination.owner.ensure.side_effect = [invite_failed, invite_failed, None, invite_failed]
+    with capture_logs() as logs:
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+        await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        clock.now += 30
+        await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [(_FAILED, "warning", True, 1), (_FAILED, "warning", False, 2)]
+    assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): True}
+
+
+@pytest.mark.asyncio
 async def test_errors_that_alternate_after_the_third_failure_log_one_error_each(
     coordination: Coordination,
     clock: Clock,
