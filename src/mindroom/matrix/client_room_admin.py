@@ -112,9 +112,10 @@ async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: s
 
 
 async def admin_join_room_user_failure(client: nio.AsyncClient, room_id: str, user_id: str) -> str | None:
-    """Join one user like `admin_join_room_user`; return None, or why it failed, to follow "the admin join".
+    """Join one user like `admin_join_room_user`; return None, or why it failed.
 
-    The reason names only the HTTP status and a well-formed Matrix errcode, never the response's free text.
+    The reason is a phrase such as `answered HTTP 403 M_FORBIDDEN` or `had no access token`. It names only the HTTP
+    status and a well-formed Matrix errcode, never the response's free text.
     """
     if not client.access_token:
         return "had no access token"
@@ -133,7 +134,7 @@ async def admin_join_room_user_failure(client: nio.AsyncClient, room_id: str, us
             return None
         try:
             body = await response.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError, ValueError):
+        except (aiohttp.ClientError, TimeoutError, ValueError, RecursionError):
             body = None
     finally:
         response.release()

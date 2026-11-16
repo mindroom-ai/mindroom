@@ -393,6 +393,7 @@ async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_
         (500, ["not", "an", "object"], "answered HTTP 500"),
         (502, ValueError("not JSON"), "answered HTTP 502"),
         (403, TimeoutError(), "answered HTTP 403"),
+        (400, RecursionError(), "answered HTTP 400"),
     ],
 )
 async def test_admin_join_failure_names_only_the_http_status_and_errcode(
