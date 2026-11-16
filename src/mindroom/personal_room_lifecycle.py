@@ -45,6 +45,8 @@ _RECONCILIATION_RETRY_SECONDS = 30.0
 # A candidate that keeps failing, such as a room waiting for a person to fix its
 # membership, is retried after doubling delays up to this cap.
 _RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
+# A retry usually heals a first failure, so a candidate is an error only once it has failed this many attempts in a row.
+_RECONCILIATION_ERROR_FAILURES = 3
 # Every bot in a room reports each membership event, so the router drops repeats among this many recent ones.
 _RECENT_MEMBERSHIP_EVENTS = 1024
 
@@ -59,20 +61,27 @@ class _TargetPendingError(RuntimeError):
 
 @dataclass(frozen=True)
 class _CandidateBackoff:
-    """One candidate's consecutive reconciliation failures and when it is next due."""
+    """When a failing candidate is next due."""
 
-    failures: int
     delay_seconds: float
     retry_at: float
+
+
+def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
+    delay = (
+        _RECONCILIATION_RETRY_SECONDS
+        if previous is None
+        else min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
+    )
+    return _CandidateBackoff(delay, monotonic() + delay)
+
+
+@dataclass(frozen=True)
+class _FailureStreak:
+    """One candidate's failed reconciliation attempts in a row and the error of the latest."""
+
+    failures: int
     error_type: type[Exception]
-
-
-def _next_backoff(previous: _CandidateBackoff | None, error: Exception) -> _CandidateBackoff:
-    if previous is None:
-        failures, delay = 1, _RECONCILIATION_RETRY_SECONDS
-    else:
-        failures, delay = previous.failures + 1, min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
-    return _CandidateBackoff(failures, delay, monotonic() + delay, type(error))
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,8 @@ class PersonalRoomLifecycle:
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
     _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
+    # Kept across reloads, which each user's provisioning from a template requests, until the candidate succeeds.
+    _failure_streaks: dict[tuple[str, str], _FailureStreak] = field(default_factory=dict, init=False)
     # Live triggers that failed, with whether they asked to re-invite a departed owner.
     _retry_candidates: dict[tuple[str, str], bool] = field(default_factory=dict, init=False)
     # The personal room and unattested members each candidate last reported, warned about only when they change.
@@ -538,6 +549,7 @@ class PersonalRoomLifecycle:
         if not failed:
             # Forget what requesters whose intent is gone last reported.
             self._roster_mismatches = {key: seen for key, seen in self._roster_mismatches.items() if key in candidates}
+            self._failure_streaks = {key: seen for key, seen in self._failure_streaks.items() if key in candidates}
             self._membership_changed &= candidates
         for candidate in sorted(candidates - self._completed_candidates):
             if revision != self._config_revision:
@@ -565,10 +577,14 @@ class PersonalRoomLifecycle:
             # The user's own agent is starting; its first sync asks for the next pass.
             return False
         except Exception as error:
-            backoff = _next_backoff(previous, error)
+            backoff = _next_backoff(previous)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
+            streak = self._failure_streaks.get(candidate)
+            new_error = streak is None or streak.error_type is not type(error)
+            failures = 1 if streak is None else streak.failures + 1
+            self._failure_streaks[candidate] = _FailureStreak(failures, type(error))
+            retry = {"attempt": failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):
                 # Expected until a person changes the room, so no traceback, and a warning only when the members change.
                 mismatch = (error.room_id, error.unexpected_user_ids)
@@ -585,21 +601,32 @@ class PersonalRoomLifecycle:
                 if error.room_id in changed:
                     # The room changed while this attempt read it, possibly before the router knew it was this room.
                     self._retry_at_once({candidate})
-            elif previous is None or previous.error_type is not type(error):
-                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
             else:
-                logger.warning(
+                # One error when the failures reach the threshold, and one for each new error after it.
+                persistent = failures == _RECONCILIATION_ERROR_FAILURES or (
+                    failures > _RECONCILIATION_ERROR_FAILURES and new_error
+                )
+                (logger.error if persistent else logger.warning)(
                     "Personal-room reconciliation failed",
                     user_id=user_id,
                     room_id=room_id,
                     error_type=type(error).__name__,
                     error=str(error),
+                    exc_info=new_error,
                     **retry,
                 )
             return False
         finally:
             self._changes_during_attempt = None
         self._roster_mismatches.pop(candidate, None)
+        streak = self._failure_streaks.pop(candidate, None)
+        if streak is not None:
+            logger.info(
+                "Personal-room reconciliation recovered",
+                user_id=user_id,
+                room_id=room_id,
+                failed_attempts=streak.failures,
+            )
         # Its own owner invite comes back as a change, and the attempt already validated the room after it.
         self._membership_changed.discard(candidate)
         if revision == self._config_revision:
