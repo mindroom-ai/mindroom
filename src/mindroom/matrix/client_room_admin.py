@@ -134,7 +134,8 @@ async def admin_join_room_user_failure(client: nio.AsyncClient, room_id: str, us
             return None
         try:
             body = await response.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError, ValueError, RecursionError):
+        except Exception:
+            # A body that cannot be read or parsed, however it fails, still leaves the status to report.
             body = None
     finally:
         response.release()
