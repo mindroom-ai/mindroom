@@ -42,7 +42,7 @@ The Matrix client prepares the Access token before every request, so no command 
 
 Native input runs in a worker thread that no task cancellation reaches, so revoking control and stopping close the provider's input gate instead, which every pointer event, key, text chunk, app launch, and accessibility press or value write checks right before it starts, after any slower check of the target.
 A button or key that input already pressed is still released, and an event already handed to the system, such as a key chord posted in one call or a whole Linux or Windows pointer motion, still completes; focusing the target app before its input is not gated, because observations focus apps too.
-A reusable gate alone would let a quick new grant reopen it under the old action, so a grant is refused while input interrupted by a revoke is still inside its native call; the follow-up observation after that call does not hold the grant back.
+A reusable gate alone would let a quick new grant reopen it under the old action, so a grant that starts new authority is refused while input from the old one is still inside its native call, whether a revoke interrupted it or an expired lease let it finish; the follow-up observation after that call does not hold the grant back.
 Each grant that starts control anew begins a new authority, and a control command runs only under the authority it arrived in, so commands queued before a revoke, an expiry, or a restart never run under a later grant; that admission is kept in memory because the Matrix command carries no grant identity, and extending a grant that is still in force keeps its queued commands.
 
 Stop waits at most 5 seconds for the running action, because a hung application can hold a native call indefinitely.
