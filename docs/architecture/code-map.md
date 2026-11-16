@@ -204,7 +204,10 @@ Matrix sync callback
 | `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections and opt-ins, and the caller's request log |
 | `api/egress_status.py` | Service status, preset, and request-log responses and the account-connection gate shared by both egress APIs |
 | `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
-| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, and where to add missing ones |
+| `egress_broker/key_access.py` | Who may use and manage an agent's Agent Keys, shared by the Agent Keys pages and secret requests |
+| `secret_requests.py` | In-memory registry of pending secret requests and the card content they post |
+| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope or records a decline |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |

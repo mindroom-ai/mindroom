@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -37,7 +38,7 @@ from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
@@ -233,7 +234,7 @@ class _JobWait:
 @dataclass
 class _Entry:
     job: BackgroundJob
-    control: JobControl = field(default_factory=JobControl)
+    control: JobControl = field(init=False)
     task: asyncio.Task[None] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     claim: JobClaim | None = None
@@ -251,6 +252,14 @@ class _Entry:
     progress: str | None = None
     # The reply whose call started the job, whose Stop refuses the job every later approval.
     reply_id: str | None = None
+    # Whether the job's approval cards wait for decisions (`set_awaiting_approval`), and how many other human decisions
+    # its calls wait for at once (`human_decision_wait`); the job is `awaiting_approval` while either is set.
+    approval_cards_open: bool = False
+    human_waits: int = 0
+
+    def __post_init__(self) -> None:
+        """Give the job's control its ID, which a call running in the job reads (`current_job_id`)."""
+        self.control = JobControl(job_id=self.job.job_id)
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
@@ -595,9 +604,35 @@ class ToolJobRuntime:
         """Publish whether a running job waits for human decisions on the approval cards it posted."""
         async with self._lock:
             entry = self._entries[job_id]
-            status = "awaiting_approval" if awaiting else "running"
-            if entry.job.status in _RUNNING_STATUSES and entry.job.status != status:
-                await self._publish(entry, _updated(entry.job, status=status))
+            entry.approval_cards_open = awaiting
+            await self._publish_awaiting(entry)
+
+    @asynccontextmanager
+    async def human_decision_wait(self, job_id: str) -> AsyncIterator[None]:
+        """Keep a running job `awaiting_approval` while one of its calls waits for a person, as approval cards do.
+
+        Concurrent waits are counted, so the job is `running` again only when its last wait and its approval cards
+        are done, and a Stop of its reply cancels it while any wait remains.
+        """
+        async with self._lock:
+            entry = self._entries[job_id]
+            entry.human_waits += 1
+            await self._publish_awaiting(entry)
+        try:
+            yield
+        finally:
+            await run_coroutine_until_complete(self._end_human_wait(entry))
+
+    async def _end_human_wait(self, entry: _Entry) -> None:
+        async with self._lock:
+            entry.human_waits -= 1
+            await self._publish_awaiting(entry)
+
+    async def _publish_awaiting(self, entry: _Entry) -> None:
+        """Publish whether a running job waits for a person; the caller holds the lock."""
+        status = "awaiting_approval" if entry.approval_cards_open or entry.human_waits else "running"
+        if entry.job.status in _RUNNING_STATUSES and entry.job.status != status:
+            await self._publish(entry, _updated(entry.job, status=status))
 
     async def save_adapter(self, job_id: str, **changes: object) -> None:
         """Save a running job with ``changes`` to its adapter, as the job stands now; an ended job keeps its own."""

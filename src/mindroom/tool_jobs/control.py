@@ -42,6 +42,8 @@ class JobControl:
     shutdown: bool = False
     # Set by a Stop of the reply that started the job, which then gets no further approval.
     reply_stopped: bool = False
+    # The managed job this control belongs to; a worker's run-as-job control belongs to none.
+    job_id: str | None = None
 
     def cancel(self, *, shutdown: bool = False) -> None:
         """Prevent tool entry even when the operation catches task cancellation; the first cause stands."""
@@ -124,6 +126,12 @@ def job_checkpoint(*, approval: bool = False) -> None:
     control = _control.get()
     if control is not None:
         control.checkpoint(approval=approval)
+
+
+def current_job_id() -> str | None:
+    """Return the ID of the managed job this task runs in, None outside one."""
+    control = _control.get()
+    return None if control is None else control.job_id
 
 
 def job_owns_execution() -> bool:

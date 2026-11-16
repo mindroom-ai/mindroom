@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, build_connection_agent_target
 from mindroom.config.egress_broker import (
     RESERVED_PLACEHOLDER_NAMES,
     RESERVED_PLACEHOLDER_PREFIXES,
     EgressService,
     GitHubRepositoryAccess,
 )
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_broker_enabled
+from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
 from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
 from mindroom.egress_broker.oauth_source import (
     broker_credential_context,
@@ -44,25 +46,33 @@ from mindroom.egress_broker.user_services import (
 from mindroom.logging_config import get_logger
 from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.egress_broker import EgressAuth
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.audit import AuditRecord
+    from mindroom.egress_broker.key_access import ServiceKeyRefusal
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
 
-_RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
-_OWN_ACCOUNT_KEY_REFUSAL = "This service uses only its own account and never sends a key, so it cannot store one"
-_GITHUB_APP_KEY_REFUSAL = "This service uses only its GitHub App and never sends a key, so it cannot store one"
+ADMIN_KEY_REFUSAL = "Only an administrator sets this service's key, on the dashboard"
+# Why a service that takes no key cannot store one (`service_key_refusal`); an `admin_key` service takes the
+# administrator's.
+_KEY_REFUSALS: dict[ServiceKeyRefusal, str] = {
+    "restrict_only": "This service only limits paths and never sends a key, so it cannot store one",
+    "separate_account": "This service uses only its own account and never sends a key, so it cannot store one",
+    "github_app": "This service uses only its GitHub App and never sends a key, so it cannot store one",
+}
 _READ_ONLY_UNSUPPORTED = "This service does not offer read-only access"
 
 # Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
@@ -136,6 +146,40 @@ def effective_services(
     reads the credential store, so async callers run this in a thread.
     """
     return effective_config(config.egress_broker, manager, target).services
+
+
+@dataclass(frozen=True)
+class AgentKeysScope:
+    """An agent the requester may use, with the worker target their keys and services for it live under now."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    target: ResolvedWorkerTarget
+    manager: CredentialsManager
+    can_manage: bool
+
+
+def resolve_agent_keys_scope(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    requester_id: str,
+    agent_name: str,
+) -> AgentKeysScope | None:
+    """Return where the requester's keys for one agent live under `config`, or None when they may not use the agent.
+
+    The Agent Keys pages and the secret request answers both resolve the destination of a key here, from the config
+    served now, so neither can store a key where the other would not.
+    """
+    if agent_name not in config.agents:
+        return None
+    human_requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    access = egress_key_access(human_requester, agent_name, config, runtime_paths, memberships)
+    if access is None:
+        return None
+    _is_shared, can_manage = access
+    target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
+    return AgentKeysScope(config, runtime_paths, target, get_runtime_credentials_manager(runtime_paths), can_manage)
 
 
 def agent_services(
@@ -372,18 +416,27 @@ def github_app_repositories(service: EgressService) -> GitHubAppRepositories | N
     return None if service.github_app is None else dict(service.github_app.repositories)
 
 
-def key_refusal(service: EgressService) -> str | None:
-    """Return why `service` cannot store a key, or None: a limit sends nothing, an own-account service its account.
+def key_save_refusal(service: EgressService) -> tuple[int, str] | None:
+    """Return the HTTP status and reason a user may not store a key for `service` (`service_key_refusal`), or None.
 
-    A `github_app` service sends only its App's tokens.
+    Only an administrator sets an `admin_key` service's key, on the dashboard (403); a service that takes no key is a
+    422. The Agent Keys pages and the secret request answers refuse the same keys.
     """
-    if service.restrict_only:
-        return _RESTRICT_ONLY_KEY_REFUSAL
-    if service.oauth_separate_account:
-        return _OWN_ACCOUNT_KEY_REFUSAL
-    if service.github_app is not None:
-        return _GITHUB_APP_KEY_REFUSAL
-    return None
+    refusal = service_key_refusal(service)
+    if refusal is None:
+        return None
+    if refusal == "admin_key":
+        return 403, ADMIN_KEY_REFUSAL
+    return 422, _KEY_REFUSALS[refusal]
+
+
+def key_refusal(service: EgressService) -> str | None:
+    """Return why `service` cannot store a key on the dashboard, or None: there an administrator sets `admin_key` keys.
+
+    A limit sends nothing, an own-account service its account, and a `github_app` service only its App's tokens.
+    """
+    refusal = service_key_refusal(service)
+    return None if refusal is None or refusal == "admin_key" else _KEY_REFUSALS[refusal]
 
 
 def require_access_offered(

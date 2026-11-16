@@ -272,7 +272,8 @@ def _homeassistant_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Egress Credentials",
     description=(
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
+        "and ask the user for a missing key"
     ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
@@ -285,7 +286,7 @@ def _homeassistant_tools() -> type[Toolkit]:
         ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[],
-    function_names=("list_egress_credentials",),
+    function_names=("list_egress_credentials", "request_secret"),
 )
 def _egress_credentials_tools() -> type[Toolkit]:
     """Return the egress broker credential status tool."""

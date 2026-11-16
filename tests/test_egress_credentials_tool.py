@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock
 
+import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import secret_requests as secret_requests_module
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
@@ -24,25 +30,48 @@ from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+)
 from tests.egress_broker.conftest import account_store, allow_oauth_reuse, connect_account, worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    ProcessRuntime,
+    job_owner,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
+# The responder access checks of a secret request run for real.
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+
 _ALICE = "@alice:example.org"
 _BOB = "@bob:example.org"
+_ROOM = "!room:example.org"
+_CARD = "$card"
+_REASON = "to open the pull request you asked for"
 _SECRET = "ghp_super_secret_token_value"  # noqa: S105
 _ACCESS_TOKEN = "gho_oauth_access_token_value"  # noqa: S105
 _CONNECT_PATH = "/api/oauth/github/authorize"
@@ -79,18 +108,30 @@ def _context(
     runtime_paths: RuntimePaths,
     services: dict[str, object] | None = None,
     agents: dict[str, AgentConfig] | None = None,
+    *,
+    memberships: AgentReplyMembershipIndex | None = None,
+    room_mode: bool = False,
 ) -> ToolRuntimeContext:
+    """Return Alice's turn on agent `code` in thread `$thread`, or in the room itself with `room_mode`."""
     config = Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services})
+    client = make_matrix_client_mock(user_id="@mindroom_code:example.org")
+    client.room_send.return_value = nio.RoomSendResponse(_CARD, _ROOM)
     return ToolRuntimeContext(
         agent_name="code",
-        target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id="$request"),
+        target=MessageTarget.resolve(
+            room_id=_ROOM,
+            thread_id="$thread",
+            reply_to_event_id="$request",
+            room_mode=room_mode,
+        ),
         requester_id=_ALICE,
-        client=MagicMock(),
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         plugins=config_plugins(config, runtime_paths),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        agent_reply_memberships=memberships,
     )
 
 
@@ -363,7 +404,7 @@ def test_personal_scope_without_the_personal_page_is_sent_to_no_page(
     assert "When `can_connect_account` is true, the user can still connect their `provider` account at" in note
     assert "connect_url" in note
     assert "https://" not in note
-    assert "Never ask the user to paste a key into the chat." in note
+    assert "Never ask the user to paste a key into the chat: call `request_secret`" in note
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", None])
@@ -462,14 +503,15 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
+        "and ask the user for a missing key"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
     assert metadata.file_access is ToolFileAccess.NONE
     assert metadata.requires_primary_runtime is True
     assert metadata.managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.WORKER_TARGET)
-    assert metadata.function_names == ("list_egress_credentials",)
+    assert metadata.function_names == ("list_egress_credentials", "request_secret")
 
     tool = get_tool_by_name(
         "egress_credentials",
@@ -479,7 +521,10 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     )
 
     assert isinstance(tool, EgressCredentialsTools)
-    assert [function.__name__ for function in tool.functions.values()] == ["list_egress_credentials"]
+    assert [function.__name__ for function in tool.functions.values()] == [
+        "list_egress_credentials",
+        "request_secret",
+    ]
 
 
 @pytest.mark.parametrize("broker_on", [False, True])
@@ -823,7 +868,7 @@ def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) ->
         "https://mindroom.example/connections/egress"
     ) in note
     assert "otherwise, or to use their own key instead, they can add an API key there" in note
-    assert "Never ask the user to paste a key into the chat." in note
+    assert "Never ask the user to paste a key into the chat: call `request_secret`" in note
 
 
 def test_note_without_a_public_url_sends_the_agent_to_the_operator(tmp_path: Path) -> None:
@@ -920,3 +965,561 @@ def test_a_service_limited_to_other_agents_is_not_listed(tmp_path: Path) -> None
     payload = _list(_tool(runtime_paths), _context(runtime_paths, services, agents))
 
     assert [entry["name"] for entry in payload["services"]] == ["github"]
+
+
+# The broker is on and the sandbox proxy runs shell in a worker, so agent `code` reaches Agent Keys, and MindRoom Chat
+# may call this MindRoom to answer a card.
+_BROKER_ENV = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+    "MINDROOM_EGRESS_BROKER_PORT": "8768",
+    "MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+}
+
+
+@pytest.fixture(autouse=True)
+def _homeserver_binds_openid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The homeserver binds OpenID tokens, so Chat can sign in to this MindRoom with a client session."""
+    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+
+
+@pytest.fixture(autouse=True)
+def _forget_secret_requests() -> Iterator[None]:
+    """Leave the process-wide registry as each test found it."""
+    before = set(secret_request_registry()._requests)
+    yield
+    for request_id in set(secret_request_registry()._requests) - before:
+        secret_request_registry().discard(request_id)
+
+
+def _asking(
+    tmp_path: Path,
+    services: dict[str, object] | None = None,
+    *,
+    worker_scope: WorkerScope = "user_agent",
+    room_mode: bool = False,
+    agent_fields: dict[str, object] | None = None,
+    **env: str,
+) -> tuple[EgressCredentialsTools, ToolRuntimeContext]:
+    """Return the tool and Alice's turn on agent `code`: personal, or shared with Bob as its credential manager.
+
+    `agent_fields` replace the agent's own.
+    """
+    runtime_paths = _runtime_paths(tmp_path, **{**_BROKER_ENV, **env})
+    scope: dict[str, object] = (
+        {"worker_scope": "shared", "credential_managers": [_BOB]}
+        if worker_scope == "shared"
+        else {"private": {"per": "user_agent"}}
+    )
+    agent = AgentConfig.model_validate(
+        {
+            "display_name": "Code",
+            "tools": ["shell", "egress_credentials"],
+            "include_default_tools": False,
+            "access": {"users": [_ALICE, _BOB]},
+            **scope,
+            **(agent_fields or {}),
+        },
+    )
+    context = _context(
+        runtime_paths,
+        services,
+        {"code": agent},
+        memberships=AgentReplyMembershipIndex(),
+        room_mode=room_mode,
+    )
+    return _tool(runtime_paths, worker_scope=worker_scope), context
+
+
+def _start(
+    tool: EgressCredentialsTools,
+    context: ToolRuntimeContext,
+    service: str = "github",
+    reason: str = _REASON,
+) -> asyncio.Task[str]:
+    with tool_runtime_context(context):
+        return asyncio.create_task(tool.request_secret(service, reason))
+
+
+async def _ask(
+    tool: EgressCredentialsTools,
+    context: ToolRuntimeContext,
+    service: str = "github",
+    reason: str = _REASON,
+) -> dict[str, object]:
+    return json.loads(await _start(tool, context, service, reason))
+
+
+def _sent(context: ToolRuntimeContext) -> list[dict[str, object]]:
+    """Return the content of every event the tool sent, in order."""
+    return [call.kwargs["content"] for call in context.client.room_send.await_args_list]
+
+
+async def _posted_card(context: ToolRuntimeContext, task: asyncio.Task[str]) -> dict[str, object]:
+    """Return the card once the tool posted it and waits for the answer (it logs `secret_request_posted` then)."""
+    with capture_logs() as logs:
+        while not task.done() and not any(entry["event"] == "secret_request_posted" for entry in logs):  # noqa: ASYNC110 - the tool logs from its own task
+            await asyncio.sleep(0)
+    assert not task.done(), task.result()
+    [card] = _sent(context)
+    return card
+
+
+def _request_id(card: dict[str, object]) -> str:
+    request = card[SECRET_REQUEST_CONTENT_KEY]
+    assert isinstance(request, dict)
+    return request["request_id"]
+
+
+def _final_card(context: ToolRuntimeContext, status: str) -> dict[str, object]:
+    """Return the card's edit after checking it replaces the card with the same content in `status`."""
+    card, edit = _sent(context)
+    new_content = edit["m.new_content"]
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": _CARD}
+    assert new_content["msgtype"] == "m.notice"
+    assert new_content[SECRET_REQUEST_CONTENT_KEY] == {**card[SECRET_REQUEST_CONTENT_KEY], "status": status}
+    return new_content
+
+
+@pytest.mark.asyncio
+async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
+    """The card goes into the thread with metadata only; the user's answer edits it and the agent learns `saved`."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context)
+    card = await _posted_card(context, task)
+    request_id = _request_id(card)
+    pending = secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time())
+    assert pending is not None
+    secret_request_registry().resolve(request_id, "saved")
+    result = json.loads(await task)
+
+    assert (pending.requester_id, pending.agent_name, pending.service) == (_ALICE, "code", "github")
+    assert pending.worker_target == worker_target()
+    assert card["msgtype"] == "m.notice"
+    assert card["body"] == "🔑 Code asks for your GitHub key. Open MindRoom Chat to enter it."
+    assert card["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread",
+        "is_falling_back": False,
+        "m.in_reply_to": {"event_id": "$request"},
+    }
+    assert card[SECRET_REQUEST_CONTENT_KEY] == {
+        "request_id": request_id,
+        "requester_id": _ALICE,
+        "service": "github",
+        "display_name": "GitHub",
+        "hosts": ["api.github.com"],
+        "reason": _REASON,
+        "status": "pending",
+        "expires_at": int(pending.expires_at * 1000),
+    }
+    assert _final_card(context, "saved")["body"] == "🔑 GitHub key saved."
+    assert result["status"] == "saved"
+    assert result["service"] == "github"
+    assert "retry" in result["note"]
+    assert "`X-Agent-Keys-Service: github`" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_request_declined_and_expired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A decline and an unanswered card each end the wait, edit the card, and tell the agent which it was."""
+    tool, context = _asking(tmp_path)
+    task = _start(tool, context)
+    secret_request_registry().resolve(_request_id(await _posted_card(context, task)), "declined")
+    declined = json.loads(await task)
+
+    assert _final_card(context, "declined")["body"] == "🔑 GitHub key request declined."
+    assert (declined["status"], declined["service"]) == ("declined", "github")
+    assert "do not ask again" in declined["note"]
+
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.01)
+    tool, context = _asking(tmp_path)
+    settled_during_edit: list[bool] = []
+
+    async def send(**kwargs: object) -> nio.RoomSendResponse:
+        content = kwargs["content"]
+        assert isinstance(content, dict)
+        if content.get("m.relates_to", {}).get("rel_type") == "m.replace":
+            settled_during_edit.append(secret_request_registry()._requests[_request_id(content)].outcome.done())
+        return nio.RoomSendResponse(_CARD, _ROOM)
+
+    context.client.room_send.side_effect = send
+    expired = await _ask(tool, context)
+
+    assert _final_card(context, "expired")["body"] == "🔑 GitHub key request expired."
+    assert (expired["status"], expired["service"]) == ("expired", "github")
+    assert "15 minutes" in expired["note"]
+    assert settled_during_edit == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) -> None:
+    """A stopped reply ends the wait: the card turns expired, the request is gone, and the cancellation propagates.
+
+    The request is settled before the edit, so an answer arriving while the card turns expired is refused.
+    """
+    tool, context = _asking(tmp_path)
+    claims_during_edit: list[object] = []
+
+    async def send(**kwargs: object) -> nio.RoomSendResponse:
+        content = kwargs["content"]
+        assert isinstance(content, dict)
+        if content.get("m.relates_to", {}).get("rel_type") == "m.replace":
+            claim = secret_request_registry().claim(_request_id(content), room_id=_ROOM, now=time.time())
+            claims_during_edit.append(claim)
+        return nio.RoomSendResponse(_CARD, _ROOM)
+
+    context.client.room_send.side_effect = send
+    task = _start(tool, context)
+    request_id = _request_id(await _posted_card(context, task))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    _final_card(context, "expired")
+    assert claims_during_edit == [None]
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "service", "reason", "message"),
+    [
+        ("unknown", "gitlab", _REASON, "Unknown service 'gitlab'"),
+        ("restrict-only", "github-limited", _REASON, "never takes a key"),
+        ("admin-key", "openai", _REASON, "Only an administrator"),
+        ("non-manager", "github", _REASON, "credential managers"),
+        ("no-memberships", "github", _REASON, "cannot check"),
+        ("empty-reason", "github", "  \n", "reason"),
+        ("github-app", "acme", _REASON, "Acme takes no key"),
+        ("separate-account", "mine", _REASON, "Google Drive takes no key; connect an account instead"),
+        ("no-agent-keys", "github", _REASON, "This agent's commands do not reach Agent Keys"),
+        ("not-a-user", "github", _REASON, "The requester may not use this agent"),
+        ("not-a-person", "github", _REASON, "Only a person can answer a card"),
+    ],
+    ids=[
+        "unknown",
+        "restrict-only",
+        "admin-key",
+        "non-manager",
+        "no-memberships",
+        "empty-reason",
+        "github-app",
+        "separate-account",
+        "no-agent-keys",
+        "not-a-user",
+        "not-a-person",
+    ],
+)
+async def test_refuses_without_posting(
+    tmp_path: Path,
+    case: str,
+    service: str,
+    reason: str,
+    message: str,
+) -> None:
+    """A service no key can be asked for, a requester who may not set the key, or no reason posts no card."""
+    app = {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}
+    services = {
+        **_SERVICES,
+        "openai": {**_SERVICES["openai"], "admin_key": True},
+        "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
+    }
+    agent_fields = {"no-agent-keys": {"worker_tools": []}, "not-a-user": {"access": {"users": [_BOB]}}}.get(case)
+    tool, context = _asking(
+        tmp_path,
+        services,
+        worker_scope="shared" if case == "non-manager" else "user_agent",
+        agent_fields=agent_fields,
+    )
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    if case == "restrict-only":
+        limit = {"restrict_only": True, "rules": [{"host": "api.github.com", "path_prefix": "/repos/o/a"}]}
+        _save_mine(manager, "github-limited", limit, context.config.egress_broker.services)
+    if case == "separate-account":
+        save_user_service(
+            manager,
+            worker_target(),
+            "mine",
+            EgressService.model_validate({"preset": "google_drive", "oauth_separate_account": True}),
+            config_services=context.config.egress_broker.services,
+            oauth_providers={"google_drive"},
+        )
+    if case == "no-memberships":
+        context = replace(context, agent_reply_memberships=None)
+    if case == "not-a-person":
+        # A bot account asks: no person could answer its card.
+        context = replace(
+            context,
+            requester_id="@bridge-bot:example.org",
+            config=context.config.model_copy(update={"bot_accounts": ["@bridge-bot:example.org"]}),
+        )
+
+    result = await _ask(tool, context, service, reason)
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    assert result["link"] is None
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refusal_names_the_agent_keys_page(tmp_path: Path) -> None:
+    """Where the user can set the key on a page, a refusal links it, here for a service that needs host rules first."""
+    tool, context = _asking(tmp_path, **_PAGE_SERVED, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+
+    result = await _ask(tool, context, "gitlab")
+
+    assert result["status"] == "error"
+    assert "Unknown service 'gitlab'" in result["message"]
+    assert result["link"] == "https://mindroom.example.org/connections/egress"
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("no-chat-origin", "MINDROOM_COMPUTER_ALLOWED_ORIGINS"),
+        ("no-openid-audience", "set `MINDROOM_PUBLIC_URL`"),
+        ("no-openid-binding", "the homeserver binds OpenID tokens"),
+        ("binding-check-failed", "the homeserver binds OpenID tokens"),
+    ],
+    ids=["no-chat-origin", "no-openid-audience", "no-openid-binding", "binding-check-failed"],
+)
+async def test_refuses_when_chat_cannot_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    message: str,
+) -> None:
+    """Without Chat allowed to call this MindRoom with a client session, nobody could answer, so no card is posted."""
+    binding = {"no-openid-binding": False, "binding-check-failed": None}.get(case, True)
+    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=binding))
+    if case == "no-openid-audience":
+        monkeypatch.setattr(egress_credentials_module, "openid_audience", lambda _paths: None)
+    tool, context = _asking(
+        tmp_path,
+        **_PAGE_SERVED,
+        MINDROOM_PUBLIC_URL="https://mindroom.example.org",
+        MINDROOM_COMPUTER_ALLOWED_ORIGINS="[]" if case == "no-chat-origin" else '["https://chat.example.org"]',
+    )
+
+    result = await _ask(tool, context)
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    assert ("homeserver" in result["message"]) is (case in {"no-openid-binding", "binding-check-failed"})
+    assert "The user can add the key on the Agent Keys page instead" in result["message"]
+    assert result["link"] == "https://mindroom.example.org/connections/egress"
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_without_a_page_says_where_the_key_goes(tmp_path: Path) -> None:
+    """With no Agent Keys page to link, the refusal still reads right: the operator names the page."""
+    tool, context = _asking(tmp_path, MINDROOM_COMPUTER_ALLOWED_ORIGINS="[]")
+
+    result = await _ask(tool, context)
+
+    assert result["link"] is None
+    assert "or, when it is null, the page the operator names" in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+async def _published_job_runtime(context: ToolRuntimeContext) -> ProcessRuntime:
+    """Start the background job runtime of the context's storage root, which a call running in one of its jobs finds."""
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    return runtime
+
+
+async def _start_reply_job(
+    runtime: ProcessRuntime,
+    context: ToolRuntimeContext,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+) -> None:
+    """Start `operation` as a job of the reply `reply`, inside the context's tool calls."""
+    with tool_runtime_context(context):
+        await start_job(
+            runtime,
+            "ask",
+            tool_name="request_secret",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+            reply_id="reply",
+        )
+
+
+async def _sends(context: ToolRuntimeContext, count: int) -> list[dict[str, object]]:
+    """Return the events the tool sent once there are `count` of them."""
+    while context.client.room_send.await_count < count:  # noqa: ASYNC110 - the job sends from its own task
+        await asyncio.sleep(0)
+    return _sent(context)
+
+
+@pytest.mark.asyncio
+async def test_stop_before_the_card_is_posted_posts_none(tmp_path: Path) -> None:
+    """A Stop of the reply that started the call's job, before the call posts its card, cancels the job without one."""
+    tool, context = _asking(tmp_path)
+    runtime = await _published_job_runtime(context)
+    go = asyncio.Event()
+
+    async def ask_later() -> BackgroundOutcome:
+        await go.wait()
+        return BackgroundOutcome("completed", await tool.request_secret("github", _REASON))
+
+    try:
+        await _start_reply_job(runtime, context, ask_later)
+        await runtime.cancel_stopped_reply("reply")
+        go.set()
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_withdraws_both_cards_of_a_job_after_one_is_answered(tmp_path: Path) -> None:
+    """Two cards in one job: answering one leaves the job waiting on the other, so Stop still expires that card."""
+    tool, context = _asking(tmp_path)
+    runtime = await _published_job_runtime(context)
+
+    async def ask_both() -> BackgroundOutcome:
+        results = await asyncio.gather(tool.request_secret("github", _REASON), tool.request_secret("openai", _REASON))
+        return BackgroundOutcome("completed", json.dumps(results))
+
+    try:
+        await _start_reply_job(runtime, context, ask_both)
+        cards = await asyncio.wait_for(_sends(context, 2), JOB_TEST_TIMEOUT)
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "awaiting_approval"), JOB_TEST_TIMEOUT)
+        github, openai = sorted(cards, key=lambda card: card[SECRET_REQUEST_CONTENT_KEY]["service"])
+        secret_request_registry().resolve(_request_id(github), "saved")
+        answered = (await asyncio.wait_for(_sends(context, 3), JOB_TEST_TIMEOUT))[2]
+
+        assert answered["m.new_content"][SECRET_REQUEST_CONTENT_KEY]["status"] == "saved"
+        assert runtime._entries["ask"].job.status == "awaiting_approval"
+
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    withdrawn = _sent(context)[3]
+    assert withdrawn["m.new_content"][SECRET_REQUEST_CONTENT_KEY] == {
+        **openai[SECRET_REQUEST_CONTENT_KEY],
+        "status": "expired",
+    }
+    # The answer route claims before anything else, so it answers this request 404.
+    assert secret_request_registry().claim(_request_id(openai), room_id=_ROOM, now=time.time()) is None
+
+
+@pytest.mark.asyncio
+async def test_stop_withdraws_the_card_of_a_background_job(tmp_path: Path) -> None:
+    """Run as a background job, the call waits on its card as an approval does, so the reply's Stop expires the card."""
+    tool, context = _asking(tmp_path)
+    runtime = await _published_job_runtime(context)
+
+    async def ask() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", await tool.request_secret("github", _REASON))
+
+    try:
+        await _start_reply_job(runtime, context, ask)
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "awaiting_approval"), JOB_TEST_TIMEOUT)
+        request_id = _request_id(_sent(context)[0])
+
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    _final_card(context, "expired")
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is None
+    assert request_id not in secret_request_registry()._requests
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_fails_after_expiry_ends_the_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the claimed answer's save fails and gives the claim back, nobody can answer, so the card expires at once."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.2)
+    tool, context = _asking(tmp_path)
+    task = _start(tool, context)
+    request_id = _request_id(await _posted_card(context, task))
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is not None
+
+    await asyncio.sleep(0.3)  # The request expires while its claimed answer is still being saved.
+    assert not task.done()
+    secret_request_registry().release(request_id)
+    result = json.loads(await asyncio.wait_for(task, 5))
+
+    assert result["status"] == "expired"
+    _final_card(context, "expired")
+
+
+@pytest.mark.asyncio
+async def test_an_answer_saving_as_the_wait_ends_is_not_expired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key the route claimed before the TTL and stores just after it is reported and shown as saved."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.2)
+    tool, context = _asking(tmp_path)
+    task = _start(tool, context)
+    request_id = _request_id(await _posted_card(context, task))
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is not None
+
+    await asyncio.sleep(0.3)  # The TTL elapses while the claimed answer is still being saved.
+    assert not task.done()
+    secret_request_registry().resolve(request_id, "saved")
+    result = json.loads(await task)
+
+    assert result["status"] == "saved"
+    assert _final_card(context, "saved")["body"] == "🔑 GitHub key saved."
+
+
+@pytest.mark.asyncio
+async def test_room_mode_posts_without_a_thread_relation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn in the room itself gets its card in the room."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.01)
+    tool, context = _asking(tmp_path, room_mode=True)
+
+    await _ask(tool, context)
+
+    assert "m.relates_to" not in _sent(context)[0]
+
+
+@pytest.mark.asyncio
+async def test_failed_post_discards_the_request(tmp_path: Path) -> None:
+    """A card that could not be sent is an error, and nobody can answer its request."""
+    tool, context = _asking(tmp_path)
+    context.client.room_send.return_value = nio.RoomSendError("server unavailable")
+
+    result = await _ask(tool, context)
+
+    assert result["status"] == "error"
+    assert secret_request_registry().claim(_request_id(_sent(context)[0]), room_id=_ROOM, now=time.time()) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_edit_keeps_the_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card that cannot be edited is logged, without the reason, and the agent still learns the outcome."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.01)
+    tool, context = _asking(tmp_path)
+    context.client.room_send.side_effect = [
+        nio.RoomSendResponse(_CARD, _ROOM),
+        nio.RoomSendError("server unavailable"),
+    ]
+
+    with capture_logs() as logs:
+        result = await _ask(tool, context)
+
+    assert result["status"] == "expired"
+    assert [entry["event"] for entry in logs if entry["event"] == "secret_request_edit_failed"] == [
+        "secret_request_edit_failed",
+    ]
+    assert [entry for entry in logs if _REASON in repr(entry)] == []

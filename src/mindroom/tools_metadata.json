@@ -8123,13 +8123,14 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use",
+      "description": "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, and ask the user for a missing key",
       "display_name": "Egress Credentials",
       "docs_url": "https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_egress_credentials"
+        "list_egress_credentials",
+        "request_secret"
       ],
       "helper_text": null,
       "icon": "KeyRound",

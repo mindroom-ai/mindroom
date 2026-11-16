@@ -649,7 +649,7 @@ agents:
       - egress_credentials
 ```
 
-Its one function, `list_egress_credentials`, takes no arguments and returns JSON:
+`list_egress_credentials` takes no arguments and returns JSON:
 
 ```json
 {
@@ -684,8 +684,29 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers, or an Atlassian connection with `requester_scoped=False`, on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
-- The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
+- The tool never returns secret values, access tokens, or connect links, and its note tells the agent to ask for a missing key with [`request_secret`](#asking-in-chat), never by having users paste it into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
+
+### Asking in chat
+
+For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+
+- MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
+  Other people in the thread see who the card waits for.
+- Chat sends the key to this MindRoom's API with the user's client session.
+  MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
+  The key never goes through Matrix, the model, the worker, or the logs.
+- The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  A card expires after 15 minutes or when the reply is stopped, and a restart of MindRoom ends every pending request.
+  It also expires when an answer arrives after its service changed or the agent's keys moved to another scope; the agent can then ask again with a new card.
+- When the call runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs), the reply waits for the answer for `background_tool_jobs.approval_wait_timeout` seconds (default 300) and then goes on; the outcome arrives later as the job's result.
+  Stop withdraws the card only while the reply still waits for it.
+- The requester answers.
+  For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
+- The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+  The refusal names the Agent Keys page where one exists.
+- Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](https://docs.mindroom.chat/deployment/sandbox-proxy/#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)).
+  Without either, the tool posts no card and sends the user to the Agent Keys page instead.
 
 ## Deployment
 
