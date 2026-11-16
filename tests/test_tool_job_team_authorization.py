@@ -317,7 +317,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
 
     async def operation() -> BackgroundOutcome:
         async with child_run_context(child, config=config, runtime_paths=paths):
-            with tool_runtime_context(child_tool_runtime_context(context, child)):
+            with tool_runtime_context(child_tool_runtime_context(context, child, config=config)):
                 response = await _add(member, child.session_id)
                 assert response.tools is not None
                 assert not response.tools[0].is_error
