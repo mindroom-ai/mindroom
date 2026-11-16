@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.egress_broker import EgressBrokerConfig
+from mindroom.constants import trusted_tool_runtime_env_values
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
@@ -435,12 +436,16 @@ class _BrokerService:
         if self._start_error is not None:
             raise self._start_error
         # Primary shell commands trust the broker CA through files of the primary's own; its process trust is unchanged.
-        # The files keep what the primary's own CA variables name, because the commands inherited those until now.
+        # The files keep what the primary's own CA variables name, because the commands inherited those until now:
+        # the exported environment, then the runtime values with the `.env`, as the shell tool layers them.
         primary_ca_env = {BROKER_CA_PEM_ENV: ca.cert_pem}
         apply_runner_ca_bundle(
             primary_ca_env,
             state_dir / "primary_ca",
-            trusted_before=self._runtime_paths.process_env,
+            trusted_before={
+                **self._runtime_paths.process_env,
+                **trusted_tool_runtime_env_values(self._runtime_paths),
+            },
         )
         self.runtime = _BrokerRuntime(
             url=self._settings.url,

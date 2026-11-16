@@ -408,18 +408,19 @@ async def test_a_primary_shell_still_trusts_the_private_cas_its_own_variables_na
     """The CA files a primary shell command gets keep the certificates of the files the primary's variables name.
 
     Those variables are replaced, so a command that reached a private HTTPS service through them would otherwise
-    stop trusting it. A variable that names a missing file adds nothing.
+    stop trusting it. A shell command inherits them from the exported environment and from the `.env` beside the
+    config, so both count. A variable that names a missing file adds nothing.
     """
     company_roots = "-----BEGIN CERTIFICATE-----\ncompany-root\n-----END CERTIFICATE-----"
     node_roots = "-----BEGIN CERTIFICATE-----\nnode-root\n-----END CERTIFICATE-----\n"
     (tmp_path / "company-ca.pem").write_text(company_roots, encoding="utf-8")
     (tmp_path / "node-ca.pem").write_text(node_roots, encoding="utf-8")
+    (tmp_path / ".env").write_text(f"NODE_EXTRA_CA_CERTS={tmp_path / 'node-ca.pem'}\n", encoding="utf-8")
     runtime_paths = tmp_runtime_paths(
         **_broker_env(
             free_port(),
             CURL_CA_BUNDLE=str(tmp_path / "company-ca.pem"),
             REQUESTS_CA_BUNDLE=str(tmp_path / "missing.pem"),
-            NODE_EXTRA_CA_CERTS=str(tmp_path / "node-ca.pem"),
         ),
     )
     config = _primary_shell_config()
