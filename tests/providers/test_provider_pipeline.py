@@ -7,12 +7,14 @@ import asyncio
 import io
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
@@ -52,6 +54,7 @@ from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.tool_search import portable_tool_search_stream
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.logging_config import bound_log_context
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
@@ -1134,9 +1137,9 @@ async def test_the_request_goes_out_while_its_record_is_written_and_the_reply_wa
     sent, may_write = threading.Event(), threading.Event()
     write_record = request_log_stage._write_request_record
 
-    def write_once_allowed(*args: object, **kwargs: object) -> None:
+    def write_once_allowed(*args: object, **kwargs: object) -> Path | None:
         may_write.wait(timeout=5)
-        write_record(*args, **kwargs)
+        return write_record(*args, **kwargs)
 
     async def send() -> None:
         sent.set()
@@ -1177,6 +1180,25 @@ async def test_a_request_that_went_out_is_logged_even_when_its_caller_is_cancell
     free.set()
     await busy
     await loop.run_in_executor(None, lambda: None)  # the queued record's write ran before this
+
+    assert [record["body"] for record in _log_records(tmp_path)] == [scripted_body(_IDENTITY, _request())]
+
+
+def test_a_request_that_went_out_is_logged_when_the_loop_shuts_down_with_its_record_queued(tmp_path: Path) -> None:
+    """A clean shutdown right after a send, which cancels every task and closes the loop, still writes the record."""
+    inner = _ScriptedProvider([[_turn()]])
+
+    async def send_and_stop() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        loop.run_in_executor(None, time.sleep, 0.2)  # the one writer thread is busy, so the record's write waits
+        stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+        reply = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0)
+        assert len(inner.requests) == 1
+        assert not reply.done()
+
+    asyncio.run(send_and_stop())
 
     assert [record["body"] for record in _log_records(tmp_path)] == [scripted_body(_IDENTITY, _request())]
 
@@ -1228,9 +1250,9 @@ async def test_request_log_builds_the_record_off_the_event_loop(
     build_threads: list[int] = []
     write_record = request_log_stage._write_request_record
 
-    def record_build_thread(*args: object, **kwargs: object) -> None:
+    def record_build_thread(*args: object, **kwargs: object) -> Path | None:
         build_threads.append(threading.get_ident())
-        write_record(*args, **kwargs)
+        return write_record(*args, **kwargs)
 
     monkeypatch.setattr(request_log_stage, "_write_request_record", record_build_thread)
     request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
@@ -1444,7 +1466,10 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    write_contexts: list[dict[str, object]] = []
+
     def unwritable(_path: Path, _payload: dict[str, object]) -> None:
+        write_contexts.append(structlog.contextvars.get_contextvars())
         message = "disk full"
         raise OSError(message)
 
@@ -1453,7 +1478,7 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
     answered = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
     failed = _ScriptedProvider([[InvalidRequest("bad request", provider="Scripted", status_code=400)]])
 
-    with capture_logs() as logs:
+    with capture_logs() as logs, bound_log_context(room_id="!room:example.org"):
         events = await _drain(WrappedProvider(answered, partial(logged_stream, log=_request_log(tmp_path))), _request())
         with pytest.raises(InvalidRequest, match="bad request"):
             await _drain(WrappedProvider(failed, partial(logged_stream, log=_request_log(tmp_path))), _request())
@@ -1465,6 +1490,8 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
         for entry in logs
         if entry["event"] == "Failed to persist LLM request log"
     ] == [("default", None)] * 2
+    # The writer thread reports the failure with the request's log fields.
+    assert [context.get("room_id") for context in write_contexts] == ["!room:example.org"] * 2
     # A response record joins only a logged request, so none is attempted after its request record failed.
     assert not [entry for entry in logs if entry["event"] == "Failed to emit LLM response telemetry"]
 

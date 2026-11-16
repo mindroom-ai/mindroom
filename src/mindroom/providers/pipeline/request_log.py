@@ -10,9 +10,11 @@ reaches its SDK, such as one whose attachment cannot be read, logs no record.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -65,27 +67,32 @@ def _write_request_record(
     deferred_tool_names: list[str],
     request_log_id: str,
     context: Mapping[str, Any],
-) -> None:
-    """Build and append the request record, in the thread that writes it.
+) -> Path | None:
+    """Build and append the request record, in the thread that writes it; return its file, or None if it failed.
 
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
     built in the writer thread, and long enough to delay the request, so the adapter sends the body meanwhile. Adapters
     and their SDKs only read the body they hand ``on_send``, and the caller sees nothing of the reply before the write
     ends, so nothing edits the body while it is read here.
     """
-    _write_line(
-        path,
-        {
-            "timestamp": datetime.now().astimezone().isoformat(),
-            "request_log_id": request_log_id,
-            **context,
-            "model_name": log.model_name,
-            "model_id": model_id,
-            "body": json_safe(body),
-            "deferred_tool_names": deferred_tool_names,
-            "model_params": model_params,
-        },
-    )
+    try:
+        _write_line(
+            path,
+            {
+                "timestamp": datetime.now().astimezone().isoformat(),
+                "request_log_id": request_log_id,
+                **context,
+                "model_name": log.model_name,
+                "model_id": model_id,
+                "body": json_safe(body),
+                "deferred_tool_names": deferred_tool_names,
+                "model_params": model_params,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to persist LLM request log", model_name=log.model_name, model_id=model_id)
+        return None
+    return path
 
 
 def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> Path:
@@ -157,40 +164,31 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     """Stream ``request``, emitting usage telemetry when it ends and the request record when enabled."""
     context = current_llm_request_log_context()
     request_log_id = uuid4().hex
-    # The request record's write, started as the adapter sends; it gives the log file once the record is written, so
-    # the response record joins only a logged request. Awaits shield it, so a cancelled caller still logs what it sent.
-    record: asyncio.Task[Path | None] | None = None
+    # The request record's write, handed to a worker thread as the adapter sends the request; it gives the log file once
+    # the record is written, so the response record joins only a logged request. It is no task and every await shields
+    # it, so neither a cancelled caller nor the loop's shutdown drops it: the loop's executor finishes it first.
+    record: asyncio.Future[Path | None] | None = None
     if log.debug.log_llm_requests:
         log_path = _daily_log_path(log.debug.llm_request_log_dir, log.storage_root, datetime.now().astimezone())
         deferred_tool_names = sorted(request.deferred_tools.names)
 
-        async def write_request_record(body: Mapping[str, Any]) -> Path | None:
-            try:
-                await asyncio.to_thread(
-                    _write_request_record,
-                    log_path,
-                    body,
-                    log,
-                    model_id=inner.identity.id,
-                    model_params=inner.model_params,
-                    deferred_tool_names=deferred_tool_names,
-                    request_log_id=request_log_id,
-                    context=context,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to persist LLM request log",
-                    model_name=log.model_name,
-                    model_id=inner.identity.id,
-                )
-                return None
-            return log_path
-
-        async def start_request_record(body: Mapping[str, Any]) -> None:
+        async def write_request_record(body: Mapping[str, Any]) -> None:
             nonlocal record
-            record = asyncio.create_task(write_request_record(body))
+            write = partial(
+                _write_request_record,
+                log_path,
+                body,
+                log,
+                model_id=inner.identity.id,
+                model_params=inner.model_params,
+                deferred_tool_names=deferred_tool_names,
+                request_log_id=request_log_id,
+                context=context,
+            )
+            # The copied context keeps the request's log fields on a failure the thread reports.
+            record = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, write)
 
-        request = replace(request, on_send=start_request_record)
+        request = replace(request, on_send=write_request_record)
     reported = ReportedUsage()
     served_provider: str | None = None
     stop_reason: StopReason | None = None
