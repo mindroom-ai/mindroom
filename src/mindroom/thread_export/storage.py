@@ -12,7 +12,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, ParamSpec, TypeVar
 from urllib.parse import quote, unquote
 
 import yaml
@@ -62,6 +62,15 @@ _THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
 # Worker code can create entries without limit, so a full set starts over at the cost of one repeat warning per entry.
 _MAX_WARNED_UNRECOGNIZED_ENTRIES = 4096
 _WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str]] = set()
+# A thread's last message timestamp, which orders the room index, and its entry there.
+type ThreadIndexEntry = tuple[int, dict[str, object]]
+
+
+class _WrittenThread(NamedTuple):
+    """Whether one thread export replaced its file, and the room index pair that file gets."""
+
+    replaced: bool
+    index_entry: ThreadIndexEntry | None
 
 
 def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -535,7 +544,7 @@ def _load_export_mapping(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _thread_index_entry(filename: str, data: bytes) -> tuple[int, dict[str, object]] | None:
+def _thread_index_entry(filename: str, data: bytes) -> ThreadIndexEntry | None:
     """Return one index pair from a thread file read up to one byte past the read cap."""
     whole = len(data) <= MAX_READ_BYTES
     try:
@@ -550,6 +559,27 @@ def _thread_index_entry(filename: str, data: bytes) -> tuple[int, dict[str, obje
         if header is None:
             return None
         payload = {**header, "messages": []}
+    return _payload_index_entry(filename, payload)
+
+
+def _yaml_node_count(value: object) -> int:
+    """Return how many YAML nodes the dump of one payload value holds, as the bounded loader counts them."""
+    if isinstance(value, dict):
+        return 1 + sum(1 + _yaml_node_count(item) for item in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_yaml_node_count(item) for item in value)
+    return 1
+
+
+def _written_index_entry(filename: str, payload: dict[str, object], file_size: int) -> ThreadIndexEntry | None:
+    """Return the index pair a rebuild would parse from the file this pass left for one built thread payload."""
+    # A rebuild indexes a file past the read cap, or one the bounded loader refuses whole, from its header.
+    whole = file_size <= MAX_READ_BYTES and _yaml_node_count(payload) <= yaml_io._MAX_UNTRUSTED_NODES
+    return _payload_index_entry(filename, payload if whole else {**payload, "messages": []})
+
+
+def _payload_index_entry(filename: str, payload: dict[str, Any]) -> ThreadIndexEntry | None:
+    """Return one index pair from a thread export mapping."""
     thread = payload.get("thread")
     messages = payload.get("messages")
     if not isinstance(thread, dict) or not isinstance(messages, list):
@@ -577,30 +607,45 @@ def _thread_index_entry(filename: str, data: bytes) -> tuple[int, dict[str, obje
     return last_timestamp, entry
 
 
-def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) -> dict[str, object]:
-    """Build one room index document from the recognizable thread files on disk, newest first within the read budget."""
-    candidates: list[tuple[int, str]] = []
+def _thread_files_newest_first(room_fd: int) -> list[tuple[str, int]]:
+    """Return the names and sizes of a room's recognizable regular thread files, most recently modified first."""
+    candidates: list[tuple[int, str, int]] = []
     for name in os.listdir(room_fd):
         if not _is_thread_export_filename(name):
             continue
         with suppress(FileNotFoundError):
             status = os.stat(name, dir_fd=room_fd, follow_symlinks=False)
             if stat.S_ISREG(status.st_mode):
-                candidates.append((status.st_mtime_ns, name))
-    newest_first = [name for _, name in sorted(candidates, reverse=True)]
-    indexed: list[tuple[int, dict[str, object]]] = []
+                candidates.append((status.st_mtime_ns, name, status.st_size))
+    return [(name, size) for _, name, size in sorted(candidates, reverse=True)]
+
+
+def _room_index_payload(
+    room_fd: int,
+    output_dir: Path,
+    room: ThreadExportRoom,
+    written_entries: dict[str, ThreadIndexEntry],
+) -> dict[str, object]:
+    """Build one room index document from the recognizable thread files on disk, newest first within the read budget."""
+    newest_first = _thread_files_newest_first(room_fd)
+    indexed: list[ThreadIndexEntry] = []
     unindexed: list[str] = []
     read_bytes = 0
     index_bytes = 0
-    for position, filename in enumerate(newest_first):
-        try:
-            # One byte past the cap shows whether the file was cut there.
-            data = read_regular_file_within_root(room_fd, filename, max_bytes=MAX_READ_BYTES + 1, truncate=True)
-        except (OSError, ValueError):
-            continue
-        # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
-        read_bytes += len(data)
-        indexed_entry = _thread_index_entry(filename, data) if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
+    for position, (filename, size) in enumerate(newest_first):
+        if filename in written_entries:
+            # This pass built the file's entry when it wrote it, so the file is charged the bytes a read would return.
+            read_bytes += min(size, MAX_READ_BYTES + 1)
+            indexed_entry = written_entries[filename] if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
+        else:
+            try:
+                # One byte past the cap shows whether the file was cut there.
+                data = read_regular_file_within_root(room_fd, filename, max_bytes=MAX_READ_BYTES + 1, truncate=True)
+            except (OSError, ValueError):
+                continue
+            # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
+            read_bytes += len(data)
+            indexed_entry = _thread_index_entry(filename, data) if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
         if indexed_entry is not None:
             index_bytes += len(json.dumps(indexed_entry[1], indent=2))
         if read_bytes > _MAX_ROOM_INDEX_BYTES or index_bytes > _MAX_ROOM_INDEX_JSON_BYTES:
@@ -609,7 +654,7 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
                 output_dir=str(output_dir),
                 room_key=room.key,
             )
-            unindexed = sorted(newest_first[position:])
+            unindexed = sorted(name for name, _ in newest_first[position:])
             break
         if indexed_entry is not None:
             indexed.append(indexed_entry)
@@ -678,9 +723,13 @@ def write_room_index(
     room: ThreadExportRoom,
     *,
     thread_files_changed: bool = True,
+    written_entries: Sequence[ThreadIndexEntry] = (),
     trusted_root: Path | None = None,
 ) -> None:
-    """Rebuild a room index after YAML changes or detected filename-set drift."""
+    """Rebuild a room index after YAML changes or detected filename-set drift.
+
+    ``written_entries`` are the entries ``write_thread_payload`` returned in this pass, so only other files are parsed.
+    """
     root_fd = _open_owned_export_root(
         output_dir,
         create=False,
@@ -697,7 +746,8 @@ def write_room_index(
     try:
         if not thread_files_changed and _room_index_filename_set_matches(room_fd):
             return
-        payload = _room_index_payload(room_fd, output_dir, room)
+        written = {str(entry["file"]): (last_timestamp, entry) for last_timestamp, entry in written_entries}
+        payload = _room_index_payload(room_fd, output_dir, room, written)
         data = f"{json.dumps(payload, indent=2)}\n".encode()
         # Only an index of the same size can be unchanged, so a larger one is replaced without being read.
         if _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=len(data)) != data:
@@ -964,8 +1014,8 @@ def write_thread_payload(
     payload: dict[str, object],
     *,
     trusted_root: Path | None = None,
-) -> bool:
-    """Write one thread payload when changed and return whether bytes were replaced."""
+) -> _WrittenThread:
+    """Write one thread payload built by ``thread_payload`` when changed, without parsing the file back."""
     data = yaml_io.safe_dump(payload, default_flow_style=False, sort_keys=False, allow_unicode=True, encoding="utf-8")
     if len(data) > _MAX_THREAD_FILE_BYTES:
         msg = f"Thread {thread_id} is too large to export: its file passes {_MAX_THREAD_FILE_BYTES >> 20} MiB"
@@ -991,8 +1041,8 @@ def write_thread_payload(
         # A larger existing file has changed, so the read stops just past the new export's size, even above the read cap.
         existing = _read_bytes_at(room_fd, filename, max_bytes=len(data) + _EXPORTED_AT_SLACK_BYTES)
         if existing is not None and _differs_only_in_exported_at(existing, data):
-            return False
+            return _WrittenThread(replaced=False, index_entry=_written_index_entry(filename, payload, len(existing)))
         _atomic_write_at(room_fd, filename, data)
-        return True
+        return _WrittenThread(replaced=True, index_entry=_written_index_entry(filename, payload, len(data)))
     finally:
         os.close(room_fd)
