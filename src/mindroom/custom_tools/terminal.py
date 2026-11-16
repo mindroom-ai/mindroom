@@ -213,7 +213,8 @@ class TerminalTools(Toolkit):
         """Open a new terminal in your workspace, which people in the room can watch where your config allows it.
 
         Args:
-            cwd: Folder to start in, relative to your workspace; the workspace by default.
+            cwd: Folder to start in, relative to your workspace, or to the turn's working directory when it has
+                one; that workspace or directory by default.
 
         Returns:
             The new terminal's session ID, or why it could not open.

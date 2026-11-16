@@ -20687,6 +20687,7 @@ async def work_in_thread_worktree(ctx: TurnLifecycleContext) -> None:
   The tools work there as with a [headless run's `workdir`](https://docs.mindroom.chat/headless/#files), so `file_access: workspace` confines `file` and `coding` to the directory.
   `$MINDROOM_AGENT_WORKSPACE` still holds the workspace, as does `HOME` in a worker, which also still reads `.mindroom/worker-env.sh` from the workspace.
   A `browser` that runs in a dedicated worker keeps saving its files under the workspace, as without a working directory.
+  A [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) the agent opens in such a turn starts in the directory, and its `cwd` is relative to it.
 - MindRoom uses the path only when it names an existing directory inside the workspace once symbolic links are resolved, and the tools work in that resolved directory; otherwise it logs a warning and the turn runs in the workspace.
 - A team's turn ignores the request, and on `turn:paused`, `turn:resumed`, and `turn:ended` the call does nothing.
 - The directory lasts for that turn only.

@@ -856,6 +856,7 @@ def get_tool_by_name(
             init_kwargs["allow_without_worker"] = (
                 runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
             )
+            init_kwargs["beside_workdir"] = workdir is not None
         init_kwargs.update(
             _build_managed_tool_init_kwargs(
                 metadata,

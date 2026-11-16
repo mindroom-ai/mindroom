@@ -606,6 +606,12 @@ def _tool_results(request: ModelRequest) -> list[str]:
     return [str(message.content) for message in request.messages if message.role == "tool"]
 
 
+def _shell_description(request: ModelRequest) -> str:
+    """Return the description of `run_shell_command` that ``request`` offers the model."""
+    (shell,) = (tool for tool in request.tools if tool.name == "run_shell_command")
+    return shell.description
+
+
 async def test_where_workers_run_only_worker_requests_carry_the_hook_s_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -642,7 +648,29 @@ async def test_where_workers_run_only_worker_requests_carry_the_hook_s_directory
     assert "Tools in the primary MindRoom runtime work in your workspace." in system
     # The note on writing into the workspace by relative path would misdirect the worker's tools.
     assert "mindroom_output_path: <relative-path>" not in system
+    # The worker's shell is described as running where its requests say it runs.
+    description = _shell_description(turn.models["default"].requests[0])
+    assert "The command runs in the workdir as its working directory" in description
+    assert "runs in your agent workspace" not in description
     assert _bound() == (None, None)
+
+
+async def test_where_workers_run_a_turn_without_a_directory_describes_the_worker_shell_in_the_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a hook's directory, the worker's request names none and its shell is described in the workspace."""
+    sent: list[tuple[str, dict[str, Any]]] = []
+    steps = [calls(tool_call("run_shell_command", "call-1", args="pwd")), answer("Done.")]
+    turn, workspace = await _turn_with_a_worker_shell(tmp_path, monkeypatch, steps, sent)
+
+    await turn.runner.generate_response(_plain_request(_target()))
+
+    ((_url, request),) = sent
+    assert (request["tool_name"], request["base_dir"], request.get("workdir")) == ("shell", str(workspace), None)
+    description = _shell_description(turn.models["default"].requests[0])
+    assert "The command runs in your agent workspace as its working directory" in description
+    assert "runs in the workdir" not in description
 
 
 @pytest.mark.parametrize("reader", ["agent", "subagent"])

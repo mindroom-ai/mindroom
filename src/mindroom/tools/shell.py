@@ -35,11 +35,7 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
-from mindroom.tool_system.output_files import (
-    ToolOutputFileHandled,
-    current_tool_output_file_request,
-    current_tool_workdir,
-)
+from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
@@ -407,10 +403,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             runtime_paths: RuntimePaths,
             tool_output_workspace_root: Path | None = None,
             allow_without_worker: bool = False,
+            beside_workdir: bool = False,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
+            # ``beside_workdir``: the commands run in the turn's working directory, here or in the worker they go to.
             # Beside a workdir, ``base_dir`` is the workdir; ``$MINDROOM_AGENT_WORKSPACE`` stays the workspace.
-            self._beside_workdir = current_tool_workdir() is not None
+            self._beside_workdir = beside_workdir
             self._workspace_dir = tool_output_workspace_root if self._beside_workdir else self.base_dir
             self._refuse_commands = shell_refuses_commands(runtime_paths, allow_without_worker=allow_without_worker)
 
