@@ -838,25 +838,28 @@ class DesktopBridge:
             return _Execution(await execute_shell(self.client, self.shell, command))
         return await self._execute_desktop(command)
 
+    async def _execute_browser(self, command: DesktopCommand) -> _Execution:
+        browser_action, browser_parameters = _browser_command_parameters(command.parameters)
+        if self.browser_provider is None:
+            msg = "Playwright browser extension support is disabled on this desktop bridge."
+            raise DesktopProtocolError(msg)
+        if command.action == "browser_control":
+            if self.provider is None:
+                msg = "Desktop GUI is unavailable for browser control."
+                raise DesktopProtocolError(msg)
+            await asyncio.to_thread(self.provider.check_emergency_stop)
+            # Control can end, or end and be granted again, while the fail-safe check runs in its thread.
+            authority_error = self._policy_error(command) or self._authority_error(command)
+            if authority_error is not None:
+                raise DesktopProtocolError(authority_error)
+        with self._sending_input() if command.action == "browser_control" else nullcontext():
+            browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
+        return _Execution(browser_result.payload, browser_image=browser_result.image)
+
     async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
         parameters = command.parameters
         if command.action in DESKTOP_BROWSER_ACTIONS:
-            browser_action, browser_parameters = _browser_command_parameters(parameters)
-            if self.browser_provider is None:
-                msg = "Playwright browser extension support is disabled on this desktop bridge."
-                raise DesktopProtocolError(msg)
-            if command.action == "browser_control":
-                if self.provider is None:
-                    msg = "Desktop GUI is unavailable for browser control."
-                    raise DesktopProtocolError(msg)
-                await asyncio.to_thread(self.provider.check_emergency_stop)
-                # Control can end, or end and be granted again, while the fail-safe check runs in its thread.
-                authority_error = self._policy_error(command) or self._authority_error(command)
-                if authority_error is not None:
-                    raise DesktopProtocolError(authority_error)
-            with self._sending_input() if command.action == "browser_control" else nullcontext():
-                browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
-            return _Execution(browser_result.payload, browser_image=browser_result.image)
+            return await self._execute_browser(command)
         if command.action == "status":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             status: dict[str, object] = (
