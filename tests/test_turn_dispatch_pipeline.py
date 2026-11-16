@@ -2742,6 +2742,7 @@ class TestAgentBot(AgentBotTestBase):
         """Turns that will be answered queue their prompt without waiting; others, and untranscribed audio, never do."""
         voice = prompt_kind != "text"
         config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -2819,3 +2820,62 @@ class TestAgentBot(AgentBotTestBase):
                     summary.assert_not_called()
             finally:
                 release.set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["first_threshold_after_first_reply", "thread_reply", "coalesced"])
+    async def test_prompt_title_is_not_queued_unless_new_thread_is_titled_at_first_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        case: Literal["first_threshold_after_first_reply", "thread_reply", "coalesced"],
+    ) -> None:
+        """Only a new thread's single prompt is titled early, and only when its first reply would title it anyway."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 3 if case == "first_threshold_after_first_reply" else 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        thread_id = "$root" if case == "thread_reply" else "$prompt"
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$prompt",
+            body="Plan a trip",
+            source={"content": {"body": "Plan a trip", "msgtype": "m.text"}},
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id=thread_id, reply_to_event_id="$prompt")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id=thread_id,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$prompt",
+            envelope=_hook_envelope(body="Plan a trip", source_event_id="$prompt", target=target),
+        )
+        plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock()) as apply_plan,
+            patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as summary,
+        ):
+            await dispatch_test_turn(
+                bot._turn_dispatcher,
+                room,
+                event,
+                event.sender,
+                handled_turn=(
+                    TurnRecord.create(["$earlier", "$prompt"], completed=False) if case == "coalesced" else None
+                ),
+                coalescing_key=requester_coalescing_key(room.room_id, thread_id, event.sender),
+            )
+
+        apply_plan.assert_awaited_once()
+        summary.assert_not_called()

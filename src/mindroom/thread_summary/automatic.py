@@ -338,8 +338,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             # before that notice reached any history read.
             if baselines.count(room_id, thread_id) > 0:
                 return
-            # Other bots may have sent a title that this client's sync has not
-            # echoed yet. Rewalk under the shared lock before claiming absence.
+            # The claim stops this process's other bots. Another runtime's title,
+            # or a pin from Chat, may not have reached this client's sync yet, so
+            # read the server's history before claiming absence.
             history = await refetched_thread_history(
                 conversation_reader,
                 room_id,
@@ -406,7 +407,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
             )
-            if state is None or state.summary_event_ids or await _thread_is_resolved(client, room_id, thread_id):
+            if state is None or state.summary_event_ids:
                 return
             await send_thread_summary_notice(
                 client,

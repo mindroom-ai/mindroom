@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _PREQUEUE_CONCURRENCY_MARGIN = 2
+# A new thread's first reply brings it to two messages: the prompt and the answer.
+_NEW_THREAD_SIZE_AFTER_FIRST_REPLY = 2
 
 
 @dataclass
@@ -82,6 +84,14 @@ def thread_summary_message_count_hint(
         if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is None
     )
     return ordinary + 1
+
+
+def first_reply_reaches_first_threshold(config: Config) -> bool:
+    """Return whether the first automatic summary is due at a new thread's first reply.
+
+    Only then may a prompt-only title come earlier; a higher first threshold keeps new threads untitled for longer.
+    """
+    return config.defaults.thread_summary_first_threshold <= _NEW_THREAD_SIZE_AFTER_FIRST_REPLY
 
 
 def should_queue_thread_summary(

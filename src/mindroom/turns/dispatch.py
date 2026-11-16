@@ -47,6 +47,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
+from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
@@ -369,6 +370,7 @@ class TurnDispatcher:
             or thread_id != turn.event.event_id
             or turn.handled_turn.is_coalesced
             or turn.payload.raw_audio_fallback
+            or not first_reply_reaches_first_threshold(self.deps.runtime.config)
         ):
             return
         # A single-event turn has no coalescing wrapper or reply enrichment;

@@ -52,6 +52,7 @@ from mindroom.thread_summary.notices import (
 )
 from mindroom.thread_summary.schedule import (
     _ThreadSummaryBaselines,
+    first_reply_reaches_first_threshold,
     should_queue_thread_summary,
     thread_summary_message_count_hint,
 )
@@ -60,6 +61,7 @@ from mindroom.thread_tag_vocabulary import claim_vocabulary_check, load_tag_voca
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import (
+    fresh_thread_summary_baselines,
     install_model_providers,
     make_conversation_reader_mock,
     make_matrix_client_mock,
@@ -440,6 +442,11 @@ class TestNextThreshold:
         assert self._next(0, first_threshold=1, subsequent_interval=4) == 1
         assert self._next(1, first_threshold=1, subsequent_interval=4) == 5
         assert self._next(5, first_threshold=1, subsequent_interval=4) == 9
+
+    @pytest.mark.parametrize(("first_threshold", "early_title"), [(1, True), (2, True), (3, False), (5, False)])
+    def test_early_title_only_when_first_reply_is_titled(self, first_threshold: int, *, early_title: bool) -> None:
+        """A new thread holds two messages after its first reply, so only a first threshold of 2 or less titles it."""
+        assert first_reply_reaches_first_threshold(_mock_config(first_threshold=first_threshold)) is early_title
 
 
 class TestBaselineCounts:
@@ -834,8 +841,11 @@ class TestMaybeGenerateThreadSummary:
         assert not _sent_summaries(self.client)
         assert self._count() == 0
 
-    async def test_provisional_title_once_across_agents_before_sync_echo(self) -> None:
-        """A fresh server read sees another sender's title even while the projection is stale."""
+    async def test_provisional_title_once_across_runtimes_before_sync_echo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fresh server read sees another runtime's title even while this runtime's projection is stale."""
         history = _make_thread_history(1)
         serve_source_thread(self.conversation_reader, history)
         self._history(history)
@@ -855,11 +865,14 @@ class TestMaybeGenerateThreadSummary:
             return nio.RoomSendResponse(event_id="$provisional", room_id=_ROOM)
 
         self.client.room_send.side_effect = send
-        await asyncio.gather(*(self._provisional() for _ in range(3)))
+        await self._provisional()
+        # Another runtime holds no claim from the first, and its sync has not delivered the title.
+        fresh_thread_summary_baselines(monkeypatch)
+        self._history(_make_thread_history(1))
+        await self._provisional()
 
         assert len(model.requests) == 1
         assert len(_sent_summaries(self.client)) == 1
-        assert self._count() == 0
 
     async def test_provisional_title_waiting_behind_after_reply_keeps_its_title(self) -> None:
         """A queued provisional pass rechecks state after acquiring the post-reply lock."""

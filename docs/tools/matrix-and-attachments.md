@@ -311,7 +311,7 @@ matrix_api(
 ### Automatic Thread Summaries
 
 MindRoom starts a background title for a new thread from its first prompt, using the transcription for voice messages, without waiting for the agent's reply.
-This provisional title does not change the summary or topic-tag refresh schedule below.
+It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
 MindRoom posts a summary notice in a thread after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`).
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 messages, the summary model sees only the first three and last three.
