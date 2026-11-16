@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 import nio
+from aiohttp import ClientResponse
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
@@ -446,22 +447,26 @@ class BotRoomLifecycle:
         """Find `#admins:<server>`, whose membership makes the router a Tuwunel server admin; False when lookup failed.
 
         A homeserver without that alias, or a room MindRoom manages under it such as one keyed `admins`, has none.
+        A server error, a rate limit, or no HTTP answer fails the lookup; any other refusal means there is none.
         """
         client = self._client()
         if self.deps.agent_name != ROUTER_AGENT_NAME or not isinstance(client, MindRoomAsyncClient):
             return True
         response = await client.room_resolve_alias(f"#admins:{self.deps.agent_user.user_id.partition(':')[2]}")
+        if isinstance(response, nio.RoomResolveAliasError):
+            transport = response.transport_response
+            status = transport.status if isinstance(transport, ClientResponse) else None
+            # Only an answer that can change on retry leaves the room unknown; any other refusal means there is none.
+            if response.status_code != "M_NOT_FOUND" and (status is None or status >= 500 or status == 429):
+                self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response), http_status=status)
+                return False
         managed = {room.room_id for room in matrix_state_for_runtime(self.deps.runtime_paths).rooms.values()}
-        if isinstance(response, nio.RoomResolveAliasResponse) and response.room_id not in managed:
-            client.unmanaged_room_id = response.room_id
-            return True
-        if isinstance(response, nio.RoomResolveAliasResponse) or (
-            isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND"
-        ):
-            client.unmanaged_room_id = None
-            return True
-        self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response))
-        return False
+        client.unmanaged_room_id = (
+            response.room_id
+            if isinstance(response, nio.RoomResolveAliasResponse) and response.room_id not in managed
+            else None
+        )
+        return True
 
     async def require_unmanaged_room(self) -> None:
         """Resolve that room at start; until it is known the router could take part in it, so a failure fails the start."""

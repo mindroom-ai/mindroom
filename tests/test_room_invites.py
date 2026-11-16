@@ -19,6 +19,7 @@ from uuid import UUID
 
 import nio
 import pytest
+from aiohttp import ClientResponse
 
 from mindroom import background_tasks, bot_room_lifecycle
 from mindroom.authorization import is_sender_allowed_for_responder
@@ -3543,3 +3544,42 @@ async def test_router_start_fails_until_its_homeserver_admin_room_is_known(tmp_p
     ):
         await bot.start()
     assert bot.client is None
+
+
+def _lookup_error(errcode: str, http_status: int | None) -> nio.RoomResolveAliasError:
+    error = nio.RoomResolveAliasError("refused", errcode)
+    error.transport_response = None if http_status is None else MagicMock(spec=ClientResponse, status=http_status)
+    return error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lookup", "starts", "unmanaged"),
+    [
+        # The homeserver's admin room is known: the router starts and keeps out of it.
+        (_ADMINS_FOUND, True, "!admins:localhost"),
+        # A homeserver with no such room: the router starts and ignores no room.
+        (_lookup_error("M_NOT_FOUND", 404), True, None),
+        # A definite refusal will not change, so it must not keep the router down: there is no admin room to keep.
+        (_lookup_error("M_FORBIDDEN", 403), True, None),
+        # A server error, a rate limit, or no answer may change: the start fails and the fleet retries it.
+        (_lookup_error("M_UNKNOWN", 502), False, None),
+        (_lookup_error("M_LIMIT_EXCEEDED", 429), False, None),
+        (_lookup_error("M_UNKNOWN", None), False, None),
+    ],
+    ids=["found", "not-found", "forbidden", "server-error", "rate-limited", "no-answer"],
+)
+async def test_router_start_waits_only_for_an_admin_room_lookup_that_can_change(
+    tmp_path: Path,
+    lookup: nio.RoomResolveAliasResponse | nio.RoomResolveAliasError,
+    starts: bool,
+    unmanaged: str | None,
+) -> None:
+    """Each answer to the `#admins` lookup either lets the start go on or fails it for the fleet's retry."""
+    bot = _router_with_admin_alias(tmp_path, lookup)
+    if starts:
+        await bot._room_lifecycle.require_unmanaged_room()
+    else:
+        with pytest.raises(RuntimeError, match="Homeserver admin room lookup failed"):
+            await bot._room_lifecycle.require_unmanaged_room()
+    assert bot.client.unmanaged_room_id == unmanaged
