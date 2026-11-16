@@ -383,13 +383,16 @@ struct DesktopControlView: View {
     private var appControlOptions: some View {
         DisclosureGroup("App control", isExpanded: $isAppControlExpanded) {
             VStack(alignment: .leading, spacing: 10) {
+                // The choices describe the next grant, so they stay fixed while a grant is in force.
                 Picker("Scope", selection: $store.controlScope) {
                     ForEach(DesktopControlScope.allCases) { scope in Text(scope.title).tag(scope) }
                 }
                 .pickerStyle(.segmented)
+                .disabled(store.status.authority.controlAvailable)
                 Picker("Duration", selection: $store.controlDuration) {
                     ForEach(DesktopGrantDuration.choices) { duration in Text(duration.title).tag(duration) }
                 }
+                .disabled(store.status.authority.controlAvailable)
                 HStack {
                     Button("Grant Control…") { isGrantConfirmationPresented = true }
                         .disabled(store.isBusy || store.status.bridge.state != "observe_only")
