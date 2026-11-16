@@ -7996,7 +7996,7 @@ def test_proxy_sends_the_workspace_alone_for_a_working_directory_outside_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A working directory outside the tool's workspace is never sent; the request names the workspace, with a warning."""
+    """A working directory outside the tool's workspace is never sent; the request names the workspace, without a log."""
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
 
@@ -8005,7 +8005,7 @@ def test_proxy_sends_the_workspace_alone_for_a_working_directory_outside_it(
 
     assert sent["base_dir"] == "agents/general/workspace"
     assert sent.get("workdir") is None
-    assert [log["log_level"] for log in logs if log["event"] == "worker_workdir_outside_workspace"] == ["warning"]
+    assert [log for log in logs if log["log_level"] == "warning"] == []
 
 
 @pytest.mark.asyncio

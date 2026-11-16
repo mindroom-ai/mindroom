@@ -23,7 +23,6 @@ import httpx
 from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
-from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
@@ -88,8 +87,6 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
-
-logger = get_logger(__name__)
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
@@ -535,7 +532,7 @@ def view_file_from_worker(
 
     ``workdir`` is the turn's working directory the viewing toolkit was built in, where the worker resolves ``path``.
     """
-    relative_workdir = _relative_workdir(workdir, workspace_root, tool_name="attachments")
+    relative_workdir = _relative_workdir(workdir, workspace_root)
     view_root = workdir if relative_workdir is not None else workspace_root
     proxy_config = sandbox_proxy_config(runtime_paths)
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
@@ -751,24 +748,17 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
-def _relative_workdir(workdir: Path | None, workspace_root: Path | None, *, tool_name: str) -> str | None:
+def _relative_workdir(workdir: Path | None, workspace_root: Path | None) -> str | None:
     """Return a turn's working directory ``workdir`` as a request carries it, relative to ``workspace_root``.
 
-    None without either, and, with a warning, for a directory outside the workspace, which a request never names.
+    None without either, and for a directory outside the workspace, such as the one a subagent with its own workspace
+    inherits from its caller's turn, which a request never names.
     """
     if workdir is None or workspace_root is None:
         return None
     # The turn confined its working directory to the canonical workspace.
     workspace = workspace_root.expanduser().resolve()
-    if not workdir.is_relative_to(workspace):
-        logger.warning(
-            "worker_workdir_outside_workspace",
-            tool_name=tool_name,
-            workdir=str(workdir),
-            workspace=str(workspace),
-        )
-        return None
-    return workdir.relative_to(workspace).as_posix()
+    return workdir.relative_to(workspace).as_posix() if workdir.is_relative_to(workspace) else None
 
 
 def _build_execute_request(
@@ -1055,7 +1045,7 @@ def worker_stand_ins(
         extra_env_passthrough=extra_env_passthrough,
         worker_target=worker_target,
         runtime_config=runtime_config,
-        workdir=_relative_workdir(workdir, workspace_root, tool_name=tool_name),
+        workdir=_relative_workdir(workdir, workspace_root),
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
 
