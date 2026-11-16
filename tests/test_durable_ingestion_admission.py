@@ -17,7 +17,7 @@ from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     DeliveryProjectionPendingError,
@@ -321,6 +321,41 @@ async def test_redaction_naming_no_event_settles_and_later_input_is_delivered(
     assert session.acked == [batch]
     assert session.dispatched == [redaction]
     assert [event.event_id for event in await principal.pending()] == ["$valid"]
+
+
+@pytest.mark.asyncio
+async def test_a_marked_message_is_kept_as_history_and_never_dispatched(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A person's message an agent wrote is settled at admission, so no drain or restart can replay it as work."""
+    agent = "@mindroom_helper:example.org"
+    marked = message("$marked")
+    marked.source["content"][AGENT_AUTHORED_KEY] = agent
+    batch = SyncBatch(uuid4(), 1, (marked,))
+    principal = await principal_for(journal_database(), batch.stream_id)
+    session = Session(batch)
+    handled: list[str] = []
+
+    async def handle(event: JournalEvent) -> bool:
+        handled.append(event.event_id)
+        return True
+
+    await consume_one_ingestion_batch(
+        session,
+        principal,
+        account_id=ACCOUNT,
+        sender_is_managed=lambda sender: sender == agent,
+    )
+
+    stored = await principal.load_event("$marked")
+    assert stored is not None
+    assert stored.source == {}
+    assert not await principal.is_pending("$marked")
+    assert await PendingEventWorker(store=principal, handle=handle).drain_once() == 0
+    assert handled == []
+    page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+    assert [(visible.logical_event_id, visible.content["body"]) for visible in page.messages] == [("$marked", "hello")]
+    assert session.acked == [batch]
 
 
 @pytest.mark.asyncio

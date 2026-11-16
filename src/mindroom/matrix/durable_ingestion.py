@@ -35,9 +35,9 @@ type _AfterAdmission = Callable[
 def _record_admission(
     record: SyncRecord,
     account_id: str,
-    schedule_trigger_sender_is_managed: Callable[[str], bool],
+    sender_is_managed: Callable[[str], bool],
 ) -> ej.IngestionRecordAdmission:
-    admission = _record_disposition(record, account_id, schedule_trigger_sender_is_managed)
+    admission = _record_disposition(record, account_id, sender_is_managed)
     membership = record.membership
     if membership is None:
         if record.kind is RecordKind.ROOM_LIFECYCLE:
@@ -58,7 +58,7 @@ def _record_admission(
 def _record_disposition(
     record: SyncRecord,
     account_id: str,
-    schedule_trigger_sender_is_managed: Callable[[str], bool],
+    sender_is_managed: Callable[[str], bool],
 ) -> ej.IngestionRecordAdmission:
     if record.kind is RecordKind.ROOM_LIFECYCLE:
         return ej.IngestionRecordAdmission(ej.IngestionRecordDisposition.ROOM_LIFECYCLE)
@@ -78,7 +78,7 @@ def _record_disposition(
                 source=source,
                 self_sender=account_id,
                 provenance=provenance,
-                schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+                sender_is_managed=sender_is_managed,
                 security_metadata=(
                     {
                         "decrypted": True,
@@ -104,13 +104,13 @@ def validate_ingestion_batch(
     batch: SyncBatch,
     *,
     account_id: str,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.IngestionBatchAdmission:
     """Convert the owned stream's typed observations into ordered application effects."""
     admission = ej.IngestionBatchAdmission(
         batch.stream_id,
         batch.sequence,
-        tuple(_record_admission(record, account_id, schedule_trigger_sender_is_managed) for record in batch.records),
+        tuple(_record_admission(record, account_id, sender_is_managed) for record in batch.records),
     )
     ej.validate_ingestion_batch_admission(admission)
     return admission
@@ -125,7 +125,7 @@ async def consume_one_ingestion_batch(
     after_admission: _AfterAdmission | None = None,
     after_sync: Callable[[], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.AdmissionFacts | None:
     """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
     batch = await session.next_batch()
@@ -134,7 +134,7 @@ async def consume_one_ingestion_batch(
     converted = validate_ingestion_batch(
         batch,
         account_id=account_id,
-        schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+        sender_is_managed=sender_is_managed,
     )
     invalidate_membership_lookups(batch.records, account_id=account_id)
     if before_admission is not None:
@@ -187,7 +187,7 @@ async def run_ingestion_pump(
     after_sync: Callable[[], Awaitable[None]] | None = None,
     after_ack: Callable[[], None] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
     while True:
@@ -201,7 +201,7 @@ async def run_ingestion_pump(
                 after_admission=after_admission,
                 after_sync=after_sync,
                 on_decryption_failure=on_decryption_failure,
-                schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+                sender_is_managed=sender_is_managed,
             )
         except ej.DeliveryProjectionPendingError:
             if wait_for_delivery_projection is None:

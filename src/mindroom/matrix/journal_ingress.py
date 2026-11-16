@@ -20,6 +20,7 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
@@ -137,7 +138,12 @@ def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
     return provenance is not nio.TimelineEventProvenance.HISTORY
 
 
-def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) -> EventClass:
+def _event_class_for(
+    provenance: nio.TimelineEventProvenance,
+    event: nio.Event,
+    *,
+    sender_is_managed: Callable[[str], bool],
+) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
@@ -162,17 +168,29 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
     not the same mistake as enumerating msgtypes -- the set stays correct as
     Matrix grows -- and it still projects, so the conversation keeps the event.
 
-    A text message whose status says it will be revised again is the last one:
+    A text message whose status says it will be revised again is another:
     an agent's `pending` placeholder is `m.text`, and the turn engine never
     answers an unfinished reply, only its terminal edit. Every agent in a room
     receives every agent's placeholder, so admitting them as work queued each
     one in every agent's ordered room lane, ahead of the prompts behind it.
+
+    An event of any kind marked agent-authored, from a sender MindRoom does not
+    manage, is the last one. Such an account acts for a person, and the marker
+    says an agent wrote the event there, so acting on it would let the agent
+    speak for the person: answer its own approval card, run a command with the
+    person's rights, or stop a reply. The marker can only take authority away,
+    so its presence decides and its value is never read. An entity's own
+    account already speaks only for that entity, so the marker takes nothing
+    from it. The event still projects, so history keeps it as it is.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(event.source.get("content") or {}):
+    content = event.source.get("content")
+    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(content or {}):
+        return EventClass.CONTEXT_ONLY
+    if isinstance(content, dict) and carries_agent_authored_marker(content) and not sender_is_managed(event.sender):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -261,7 +279,7 @@ def _projected_event(
     return projected
 
 
-def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callable[[str], bool]) -> EventKind | None:
+def _ingested_kind(parsed: nio.Event, sender_is_managed: Callable[[str], bool]) -> EventKind | None:
     """Return the kind one parsed timeline event is admitted as, or None to settle it without work."""
     if parsed.decrypted and (isinstance(parsed, nio.RedactionEvent) or "state_key" in parsed.source):
         # Redactions and state are never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
@@ -270,7 +288,7 @@ def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callab
         # Nio's schema accepts an empty target, which deletes nothing and which batch validation would reject.
         return None
     kind = _event_kind(parsed)
-    if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
+    if kind is EventKind.SCHEDULE_TRIGGER and not sender_is_managed(parsed.sender):
         return None
     if kind is None and isinstance(parsed, nio.RoomMemberEvent):
         return EventKind.ROOM_LIFECYCLE
@@ -285,7 +303,7 @@ def ingestion_timeline_views(
     provenance: nio.TimelineEventProvenance,
     expected_event_id: str | None = None,
     security_metadata: Mapping[str, object] | None = None,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
     """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
@@ -306,10 +324,10 @@ def ingestion_timeline_views(
         # Nio owns ciphertext recovery. Only historical identities need an
         # application tombstone so later decryption cannot revive old work.
         return None
-    kind = _ingested_kind(parsed, schedule_trigger_sender_is_managed)
+    kind = _ingested_kind(parsed, sender_is_managed)
     if kind is None:
         return None
-    event_class = _event_class_for(provenance, parsed)
+    event_class = _event_class_for(provenance, parsed, sender_is_managed=sender_is_managed)
     return (
         _inbound_event(room_id, parsed, kind, event_class),
         _projected_event(room_id, parsed, kind, self_sender=self_sender),

@@ -623,11 +623,17 @@ path = "mindroom.matrix.journal_ingress"
 depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
+    "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
 ]
 visibility = [
     "mindroom.journal_dispatch",
 ]
+
+[[modules]]
+path = "mindroom.matrix.agent_authored"
+depends_on = ["mindroom.constants"]
+visibility = ["mindroom.matrix.journal_ingress"]
 
 [[modules]]
 path = "mindroom.matrix.transport_progress"
