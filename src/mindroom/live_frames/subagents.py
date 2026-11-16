@@ -42,8 +42,8 @@ logger = get_logger(__name__)
 
 _SUBAGENT_EVENT_TYPE = "io.mindroom.subagents"
 
-# At most 8 frames a second per account and room, which leaves at least 12 of the homeserver's 30 events a second per
-# sender and room for the account's own reply frames at 10 a second.
+# At most 8 frames a second per account and room. Together with the account's reply frames, 10 a second for each of 50
+# replies, that stays under the homeserver's 600 events a second per sender and room.
 _SEND_INTERVAL_SECONDS = 0.125
 # Less often than a reply's snapshots, because a run's snapshots are bigger and share the room's frame buffer with
 # reply frames. A snapshot this often lets a client that missed frames catch up and tells clients a working run is
