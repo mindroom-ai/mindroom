@@ -40,9 +40,10 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
-from mindroom.tool_system.tool_environment import ToolEnvironment
+from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
@@ -823,3 +824,68 @@ async def test_the_reply_s_record_of_a_call_never_holds_a_given_secret(
     assert len(recorded) == 1
     assert "open-sesame-123" not in str(recorded[0])
     assert REDACTED in str(recorded[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("toolkit", "function_name", "received"),
+    [
+        ("shell", "run_shell_command", True),
+        ("shell", "check_shell_command", False),
+        ("terminal", "terminal_open", False),
+    ],
+)
+async def test_a_given_secret_is_a_variable_of_shell_commands_only(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    toolkit: str,
+    function_name: str,
+    received: bool,
+) -> None:
+    """No other call gets the variable: a terminal opened with it would keep it past its lifetime, for anyone."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    async def capture(_call: ToolCall, _call_next: ToolNext) -> object:
+        seen.update(current_tool_environment().values)
+        return "done"
+
+    function = replace(shell.function, name=function_name, registered_toolkit=toolkit, middleware=(capture,))
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert ("PASSPHRASE" in seen) is received
+
+
+@pytest.mark.asyncio
+async def test_live_progress_never_shows_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """What a running call reports for live reply frames loses the value before any listener gets it."""
+    given("PASSPHRASE", "open-sesame-123")
+    reports: list[str] = []
+
+    async def report(call: ToolCall, call_next: ToolNext) -> object:
+        report_tool_progress("typed open-sesame-123, waiting")
+        return await call_next(call.arguments)
+
+    function = replace(shell.function, middleware=(*shell.function.middleware, report))
+    with tool_progress_reporter(reports.append):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert f"typed {REDACTED}, waiting" in reports
+    assert not any("open-sesame-123" in text for text in reports)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_that_holds_another_is_removed_whole(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """The longer value goes first, so no tail of it stays beside the shorter one's mask."""
+    given("SHORT", "open-sesame")
+    given("LONG", "open-sesame-and-more")
+    shell = _local_shell(tmp_path)
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$LONG"']})
+
+    assert not outcome.is_error, outcome.content
+    assert "and-more" not in outcome.content
+    assert outcome.content.count(REDACTED) == 1

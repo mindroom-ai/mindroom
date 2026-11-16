@@ -18,12 +18,15 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.egress_broker import EgressService
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+
+logger = get_logger(__name__)
 
 SECRET_REQUEST_CONTENT_KEY = "io.mindroom.secret_request"  # noqa: S105 - Matrix content key, not a secret
 SECRET_REQUEST_TTL_SECONDS = 15 * 60
@@ -244,11 +247,14 @@ class _TemporarySecrets:
     """The values requesters gave conversations, by holder and variable name, until each expires.
 
     Every value is in memory; one kept on disk also has a file under the storage root, which the first use of that
-    root reads back after a restart. A lock guards the store, since an answer is written from a thread.
+    root reads back after a restart. Every tool call reads the store on the event loop, so a read takes only the lock
+    that guards the values, never a write to disk, and no trouble with a file fails it.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # One answer writes its file at a time, outside the lock that reads take.
+        self._writes = threading.Lock()
         self._given: dict[tuple[_SecretHolder, str], _Given] = {}
         self._loaded: set[Path] = set()
 
@@ -266,12 +272,15 @@ class _TemporarySecrets:
         directory = storage_root / _TEMPORARY_SECRETS_DIRECTORY
         expires_at = now + TEMPORARY_SECRET_KEEP_SECONDS[keep]
         with self._lock:
+            # The directory's files are read before this process writes any, so a read never meets a write under way.
             self._refresh(directory, now)
+        with self._writes:
             path = _write_file(directory, holder, name, value, expires_at) if keep == "disk" else None
-            earlier = self._given.get((holder, name))
+            with self._lock:
+                earlier = self._given.get((holder, name))
+                self._given[(holder, name)] = _Given(value, expires_at, path)
             if earlier is not None and earlier.path is not None and earlier.path != path:
-                earlier.path.unlink(missing_ok=True)
-            self._given[(holder, name)] = _Given(value, expires_at, path)
+                _delete_file(earlier.path)
 
     def values(self, holder: _SecretHolder, *, storage_root: Path, now: float | None = None) -> dict[str, str]:
         """Return `holder`'s live values by variable name, at `now` or else at this moment."""
@@ -283,18 +292,38 @@ class _TemporarySecrets:
         """Read `directory`'s files at its first use, then drop every expired value with its file."""
         if directory not in self._loaded:
             self._loaded.add(directory)
-            for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-                stored = _read_file(path)
-                if stored is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    key, given = stored
-                    self._given.setdefault(key, given)
+            for key, given in _stored_values(directory):
+                self._given.setdefault(key, given)
         for key, given in list(self._given.items()):
             if now >= given.expires_at:
                 del self._given[key]
                 if given.path is not None:
-                    given.path.unlink(missing_ok=True)
+                    _delete_file(given.path)
+
+
+def _stored_values(directory: Path) -> list[tuple[tuple[_SecretHolder, str], _Given]]:
+    """Return the values `directory` holds, deleting what is none: a foreign file, or a write that never finished."""
+    try:
+        paths = sorted(directory.iterdir()) if directory.is_dir() else []
+    except OSError as error:
+        logger.warning("temporary_secrets_not_read", error_type=type(error).__name__)
+        return []
+    stored_values = []
+    for path in paths:
+        stored = _read_file(path) if path.suffix == ".json" else None
+        if stored is None:
+            _delete_file(path)
+        else:
+            stored_values.append(stored)
+    return stored_values
+
+
+def _delete_file(path: Path) -> None:
+    """Delete a value's file; one that cannot be deleted is logged, since no read may fail over it."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning("temporary_secret_file_not_deleted", error_type=type(error).__name__)
 
 
 def _write_file(directory: Path, holder: _SecretHolder, name: str, value: str, expires_at: float) -> Path:

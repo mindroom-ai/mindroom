@@ -5773,6 +5773,7 @@ visibility = [
     "mindroom.api.sandbox_execute_stream",
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -5798,6 +5799,7 @@ depends_on = [
     "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.progress",
 ]
 
 [[modules]]

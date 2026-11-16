@@ -59,6 +59,20 @@ def report_tool_progress(text: str) -> None:
 
 
 @contextmanager
+def tool_progress_through(change: Callable[[str], str]) -> Iterator[None]:
+    """Pass the progress of tool calls run in this context through ``change`` before its listener receives it."""
+    listener = _REPORTER.get()
+    if listener is None:
+        yield
+        return
+    token = _REPORTER.set(lambda text: listener(change(text)))
+    try:
+        yield
+    finally:
+        _REPORTER.reset(token)
+
+
+@contextmanager
 def tool_progress_reporter(reporter: Callable[[str], None], *, forward: bool = False) -> Iterator[None]:
     """Receive the progress of tool calls run in this context; the reporter may be called from any thread.
 

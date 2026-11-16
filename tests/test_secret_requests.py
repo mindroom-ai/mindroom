@@ -319,3 +319,35 @@ def test_temporary_bodies() -> None:
     assert temporary_secret_body("saved", **kwargs) == "🔑 Secret received."
     assert temporary_secret_body("declined", **kwargs) == "🔑 Secret request declined."
     assert temporary_secret_body("expired", **kwargs) == "🔑 Secret request expired."
+
+
+def test_a_file_that_cannot_be_deleted_never_fails_a_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool calls read the store, so a file the process cannot remove must not stop them."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "s3cret", keep="disk", now=1000.0, storage_root=tmp_path)
+
+    def refuse(_path: Path, *, missing_ok: bool = False) -> None:  # noqa: ARG001
+        raise PermissionError
+
+    monkeypatch.setattr(type(tmp_path), "unlink", refuse)
+    expired = 1000.0 + TEMPORARY_SECRET_KEEP_SECONDS["disk"]
+
+    assert store.values(HOLDER, now=expired, storage_root=tmp_path) == {}
+    assert _TemporarySecrets().values(HOLDER, now=expired, storage_root=tmp_path) == {}
+
+
+def test_an_unreadable_directory_never_fails_a_read(tmp_path: Path) -> None:
+    """A store directory that is no directory leaves the conversation without stored values, not without tools."""
+    (tmp_path / "temporary_secrets").write_text("in the way", encoding="utf-8")
+
+    assert _TemporarySecrets().values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+
+
+def test_a_file_left_by_an_interrupted_write_is_deleted(tmp_path: Path) -> None:
+    """A crash between writing a value and publishing its file leaves a copy, which the next start removes."""
+    directory = tmp_path / "temporary_secrets"
+    directory.mkdir()
+    (directory / ".0123.json.abcdef.tmp").write_text('{"value": "s3cret"}', encoding="utf-8")
+
+    assert _TemporarySecrets().values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+    assert _files(tmp_path) == []

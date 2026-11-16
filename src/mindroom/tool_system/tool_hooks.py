@@ -41,6 +41,7 @@ from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.progress import tool_progress_through
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
@@ -71,6 +72,8 @@ type _ToolApprovalGate = Callable[[BackgroundScriptToolOrigin, str, dict[str, An
 
 
 logger = get_logger(__name__)
+# The one call a temporary secret is a variable of, by toolkit and function.
+_SECRET_RECEIVER = ("shell", "run_shell_command")
 
 
 @dataclass(slots=True)
@@ -679,8 +682,10 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
     # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
+    # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
+    # types there.
     given = _given_secrets(resolved_context)
-    if given:
+    if given and (registered_toolkit, tool_name) == _SECRET_RECEIVER:
         environment = environment.then(ToolEnvironment(values=given))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
@@ -725,20 +730,27 @@ def _without_given_secrets(
     func: Callable[..., Awaitable[_ToolHookResult]],
     given: Mapping[str, str],
 ) -> Callable[..., Awaitable[_ToolHookResult]]:
-    """Return the tool with the exact copies of the call's given secrets removed from a string result.
+    """Return the tool with the exact copies of the conversation's given secrets removed from what it shows.
 
-    The reply's record of the call, its tool trace, its hooks and the model all read what this returns. Best effort,
-    like all redaction: a command that encodes the value, or a result that is no string, passes.
+    Every call in the conversation is covered, since a later call may read what a command wrote. The reply's record
+    of the call, its tool trace, its hooks and the model all read the string result this returns, and live reply
+    frames the progress it reports. Best effort, like all redaction: a command that encodes the value, or a result
+    that is no string, passes.
     """
     if not given:
         return func
+    # The longest first, so a value that holds another leaves no tail beside the shorter one's mask.
+    values = sorted(given.values(), key=lambda value: -len(value))
+
+    def redacted(text: str) -> str:
+        for value in values:
+            text = text.replace(value, REDACTED)
+        return text
 
     async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
-        result = await func(**arguments)
-        if isinstance(result, str):
-            for value in given.values():
-                result = result.replace(value, REDACTED)
-        return result
+        with tool_progress_through(redacted):
+            result = await func(**arguments)
+        return redacted(result) if isinstance(result, str) else result
 
     return without_given_secrets
 
