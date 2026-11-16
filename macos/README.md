@@ -15,7 +15,7 @@ MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
 It runs the existing Python Accessibility, screen capture, input, browser, read-only folder, shell, Matrix, and desktop bridge implementations.
 The menu app launches it as a foreground child and communicates only through inherited stdin, stdout, and stderr pipes.
-Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
+Quitting the app closes that channel, clears every control grant, timed or until stopped and for saved apps or the whole computer, and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
 
 ## Local inference
@@ -176,3 +176,8 @@ A release still requires these checks on macOS:
 6. With a disposable folder and a harmless command, check folder selection, a protected-folder prompt, the shell approval card, auto-approval confirmation, and Revoke Shell Access.
 7. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
 8. Notarize, staple, and launch the DMG build, then test a Sparkle update.
+9. Whole-computer control, which no automated test exercises on a real Mac and which has not been run yet for its first release:
+   - Grant whole-computer control until stopped, then from the agent run `status`, `list_apps`, `launch_app com.apple.TextEdit`, `get_app_state`, a click and typing, and a `screenshot` of `primary-screen`.
+   - Confirm the MindRoom window is absent from that screenshot and that a click and a keypress aimed at it are refused.
+   - Revoke from the menu bar during a drag, use the emergency corner, then quit and reopen the app and confirm it is observe-only.
+   - Run `launch_app` for an app the helper has never opened, to see whether macOS shows an Automation prompt for app activation.

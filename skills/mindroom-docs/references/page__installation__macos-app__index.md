@@ -141,7 +141,11 @@ For homeservers behind Cloudflare Access, install `cloudflared`; see [Homeserver
 ### Control Applications
 
 Applications start observe-only.
-**Grant Control…** shows the identities, allowed applications, and duration for confirmation, and control ends when that lease expires; it is never renewed at launch or restart.
+In **App control** on the Start step, choose a **Scope** of **Saved apps** or **Whole computer** and a **Duration** of **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**, then select **Grant Control…**.
+The confirmation shows the identities and either the saved applications or what whole-computer control reaches; see [Grant Whole-Computer Control](https://docs.mindroom.chat/tools/desktop/#grant-whole-computer-control).
+To use the whole Mac without choosing apps, save only **Allow primary screen** under **Advanced screen access**, start, and grant whole-computer control.
+While whole-computer control is in force, the status reads **Whole-computer control · until you stop** or its remaining time, the menu bar shows **Controlling this Mac**, and its menu offers **Stop Whole-Computer Control**.
+Control ends when its duration expires and is never saved or renewed at launch or restart, and the two choices return to **Saved apps** and **15 Minutes** each time MindRoom opens.
 **Revoke Now** removes input authority while observation continues, and **Stop Access** ends the session.
 Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you gives the agent your own authority; see [Security Model](https://docs.mindroom.chat/tools/desktop/#security-model).
 Optional browser settings and redacted diagnostics are in expandable sections; see the [Desktop guide](https://docs.mindroom.chat/tools/desktop/#use-the-signed-in-browser-profile) for browser-extension setup.
