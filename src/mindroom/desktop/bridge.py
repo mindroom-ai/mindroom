@@ -159,9 +159,6 @@ class DesktopBridgePolicy:
         ):
             msg = "Observe-only desktop bridge cannot carry a control lease or scope."
             raise ValueError(msg)
-        if self.control_scope not in _CONTROL_SCOPES:
-            msg = "Control scope must be apps or computer."
-            raise ValueError(msg)
 
     def caller_allowed(self, command: DesktopCommand) -> bool:
         """Return whether local static policy admits the human and agent provenance."""

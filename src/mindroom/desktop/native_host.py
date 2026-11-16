@@ -1106,11 +1106,12 @@ def _optional_text(parameters: dict[str, object], key: str) -> str | None:
 def _control_grant(parameters: dict[str, object]) -> tuple[int | None, DesktopControlScope]:
     """Parse exactly a duration or until_revoked: true, plus an optional scope; a None duration means until revoked."""
     remaining = {key: value for key, value in parameters.items() if key != "scope"}
-    scope = parameters.get("scope", "apps")
-    if scope not in {"apps", "computer"}:
+    requested_scope = parameters.get("scope", "apps")
+    if requested_scope not in {"apps", "computer"}:
         raise NativeProtocolError("invalid_request", "Native desktop grant_control scope must be apps or computer.")
+    scope: DesktopControlScope = "computer" if requested_scope == "computer" else "apps"
     if set(remaining) == {"until_revoked"} and remaining["until_revoked"] is True:
-        return None, cast("DesktopControlScope", scope)
+        return None, scope
     duration_seconds = remaining.get("duration_seconds")
     if (
         set(remaining) != {"duration_seconds"}
@@ -1121,7 +1122,7 @@ def _control_grant(parameters: dict[str, object]) -> tuple[int | None, DesktopCo
             "invalid_request",
             "Native desktop grant_control needs exactly duration_seconds or until_revoked: true, and an optional scope.",
         )
-    return duration_seconds, cast("DesktopControlScope", scope)
+    return duration_seconds, scope
 
 
 def _optional_bool(parameters: dict[str, object], key: str) -> bool:
