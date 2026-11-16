@@ -217,7 +217,8 @@ Control actions sent before a lease ended or its scope changed never run under a
 In the macOS app's **App control** section on the Start step, choose **Scope: Whole computer** and a duration, select **Grant Control…**, and confirm with **Allow Whole-Computer Control**.
 While it is in force, the agent can observe and control every app and the whole primary screen except MindRoom itself: `list_apps` lists the running apps, and `launch_app` opens any installed app by bundle ID.
 It needs at least one saved app, such as `primary-screen` alone, and only the macOS app can grant it.
-It is never saved: revoking it, **Stop Access**, the emergency corner, quitting MindRoom, and restarting the Mac end it, while sleep and screen lock do not.
+It is never saved: revoking it, **Stop Access**, quitting MindRoom, and restarting the Mac end it, while sleep and screen lock do not.
+The emergency corner stops the agent's input; revoke or stop access to also end its view of apps you did not save.
 When it ends, the agent can again reach only the saved apps.
 Shell command approval, read-only folders, and the browser extension keep their own settings.
 

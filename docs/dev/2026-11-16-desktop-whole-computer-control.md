@@ -25,7 +25,8 @@ What the grant does for a user is on the [Desktop Bridge](../tools/desktop.md#gr
   The comparison uses the last granted scope, not the available one, because a lapsed timed lease lets running input finish and must not let a quick grant of another scope take over that input.
 - The backend's scope flag is the only state the bridge writes from its own thread while a worker may be reading.
   Retained states of apps the scope no longer admits are dropped on the worker's next use instead of at the scope change, so no worker ever sees the state store change under it.
-- Revoke clears the backend's scope at once, so an observation already running cannot read an unsaved app afterwards; a lapsed lease or a latched emergency stop reaches the backend at the next executed command, which is the first that could use it.
+- Revoke clears the backend's scope at once, so no new read of an unsaved app starts; a lapsed lease or a latched emergency stop reaches the backend at the next executed command.
+- A read already running when the scope ends still finishes on the Mac, so the bridge checks the scope again before it replies and returns nothing from an app the scope no longer admits.
 
 ## Limits
 
