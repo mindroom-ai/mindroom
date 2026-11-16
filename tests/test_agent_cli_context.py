@@ -21,6 +21,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.skills import Skill
 from tests.test_agent_cli_authority import _runtime_context
 from tests.turn_model_helpers import turn_model
 
@@ -117,6 +118,42 @@ def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_p
     documents = minimal_context_documents(build)
 
     assert documents["knowledge"] == "handbook: The team handbook.\nrunbooks: Operations runbooks."
+
+
+def test_the_bootstrap_names_each_skill_and_its_document_says_where_its_files_live(tmp_path: Path) -> None:
+    """A minimal agent learns its skills by name from the prompt and reads each as `skill:<name>`."""
+    build = _minimal_build(_runtime_context(tmp_path))
+    review = tmp_path / "skills" / "code-review"
+    skills = (
+        Skill(
+            name="code-review",
+            description="Review a diff.",
+            instructions="Read the whole diff first.",
+            source_path=review,
+            references=("checklist.md",),
+            scripts=("lint.sh",),
+        ),
+        Skill(
+            name="tdd",
+            description="Test first.",
+            instructions="Write the failing test.",
+            source_path=tmp_path / "skills" / "tdd",
+        ),
+    )
+    build = replace(build, surface=replace(build.surface, skills=skills))
+
+    turn = minimal_turn(build, session_preamble="", transient_memory="", system_enrichment=(), transient_enrichment=())
+
+    system = system_text(turn.system_messages)
+    assert "Skills: `code-review`, `tdd`; read one with `mindroom-agent context read skill:<name>`" in system
+    assert "Read the whole diff first." not in system
+    review_document = turn.context_documents["skill:code-review"]
+    assert review_document.startswith(f"code-review\nDirectory: {review}\n")
+    assert "references/checklist.md" in review_document
+    assert "scripts/lint.sh" in review_document
+    assert review_document.endswith("Read the whole diff first.")
+    assert turn.context_documents["skill:tdd"].endswith("Write the failing test.")
+    assert not any(name.startswith("skill-") for name in turn.context_documents)
 
 
 def test_a_catalog_runs_under_its_own_agent_s_runtime_context(tmp_path: Path) -> None:

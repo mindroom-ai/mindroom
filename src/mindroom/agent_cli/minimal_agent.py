@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.run_storage import RunStorage
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+    from mindroom.tool_system.skills import Skill
 
 __all__ = [
     "MinimalTurn",
@@ -73,13 +74,23 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     }
     for index, document in enumerate(surface.context_documents):
         documents[f"context-{index + 1}"] = document
-    for index, skill in enumerate(surface.skills):
-        documents[f"skill-{index + 1}"] = f"{skill.name}\n{skill.instructions}"
+    for skill in surface.skills:
+        documents[f"skill:{skill.name}"] = _skill_document(skill)
     for index, toolkit in enumerate(build.spec.toolkits):
         if toolkit.guidance:
             documents[f"toolkit-{index + 1}"] = toolkit.guidance
     documents["agent-context"] = system_text(prompt_for_turn(build))
     return documents
+
+
+def _skill_document(skill: Skill) -> str:
+    """Name a skill, the directory its files live in, its reference and script files, then its instructions."""
+    lines = [skill.name, f"Directory: {skill.source_path}"]
+    if skill.references:
+        lines.append("References: " + ", ".join(f"references/{name}" for name in skill.references))
+    if skill.scripts:
+        lines.append("Scripts: " + ", ".join(f"scripts/{name}" for name in skill.scripts))
+    return "\n".join([*lines, "", skill.instructions])
 
 
 def minimal_turn(
@@ -104,6 +115,7 @@ def minimal_turn(
         toolkit_names=surface.toolkit_names,
         instructions=surface.minimal_instructions,
         context_files=surface.context_files,
+        skill_names=[skill.name for skill in surface.skills],
         memory_root=surface.memory_root,
         runtime_context=surface.runtime_context,
     )

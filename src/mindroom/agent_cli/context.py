@@ -17,6 +17,7 @@ def minimal_system_message(
     toolkit_names: Sequence[str],
     instructions: Sequence[str],
     context_files: Sequence[str] = (),
+    skill_names: Sequence[str] = (),
     memory_root: Path | None = None,
     runtime_context: str = "",
 ) -> str:
@@ -34,6 +35,15 @@ def minimal_system_message(
         if len(files) > 2000:
             files = f"{len(context_files)} context files available; use mindroom-agent context list."
         guidance.append(files)
+    if skill_names:
+        skills = (
+            "Skills: "
+            + ", ".join(f"`{name}`" for name in skill_names)
+            + "; read one with `mindroom-agent context read skill:<name>` before following it."
+        )
+        if len(skills) > 2000:
+            skills = f"{len(skill_names)} skills available; use mindroom-agent context list."
+        guidance.append(skills)
     if memory_root is not None:
         guidance.append(
             f"File memory: `{(memory_root / 'MEMORY.md').as_posix()}`, `{(memory_root / 'memory').as_posix()}/`.",
