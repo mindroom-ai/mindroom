@@ -10,7 +10,9 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.llm.errors import AuthenticationFailed
 from mindroom.providers.credentials import missing_model_api_key_provider
+from mindroom.providers.registry import configured_model
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -45,6 +47,30 @@ def test_missing_model_api_key_provider_honors_model_credentials(tmp_path: Path)
     assert [name for name in config.models if missing_model_api_key_provider(config, runtime_paths, name)] == [
         "unkeyed",
     ]
+
+
+def test_a_model_key_written_as_an_env_reference_resolves_from_the_runtime_env(tmp_path: Path) -> None:
+    """A whole-value ``${NAME}`` key is read from `.env` when the model is built; an unset variable is named."""
+    (tmp_path / ".env").write_text("OPENROUTER_TEAM_API_KEY=sk-team\n", encoding="utf-8")
+    runtime_paths = test_runtime_paths(tmp_path)
+    reference = "${OPENROUTER_TEAM_API_KEY}"
+    config = Config(
+        models={
+            "field": ModelConfig(provider="openrouter", id="m", api_key=reference),
+            "extra": ModelConfig(provider="openrouter", id="m", extra_kwargs={"api_key": reference}),
+            "client": ModelConfig(provider="openai", id="m", extra_kwargs={"client_params": {"api_key": reference}}),
+            "partial": ModelConfig(provider="openrouter", id="m", api_key=f"prefix-{reference}"),
+            "unset": ModelConfig(provider="openrouter", id="m", api_key="${OPENROUTER_OTHER_API_KEY}"),
+        },
+    )
+
+    assert configured_model(config, runtime_paths, "field").api_key == "sk-team"
+    assert configured_model(config, runtime_paths, "extra").extra_kwargs == {"api_key": "sk-team"}
+    assert configured_model(config, runtime_paths, "client").extra_kwargs == {"client_params": {"api_key": "sk-team"}}
+    assert configured_model(config, runtime_paths, "partial").api_key == f"prefix-{reference}"
+    assert missing_model_api_key_provider(config, runtime_paths, "unset") is None
+    with pytest.raises(AuthenticationFailed, match="OPENROUTER_OTHER_API_KEY not set"):
+        configured_model(config, runtime_paths, "unset")
 
 
 def test_a_gemini_model_on_vertex_ai_needs_no_google_key(tmp_path: Path) -> None:

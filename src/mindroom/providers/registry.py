@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
-from mindroom.providers.credentials import dashboard_api_key
+from mindroom.providers.credentials import dashboard_api_key, resolve_api_key_references
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
@@ -60,15 +60,18 @@ _SETTINGS_KEYS = {
 
 
 def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
-    """Return the model configured as ``model_name``, with the key the dashboard saved for it applied."""
+    """Return the model configured as ``model_name``, with the key the dashboard saved for it applied.
+
+    A key written as ``${NAME}`` becomes that runtime env variable's value.
+    """
     if model_name not in config.models:
         available = ", ".join(sorted(config.models))
         msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
     model_config = config.models[model_name]
     if dashboard_key := dashboard_api_key(model_name, runtime_paths):
-        return model_config.model_copy(update={"api_key": dashboard_key})
-    return model_config
+        model_config = model_config.model_copy(update={"api_key": dashboard_key})
+    return resolve_api_key_references(model_config, runtime_paths)
 
 
 def _build_adapter(

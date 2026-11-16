@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.config.schema_hints import ENV_PLACEHOLDER_PATTERN
 from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider
+from mindroom.llm.errors import AuthenticationFailed
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -25,6 +28,7 @@ __all__ = [
     "model_api_key",
     "model_uses_own_credential",
     "own_api_key",
+    "resolve_api_key_references",
     "uses_alternative_auth",
 ]
 
@@ -49,6 +53,32 @@ def own_api_key(model_config: ModelConfig) -> str | None:
     """
     client_params = (model_config.extra_kwargs or {}).get("client_params") or {}
     return client_params.get("api_key") or model_config.configured_api_key()
+
+
+def resolve_api_key_references(model_config: ModelConfig, runtime_paths: RuntimePaths) -> ModelConfig:
+    """Return the model with each key written as ``${NAME}`` replaced by that runtime env variable's value.
+
+    Covers ``api_key``, ``extra_kwargs.api_key`` and ``extra_kwargs.client_params.api_key``; only a whole-value
+    reference resolves. An unset or blank variable raises ``AuthenticationFailed`` naming it.
+    """
+
+    def resolve(key: object) -> object:
+        if not (isinstance(key, str) and (reference := ENV_PLACEHOLDER_PATTERN.fullmatch(key))):
+            return key
+        name = reference.group(1)
+        if (value := get_secret_from_env(name, runtime_paths)) is None:
+            msg = f"{name} not set. This model's api_key reads the {name} environment variable."
+            raise AuthenticationFailed(msg, provider=model_config.provider, status_code=401)
+        return value
+
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+    if "api_key" in extra_kwargs:
+        extra_kwargs["api_key"] = resolve(extra_kwargs["api_key"])
+    client_params = extra_kwargs.get("client_params") or {}
+    if "api_key" in client_params:
+        extra_kwargs["client_params"] = {**client_params, "api_key": resolve(client_params["api_key"])}
+    update = {"api_key": resolve(model_config.api_key), "extra_kwargs": extra_kwargs or model_config.extra_kwargs}
+    return model_config.model_copy(update=update)
 
 
 def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:

@@ -1229,7 +1229,9 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.credentials"
 depends_on = [
+    "mindroom.config.schema_hints",
     "mindroom.constants",
+    "mindroom.llm",
     "mindroom.providers.names",
 ]
 visibility = [
@@ -6780,6 +6782,7 @@ expose = [
     "model_api_key",
     "model_uses_own_credential",
     "own_api_key",
+    "resolve_api_key_references",
     "uses_alternative_auth",
 ]
 from = ["mindroom.providers.credentials"]
