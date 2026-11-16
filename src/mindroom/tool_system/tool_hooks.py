@@ -34,6 +34,8 @@ from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import secret_holder, temporary_secrets
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
@@ -45,7 +47,7 @@ from mindroom.tool_system.tool_environment import ToolEnvironment, collected_too
 from mindroom.tool_system.tool_function import ToolOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
     from concurrent.futures import Executor
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
@@ -676,6 +678,10 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     )
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
+    # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
+    given = _given_secrets(resolved_context)
+    if given:
+        environment = environment.then(ToolEnvironment(values=given))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -699,7 +705,29 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("error", ready, error=error)
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
+    result = _without_given_secrets(result, given)
     return await answer(result, "error" if _answered_failure(result) else "success")
+
+
+def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
+    """Return the temporary secrets the call's requester gave its conversation, by variable name."""
+    holder = secret_holder(resolved_context.execution_identity)
+    if holder is None:
+        return {}
+    return temporary_secrets().values(
+        holder,
+        now=time.time(),
+        storage_root=resolved_context.runtime_paths.storage_root,
+    )
+
+
+def _without_given_secrets(result: object, given: Mapping[str, str]) -> object:
+    """Return a string result without the exact copies of the call's given secrets: best effort, like all redaction."""
+    if not isinstance(result, str):
+        return result
+    for value in given.values():
+        result = result.replace(value, REDACTED)
+    return result
 
 
 async def dispatch_external_tool_hooks(

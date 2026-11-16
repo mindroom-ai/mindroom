@@ -1,26 +1,38 @@
-"""In-memory registry of pending secret requests and the card content they post.
+"""Pending secret requests, the card content they post, and the temporary secrets a requester gave a conversation.
 
-An agent asks for a key with a card in the thread; the requester answers through
-the backend route. The registry holds only metadata and a future for the outcome,
-never the secret value.
+An agent asks for a key or a temporary secret with a card in the thread; the requester answers through the backend
+route. The registry of pending requests holds only metadata and a future for the outcome, never a value. A temporary
+secret's value lives in the store below, in memory or, when the requester chose so, also in one private file.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
 import secrets
-from dataclasses import dataclass, field
+import threading
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.atomic_file import atomic_write_bytes_at
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.egress_broker import EgressService
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 SECRET_REQUEST_CONTENT_KEY = "io.mindroom.secret_request"  # noqa: S105 - Matrix content key, not a secret
 SECRET_REQUEST_TTL_SECONDS = 15 * 60
 
 type SecretRequestOutcome = Literal["saved", "declined", "expired"]
 type SecretRequestStatus = Literal["pending", "saved", "declined", "expired"]
+# Where the requester lets MindRoom keep a temporary secret, which sets how long: the primary's memory, or also a file.
+type SecretKeep = Literal["memory", "disk"]
+TEMPORARY_SECRET_KEEP_SECONDS: dict[SecretKeep, int] = {"memory": 15 * 60, "disk": 24 * 60 * 60}
+_TEMPORARY_SECRETS_DIRECTORY = "temporary_secrets"
 
 
 @dataclass
@@ -154,3 +166,133 @@ def secret_request_content(
         "status": status,
         "expires_at": int(request.expires_at * 1000),
     }
+
+
+@dataclass(frozen=True)
+class SecretHolder:
+    """The conversation a temporary secret was given to: one agent's turns for one requester in one room and thread."""
+
+    agent_name: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+
+
+def secret_holder(identity: ToolExecutionIdentity | None) -> SecretHolder | None:
+    """Return the conversation a tool call runs in, or None for a call outside a requester's Matrix conversation."""
+    if identity is None or not identity.agent_name or identity.room_id is None or identity.requester_id is None:
+        return None
+    return SecretHolder(
+        agent_name=identity.agent_name,
+        room_id=identity.room_id,
+        thread_id=identity.resolved_thread_id,
+        requester_id=identity.requester_id,
+    )
+
+
+@dataclass(frozen=True)
+class _Given:
+    value: str
+    expires_at: float
+    # The file of a value kept on disk.
+    path: Path | None
+
+
+class _TemporarySecrets:
+    """The values requesters gave conversations, by holder and variable name, until each expires.
+
+    Every value is in memory; one kept on disk also has a file under the storage root, which the first use of that
+    root reads back after a restart. A lock guards the store, since an answer is written from a thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._given: dict[tuple[SecretHolder, str], _Given] = {}
+        self._loaded: set[Path] = set()
+
+    def give(
+        self,
+        holder: SecretHolder,
+        name: str,
+        value: str,
+        *,
+        keep: SecretKeep,
+        now: float,
+        storage_root: Path,
+    ) -> None:
+        """Keep `value` as `holder`'s variable `name` for the lifetime of `keep`, in place of an earlier value."""
+        directory = storage_root / _TEMPORARY_SECRETS_DIRECTORY
+        expires_at = now + TEMPORARY_SECRET_KEEP_SECONDS[keep]
+        with self._lock:
+            self._refresh(directory, now)
+            path = _write_file(directory, holder, name, value, expires_at) if keep == "disk" else None
+            earlier = self._given.get((holder, name))
+            if earlier is not None and earlier.path is not None and earlier.path != path:
+                earlier.path.unlink(missing_ok=True)
+            self._given[(holder, name)] = _Given(value, expires_at, path)
+
+    def values(self, holder: SecretHolder, *, now: float, storage_root: Path) -> dict[str, str]:
+        """Return `holder`'s live values by variable name."""
+        with self._lock:
+            self._refresh(storage_root / _TEMPORARY_SECRETS_DIRECTORY, now)
+            return {name: given.value for (owner, name), given in self._given.items() if owner == holder}
+
+    def _refresh(self, directory: Path, now: float) -> None:
+        """Read `directory`'s files at its first use, then drop every expired value with its file."""
+        if directory not in self._loaded:
+            self._loaded.add(directory)
+            for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+                stored = _read_file(path)
+                if stored is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    key, given = stored
+                    self._given.setdefault(key, given)
+        for key, given in list(self._given.items()):
+            if now >= given.expires_at:
+                del self._given[key]
+                if given.path is not None:
+                    given.path.unlink(missing_ok=True)
+
+
+def _write_file(directory: Path, holder: SecretHolder, name: str, value: str, expires_at: float) -> Path:
+    """Write one value's private file, named after its holder and variable so a new value replaces it."""
+    identity = {**asdict(holder), "name": name}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
+    payload = json.dumps({**identity, "value": value, "expires_at": expires_at}).encode()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        atomic_write_bytes_at(directory_fd, f"{digest}.json", payload, file_mode=0o600)
+    finally:
+        os.close(directory_fd)
+    return directory / f"{digest}.json"
+
+
+def _read_file(path: Path) -> tuple[tuple[SecretHolder, str], _Given] | None:
+    """Return the value a file holds, or None when it is not one this store wrote."""
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        holder = SecretHolder(
+            agent_name=stored["agent_name"],
+            room_id=stored["room_id"],
+            thread_id=stored["thread_id"],
+            requester_id=stored["requester_id"],
+        )
+        key = (holder, stored["name"])
+        given = _Given(stored["value"], float(stored["expires_at"]), path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    strings = (holder.agent_name, holder.room_id, holder.requester_id, key[1], given.value)
+    if not all(isinstance(item, str) for item in strings) or not isinstance(holder.thread_id, str | None):
+        return None
+    return key, given
+
+
+_TEMPORARY_SECRETS = _TemporarySecrets()
+
+
+def temporary_secrets() -> _TemporarySecrets:
+    """Return the process-wide store of temporary secrets."""
+    return _TEMPORARY_SECRETS

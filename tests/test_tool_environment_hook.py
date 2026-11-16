@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import os
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import secret_requests
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
@@ -31,6 +33,8 @@ from mindroom.hooks import (
     default_timeout_ms_for_event,
     hook,
 )
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import _TemporarySecrets, secret_holder
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -733,3 +737,63 @@ def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: obj
 
     with pytest.raises(ValueError, match="one absolute directory"):
         ctx.prepend_path(directory)
+
+
+@pytest.fixture
+def given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[str, str], None]:
+    """Give Alice's conversation with the agent a temporary secret, in a store of this test's own."""
+    store = _TemporarySecrets()
+    monkeypatch.setattr(secret_requests, "_TEMPORARY_SECRETS", store)
+    holder = secret_holder(_ALICE)
+    assert holder is not None
+
+    def give(name: str, value: str) -> None:
+        store.give(holder, name, value, keep="memory", now=time.time(), storage_root=tmp_path / "given")
+
+    return give
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_reaches_the_command_wherever_it_runs(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """A value the requester gave the conversation is a variable of its shell commands, with no hook involved."""
+    given("PASSPHRASE", "open sesame")
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "$PASSPHRASE" | wc -c') == "11"
+    if shell.sent:
+        assert shell.sent[-1]["execution_env"]["PASSPHRASE"] == "open sesame"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_goes_over_a_hook_s_variable(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """The person's own value wins over a plugin's for the same name."""
+    given("PLUGIN_VALUE", "from the person")
+
+    output = await shell.run(_registry(_shell_environment), 'printf %s "$PLUGIN_VALUE" | wc -c')
+
+    assert output == str(len("from the person"))
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_stays_with_its_requester(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """Another person's turn in the same room never receives the value."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:-unset}"', identity=_BOB) == "unset"
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:+set}"', identity=_ALICE) == "set"
+
+
+@pytest.mark.asyncio
+async def test_a_result_never_repeats_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """Every exact copy of a live value is removed from a tool result before the model reads it."""
+    given("PASSPHRASE", "open-sesame-123")
+    command = 'echo "$PASSPHRASE $PASSPHRASE x${PASSPHRASE}y"'
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", command]})
+
+    assert not outcome.is_error, outcome.content
+    assert "open-sesame-123" not in outcome.content
+    assert outcome.content.count(REDACTED) == 3

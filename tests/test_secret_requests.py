@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import stat
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom import secret_requests
 from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
+    TEMPORARY_SECRET_KEEP_SECONDS,
+    SecretHolder,
     _SecretRequestRegistry,
+    _TemporarySecrets,
+    secret_holder,
     secret_request_body,
     secret_request_content,
     secret_request_registry,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.egress_broker.conftest import worker_target
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.secret_requests import SecretKeep
 
 ROOM = "!room:example.org"
 
@@ -131,3 +145,137 @@ def test_bodies() -> None:
     assert secret_request_body("saved", **kwargs) == "🔑 GitHub key saved."
     assert secret_request_body("declined", **kwargs) == "🔑 GitHub key request declined."
     assert secret_request_body("expired", **kwargs) == "🔑 GitHub key request expired."
+
+
+HOLDER = SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id="@alice:example.org")
+IDENTITY = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="code",
+    requester_id="@alice:example.org",
+    room_id=ROOM,
+    thread_id=None,
+    resolved_thread_id="$thread",
+    session_id="session-1",
+)
+
+
+def _files(storage_root: Path) -> list[Path]:
+    directory = storage_root / "temporary_secrets"
+    return sorted(directory.iterdir()) if directory.exists() else []
+
+
+@pytest.mark.parametrize("keep", ["memory", "disk"])
+def test_a_given_value_is_read_until_it_expires(tmp_path: Path, keep: SecretKeep) -> None:
+    """Each keep has its own lifetime: 15 minutes in memory, 24 hours on disk."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "s3cret", keep=keep, now=1000.0, storage_root=tmp_path)
+    lifetime = TEMPORARY_SECRET_KEEP_SECONDS[keep]
+
+    assert store.values(HOLDER, now=1000.0 + lifetime - 1, storage_root=tmp_path) == {"TOKEN": "s3cret"}
+    assert store.values(HOLDER, now=1000.0 + lifetime, storage_root=tmp_path) == {}
+    assert (TEMPORARY_SECRET_KEEP_SECONDS["memory"], TEMPORARY_SECRET_KEEP_SECONDS["disk"]) == (900, 86400)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        replace(HOLDER, agent_name="other"),
+        replace(HOLDER, room_id="!other:example.org"),
+        replace(HOLDER, thread_id=None),
+        replace(HOLDER, requester_id="@bob:example.org"),
+    ],
+)
+@pytest.mark.parametrize("keep", ["memory", "disk"])
+def test_only_the_same_agent_room_thread_and_requester_reads_a_value(
+    tmp_path: Path,
+    other: SecretHolder,
+    keep: SecretKeep,
+) -> None:
+    """A value belongs to one agent's conversation with one requester."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "s3cret", keep=keep, now=1000.0, storage_root=tmp_path)
+
+    assert store.values(other, now=1001.0, storage_root=tmp_path) == {}
+    assert _TemporarySecrets().values(other, now=1001.0, storage_root=tmp_path) == {}
+
+
+def test_a_new_value_replaces_the_same_name(tmp_path: Path) -> None:
+    """The latest answer for a variable is the one commands receive, beside the conversation's other variables."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "old", keep="memory", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "OTHER", "kept", keep="memory", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "TOKEN", "new", keep="memory", now=1001.0, storage_root=tmp_path)
+
+    assert store.values(HOLDER, now=1002.0, storage_root=tmp_path) == {"TOKEN": "new", "OTHER": "kept"}
+
+
+def test_a_holder_needs_an_agent_room_and_requester() -> None:
+    """A call outside a person's Matrix conversation holds no values."""
+    assert secret_holder(IDENTITY) == HOLDER
+    assert secret_holder(None) is None
+    assert secret_holder(replace(IDENTITY, agent_name="")) is None
+    assert secret_holder(replace(IDENTITY, room_id=None)) is None
+    assert secret_holder(replace(IDENTITY, requester_id=None)) is None
+
+
+def test_a_memory_value_leaves_no_file(tmp_path: Path) -> None:
+    """The default keep never touches the disk."""
+    _TemporarySecrets().give(HOLDER, "TOKEN", "s3cret", keep="memory", now=1000.0, storage_root=tmp_path)
+
+    assert _files(tmp_path) == []
+    assert not any("s3cret" in path.read_text() for path in tmp_path.rglob("*") if path.is_file())
+
+
+def test_a_disk_value_survives_a_restart(tmp_path: Path) -> None:
+    """A value kept on disk lies in one private file, which a new process reads back."""
+    _TemporarySecrets().give(HOLDER, "TOKEN", "s3cret", keep="disk", now=1000.0, storage_root=tmp_path)
+
+    (file,) = _files(tmp_path)
+    assert stat.S_IMODE(file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(file.parent.stat().st_mode) == 0o700
+    assert _TemporarySecrets().values(HOLDER, now=1001.0, storage_root=tmp_path) == {"TOKEN": "s3cret"}
+
+
+def test_an_expired_disk_value_s_file_is_deleted(tmp_path: Path) -> None:
+    """The file goes when its value expires, in the process that wrote it or a later one."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "s3cret", keep="disk", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "OTHER", "kept", keep="disk", now=2000.0, storage_root=tmp_path)
+    after_the_first = 1000.0 + TEMPORARY_SECRET_KEEP_SECONDS["disk"]
+
+    assert store.values(HOLDER, now=after_the_first, storage_root=tmp_path) == {"OTHER": "kept"}
+    assert len(_files(tmp_path)) == 1
+    assert _TemporarySecrets().values(HOLDER, now=after_the_first + 1000, storage_root=tmp_path) == {}
+    assert _files(tmp_path) == []
+
+
+def test_a_memory_value_replacing_a_disk_one_deletes_the_file(tmp_path: Path) -> None:
+    """A later answer kept in memory leaves no older copy of the variable on disk."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "old", keep="disk", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "TOKEN", "new", keep="memory", now=1001.0, storage_root=tmp_path)
+
+    assert _files(tmp_path) == []
+    assert store.values(HOLDER, now=1002.0, storage_root=tmp_path) == {"TOKEN": "new"}
+    assert _TemporarySecrets().values(HOLDER, now=1002.0, storage_root=tmp_path) == {}
+
+
+def test_a_disk_value_replaces_its_own_file(tmp_path: Path) -> None:
+    """A variable has one file however often it is given."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "old", keep="disk", now=1000.0, storage_root=tmp_path)
+    store.give(HOLDER, "TOKEN", "new", keep="disk", now=1001.0, storage_root=tmp_path)
+
+    assert len(_files(tmp_path)) == 1
+    assert _TemporarySecrets().values(HOLDER, now=1002.0, storage_root=tmp_path) == {"TOKEN": "new"}
+
+
+def test_an_unreadable_file_is_deleted_not_fatal(tmp_path: Path) -> None:
+    """A file that is no stored value never stops tool calls, and does not stay."""
+    directory = tmp_path / "temporary_secrets"
+    directory.mkdir()
+    (directory / "broken.json").write_text("not json", encoding="utf-8")
+    (directory / "partial.json").write_text('{"name": "TOKEN"}', encoding="utf-8")
+
+    assert _TemporarySecrets().values(HOLDER, now=1000.0, storage_root=tmp_path) == {}
+    assert _files(tmp_path) == []
