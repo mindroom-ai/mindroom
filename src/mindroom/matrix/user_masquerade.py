@@ -11,17 +11,11 @@ import json
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote
 
 import nio
 
-from mindroom.constants import (
-    AGENT_AUTHORED_KEY,
-    RuntimePaths,
-    read_secret_file,
-    runtime_env_path,
-    runtime_matrix_homeserver,
-)
+from mindroom.constants import AGENT_AUTHORED_KEY, RuntimePaths, runtime_matrix_homeserver, secret_from_env_or_file
 from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, maybe_ssl_context
 from mindroom.runtime_env_policy import MATRIX_USER_APPSERVICE_TOKEN_ENV, MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV
 
@@ -31,28 +25,23 @@ if TYPE_CHECKING:
 
 __all__ = ["create_user_masquerade_client", "user_appservice_token"]
 
-# The requests that create a room event: `send/<type>/<txn>` and `redact/<event>/<txn>`.
-_EVENT_CREATING_PATH = re.compile(r"/_matrix/client/[^/]+/rooms/[^/]+/(?:send|redact)/[^/]+/[^/]+")
+# The requests that create a room event: `send/<type>` and `redact/<event>`, each with or without a transaction ID.
+# Homeservers route a path with an empty segment too.
+_EVENT_CREATING_PATH = re.compile(r"/_matrix/client/[^/]*/rooms/[^/]*/(?:send|redact)/[^/]*(?:/[^/]*)?")
 
 
 def user_appservice_token(runtime_paths: RuntimePaths) -> str | None:
     """Return the configured token for acting as people, or None when neither variable is set."""
-    token = (runtime_paths.env_value(MATRIX_USER_APPSERVICE_TOKEN_ENV) or "").strip()
-    file_path = runtime_env_path(runtime_paths, MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV)
-    if token and file_path is not None:
-        msg = f"Set only one of {MATRIX_USER_APPSERVICE_TOKEN_ENV} or {MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV}"
-        raise ValueError(msg)
-    if file_path is None:
-        return token or None
-    try:
-        file_token = read_secret_file(file_path)
-    except OSError as exc:
-        msg = f"{MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV} is not readable: {file_path}"
-        raise ValueError(msg) from exc
-    if not file_token:
-        msg = f"{MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV} points to an empty file: {file_path}"
-        raise ValueError(msg)
-    return file_token
+    return secret_from_env_or_file(
+        runtime_paths,
+        MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
+    )
+
+
+def _names_a_user(query: str) -> bool:
+    """Return whether a query already has a `user_id` parameter, splitting on `;` too, as some servers do."""
+    return any(name == "user_id" for name, _ in parse_qsl(query.replace(";", "&"), keep_blank_values=True))
 
 
 def _stamped_event_body(data: object, agent_user_id: str) -> str:
@@ -99,8 +88,15 @@ class _UserMasqueradeClient(MindRoomAsyncClient):
         trace_context: object = None,
         timeout: float | None = None,  # noqa: ASYNC109 - nio's request timeout parameter
     ) -> ClientResponse:
-        """Send one request as the person; nothing is sent when an event body cannot be marked."""
-        if method == "PUT" and _EVENT_CREATING_PATH.fullmatch(urlsplit(path).path):
+        """Send one request as the person, sending nothing when the path names a user or an event cannot be marked."""
+        if "#" in path:
+            msg = "A Matrix request path must not have a fragment"
+            raise ValueError(msg)
+        route, _, query = path.partition("?")
+        if _names_a_user(query):
+            msg = "The Matrix request already names a user"
+            raise ValueError(msg)
+        if method.upper() != "GET" and _EVENT_CREATING_PATH.fullmatch(route):
             data = _stamped_event_body(data, self._agent_user_id)
         person_path = f"{path}{'&' if '?' in path else '?'}{self._person_query}"
         return await super().send(method, person_path, data, headers, trace_context, timeout)

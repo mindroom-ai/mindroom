@@ -834,6 +834,29 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir)
 
 
+def secret_from_env_or_file(runtime_paths: RuntimePaths, value_env: str, file_env: str) -> str | None:
+    """Return a secret set in ``value_env`` or read from the file ``file_env`` names, or None when neither is set.
+
+    Raises ValueError, never showing the secret, when both are set or the file is unreadable or empty.
+    """
+    value = (runtime_paths.env_value(value_env) or "").strip()
+    file_path = runtime_env_path(runtime_paths, file_env)
+    if value and file_path is not None:
+        msg = f"Set only one of {value_env} or {file_env}"
+        raise ValueError(msg)
+    if file_path is None:
+        return value or None
+    try:
+        file_value = read_secret_file(file_path)
+    except OSError as exc:
+        msg = f"{file_env} is not readable: {file_path}"
+        raise ValueError(msg) from exc
+    if not file_value:
+        msg = f"{file_env} points to an empty file: {file_path}"
+        raise ValueError(msg)
+    return file_value
+
+
 def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return the variables naming the primary's secret files: every `<NAME>_FILE`, and a set credentials path."""
     names = {name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")}

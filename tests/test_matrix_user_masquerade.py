@@ -142,6 +142,39 @@ async def test_a_path_with_a_query_keeps_it_and_gains_the_person(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "user_id=%40bob%3Aexample.com",
+        "limit=5&user_id=%40bob%3Aexample.com",
+        "user%5Fid=%40bob%3Aexample.com",
+        "limit=5;user_id=%40bob%3Aexample.com",
+        "user_id",
+    ],
+)
+async def test_a_path_that_already_names_a_user_is_refused(tmp_path: Path, query: str) -> None:
+    """A homeserver may act as the first user a request names, so a request naming anyone already is never sent."""
+    client, session = _client(tmp_path, {"joined_rooms": []})
+
+    with pytest.raises(ValueError, match="already names a user"):
+        await client.send("GET", f"/_matrix/client/v3/joined_rooms?{query}")
+
+    assert session.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["#top", "?limit=5#top", "#"])
+async def test_a_path_with_a_fragment_is_refused(tmp_path: Path, suffix: str) -> None:
+    """A parameter appended after a fragment never reaches the homeserver, so such a path is never sent."""
+    client, session = _client(tmp_path, {"joined_rooms": []})
+
+    with pytest.raises(ValueError, match="fragment"):
+        await client.send("GET", f"/_matrix/client/v3/joined_rooms{suffix}")
+
+    assert session.requests == []
+
+
+@pytest.mark.asyncio
 async def test_the_token_is_a_bearer_header_and_never_in_the_url(tmp_path: Path) -> None:
     """The service's token travels only in the Authorization header."""
     client, session = _client(tmp_path, {"joined_rooms": []})
@@ -221,6 +254,74 @@ async def test_a_redaction_is_stamped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_post_send_without_a_transaction_id_is_stamped(tmp_path: Path) -> None:
+    """Homeservers also accept a message posted without a transaction ID, and it carries the marker too."""
+    client, session = _client(tmp_path, {"event_id": "$sent"})
+
+    await client.send(
+        "POST",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message",
+        json.dumps({"msgtype": "m.text", "body": "hi"}),
+    )
+
+    [request] = session.requests
+    assert _sent_body(request) == {"msgtype": "m.text", "body": "hi", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["put", "post", "Put"])
+async def test_a_lower_case_method_is_stamped(tmp_path: Path, method: str) -> None:
+    """The HTTP layer sends a lower-case method as its upper-case form, so it is stamped the same."""
+    client, session = _client(tmp_path, {"event_id": "$sent"})
+
+    await client.send(
+        method,
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message/txn1",
+        json.dumps({"msgtype": "m.text", "body": "hi"}),
+    )
+
+    [request] = session.requests
+    assert _sent_body(request) == {"msgtype": "m.text", "body": "hi", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
+async def test_a_post_redact_without_a_transaction_id_is_stamped(tmp_path: Path) -> None:
+    """Homeservers also accept a redaction posted without a transaction ID, and it carries the marker too."""
+    client, session = _client(tmp_path, {"event_id": "$redaction"})
+
+    await client.send(
+        "POST",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/redact/%24target",
+        json.dumps({"reason": "sent by mistake"}),
+    )
+
+    [request] = session.requests
+    assert _sent_body(request) == {"reason": "sent by mistake", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/_matrix/client//rooms/%21room%3Aexample.com/send/m.room.message/txn1",
+        "/_matrix/client/v3/rooms//send/m.room.message/txn1",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/send//txn1",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message/",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/send/",
+        "/_matrix/client/v3/rooms/%21room%3Aexample.com/redact//txn1",
+    ],
+)
+async def test_an_event_path_with_an_empty_segment_is_stamped(tmp_path: Path, path: str) -> None:
+    """A homeserver may route a path with an empty segment, so the event it creates carries the marker too."""
+    client, session = _client(tmp_path, {"event_id": "$sent"})
+
+    await client.send("PUT", path, json.dumps({"body": "hi"}))
+
+    [request] = session.requests
+    assert _sent_body(request) == {"body": "hi", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
 async def test_a_model_supplied_marker_is_overwritten(tmp_path: Path) -> None:
     """Content cannot claim another author: the marker always names the agent that sent it."""
     client, session = _client(tmp_path, {"event_id": "$sent"})
@@ -243,12 +344,23 @@ async def test_a_model_supplied_marker_is_overwritten(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", ['["not", "an", "object"]', "not json", None])
-async def test_a_send_body_that_is_not_a_json_object_is_refused(tmp_path: Path, body: str | None) -> None:
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('["not", "an", "object"]', "must be a JSON object"),
+        ("not json", "Expecting value"),
+        (None, "must be a JSON object"),
+    ],
+)
+async def test_a_send_body_that_is_not_a_json_object_is_refused(
+    tmp_path: Path,
+    body: str | None,
+    message: str,
+) -> None:
     """An event that cannot carry the marker is never sent."""
     client, session = _client(tmp_path, {"event_id": "$sent"})
 
-    with pytest.raises(ValueError):  # noqa: PT011 - invalid JSON raises the decoder's own ValueError
+    with pytest.raises(ValueError, match=message):
         await client.send("PUT", "/_matrix/client/v3/rooms/%21room%3Aexample.com/send/m.room.message/txn1", body)
 
     assert session.requests == []
