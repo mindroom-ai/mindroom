@@ -3139,3 +3139,48 @@ async def test_input_cancelled_while_its_native_call_runs_keeps_refusing_new_gra
             bridge.grant_local_control(60)
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regrant", [False, True])
+async def test_browser_control_rechecks_authority_after_its_fail_safe_check(
+    transport: AsyncMock,
+    regrant: bool,
+) -> None:
+    """A revoke during the fail-safe check before a browser action stops it, even when a new grant follows."""
+    checking, release = threading.Event(), threading.Event()
+
+    class SlowFailSafe(FakeProvider):
+        def check_emergency_stop(self) -> None:
+            super().check_emergency_stop()
+            if not checking.is_set():
+                checking.set()
+                assert release.wait(5)
+
+    browser = FakeBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=SlowFailSafe(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+    command = _command(
+        "browser_control",
+        parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.org"}},
+    )
+    await bridge.on_to_device_event(_event(command))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(checking.wait, 5)
+        bridge.revoke_local_control()
+        if regrant:
+            bridge.grant_local_control(60)
+    finally:
+        release.set()
+    await executing
+    await bridge.deliver_pending()
+    assert browser.calls == []
+    assert _response(transport).error == (
+        _STALE_AUTHORITY if regrant else "Desktop control is disabled; this bridge is observe-only."
+    )
