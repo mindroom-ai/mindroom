@@ -206,7 +206,7 @@ class DesktopBridge:
     # Each grant that starts control anew is a new generation; control commands run only under the one they arrived in.
     _control_generation: int = field(default=0, init=False)
     _admitted_generations: dict[str, int] = field(default_factory=dict, init=False)
-    # App input inside its native call, and whether a revoke interrupted it; no grant may reopen input until it returns.
+    # Control input still running, and whether a revoke interrupted it; no new grant may start until it returns.
     _input_running: bool = field(default=False, init=False)
     _input_interrupted: bool = field(default=False, init=False)
 
@@ -528,13 +528,13 @@ class DesktopBridge:
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
-        if self._input_interrupted:
-            msg = "Wait for the interrupted desktop action to finish before granting control again."
-            raise ValueError(msg)
-        # Running input was admitted under the last granted scope, which a lapsed lease leaves in place; it must
-        # never continue under another one.
-        if self._input_running and scope != self.policy.control_scope:
-            msg = "Wait for the running desktop action to finish before changing the control scope."
+        # Running input must not continue under new authority: after a revoke interrupted it, after an expired lease
+        # let it finish, or under another scope than the one it was admitted in, which a lapsed lease leaves in place.
+        # Extending a lease of the same scope that is still in force continues the same authority.
+        if self._input_running and (
+            self._input_interrupted or not self._control_available() or scope != self.policy.control_scope
+        ):
+            msg = "Wait for the desktop action that is still running to finish before granting control again."
             raise ValueError(msg)
         self.provider.check_emergency_stop()
         try:
@@ -897,7 +897,8 @@ class DesktopBridge:
                     msg = "Desktop GUI is unavailable for browser control."
                     raise DesktopProtocolError(msg)
                 await asyncio.to_thread(self.provider.check_emergency_stop)
-            browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
+            with self._sending_input() if command.action == "browser_control" else nullcontext():
+                browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
             reject_unexpected_parameters(parameters, allowed=frozenset())
@@ -921,7 +922,7 @@ class DesktopBridge:
         if command.action == "launch_app":
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             app_id = required_str_parameter(parameters, "app")
-            with self._native_input():
+            with self._sending_input():
                 await asyncio.to_thread(provider.launch_app, app_id)
             return _Execution(
                 {"action": command.action, "action_completed": True},
@@ -939,7 +940,7 @@ class DesktopBridge:
 
         app_id = required_str_parameter(parameters, "app")
         state_id = required_str_parameter(parameters, "state_id")
-        with self._agent_input(), self._native_input():
+        with self._agent_input(), self._sending_input():
             if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
                 await execute_semantic_control(provider, command, app_id=app_id, state_id=state_id)
             else:
@@ -950,14 +951,23 @@ class DesktopBridge:
         )
 
     @contextmanager
-    def _native_input(self) -> Iterator[None]:
-        """Mark app input as inside its native call from the moment it is handed to its worker thread until it returns."""
+    def _sending_input(self) -> Iterator[None]:
+        """Mark control input as running from when it is handed to its thread or browser until that call returns."""
         self._input_running = True
         try:
             yield
-        finally:
-            self._input_running = False
-            self._input_interrupted = False
+        except asyncio.CancelledError:
+            # Cancelling the waiter does not stop the call it waited on, so new grants stay refused as the bridge ends.
+            raise
+        except BaseException:
+            self._finish_input()
+            raise
+        else:
+            self._finish_input()
+
+    def _finish_input(self) -> None:
+        self._input_running = False
+        self._input_interrupted = False
 
     def _agent_input(self) -> AbstractContextManager[None]:
         """Keep app input and a shell approval card or prompt from ever being live at the same time."""
