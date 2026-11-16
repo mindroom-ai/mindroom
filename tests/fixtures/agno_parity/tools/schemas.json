@@ -14665,7 +14665,7 @@
       },
       {
         "name": "google_drive_upload_file",
-        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs\nsupports, such as headings, tables, lists, links, and images a Word file embeds or a public URL serves;\n\"spreadsheet\" a Google Sheet from Excel or CSV; \"presentation\" Google Slides from PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
+        "description": "Upload one local file, resolving relative paths from the agent workspace.\nWith convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:\n\"document\" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs\nsupports, such as headings, tables, lists, links, and the images a Word file embeds; \"spreadsheet\" a\nGoogle Sheet from Excel or CSV; \"presentation\" Google Slides from PowerPoint.\nThe converted file takes the local file's name without its extension unless name is given.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14733,7 +14733,7 @@
       },
       {
         "name": "google_drive_update_file",
-        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it: formatting the local file lacks is gone, and comments on the replaced content lose\ntheir place.\nTo change part of such a file, use the Google Docs or Google Sheets tool instead.",
+        "description": "Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.\nA Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's\nconvert_to converts it, so formatting that is not in the local file is lost and comments on the replaced\ncontent lose their place.\nTo change part of such a file, use the Google Docs or Google Sheets tool instead.",
         "parameters": {
           "type": "object",
           "properties": {

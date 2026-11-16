@@ -11148,7 +11148,7 @@ Files with the same name never overwrite each other, downloading the same file a
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: Drive imports the formatting Google Docs supports, such as headings, tables, lists, and links.
-Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting the local file lacks is gone and comments on the replaced content lose their place.
+Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting that is not in the local file is lost and comments on the replaced content lose their place.
 To change part of a Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](https://docs.mindroom.chat/deployment/google-services-oauth/#scope-rationale).

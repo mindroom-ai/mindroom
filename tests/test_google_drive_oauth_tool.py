@@ -991,11 +991,6 @@ def test_google_drive_update_replaces_a_google_doc_with_the_converted_file(
     tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
     replacement = workspace_root / "plan.html"
     replacement.write_text("<h1>Revised plan</h1>")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "Plan",
-        "mimeType": "application/vnd.google-apps.document",
-    }
 
     result = json.loads(tool.update_file("file-id", "plan.html"))
 
