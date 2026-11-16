@@ -44,9 +44,9 @@ def window_owner_at(point: tuple[int, int]) -> int | None:
 
 def process_bundle_id(process_id: int) -> str | None:
     """Return the bundle ID of the application running as one process, or None for a process that is not an app."""
-    import AppKit  # noqa: PLC0415
+    from AppKit import NSRunningApplication  # noqa: PLC0415  # ty: ignore[unresolved-import]
 
-    application = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(process_id)  # ty: ignore[unresolved-attribute]
+    application = NSRunningApplication.runningApplicationWithProcessIdentifier_(process_id)
     if application is None:
         return None
     bundle_id = application.bundleIdentifier()

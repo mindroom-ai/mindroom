@@ -197,7 +197,7 @@ class DesktopBridge:
     # Each grant that starts control anew is a new generation; control commands run only under the one they arrived in.
     _control_generation: int = field(default=0, init=False)
     _admitted_generations: dict[str, int] = field(default_factory=dict, init=False)
-    # App input inside its native call, and whether a revoke interrupted it; no grant may reopen input until it returns.
+    # App input inside its native call, and whether a revoke interrupted it; no new grant may start until it returns.
     _input_running: bool = field(default=False, init=False)
     _input_interrupted: bool = field(default=False, init=False)
 
@@ -505,8 +505,10 @@ class DesktopBridge:
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
-        if self._input_interrupted:
-            msg = "Wait for the interrupted desktop action to finish before granting control again."
+        # Input still inside its native call must not continue under new authority, whether a revoke interrupted it
+        # or an expired lease let it finish; extending a lease still in force continues the same authority.
+        if self._input_running and (self._input_interrupted or not self._control_available()):
+            msg = "Wait for the desktop action that is still running to finish before granting control again."
             raise ValueError(msg)
         self.provider.check_emergency_stop()
         if not self._control_available():
