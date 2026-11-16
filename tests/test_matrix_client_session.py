@@ -1142,3 +1142,41 @@ async def test_transport_failures_warn_once_until_a_request_succeeds(monkeypatch
         ("warning", "ClientConnectorError"),
     ]
     assert failures[1]["error"] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_room_refuses_every_write_and_allows_reads_and_other_rooms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that keeps a room without taking part in it sends no message, reaction, state, or membership there."""
+    sent: list[tuple[str, str]] = []
+
+    async def transport(_client: nio.AsyncClient, method: str, path: str, *_args: object, **_kwargs: object) -> object:
+        sent.append((method, path.split("?", 1)[0]))
+        return object()
+
+    monkeypatch.setattr(nio.AsyncClient, "send", transport)
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_router:example.org")
+    client.access_token = "token"  # noqa: S105
+    client.unmanaged_room_id = "!admins:example.org"
+    admins, other = "%21admins%3Aexample.org", "%21other%3Aexample.org"
+    writes = [
+        client.room_send("!admins:example.org", "m.room.message", {"msgtype": "m.text", "body": "hi"}),
+        client.room_send("!admins:example.org", "m.reaction", {}),
+        client.room_put_state("!admins:example.org", "io.mindroom.accounts", {}, state_key=client.user_id),
+        client.room_typing("!admins:example.org", typing_state=True),
+        client.room_redact("!admins:example.org", "$event"),
+        client.room_kick("!admins:example.org", "@someone:example.org"),
+        client.room_leave("!admins:example.org"),
+        client.send("POST", f"/_synapse/admin/v1/join/{admins}"),
+    ]
+    for write in writes:
+        with pytest.raises(RuntimeError, match="unmanaged room"):
+            await write
+
+    await client.send("GET", f"/_matrix/client/v3/rooms/{admins}/state")
+    await client.send("PUT", f"/_matrix/client/v3/rooms/{other}/send/m.room.message/txn")
+    assert sent == [
+        ("GET", f"/_matrix/client/v3/rooms/{admins}/state"),
+        ("PUT", f"/_matrix/client/v3/rooms/{other}/send/m.room.message/txn"),
+    ]

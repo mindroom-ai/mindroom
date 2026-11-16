@@ -27,6 +27,7 @@ from mindroom.contacts.store import contact_room_ids, remove_kept_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_outcome
 from mindroom.matrix.client_room_admin import get_joined_rooms, is_canonical_parent, names_canonical_parent
+from mindroom.matrix.client_session import MindRoomAsyncClient, unmanaged_room_id
 from mindroom.matrix.invited_rooms_store import (
     forget_invited_room,
     invited_rooms_path,
@@ -441,6 +442,25 @@ class BotRoomLifecycle:
         if event_id is None:
             self._logger().warning("Managed room notice delivery failed", room_id=room.room_id)
 
+    async def resolve_unmanaged_room(self) -> bool:
+        """Find the router's homeserver admin room, which it keeps but takes no part in; False when the lookup failed.
+
+        On Tuwunel, an account is a server admin while it is joined to `#admins:<server_name>`, and the router needs
+        that for the admin join API. A homeserver without that alias leaves no room unmanaged.
+        """
+        client = self._client()
+        if self.deps.agent_name != ROUTER_AGENT_NAME or not isinstance(client, MindRoomAsyncClient):
+            return True
+        response = await client.room_resolve_alias(f"#admins:{self.deps.agent_user.user_id.partition(':')[2]}")
+        if isinstance(response, nio.RoomResolveAliasResponse):
+            client.unmanaged_room_id = response.room_id
+            return True
+        if isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND":
+            client.unmanaged_room_id = None
+            return True
+        self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response))
+        return False
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         invited_rooms = await self._invited_room_ids_after_joined_invites()
@@ -581,6 +601,11 @@ class BotRoomLifecycle:
             # The router maintains the root Space and the server emoji room outside the configured rooms.
             state = matrix_state_for_runtime(self.deps.runtime_paths)
             configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
+            # Leaving the homeserver admin room would end the router's server admin, so an unknown one leaves nothing.
+            if not await self.resolve_unmanaged_room():
+                return []
+            # The router stays in that room without following the rooms it lists.
+            current_rooms.discard(unmanaged_room_id(client) or "")
 
         leaving, parent_ids = current_rooms - configured_rooms, current_rooms & configured_rooms
         # A room kept this way can list others in turn, so the rooms it lists are checked against it next.
@@ -848,6 +873,8 @@ class BotRoomLifecycle:
         The event only starts the work, in the background because joining waits for this bot's own sync, and the rooms'
         current state decides it, so a replayed or superseded event changes nothing.
         """
+        if room.room_id == unmanaged_room_id(self._client()):
+            return
         if event.source["content"].get("via"):
             self._follow_listed_rooms(room.room_id)
             return

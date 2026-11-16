@@ -108,6 +108,8 @@ class JournalDispatcher:
     room_for_id: Callable[[str], nio.MatrixRoom]
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
     runtime_generation: str = "unmanaged"
+    # Whether a room is one this account keeps but takes no part in; its events settle without running.
+    ignores_room: Callable[[str], bool] = lambda _room_id: False
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -222,6 +224,8 @@ class JournalDispatcher:
         journal was meant to remove, and it answered the wrong question: a turn
         can be terminal with nothing durable behind it.
         """
+        if self.ignores_room(event.room_id):
+            return True
         needs_turn_replay = _needs_turn_replay(event)
         if needs_turn_replay and not self._turn_replay_released:
             # Turn work waits until the orchestrator has started responders.

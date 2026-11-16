@@ -16,6 +16,7 @@ import nio
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
+from mindroom.matrix.client_session import unmanaged_room_id
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -130,6 +131,8 @@ async def cleanup_all_orphaned_bots(
     joined_rooms = await get_joined_rooms(client)
     if joined_rooms is None:
         return kicked_bots
+    # The router keeps its homeserver admin room without taking part in it.
+    joined_rooms = [room_id for room_id in joined_rooms if room_id != unmanaged_room_id(client)]
 
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
 

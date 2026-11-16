@@ -13,6 +13,7 @@ from mindroom.entity_resolution import configured_bot_user_ids_for_room, is_conf
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
+from mindroom.matrix.client_session import unmanaged_room_id
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_reconciliation import read_room_state
@@ -163,6 +164,7 @@ class RoomSetup:
                     *(
                         reconcile(client, self.config_provider(), self.runtime_paths, room_id)
                         for room_id in client.rooms
+                        if room_id != unmanaged_room_id(client)
                         for reconcile in (reconcile_room_thread_mode, reconcile_room_accounts)
                     ),
                 )

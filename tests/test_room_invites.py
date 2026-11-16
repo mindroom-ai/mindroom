@@ -35,6 +35,7 @@ from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix import client_room_admin, invited_rooms_store
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, invite_to_room
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     is_inviter_allowed,
@@ -3390,3 +3391,103 @@ async def test_an_invite_can_carry_a_reason_the_invitee_reads() -> None:
         json.dumps({"user_id": "@dana:other.org", "reason": "Find a slot"}, separators=(",", ":")),
     )
     client.room_invite.assert_not_awaited()
+
+
+def _router_with_admin_alias(
+    tmp_path: Path,
+    lookup: nio.RoomResolveAliasResponse | nio.RoomResolveAliasError,
+) -> AgentBot:
+    """Return a router whose own homeserver answers its `#admins` alias lookup with ``lookup``."""
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
+    client = MindRoomAsyncClient("http://localhost:8008", "@mindroom_router:localhost")
+    client.room_resolve_alias = AsyncMock(return_value=lookup)
+    bot.client = client
+    return bot
+
+
+_ADMINS_FOUND = nio.RoomResolveAliasResponse("#admins:localhost", "!admins:localhost", ["localhost"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lookup", "left"),
+    [
+        # The router keeps the room that makes it a server admin and leaves the rest.
+        (_ADMINS_FOUND, ["!stale:localhost"]),
+        # A homeserver without that alias: nothing changes.
+        (nio.RoomResolveAliasError("not found", "M_NOT_FOUND"), ["!admins:localhost", "!stale:localhost"]),
+        # A lookup that failed otherwise leaves nothing this pass, so the router never drops its server admin.
+        (nio.RoomResolveAliasError("unavailable", "M_UNKNOWN"), []),
+    ],
+)
+async def test_router_cleanup_keeps_its_homeserver_admin_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lookup: nio.RoomResolveAliasResponse | nio.RoomResolveAliasError,
+    left: list[str],
+) -> None:
+    """The router's leave pass never leaves the room `#admins:<its server>` names."""
+    bot = _router_with_admin_alias(tmp_path, lookup)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=["!admins:localhost", "!stale:localhost"]),
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: MatrixState())
+
+    assert sorted(await bot._room_lifecycle._rooms_to_leave()) == left
+    bot.client.room_resolve_alias.assert_awaited_once_with("#admins:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_follows_no_room_its_homeserver_admin_room_lists(tmp_path: Path) -> None:
+    """A space child listed in the admin room starts no follow or leave work."""
+    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
+    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    event = nio.RoomSpaceChildEvent.from_dict(
+        {
+            "event_id": "$child",
+            "sender": "@operator:localhost",
+            "origin_server_ts": 1,
+            "type": "m.space.child",
+            "state_key": "!listed:localhost",
+            "content": {"via": ["localhost"]},
+        },
+    )
+    room = nio.MatrixRoom("!admins:localhost", "@mindroom_router:localhost")
+    room.children.add("!listed:localhost")
+    bot.client.rooms["!admins:localhost"] = room
+
+    await bot._room_lifecycle.on_space_child(room, event)
+
+    assert not [task for task in asyncio.all_tasks() if "listed_rooms_join" in task.get_name()]
+
+
+@pytest.mark.asyncio
+async def test_orphan_cleanup_skips_the_routers_homeserver_admin_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The router kicks no one from its homeserver admin room, and the rest of the sweep still runs."""
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    client = MindRoomAsyncClient("http://localhost:8008", "@mindroom_router:localhost")
+    client.unmanaged_room_id = "!admins:localhost"
+    client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+    monkeypatch.setattr(
+        "mindroom.matrix.room_cleanup.get_joined_rooms",
+        AsyncMock(return_value=["!admins:localhost", "!other:localhost"]),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix.room_cleanup.get_room_members",
+        AsyncMock(return_value=["@mindroom_router:localhost", "@mindroom_retired:localhost"]),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
+        lambda _runtime_paths: frozenset({"@mindroom_router:localhost", "@mindroom_retired:localhost"}),
+    )
+    monkeypatch.setattr("mindroom.matrix.room_cleanup.is_dm_room", AsyncMock(return_value=False))
+
+    result = await cleanup_all_orphaned_bots(client, config, runtime_paths_for(config))
+
+    assert result == {"!other:localhost": ["@mindroom_retired:localhost"]}
+    client.room_kick.assert_awaited_once()

@@ -16,6 +16,7 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     emit,
 )
+from mindroom.matrix.client_session import unmanaged_room_id
 from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.room_member_joins import (
@@ -143,7 +144,7 @@ class RouterDuties:
         """Reconcile one held room's thread mode and MindRoom accounts and return whether both are current."""
         runtime = self.deps.runtime
         client = runtime.client
-        if client is None or room_id not in client.rooms:
+        if client is None or room_id not in client.rooms or room_id == unmanaged_room_id(client):
             return True
         current = await asyncio.gather(
             reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),

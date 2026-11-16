@@ -19,6 +19,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
@@ -1238,3 +1239,21 @@ async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_wait
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
     assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_router_publishes_no_room_state_in_its_homeserver_admin_room(room_state: RoomState) -> None:
+    """Startup, reload, membership changes, and joins write no thread mode or accounts state into that room."""
+    config, paths, ids, events, client = room_state
+    client.__class__ = MindRoomAsyncClient
+    client.unmanaged_room_id = ROOM_ID
+    duties = _router_duties(room_state)
+
+    await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    events["m.room.member", ids["agent2"].full_id] = {"membership": "leave"}
+    _sync_live_room(room_state)
+    await duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent2"].full_id, "leave", "join"))
+    duties.mark_joined_for_room_state(ROOM_ID)
+    await duties.publish_joined_room_state()
+
+    client.room_put_state.assert_not_awaited()

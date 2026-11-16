@@ -2483,6 +2483,7 @@ depends_on = [
     "mindroom.managed_room_notice",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
@@ -3135,6 +3136,7 @@ path = "mindroom.matrix.room_cleanup"
 depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
 ]
@@ -3245,11 +3247,24 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
+]
+
+[[modules]]
+path = "mindroom.router.duties"
+depends_on = [
+    "mindroom.commands.config_confirmation",
+    "mindroom.entity_resolution",
+    "mindroom.hooks",
+    "mindroom.matrix.client_session",
+    "mindroom.matrix.room_accounts",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.matrix.room_thread_mode",
 ]
 
 [[modules]]
@@ -4191,15 +4206,19 @@ path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants", "mindroom.failure_text", "mindroom.tls_trust"]
 visibility = [
     "mindroom.bot",
+    "mindroom.bot_room_lifecycle",
     "mindroom.cli.doctor",
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.provisioning_env",
+    "mindroom.matrix.room_cleanup",
     "mindroom.matrix.typing",
     "mindroom.matrix.users",
+    "mindroom.orchestration.rooms",
     "mindroom.orchestration.runtime",
+    "mindroom.router.duties",
 ]
 
 [[modules]]
@@ -4987,6 +5006,7 @@ depends_on = [
     "mindroom.reaction_dispatch",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
+    "mindroom.router.duties",
     "mindroom.timestamp_formatting",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
@@ -6951,10 +6971,22 @@ expose = [
 ]
 from = ["mindroom.matrix.client_session"]
 visibility = [
+    "mindroom.bot_room_lifecycle",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.typing",
     "mindroom.desktop.session",
     "mindroom.orchestration.runtime",
+]
+
+[[interfaces]]
+expose = ["unmanaged_room_id"]
+from = ["mindroom.matrix.client_session"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.bot_room_lifecycle",
+    "mindroom.matrix.room_cleanup",
+    "mindroom.orchestration.rooms",
+    "mindroom.router.duties",
 ]
 
 [[interfaces]]

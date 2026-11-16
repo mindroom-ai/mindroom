@@ -98,7 +98,7 @@ from .knowledge.utils import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .managed_avatars import ensure_entity_avatar
 from .matrix.client_room_admin import get_joined_rooms
-from .matrix.client_session import PermanentMatrixStartupError
+from .matrix.client_session import PermanentMatrixStartupError, unmanaged_room_id
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
 from .matrix.relation_lookup import RelationLookup
@@ -530,6 +530,7 @@ class AgentBot:
                 self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
             ),
             runtime_generation=self._approval_runtime_generation,
+            ignores_room=lambda room_id: room_id == unmanaged_room_id(self.client),
         )
         self._turn_store = TurnStore(
             TurnStoreDeps(
@@ -1589,6 +1590,7 @@ class AgentBot:
             self.orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
+            await self._room_lifecycle.resolve_unmanaged_room()
             await ensure_entity_avatar(client, self.agent_name, self.config, self.runtime_paths, logger=self.logger)
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()

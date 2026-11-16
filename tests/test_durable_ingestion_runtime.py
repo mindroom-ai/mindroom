@@ -491,6 +491,9 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
         session._transport.request = request
         assert room.room_id in bot.client.rooms
         assert room.room_id not in bot.client.invited_rooms
+        # This homeserver names no admin room, so the router's cleanup keeps nothing for it.
+        not_found = nio.RoomResolveAliasError("not found", "M_NOT_FOUND")
+        monkeypatch.setattr(bot.client, "room_resolve_alias", AsyncMock(return_value=not_found))
         # Startup computes cleanup before welcome admission opens.
         assert await bot._room_lifecycle._rooms_to_leave() == ([] if policy_allows_recovery else [room.room_id])
         welcome.assert_not_awaited()

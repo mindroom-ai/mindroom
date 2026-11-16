@@ -6,6 +6,7 @@ import ssl as ssl_module
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 
 import aiohttp
 import nio
@@ -57,21 +58,31 @@ class _AsyncRequestHeaders(Protocol):
         ...
 
 
+class _UnmanagedRoomWriteError(RuntimeError):
+    """Raised when a client would write into the room it keeps but takes no part in."""
+
+
 class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
     _process_shutdown_transport_fenced = False
     _transport_failure_logged = False
+    # A room this account stays in but never writes to, such as the router's homeserver admin room.
+    unmanaged_room_id: str | None = None
 
     @property
     def process_shutdown_transport_fenced(self) -> bool:
         """Return whether orderly shutdown permanently closed new transport."""
         return self._process_shutdown_transport_fenced
 
-    async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        """Prepare dynamic request headers before every transport attempt."""
+    async def send(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Prepare dynamic request headers before every transport attempt, and refuse any write to the unmanaged room."""
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
+        room_id = self.unmanaged_room_id
+        if room_id is not None and method != "GET" and quote(room_id, safe="") in path.split("?", 1)[0].split("/"):
+            msg = f"{method} to the unmanaged room {room_id} refused"
+            raise _UnmanagedRoomWriteError(msg)
         headers = self.config.custom_headers
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
@@ -79,7 +90,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
             raise _MatrixTransportShutdownError
         # nio retries connection errors while logging only "Timed out", so name the real cause here.
         try:
-            response = await super().send(*args, **kwargs)
+            response = await super().send(method, path, *args, **kwargs)
         except (aiohttp.ClientConnectionError, TimeoutError) as exc:
             self._log_transport_failure(exc)
             raise
@@ -115,6 +126,11 @@ class MindRoomAsyncClient(nio.AsyncClient):
         )
         encrypted_content.update(encryption_visible_metadata(content))
         return encrypted_message_type, encrypted_content
+
+
+def unmanaged_room_id(client: nio.AsyncClient | None) -> str | None:
+    """Return the room this client keeps but takes no part in, if any."""
+    return client.unmanaged_room_id if isinstance(client, MindRoomAsyncClient) else None
 
 
 def require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
@@ -260,4 +276,5 @@ __all__ = [
     "olm_store_dir",
     "olm_store_exists",
     "require_runtime_paths_arg",
+    "unmanaged_room_id",
 ]
