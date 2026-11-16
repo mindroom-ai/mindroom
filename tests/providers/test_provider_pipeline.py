@@ -7,6 +7,7 @@ import asyncio
 import io
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
@@ -1125,19 +1126,59 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_the_request_record_is_written_before_the_request_is_sent(tmp_path: Path) -> None:
-    """The adapter sends only once its record is on disk, so a request that hangs or crashes is still logged."""
-    seen_before_reply: list[dict[str, object]] = []
+async def test_the_request_goes_out_while_its_record_is_written_and_the_reply_waits_for_the_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter sends while the record is written, and its caller sees no reply before the record is complete."""
+    sent, may_write = threading.Event(), threading.Event()
+    write_record = request_log_stage._write_request_record
 
-    async def read_log() -> None:
-        seen_before_reply.extend(_log_records(tmp_path))
+    def write_once_allowed(*args: object, **kwargs: object) -> None:
+        may_write.wait(timeout=5)
+        write_record(*args, **kwargs)
 
-    inner = _ScriptedProvider([[Await(read_log), _turn()]])
+    async def send() -> None:
+        sent.set()
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+    monkeypatch.setattr(request_log_stage, "_write_request_record", write_once_allowed)
+    inner = _ScriptedProvider([[Await(send), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+    reply = asyncio.ensure_future(anext(stream))
 
-    assert seen_before_reply == _log_records(tmp_path)
-    assert [record["body"] for record in seen_before_reply] == [scripted_body(_IDENTITY, _request())]
+    assert await asyncio.to_thread(sent.wait, 5)
+    assert not reply.done()
+    may_write.set()
+    assert isinstance(await reply, TurnCompleted)
+    assert [record["body"] for record in _log_records(tmp_path)] == [scripted_body(_IDENTITY, _request())]
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_went_out_is_logged_even_when_its_caller_is_cancelled_twice(tmp_path: Path) -> None:
+    """Cancelling the caller, as shutdown does in rounds, never cancels the record of a request it already sent."""
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    free = threading.Event()
+    # The one writer thread is busy, so the record's write waits in the queue, where a cancellation would drop it.
+    busy = loop.run_in_executor(None, free.wait, 5)
+    inner = _ScriptedProvider([[_turn()]])
+    reply = asyncio.ensure_future(
+        _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request()),
+    )
+
+    await asyncio.sleep(0)
+    assert len(inner.requests) == 1
+    reply.cancel()  # while it waits for the record before its first event
+    await asyncio.sleep(0)
+    reply.cancel()  # while it waits for the record as the stream closes
+    with pytest.raises(asyncio.CancelledError):
+        await reply
+    free.set()
+    await busy
+    await loop.run_in_executor(None, lambda: None)  # the queued record's write ran before this
+
+    assert [record["body"] for record in _log_records(tmp_path)] == [scripted_body(_IDENTITY, _request())]
 
 
 @pytest.mark.asyncio

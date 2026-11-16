@@ -69,7 +69,9 @@ def _write_request_record(
     """Build and append the request record, in the thread that writes it.
 
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
-    built in the writer thread; the adapter sends the body only after the write, so nothing edits it meanwhile.
+    built in the writer thread, and long enough to delay the request, so the adapter sends the body meanwhile. Adapters
+    and their SDKs only read the body they hand ``on_send``, and the caller sees nothing of the reply before the write
+    ends, so nothing edits the body while it is read here.
     """
     _write_line(
         path,
@@ -155,14 +157,14 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     """Stream ``request``, emitting usage telemetry when it ends and the request record when enabled."""
     context = current_llm_request_log_context()
     request_log_id = uuid4().hex
-    # Set once the request record is written, so the response record joins only a logged request.
-    logged_path: Path | None = None
+    # The request record's write, started as the adapter sends; it gives the log file once the record is written, so
+    # the response record joins only a logged request. Awaits shield it, so a cancelled caller still logs what it sent.
+    record: asyncio.Task[Path | None] | None = None
     if log.debug.log_llm_requests:
         log_path = _daily_log_path(log.debug.llm_request_log_dir, log.storage_root, datetime.now().astimezone())
         deferred_tool_names = sorted(request.deferred_tools.names)
 
-        async def write_request_record(body: Mapping[str, Any]) -> None:
-            nonlocal logged_path
+        async def write_request_record(body: Mapping[str, Any]) -> Path | None:
             try:
                 await asyncio.to_thread(
                     _write_request_record,
@@ -181,10 +183,14 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     model_name=log.model_name,
                     model_id=inner.identity.id,
                 )
-            else:
-                logged_path = log_path
+                return None
+            return log_path
 
-        request = replace(request, on_send=write_request_record)
+        async def start_request_record(body: Mapping[str, Any]) -> None:
+            nonlocal record
+            record = asyncio.create_task(write_request_record(body))
+
+        request = replace(request, on_send=start_request_record)
     reported = ReportedUsage()
     served_provider: str | None = None
     stop_reason: StopReason | None = None
@@ -192,6 +198,9 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         events = inner.stream(request)
         async with closing_async_stream(events):
             async for event in events:
+                if record is not None:
+                    # The caller sees the reply only once the request's record is written.
+                    await asyncio.shield(record)
                 reported.observe(event)
                 if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
@@ -202,6 +211,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         usage = received if (received := reported.received) is not None and received.reported else None
         try:
             _log_usage(inner, log, usage, served_provider, stop_reason, context)
+            logged_path = None if record is None else await asyncio.shield(record)
             if logged_path is not None and usage is not None:
                 response: dict[str, Any] = {
                     "timestamp": datetime.now().astimezone().isoformat(),
