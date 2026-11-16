@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import nio
@@ -53,6 +53,7 @@ from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.thread_summary import notices
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
@@ -3444,7 +3445,7 @@ async def test_router_cleanup_keeps_its_homeserver_admin_room(
 async def test_router_follows_no_room_its_homeserver_admin_room_lists(tmp_path: Path) -> None:
     """A space child listed in the admin room starts no follow or leave work."""
     bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
-    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    assert await bot._room_lifecycle._resolve_unmanaged_room()
     event = nio.RoomSpaceChildEvent.from_dict(
         {
             "event_id": "$child",
@@ -3529,7 +3530,7 @@ async def test_router_writes_no_server_state_into_its_homeserver_admin_room(
 ) -> None:
     """A reload that changes the router's server state publishes it in its other rooms only."""
     bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
-    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    assert await bot._room_lifecycle._resolve_unmanaged_room()
     bot.client.rooms = {"!admins:localhost": MagicMock(), "!lobby:localhost": MagicMock()}
     previous = bot.config.model_copy()
     monkeypatch.setattr(bot, "_server_state_content", lambda config: {"current": config is bot.config})
@@ -3552,5 +3553,41 @@ async def test_a_managed_room_under_the_admin_alias_stays_managed(
     managed.add_room("admins", "!admins:localhost", "#admins:localhost", "Admins")
     monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: managed)
 
-    assert await bot._room_lifecycle.resolve_unmanaged_room()
+    assert await bot._room_lifecycle._resolve_unmanaged_room()
     assert bot.client.unmanaged_room_id is None
+
+
+@pytest.mark.asyncio
+async def test_router_start_fails_until_its_homeserver_admin_room_is_known(tmp_path: Path) -> None:
+    """A lookup that failed other than M_NOT_FOUND stops the start, which the fleet retries, so nothing runs meanwhile."""
+    bot = _router_with_admin_alias(tmp_path, nio.RoomResolveAliasError("unavailable", "M_UNKNOWN"))
+    client = bot.client
+    with (
+        patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=client)),
+        pytest.raises(RuntimeError, match="Homeserver admin room lookup failed"),
+    ):
+        await bot.start()
+    assert bot.client is None
+
+
+@pytest.mark.asyncio
+async def test_router_tracks_no_thread_tags_in_its_homeserver_admin_room(tmp_path: Path) -> None:
+    """A thread tag set in that room starts no snooze work."""
+    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
+    assert await bot._room_lifecycle._resolve_unmanaged_room()
+    observe = MagicMock()
+    bot.orchestrator.thread_snooze = SimpleNamespace(observe_state_event=observe)
+    event = nio.UnknownEvent.from_dict(
+        {
+            "event_id": "$tag",
+            "sender": "@operator:localhost",
+            "origin_server_ts": 1,
+            "type": THREAD_TAGS_EVENT_TYPE,
+            "state_key": "$thread",
+            "content": {"tags": {"snoozed": {}}},
+        },
+    )
+
+    bot._on_thread_tag_state(nio.MatrixRoom("!admins:localhost", "@mindroom_router:localhost"), event)
+
+    observe.assert_not_called()

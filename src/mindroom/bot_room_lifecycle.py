@@ -442,7 +442,7 @@ class BotRoomLifecycle:
         if event_id is None:
             self._logger().warning("Managed room notice delivery failed", room_id=room.room_id)
 
-    async def resolve_unmanaged_room(self) -> bool:
+    async def _resolve_unmanaged_room(self) -> bool:
         """Find the router's homeserver admin room, which it keeps but takes no part in; False when the lookup failed.
 
         On Tuwunel, an account is a server admin while it is joined to `#admins:<server_name>`, and the router needs
@@ -464,6 +464,12 @@ class BotRoomLifecycle:
             return True
         self._logger().warning("homeserver_admin_room_lookup_failed", error=str(response))
         return False
+
+    async def require_unmanaged_room(self) -> None:
+        """Resolve that room at start; until it is known the router could take part in it, so a failure fails the start."""
+        if not await self._resolve_unmanaged_room():
+            msg = "Homeserver admin room lookup failed"
+            raise RuntimeError(msg)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
@@ -606,7 +612,7 @@ class BotRoomLifecycle:
             state = matrix_state_for_runtime(self.deps.runtime_paths)
             configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
             # Leaving the homeserver admin room would end the router's server admin, so an unknown one leaves nothing.
-            if not await self.resolve_unmanaged_room():
+            if not await self._resolve_unmanaged_room():
                 return []
             # The router stays in that room without following the rooms it lists.
             current_rooms.discard(unmanaged_room_id(client) or "")

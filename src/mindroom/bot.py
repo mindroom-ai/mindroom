@@ -1091,7 +1091,12 @@ class AgentBot:
 
     def _on_thread_tag_state(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Index a live thread tag state event from sync; never raise into nio's callback loop."""
-        if event.type != THREAD_TAGS_EVENT_TYPE or "state_key" not in event.source or event.decrypted:
+        if (
+            event.type != THREAD_TAGS_EVENT_TYPE
+            or "state_key" not in event.source
+            or event.decrypted
+            or room.room_id == unmanaged_room_id(self.client)
+        ):
             return
         try:
             self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
@@ -1591,7 +1596,7 @@ class AgentBot:
             self.orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
-            await self._room_lifecycle.resolve_unmanaged_room()
+            await self._room_lifecycle.require_unmanaged_room()
             await ensure_entity_avatar(client, self.agent_name, self.config, self.runtime_paths, logger=self.logger)
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
