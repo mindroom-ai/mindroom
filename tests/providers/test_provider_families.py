@@ -439,7 +439,7 @@ async def test_the_request_record_holds_the_body_each_family_sent(family: str, t
     """
     spec = FAMILIES[family]
     log_dir = tmp_path / "logs"
-    wire = Wire(lambda _request: spec.reply())
+    wire = Wire(spec.reply())
     provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
     image = Image(content=_PNG, mime_type="image/png")
     request = ModelRequest(

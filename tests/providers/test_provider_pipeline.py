@@ -1134,16 +1134,16 @@ async def test_the_request_goes_out_while_its_record_is_written_and_the_reply_wa
 ) -> None:
     """The adapter sends while the record is written, and its caller sees no reply before the record is complete."""
     sent, may_write = threading.Event(), threading.Event()
-    write_record = request_log_stage._write_request_record
+    write_line = request_log_stage._write_line
 
-    def write_once_allowed(*args: object, **kwargs: object) -> Path | None:
+    def write_once_allowed(path: Path, payload: dict[str, object]) -> None:
         may_write.wait(timeout=5)
-        return write_record(*args, **kwargs)
+        write_line(path, payload)
 
     async def send() -> None:
         sent.set()
 
-    monkeypatch.setattr(request_log_stage, "_write_request_record", write_once_allowed)
+    monkeypatch.setattr(request_log_stage, "_write_line", write_once_allowed)
     inner = _ScriptedProvider([[Await(send), _turn()]])
     stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
     reply = asyncio.ensure_future(anext(stream))
@@ -1308,13 +1308,13 @@ async def test_request_log_builds_the_record_off_the_event_loop(
     """Serializing a long conversation must not stall the loop, so the record is built in the thread that writes it."""
     inner = _ScriptedProvider([[_turn()]])
     build_threads: list[int] = []
-    write_record = request_log_stage._write_request_record
+    json_safe = request_log_stage.json_safe
 
-    def record_build_thread(*args: object, **kwargs: object) -> Path | None:
+    def record_build_thread(value: object) -> object:
         build_threads.append(threading.get_ident())
-        return write_record(*args, **kwargs)
+        return json_safe(value)
 
-    monkeypatch.setattr(request_log_stage, "_write_request_record", record_build_thread)
+    monkeypatch.setattr(request_log_stage, "json_safe", record_build_thread)
     request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
 
     await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
