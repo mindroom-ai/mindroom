@@ -593,6 +593,7 @@ def _written_index_entry(room_fd: int, filename: str, payload: dict[str, object]
     except FileNotFoundError:
         return None
     # A rebuild indexes a file past the read cap, or one the bounded loader refuses whole, from its header.
+    # Of that loader's limits only the node count can refuse a built payload's dump, and libyaml gives every value back.
     whole = status.st_size <= MAX_READ_BYTES and _yaml_node_count(payload) <= yaml_io._MAX_UNTRUSTED_NODES
     pair = _payload_index_entry(filename, payload if whole else {**payload, "messages": []})
     return None if pair is None else WrittenIndexEntry(filename, _file_identity(status), pair)
@@ -1035,7 +1036,7 @@ def write_thread_payload(
     *,
     trusted_root: Path | None = None,
 ) -> _WrittenThread:
-    """Write one thread payload built by ``thread_payload`` when changed, without parsing the file back."""
+    """Write one thread payload built by ``thread_payload`` when changed; return whether it replaced the file, and the file's index entry."""
     data = yaml_io.safe_dump(payload, default_flow_style=False, sort_keys=False, allow_unicode=True, encoding="utf-8")
     if len(data) > _MAX_THREAD_FILE_BYTES:
         msg = f"Thread {thread_id} is too large to export: its file passes {_MAX_THREAD_FILE_BYTES >> 20} MiB"
