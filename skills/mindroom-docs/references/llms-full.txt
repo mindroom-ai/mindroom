@@ -3060,7 +3060,8 @@ Edits, reactions, and redactions belong to the same thread as the message they t
 A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
 Agents in the fork see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
 An agent that answered in the parent counts as a participant of the fork.
-Chains of forks are followed up to eight parents deep.
+Agents in the fork can use the attachments of the parent messages they see.
+An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
 Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
 
 ## Multi-Human Thread Protection
@@ -6099,7 +6100,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
