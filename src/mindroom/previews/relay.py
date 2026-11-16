@@ -92,15 +92,12 @@ async def relay_websocket(websocket: WebSocket, upstream: aiohttp.ClientWebSocke
     cancelled = False
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        codes = []
-        for task in (task for task in tasks if task in done):
+        for task in done:
             try:
-                codes.append(task.result())
+                code = task.result()
             except (WebSocketDisconnect, aiohttp.ClientError, OSError, RuntimeError):
                 # A side that could not be sent to was lost.
-                codes.append(1011)
-        # Both sides may end in the same step; a lost side then wins over the other's close.
-        code = 1011 if 1011 in codes else codes[0]
+                code = 1011
     except asyncio.CancelledError:
         cancelled = True
         raise

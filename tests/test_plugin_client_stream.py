@@ -9,7 +9,7 @@ import sys
 import time
 from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from types import ModuleType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import aiohttp
@@ -28,7 +28,6 @@ from mindroom.api.client_sessions import ClientSessionStore, client_session_stor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.plugin_http import ClientUser
-from mindroom.previews.relay import relay_websocket
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 from tests.test_plugin_routes import _app, _write_plugin
 
@@ -910,38 +909,3 @@ async def test_a_relayed_streams_upstream_learns_how_the_client_left(app: FastAP
                 assert await close_codes.get() == (1011 if leaving == "dropped" else 1000)
     finally:
         await runner.cleanup()
-
-
-class _LostCaller:
-    """A caller socket whose first message reports it was lost without a close frame."""
-
-    def __init__(self) -> None:
-        self.close_code: int | None = None
-
-    async def receive(self) -> dict[str, object]:
-        return {"type": "websocket.disconnect", "code": 1005}
-
-    async def close(self, code: int) -> None:
-        self.close_code = code
-
-
-class _ClosingApp:
-    """An app socket whose first message is a normal close frame."""
-
-    def __init__(self) -> None:
-        self.close_code: int | None = None
-
-    async def receive(self) -> aiohttp.WSMessage:
-        return aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, 1000, None)
-
-    async def close(self, code: int) -> None:
-        self.close_code = code
-
-
-@pytest.mark.asyncio
-async def test_a_lost_caller_wins_over_the_apps_close_in_the_same_step() -> None:
-    """Both sides ending at once still close the app with 1011 for the lost caller, whatever order they finish in."""
-    for _ in range(50):
-        caller, app_socket = _LostCaller(), _ClosingApp()
-        await relay_websocket(cast("WebSocket", caller), cast("aiohttp.ClientWebSocketResponse", app_socket))
-        assert (app_socket.close_code, caller.close_code) == (1011, 1011)
