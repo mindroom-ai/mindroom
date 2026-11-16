@@ -435,8 +435,13 @@ class _BrokerService:
         if self._start_error is not None:
             raise self._start_error
         # Primary shell commands trust the broker CA through files of the primary's own; its process trust is unchanged.
+        # The files keep what the primary's own CA variables name, because the commands inherited those until now.
         primary_ca_env = {BROKER_CA_PEM_ENV: ca.cert_pem}
-        apply_runner_ca_bundle(primary_ca_env, state_dir / "primary_ca")
+        apply_runner_ca_bundle(
+            primary_ca_env,
+            state_dir / "primary_ca",
+            trusted_before=self._runtime_paths.process_env,
+        )
         self.runtime = _BrokerRuntime(
             url=self._settings.url,
             signer=signer,
@@ -575,7 +580,12 @@ def execution_env_for_primary_shell(
     try:
         if not broker_serves_primary_shell(config, agent_name, runtime_paths):
             return ToolEnvironment()
-        worker_target = resolve_agent_execution(agent_name, config, runtime_paths, execution_identity).worker_target
+        worker_target = resolve_agent_execution(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ).worker_target
         env = _execution_env(
             runtime,
             runtime_paths,

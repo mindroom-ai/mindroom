@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping  # noqa: TC003
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote, urlsplit
 
@@ -237,12 +237,20 @@ def primary_callback_hosts(runtime_paths: RuntimePaths) -> list[str]:
     return list(dict.fromkeys(host for host in hosts if host))
 
 
-def apply_runner_ca_bundle(env: dict[str, str], directory: Path) -> None:
+def apply_runner_ca_bundle(
+    env: dict[str, str],
+    directory: Path,
+    *,
+    trusted_before: Mapping[str, str] | None = None,
+) -> None:
     """Materialize broker CA bundle into directory and set CA env vars.
 
     Pops BROKER_CA_PEM_ENV from env, writes combined and broker-only bundle
     files, and sets SSL_CERT_FILE (+ friends) to the combined bundle and
     NODE_EXTRA_CA_CERTS to the broker-only file.
+
+    `trusted_before` is the environment whose CA variables these replace; the files keep the certificates of the
+    CA files it names, so commands that trusted a private CA through them still do.
 
     `materialize_ca_bundle` creates the directory with mode 0700 if missing.
     An env without the broker CA is left unchanged.
@@ -255,7 +263,14 @@ def apply_runner_ca_bundle(env: dict[str, str], directory: Path) -> None:
     from mindroom.egress_broker.ca import materialize_ca_bundle  # noqa: PLC0415
 
     # Materialize CA bundle
-    combined, broker_only = materialize_ca_bundle(ca_pem, directory)
+    trusted_before = trusted_before or {}
+    node_extra = trusted_before.get("NODE_EXTRA_CA_CERTS")
+    combined, broker_only = materialize_ca_bundle(
+        ca_pem,
+        directory,
+        kept_bundles=[Path(trusted_before[name]) for name in RUNNER_CA_BUNDLE_ENV if trusted_before.get(name)],
+        kept_node_extra=Path(node_extra) if node_extra else None,
+    )
 
     # Set CA env vars
     for name in RUNNER_CA_BUNDLE_ENV:

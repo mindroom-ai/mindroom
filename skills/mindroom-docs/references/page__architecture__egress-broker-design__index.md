@@ -70,9 +70,10 @@ A call without a configured agent gets no broker environment, because nothing sh
 
 **A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
 Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
-The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment (the config warnings name such agents), so the broker adds convenience there and no new exposure.
+The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment, so the broker adds convenience there and no new exposure.
 Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
 It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
+Those files keep the certificates of the CA files the primary's own variables name, because they replace those variables for the command.
 A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
 
 **A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**

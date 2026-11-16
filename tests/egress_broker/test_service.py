@@ -399,6 +399,49 @@ async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_thro
     ]
 
 
+@pytest.mark.asyncio
+async def test_a_primary_shell_still_trusts_the_private_cas_its_own_variables_named(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tmp_path: Path,
+) -> None:
+    """The CA files a primary shell command gets keep the certificates of the files the primary's variables name.
+
+    Those variables are replaced, so a command that reached a private HTTPS service through them would otherwise
+    stop trusting it. A variable that names a missing file adds nothing.
+    """
+    company_roots = "-----BEGIN CERTIFICATE-----\ncompany-root\n-----END CERTIFICATE-----"
+    node_roots = "-----BEGIN CERTIFICATE-----\nnode-root\n-----END CERTIFICATE-----\n"
+    (tmp_path / "company-ca.pem").write_text(company_roots, encoding="utf-8")
+    (tmp_path / "node-ca.pem").write_text(node_roots, encoding="utf-8")
+    runtime_paths = tmp_runtime_paths(
+        **_broker_env(
+            free_port(),
+            CURL_CA_BUNDLE=str(tmp_path / "company-ca.pem"),
+            REQUESTS_CA_BUNDLE=str(tmp_path / "missing.pem"),
+            NODE_EXTRA_CA_CERTS=str(tmp_path / "node-ca.pem"),
+        ),
+    )
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+
+    node_file = Path(env["NODE_EXTRA_CA_CERTS"]).read_text(encoding="utf-8")
+    assert node_file.startswith(node_roots)
+    broker_ca = node_file.removeprefix(node_roots)
+    assert broker_ca.count("-----BEGIN CERTIFICATE-----") == 1
+    bundle = Path(env["CURL_CA_BUNDLE"]).read_text(encoding="utf-8")
+    assert bundle.endswith(f"{company_roots}\n{broker_ca}")
+    assert "node-root" not in bundle
+    assert "company-root" not in node_file
+
+
 @pytest.mark.parametrize(
     ("host", "url"),
     [
@@ -500,7 +543,7 @@ async def test_a_primary_shell_runs_without_the_broker_env_when_building_it_fail
     runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
     config = _primary_shell_config()
 
-    def unresolvable(*_args: object) -> None:
+    def unresolvable(*_args: object, **_kwargs: object) -> None:
         msg = "no requester"
         raise ValueError(msg)
 
