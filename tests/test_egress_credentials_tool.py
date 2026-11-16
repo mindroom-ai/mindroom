@@ -14,6 +14,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import secret_request_cards
 from mindroom import secret_requests as secret_requests_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
@@ -979,7 +980,7 @@ _BROKER_ENV = {
 @pytest.fixture(autouse=True)
 def _homeserver_binds_openid(monkeypatch: pytest.MonkeyPatch) -> None:
     """The homeserver binds OpenID tokens, so Chat can sign in to this MindRoom with a client session."""
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=True))
 
 
 @pytest.fixture(autouse=True)
@@ -1093,8 +1094,8 @@ async def test_request_posts_card_and_returns_saved(tmp_path: Path) -> None:
     secret_request_registry().resolve(request_id, "saved")
     result = json.loads(await task)
 
-    assert (pending.requester_id, pending.agent_name, pending.service) == (_ALICE, "code", "github")
-    assert pending.worker_target == worker_target()
+    assert (pending.requester_id, pending.agent_name, pending.target.service) == (_ALICE, "code", "github")
+    assert pending.target.worker_target == worker_target()
     assert card["msgtype"] == "m.notice"
     assert card["body"] == "🔑 Code asks for your GitHub key. Open MindRoom Chat to enter it."
     assert card["m.relates_to"] == {
@@ -1296,9 +1297,9 @@ async def test_refuses_when_chat_cannot_answer(
 ) -> None:
     """Without Chat allowed to call this MindRoom with a client session, nobody could answer, so no card is posted."""
     binding = {"no-openid-binding": False, "binding-check-failed": None}.get(case, True)
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=binding))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=binding))
     if case == "no-openid-audience":
-        monkeypatch.setattr(egress_credentials_module, "openid_audience", lambda _paths: None)
+        monkeypatch.setattr(secret_request_cards, "openid_audience", lambda _paths: None)
     tool, context = _asking(
         tmp_path,
         **_PAGE_SERVED,

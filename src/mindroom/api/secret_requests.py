@@ -133,16 +133,17 @@ def _save_where_asked(
     the service check to the write, so the key is saved for the service as checked. Runs in a thread: it reads the
     credential store.
     """
-    destination = egress_key_path(scope.manager, scope.target, pending.service)
-    if destination != egress_key_path(scope.manager, pending.worker_target, pending.service):
+    target = pending.target
+    destination = egress_key_path(scope.manager, scope.target, target.service)
+    if destination != egress_key_path(scope.manager, target.worker_target, target.service):
         return "expired"
     if not scope.can_manage:
         return "forbidden"
     with consistent_read():
-        service = agent_services(scope.config, scope.manager, scope.target).get(pending.service)
-        if service is None or key_save_refusal(service) is not None or secret_request_hosts(service) != pending.hosts:
+        service = agent_services(scope.config, scope.manager, scope.target).get(target.service)
+        if service is None or key_save_refusal(service) is not None or secret_request_hosts(service) != target.hosts:
             return "expired"
-        save_secret(scope.manager, pending.worker_target, pending.service, secret)
+        save_secret(scope.manager, target.worker_target, target.service, secret)
     return "saved"
 
 
@@ -151,7 +152,7 @@ def _log_answer(pending: PendingSecretRequest, user: ClientUser, status: str) ->
         "secret_request_answered",
         request_id=pending.request_id,
         agent=pending.agent_name,
-        service=pending.service,
+        service=pending.target.service,
         status=status,
         user_id=user.user_id,
     )

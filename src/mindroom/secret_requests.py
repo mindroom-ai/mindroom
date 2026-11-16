@@ -35,6 +35,16 @@ TEMPORARY_SECRET_KEEP_SECONDS: dict[SecretKeep, int] = {"memory": 15 * 60, "disk
 _TEMPORARY_SECRETS_DIRECTORY = "temporary_secrets"
 
 
+@dataclass(frozen=True)
+class KeyTarget:
+    """An answer becomes the agent's Agent Keys key for `service` in `worker_target`'s store."""
+
+    service: str
+    worker_target: ResolvedWorkerTarget
+    # The service's hosts the card shows, which the key may only ever be sent to.
+    hosts: tuple[str, ...]
+
+
 @dataclass
 class PendingSecretRequest:
     """One open request for a secret, awaiting the requester's answer."""
@@ -43,10 +53,7 @@ class PendingSecretRequest:
     room_id: str
     requester_id: str
     agent_name: str
-    service: str
-    worker_target: ResolvedWorkerTarget
-    # The service's hosts the card shows, which the key may only ever be sent to.
-    hosts: tuple[str, ...]
+    target: KeyTarget
     expires_at: float
     outcome: asyncio.Future[SecretRequestOutcome]
     claimed: bool = False
@@ -66,9 +73,7 @@ class _SecretRequestRegistry:
         room_id: str,
         requester_id: str,
         agent_name: str,
-        service: str,
-        worker_target: ResolvedWorkerTarget,
-        hosts: tuple[str, ...],
+        target: KeyTarget,
         now: float,
     ) -> PendingSecretRequest:
         """Create and store a pending request that expires after the TTL."""
@@ -77,9 +82,7 @@ class _SecretRequestRegistry:
             room_id=room_id,
             requester_id=requester_id,
             agent_name=agent_name,
-            service=service,
-            worker_target=worker_target,
-            hosts=hosts,
+            target=target,
             expires_at=now + SECRET_REQUEST_TTL_SECONDS,
             outcome=asyncio.get_running_loop().create_future(),
         )
@@ -159,9 +162,9 @@ def secret_request_content(
     return {
         "request_id": request.request_id,
         "requester_id": request.requester_id,
-        "service": request.service,
+        "service": request.target.service,
         "display_name": display_name,
-        "hosts": list(request.hosts),
+        "hosts": list(request.target.hosts),
         "reason": reason,
         "status": status,
         "expires_at": int(request.expires_at * 1000),

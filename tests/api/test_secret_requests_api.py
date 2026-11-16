@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from structlog.testing import capture_logs
 
+from mindroom import secret_request_cards
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main, secret_requests
 from mindroom.api.client_sessions import client_session_store
@@ -28,11 +29,15 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.custom_tools import egress_credentials as egress_credentials_module
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import load_secret, save_secret
 from mindroom.message_target import MessageTarget
-from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, SECRET_REQUEST_TTL_SECONDS, secret_request_registry
+from mindroom.secret_requests import (
+    SECRET_REQUEST_CONTENT_KEY,
+    SECRET_REQUEST_TTL_SECONDS,
+    KeyTarget,
+    secret_request_registry,
+)
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room, _room
@@ -128,9 +133,11 @@ def ask() -> Iterator[Callable[..., PendingSecretRequest]]:
             room_id=room_id,
             requester_id=ALICE,
             agent_name=agent,
-            service="github",
-            worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
-            hosts=("api.github.com",),
+            target=KeyTarget(
+                service="github",
+                worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
+                hosts=("api.github.com",),
+            ),
             now=time.time() if now is None else now,
         )
         registered.append(request.request_id)
@@ -162,7 +169,7 @@ def _stored(room: _Room, request: PendingSecretRequest) -> str | None:
     stored = load_scoped_credentials(
         "egress_github",
         credentials_manager=get_runtime_credentials_manager(room.paths),
-        worker_target=request.worker_target,
+        worker_target=request.target.worker_target,
         primary_built_tool=True,
     )
     return None if stored is None else stored["secret"]
@@ -384,7 +391,7 @@ async def test_a_turn_from_a_bridge_alias_asks_the_person(tmp_path: Path, monkey
     alias = "@telegram_alice:localhost"
     config = _config(aliases={ALICE: [alias]})
     room = _answering_room(tmp_path, config, MINDROOM_COMPUTER_ALLOWED_ORIGINS='["https://chat.example.org"]')
-    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+    monkeypatch.setattr(secret_request_cards, "homeserver_openid_binding", AsyncMock(return_value=True))
     bound = bind_runtime_paths(config, room.paths)
     client = make_matrix_client_mock(user_id=room.ids["code"])
     client.room_send.return_value = nio.RoomSendResponse("$card", ROOM)

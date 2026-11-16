@@ -12,6 +12,7 @@ from mindroom import secret_requests
 from mindroom.secret_requests import (
     SECRET_REQUEST_TTL_SECONDS,
     TEMPORARY_SECRET_KEEP_SECONDS,
+    KeyTarget,
     SecretHolder,
     _SecretRequestRegistry,
     _TemporarySecrets,
@@ -36,9 +37,7 @@ def _register(registry: _SecretRequestRegistry, *, now: float = 1000.0) -> secre
         room_id=ROOM,
         requester_id="@alice:example.org",
         agent_name="code",
-        service="github",
-        worker_target=worker_target(),
-        hosts=("api.github.com",),
+        target=KeyTarget(service="github", worker_target=worker_target(), hosts=("api.github.com",)),
         now=now,
     )
 
