@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.desktop.bridge import DesktopBridge
+    from mindroom.desktop.bridge import DesktopBridge, DesktopControlScope
     from mindroom.desktop.bridge_session import DesktopBridgeSession, DesktopBridgeSessionDeps
     from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 
@@ -67,7 +67,13 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        scope: DesktopControlScope = "apps",
+    ) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
     def reset_emergency_stop(self) -> dict[str, object]: ...
     def decide_shell(
@@ -197,6 +203,8 @@ class NativeDesktopHost:
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
                 "emergency_stop_latched": bool(runtime_status.get("emergency_stop_latched", False)),
+                "control_scope": runtime_status.get("control_scope", "apps"),
+                "control_until_revoked": bool(runtime_status.get("control_until_revoked", False)),
             },
             "permissions": _permission_status(),
             "shell": runtime_status.get(
@@ -459,11 +467,10 @@ class NativeDesktopHost:
                 self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
-            _expect_keys(parameters, {"duration_seconds"})
+            duration_seconds, scope = _control_grant(parameters)
+            runtime = self._require_runtime()
             try:
-                self._require_runtime().grant_control(
-                    _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
-                )
+                runtime.grant_control(duration_seconds, until_revoked=duration_seconds is None, scope=scope)
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -687,9 +694,15 @@ class NativeBridgeRuntime:
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant a bounded local control lease."""
-        return self._required_bridge().grant_local_control(duration_seconds)
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        scope: DesktopControlScope = "apps",
+    ) -> dict[str, object]:
+        """Grant local control of the saved apps or the whole computer, for a duration or until revoked."""
+        return self._required_bridge().grant_local_control(duration_seconds, until_revoked=until_revoked, scope=scope)
 
     def revoke_control(self) -> dict[str, object]:
         """Revoke new local control actions."""
@@ -1088,6 +1101,27 @@ def _required_text(parameters: dict[str, object], key: str) -> str:
 
 def _optional_text(parameters: dict[str, object], key: str) -> str | None:
     return None if parameters.get(key) is None else _required_text(parameters, key)
+
+
+def _control_grant(parameters: dict[str, object]) -> tuple[int | None, DesktopControlScope]:
+    """Parse exactly a duration or until_revoked: true, plus an optional scope; a None duration means until revoked."""
+    remaining = {key: value for key, value in parameters.items() if key != "scope"}
+    scope = parameters.get("scope", "apps")
+    if scope not in {"apps", "computer"}:
+        raise NativeProtocolError("invalid_request", "Native desktop grant_control scope must be apps or computer.")
+    if set(remaining) == {"until_revoked"} and remaining["until_revoked"] is True:
+        return None, cast("DesktopControlScope", scope)
+    duration_seconds = remaining.get("duration_seconds")
+    if (
+        set(remaining) != {"duration_seconds"}
+        or type(duration_seconds) is not int
+        or not 60 <= duration_seconds <= 3600
+    ):
+        raise NativeProtocolError(
+            "invalid_request",
+            "Native desktop grant_control needs exactly duration_seconds or until_revoked: true, and an optional scope.",
+        )
+    return duration_seconds, cast("DesktopControlScope", scope)
 
 
 def _optional_bool(parameters: dict[str, object], key: str) -> bool:

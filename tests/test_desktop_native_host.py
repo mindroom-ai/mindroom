@@ -63,6 +63,7 @@ from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.desktop_helpers import (
     FailingSource,
     FakeMatrixOwner,
+    FakeProvider,
     ManualBridge,
     fake_cloudflare_access,
     offline_session_deps,
@@ -102,7 +103,7 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.running = False
         self.stopped = 0
-        self.grants: list[int] = []
+        self.grants: list[tuple[int | None, bool, str]] = []
         self.revoked = 0
         self.reset = 0
         self.shell_calls: list[tuple[str, dict[str, object]]] = []
@@ -124,8 +125,14 @@ class FakeRuntime:
             "active_action": None,
         }
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        self.grants.append(duration_seconds)
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        scope: str = "apps",
+    ) -> dict[str, object]:
+        self.grants.append((duration_seconds, until_revoked, scope))
         return self.status()
 
     def revoke_control(self) -> dict[str, object]:
@@ -311,7 +318,7 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     asyncio.run(host.handle(_request("reset_emergency_stop")))
     asyncio.run(host.shutdown())
 
-    assert runtime.grants == [600]
+    assert runtime.grants == [(600, False, "apps")]
     assert runtime.revoked == 1
     assert runtime.reset == 1
     assert runtime.stopped == 1
@@ -2186,3 +2193,126 @@ def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path
         await host.shutdown()
 
     asyncio.run(scenario())
+
+
+def _started_host(tmp_path: Path, runtime: FakeRuntime) -> NativeDesktopHost:
+    host = _host(tmp_path, runtime)
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    asyncio.run(host.handle(_request("start")))
+    return host
+
+
+@pytest.mark.parametrize(
+    ("parameters", "granted"),
+    [
+        ({"duration_seconds": 600}, (600, False, "apps")),
+        ({"until_revoked": True}, (None, True, "apps")),
+        ({"duration_seconds": 900, "scope": "apps"}, (900, False, "apps")),
+        ({"duration_seconds": 900, "scope": "computer"}, (900, False, "computer")),
+        ({"until_revoked": True, "scope": "computer"}, (None, True, "computer")),
+    ],
+)
+def test_grant_control_takes_a_duration_or_until_revoked_and_an_optional_scope(
+    tmp_path: Path,
+    parameters: dict[str, object],
+    granted: tuple[int | None, bool, str],
+) -> None:
+    runtime = FakeRuntime()
+    host = _started_host(tmp_path, runtime)
+    asyncio.run(host.handle(_request("grant_control", **parameters)))
+    assert runtime.grants == [granted]
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {},
+        {"scope": "computer"},
+        {"duration_seconds": 600, "until_revoked": True},
+        {"until_revoked": False},
+        {"until_revoked": 1},
+        {"duration_seconds": 59},
+        {"duration_seconds": 3601},
+        {"duration_seconds": True},
+        {"until_revoked": True, "scope": "all"},
+        {"until_revoked": True, "scope": None},
+        {"until_revoked": True, "extra": 1},
+    ],
+)
+def test_grant_control_rejects_every_other_shape_without_granting(
+    tmp_path: Path,
+    parameters: dict[str, object],
+) -> None:
+    runtime = FakeRuntime()
+    host = _started_host(tmp_path, runtime)
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("grant_control", **parameters)))
+    assert caught.value.code == "invalid_request"
+    assert runtime.grants == []
+
+
+def test_status_reports_control_scope_and_defaults_when_the_runtime_omits_it(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    host = _started_host(tmp_path, runtime)
+    authority = host.status()["authority"]
+    assert (authority["control_scope"], authority["control_until_revoked"]) == ("apps", False)
+    granted = {
+        **runtime.status(),
+        "control_available": True,
+        "control_scope": "computer",
+        "control_until_revoked": True,
+    }
+    runtime.status = lambda: granted
+    authority = host.status()["authority"]
+    assert (authority["control_scope"], authority["control_until_revoked"]) == ("computer", True)
+
+
+@pytest.mark.asyncio
+async def test_native_whole_computer_grant_without_a_gui_is_denied(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, _bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
+    with pytest.raises(NativeProtocolError) as caught:
+        await host.handle(_request("grant_control", until_revoked=True, scope="computer"))
+    assert (caught.value.code, str(caught.value)) == ("control_denied", "Desktop GUI is unavailable.")
+    authority = host.status()["authority"]
+    assert (authority["control_available"], authority["control_scope"], authority["control_until_revoked"]) == (
+        False,
+        "apps",
+        False,
+    )
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_native_whole_computer_grant_reaches_the_running_bridge_until_revoked(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app's grant reaches the bridge with its scope, the helper reports it, and revoke ends it."""
+    provider = FakeProvider()
+    monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", lambda **_: provider)
+    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", ManualBridge)
+    host = _offline_host(tmp_path, offline_runtime_session)
+    await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+    await host.handle(_request("start"))
+    try:
+        granted = (await host.handle(_request("grant_control", until_revoked=True, scope="computer")))["status"]
+        assert granted["bridge"]["state"] == "control"
+        authority = granted["authority"]
+        assert (authority["control_available"], authority["control_scope"], authority["control_until_revoked"]) == (
+            True,
+            "computer",
+            True,
+        )
+        assert (authority["lease_expires_at_ms"], authority["lease_remaining_seconds"]) == (None, 0)
+        assert (provider.input_enabled, provider.computer_scope) == (True, True)
+        revoked = (await host.handle(_request("revoke_control")))["status"]
+        assert revoked["bridge"]["state"] == "observe_only"
+        assert (revoked["authority"]["control_scope"], revoked["authority"]["control_until_revoked"]) == ("apps", False)
+        assert (provider.input_enabled, provider.computer_scope) == (False, False)
+    finally:
+        await host.shutdown()

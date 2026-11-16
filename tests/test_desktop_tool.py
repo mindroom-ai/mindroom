@@ -867,6 +867,16 @@ def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
     )
 
 
+def test_app_guidance_explains_whole_computer_scope() -> None:
+    """The agent learns how to tell whole-computer control from saved apps and that the user can end it at any time."""
+    function = toolkit_offers(DesktopTools(), "desktop")
+    description = function.description or ""
+    for phrase in ("bridge.control_scope", "computer", "primary-screen", "call status again when an app is refused"):
+        assert phrase in description
+    app = function.parameters["properties"]["app"]["description"]
+    assert "any installed app's bundle ID while control_scope is computer" in app
+
+
 @pytest.mark.asyncio
 async def test_remote_folder_read_encodes_root_and_path_and_returns_text_without_screenshot(
     monkeypatch: pytest.MonkeyPatch,

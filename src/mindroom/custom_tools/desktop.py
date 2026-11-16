@@ -92,7 +92,10 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "request_id": {"type": "string", "description": "Original request ID to recover with request_status."},
         "app": {
             "type": "string",
-            "description": "Exact application ID returned by list_apps.",
+            "description": (
+                "Exact application ID returned by list_apps, or any installed app's bundle ID while control_scope "
+                "is computer."
+            ),
         },
         "state_id": {
             "type": "string",
@@ -222,6 +225,11 @@ _DESKTOP_DESCRIPTION = (
     "Operate the requester's paired local computer through encrypted Matrix messages. status reports which of "
     "these the user enabled locally: allowlisted apps, read-only folders, and shell commands. Its gui_mode "
     "(observe_only or control) covers only app control; folders and shell access are reported separately. "
+    "status's bridge.control_scope is apps or computer. While it is computer the user has granted whole-computer "
+    "control on that computer: list_apps lists the running apps, launch_app and get_app_state accept any installed "
+    "app's bundle ID, app=primary-screen observes and takes coordinate input on the whole primary display, and "
+    "MindRoom's own windows stay out of reach. The user can end that scope at any time, so call status again when "
+    "an app is refused. "
     "Apps: start with list_apps; if the chosen app is not running, use launch_app, then get_app_state. "
     "Use observation=tree for semantic work without screenshot transfer. Prefer click_element, set_value, "
     "scroll_element, or perform_action over pixel and keyboard fallbacks. Every element index belongs "
