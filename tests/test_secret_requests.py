@@ -411,3 +411,32 @@ def test_a_read_in_memory_never_waits_for_a_write_to_disk(tmp_path: Path, monkey
         finish.set()
         answer.join(timeout=10)
     assert store.values_in_memory(HOLDER, now=1001.0, storage_root=tmp_path) == {"TOKEN": "s3cret"}
+
+
+def test_an_answer_deletes_the_files_of_expired_values(tmp_path: Path) -> None:
+    """Saving another value is enough to remove an expired one's file: no tool call has to come first."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "FIRST", "expires", keep="disk", now=1000.0, storage_root=tmp_path)
+    (first_file,) = _files(tmp_path)
+    later = 1000.0 + TEMPORARY_SECRET_KEEP_SECONDS["disk"] + 1
+
+    store.give(HOLDER, "SECOND", "stays", keep="disk", now=later, storage_root=tmp_path)
+
+    assert not first_file.exists()
+    assert len(_files(tmp_path)) == 1
+    assert store.values_in_memory(HOLDER, now=later, storage_root=tmp_path) == {"SECOND": "stays"}
+
+
+def test_a_value_does_not_replace_one_whose_file_stays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file that cannot be removed would bring the old value back after a restart, so the new one is refused."""
+    store = _TemporarySecrets()
+    store.give(HOLDER, "TOKEN", "old", keep="disk", now=1000.0, storage_root=tmp_path)
+
+    def refuse(_path: Path, *, missing_ok: bool = False) -> None:  # noqa: ARG001
+        raise PermissionError
+
+    monkeypatch.setattr(type(tmp_path), "unlink", refuse)
+    with pytest.raises(PermissionError):
+        store.give(HOLDER, "TOKEN", "new", keep="memory", now=1001.0, storage_root=tmp_path)
+
+    assert store.values_in_memory(HOLDER, now=1002.0, storage_root=tmp_path) == {"TOKEN": "old"}

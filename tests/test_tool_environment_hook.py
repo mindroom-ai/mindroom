@@ -44,6 +44,7 @@ from mindroom.tool_system.progress import report_tool_progress, tool_progress_re
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tool_system.invocation import ToolCall, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _ALICE = _MIND_EXECUTION_IDENTITY
@@ -915,3 +916,42 @@ async def test_a_structured_result_loses_a_given_secret_too(tmp_path: Path, give
     assert not outcome.is_error, outcome.content
     assert recorded == [{"status": "saved", "preview": f"raw:{REDACTED}", "lines": [REDACTED, 7]}]
     assert "open-sesame-123" not in str(outcome.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        ToolValue(content="raw:open-sesame-123"),
+        ToolOutcome(content="failed with open-sesame-123", is_error=True, stop_after_call=True),
+    ],
+    ids=["value", "outcome"],
+)
+async def test_a_result_that_carries_media_loses_a_given_secret_in_its_text(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    value: ToolValue,
+) -> None:
+    """A shell result with media attached, as a command that used the agent CLI returns, is masked in its text."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def answer(_call: ToolCall, _call_next: ToolNext) -> object:
+        return value
+
+    function = replace(shell.function, middleware=(answer,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    masked = value.content.replace("open-sesame-123", REDACTED)
+    assert recorded == [replace(value, content=masked)]
+    assert outcome.content == masked
+    assert outcome.is_error is isinstance(value, ToolOutcome)

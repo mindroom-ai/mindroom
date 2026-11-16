@@ -278,12 +278,16 @@ class _TemporarySecrets:
         expires_at = now + TEMPORARY_SECRET_KEEP_SECONDS[keep]
         with self._files:
             self._load(directory)
-            path = _write_file(directory, holder, name, value, expires_at) if keep == "disk" else None
+            self._delete_expired(now)
             with self._lock:
                 earlier = self._given.get((holder, name))
-                self._given[(holder, name)] = _Given(value, expires_at, path)
+            path = _write_file(directory, holder, name, value, expires_at) if keep == "disk" else None
             if earlier is not None and earlier.path is not None and earlier.path != path:
-                _delete_file(earlier.path)
+                # Before the new value counts: a file that stayed would bring the old value back after a restart,
+                # so one that cannot be removed refuses the new value.
+                earlier.path.unlink(missing_ok=True)
+            with self._lock:
+                self._given[(holder, name)] = _Given(value, expires_at, path)
 
     def values(self, holder: _SecretHolder, *, storage_root: Path, now: float | None = None) -> dict[str, str]:
         """Return `holder`'s live values by variable name, at `now` or else at this moment.
@@ -294,13 +298,9 @@ class _TemporarySecrets:
         now = time.time() if now is None else now
         with self._files:
             self._load(storage_root / _TEMPORARY_SECRETS_DIRECTORY)
+            self._delete_expired(now)
             with self._lock:
-                expired = [key for key, given in self._given.items() if now >= given.expires_at]
-                paths = [given.path for key in expired if (given := self._given.pop(key)).path is not None]
-                values = {name: given.value for (owner, name), given in self._given.items() if owner == holder}
-            for path in paths:
-                _delete_file(path)
-        return values
+                return {name: given.value for (owner, name), given in self._given.items() if owner == holder}
 
     def values_in_memory(
         self,
@@ -323,6 +323,14 @@ class _TemporarySecrets:
             for key in expired:
                 del self._given[key]
             return {name: given.value for (owner, name), given in self._given.items() if owner == holder}
+
+    def _delete_expired(self, now: float) -> None:
+        """Drop every expired value and delete its file; the caller holds the files' lock."""
+        with self._lock:
+            expired = [key for key, given in self._given.items() if now >= given.expires_at]
+            paths = [given.path for key in expired if (given := self._given.pop(key)).path is not None]
+        for path in paths:
+            _delete_file(path)
 
     def _load(self, directory: Path) -> None:
         """Read `directory`'s files at its first use; the caller holds the files' lock."""

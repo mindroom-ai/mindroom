@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -45,7 +45,7 @@ from mindroom.tool_system.progress import tool_progress_through
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
@@ -742,9 +742,9 @@ def _without_given_secrets(
     """Return the tool with the exact copies of the conversation's given secrets removed from what it shows.
 
     Every call in the conversation is covered, since a later call may read what a command wrote. The reply's record
-    of the call, its tool trace, its hooks and the model all read the result this returns, masked in its text and in
-    the texts of a mapping or a list, such as the receipt of output saved to a file; live reply frames read the
-    progress it reports. Best effort, like all redaction: a command that encodes the value passes, and so does
+    of the call, its tool trace, its hooks and the model all read the result this returns, masked in its text, in the
+    text of a value that carries media, and in the texts of a mapping or a list, such as the receipt of output saved
+    to a file; live reply frames read the progress it reports. Best effort, like all redaction: a command that encodes the value passes, and so does
     what a command, or MindRoom on its behalf, writes to a file in the workspace.
     """
     if not given:
@@ -760,6 +760,9 @@ def _without_given_secrets(
     def masked(result: object) -> object:
         if isinstance(result, str):
             return masked_text(result)
+        if isinstance(result, ToolValue):
+            # A result with media beside its text, as a shell command that used the agent CLI returns.
+            return replace(result, content=masked_text(result.content))
         if isinstance(result, dict):
             return {key: masked(item) for key, item in result.items()}
         if isinstance(result, list):

@@ -231,7 +231,7 @@ It provides `request_temporary_secret(name, reason)`, where `name` is the enviro
 - Chat sends the value to this MindRoom's API with the user's client session, so it never goes through Matrix or the model.
 - While it is kept, the value is the environment variable `name` of that agent's `shell` commands (`run_shell_command`) in the same room and thread, in turns of the same requester, whether they run in the MindRoom process or in a worker.
   MindRoom gives it to no other agent, conversation, or person's turn, and not to a [`terminal`], whose shell would keep it past its lifetime.
-  In a worker that several people's turns share, another person's command can still read the environment of a command while it runs.
+  In a worker that several people's turns share, another person's command can still read the environment of a command while it runs, and a process that a command leaves running keeps the variable for as long as it runs.
 - The tool returns `provided` with the minutes the variable stays set, `declined`, or `expired` when no answer came in 15 minutes.
   It waits, stops, and continues as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) the way [`request_secret`](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) does, and needs the same access for Chat: its origin in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and a homeserver that binds OpenID tokens to this deployment.
 
