@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelRequest
 
-_ROOM_FUNCTIONS = {"get_attachment", "list_attachments", "register_attachment"}
+_ROOM_FUNCTIONS = {"get_attachment", "list_attachments", "register_attachment", "inline_image"}
 
 
 def _headless_config(*tools: object) -> dict[str, Any]:
