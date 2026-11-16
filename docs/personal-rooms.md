@@ -54,7 +54,7 @@ Avatars are set only on rooms that have none.
 The welcome is sent once, and changing `welcome` or `welcome_dispatch` later does not change a welcome that is already pending.
 
 `auto_join_requester: true` requires the router's Matrix account to be allowed to use the homeserver's Synapse-compatible admin join API.
-On Tuwunel, where an account is a server admin while it is joined to the room `#admins:<server_name>`, the router stays in that room across restarts and takes no part in it: it never replies, reacts, or writes state there.
+On Tuwunel, where an account is a server admin while it is joined to the room `#admins:<server_name>`, the router stays in that room across restarts, does not store or act on events from it, and never writes to it.
 It applies only when MindRoom creates the room, and never joins someone who already joined, left, or was banned.
 When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the router's account is not a homeserver admin.
 
