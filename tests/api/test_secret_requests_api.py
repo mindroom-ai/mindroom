@@ -7,16 +7,20 @@ request is Alice's, as the tool registers it, and only she may answer it while i
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import httpx
+import nio
 import pytest
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main, secret_requests
 from mindroom.api.client_sessions import client_session_store
 from mindroom.api.validation_errors import validation_error_response
@@ -24,9 +28,20 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.custom_tools import egress_credentials as egress_credentials_module
+from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import load_secret, save_secret
-from mindroom.secret_requests import SECRET_REQUEST_TTL_SECONDS, secret_request_registry
+from mindroom.message_target import MessageTarget
+from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, SECRET_REQUEST_TTL_SECONDS, secret_request_registry
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room, _room
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+)
 from tests.egress_broker.conftest import worker_target
 
 if TYPE_CHECKING:
@@ -57,12 +72,15 @@ def _config(
     code_users: tuple[str, ...] = (ALICE, BOB),
     team_managers: tuple[str, ...] = (ALICE,),
     services: dict[str, object] | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> Config:
     """``code`` for ``code_users``, and ``team`` for Alice and Bob, whose keys ``team_managers`` manage.
 
-    Both use ``services``, by default the GitHub service the requests ask for.
+    Both use ``services``, by default the GitHub service the requests ask for; ``aliases`` maps people to their bridge
+    accounts.
     """
     return Config(
+        authorization={"aliases": aliases or {}},
         egress_broker={"services": {"github": GITHUB} if services is None else services},
         agents={
             "code": AgentConfig(
@@ -84,9 +102,9 @@ def _config(
     )
 
 
-def _answering_room(tmp_path: Path, config: Config) -> _Room:
+def _answering_room(tmp_path: Path, config: Config, **env: str) -> _Room:
     """The router, Alice, Bob and Carol in ``ROOM`` with ``config``'s agents, on an app serving it and the route."""
-    room = _room(tmp_path, dict(config.agents), **ENV)
+    room = _room(tmp_path, dict(config.agents), **ENV, **env)
     room.serve(config)
     room.app.include_router(secret_requests.router)
     room.app.add_exception_handler(RequestValidationError, validation_error_response)
@@ -358,6 +376,46 @@ async def test_a_card_for_a_service_that_changed_takes_no_key(
     assert _stored(room, request) is None
     assert [entry["status"] for entry in logs if entry["event"] == "secret_request_answered"] == ["stale"]
     assert (await _answer(room, ALICE, request.request_id, {"decline": True})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_turn_from_a_bridge_alias_asks_the_person(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn from Alice's bridge account posts a card for Alice herself, and her answer stores the key in her scope."""
+    alias = "@telegram_alice:localhost"
+    config = _config(aliases={ALICE: [alias]})
+    room = _answering_room(tmp_path, config, MINDROOM_COMPUTER_ALLOWED_ORIGINS='["https://chat.example.org"]')
+    monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=True))
+    bound = bind_runtime_paths(config, room.paths)
+    client = make_matrix_client_mock(user_id=room.ids["code"])
+    client.room_send.return_value = nio.RoomSendResponse("$card", ROOM)
+    context = ToolRuntimeContext(
+        agent_name="code",
+        target=MessageTarget.resolve(room_id=ROOM, thread_id="$thread", reply_to_event_id="$request"),
+        requester_id=alias,
+        client=client,
+        config=bound,
+        runtime_paths=room.paths,
+        plugins=config_plugins(bound, room.paths),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    tool = EgressCredentialsTools(runtime_paths=room.paths, worker_target=worker_target(alias, scope="user_agent"))
+
+    with tool_runtime_context(context):
+        task = asyncio.create_task(tool.request_secret("github", "to open the pull request"))
+    while not client.room_send.await_count and not task.done():  # noqa: ASYNC110 - the tool sends from its own task
+        await asyncio.sleep(0)
+    card = client.room_send.await_args_list[0].kwargs["content"][SECRET_REQUEST_CONTENT_KEY]
+    response = await _answer(room, ALICE, card["request_id"], {"secret": SECRET})
+    result = json.loads(await task)
+
+    assert card["requester_id"] == ALICE
+    assert response.status_code == 204
+    assert result["status"] == "saved"
+    manager = get_runtime_credentials_manager(room.paths)
+    assert load_secret(manager, worker_target(ALICE, scope="user_agent"), "github") == SECRET
+    assert load_secret(manager, worker_target(alias, scope="user_agent"), "github") is None
 
 
 @pytest.mark.asyncio

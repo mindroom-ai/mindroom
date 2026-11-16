@@ -1528,6 +1528,7 @@ visibility = [
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
+    "mindroom.custom_tools.egress_credentials",
 ]
 
 [[modules]]
@@ -5718,6 +5719,7 @@ depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
 [[modules]]
 path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
+    "mindroom.approval.tool_approval",
     "mindroom.egress_broker",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",

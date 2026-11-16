@@ -20,9 +20,10 @@ import contextlib
 import functools
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_agent_scope, egress_tool_without_worker_commands, personal_page_served
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
@@ -36,7 +37,6 @@ from mindroom.matrix.client_delivery import edit_message_result, send_message_re
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix_openid import homeserver_openid_binding, openid_audience
 from mindroom.origins import allowed_client_origins
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
@@ -80,6 +80,7 @@ _NO_SERVICES_NOTE = (
     "and users can add services of their own on the egress page where it is available."
 )
 _MAX_REASON_LENGTH = 500
+_NO_PERSON_NOTE = "Only a person can answer a card, and this turn comes from an agent or a bot, so no card was posted."
 # How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
 _SAVE_GRACE_SECONDS = 30
 _OUTCOME_NOTES: dict[SecretRequestOutcome, str] = {
@@ -115,8 +116,13 @@ _NO_OPENID_BINDING_NOTE = (
 
 @dataclass(frozen=True)
 class _SecretRequestCard:
-    """What a secret request card shows besides its request's own metadata; never a key."""
+    """What a secret request card shows besides its request's own metadata, who answers it, and the scope its key goes to.
 
+    Never a key.
+    """
+
+    requester_id: str
+    worker_target: ResolvedWorkerTarget
     agent_display_name: str
     display_name: str
     hosts: tuple[str, ...]
@@ -232,15 +238,14 @@ async def _answer_in_flight(request: PendingSecretRequest) -> SecretRequestOutco
     return request.outcome.result() if request.outcome.done() else "expired"
 
 
-def _key_access_refusal(context: ToolRuntimeContext, agent_name: str, runtime_paths: RuntimePaths) -> str | None:
+def _key_access_refusal(
+    context: ToolRuntimeContext,
+    requester_id: str,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+) -> str | None:
     """Return why the requester may not set this agent's keys, or None when they may, as on the Agent Keys pages."""
     config = context.current_config
-    if not is_human_requester_id(
-        resolve_human_requester_alias(context.requester_id, config, runtime_paths),
-        config,
-        runtime_paths,
-    ):
-        return "Only a person can answer a card, and this turn comes from an agent or a bot, so no card was posted."
     memberships = context.agent_reply_memberships
     if memberships is None:
         return "This turn cannot check who may set this agent's keys, so no card was posted."
@@ -249,7 +254,7 @@ def _key_access_refusal(context: ToolRuntimeContext, agent_name: str, runtime_pa
             "This agent's commands do not reach Agent Keys, so no key can be stored for it: it needs "
             "`egress_credentials` and a `shell` or `python` tool that runs in a worker."
         )
-    access = egress_key_access(context.requester_id, agent_name, config, runtime_paths, memberships)
+    access = egress_key_access(requester_id, agent_name, config, runtime_paths, memberships)
     if access is None:
         return "The requester may not use this agent, so they cannot set its keys."
     _is_shared, can_manage = access
@@ -399,10 +404,10 @@ class EgressCredentialsTools(Toolkit):
         registry = secret_request_registry()
         request = registry.register(
             room_id=context.room_id,
-            requester_id=context.requester_id,
+            requester_id=card.requester_id,
             agent_name=agent_name,
             service=service,
-            worker_target=target,
+            worker_target=card.worker_target,
             hosts=card.hosts,
             now=time.time(),
         )
@@ -438,18 +443,25 @@ class EgressCredentialsTools(Toolkit):
         service: str,
         reason: str,
     ) -> _SecretRequestCard | str:
-        """Return the card asking the requester for `service`'s key, or why no card may be posted.
+        """Return the card asking the turn's requester for `service`'s key, or why no card may be posted.
 
-        The service resolves as `list_egress_credentials` lists it, and the requester must be one who may set this
-        agent's keys, as on the Agent Keys pages; the card needs no personal page, so it works where none is served.
-        Chat answers through this MindRoom's API with a client session, so a card needs what that session needs.
+        The requester is the person who answers, resolved as for approval cards: the canonical human, with a bridge
+        alias resolved, whose scope the key goes to. The service resolves as `list_egress_credentials` lists it, and the
+        requester must be one who may set this agent's keys, as on the Agent Keys pages; the card needs no personal
+        page, so it works where none is served. Chat answers through this MindRoom's API with a client session, so a
+        card needs what that session needs.
         """
+        requester_id = resolve_tool_approval_approver(context.current_config, self._runtime_paths, context.requester_id)
+        if requester_id is None:
+            return _NO_PERSON_NOTE
         reason = reason.strip()[:_MAX_REASON_LENGTH]
         if not reason:
             return "Give a reason: the card tells the user what you need the key for."
-        refusal = _key_access_refusal(context, agent_name, self._runtime_paths)
+        refusal = _key_access_refusal(context, requester_id, agent_name, self._runtime_paths)
         if refusal is not None:
             return refusal
+        if requester_id != context.requester_id:
+            target = replace(context, requester_id=requester_id).resolve_worker_target()
         config = context.current_config
         manager = get_runtime_credentials_manager(self._runtime_paths)
         services = services_for_agent(effective_config(config.egress_broker, manager, target).services, agent_name)
@@ -460,6 +472,8 @@ class EgressCredentialsTools(Toolkit):
             return refusal
         agent = config.agents.get(agent_name)
         return _SecretRequestCard(
+            requester_id=requester_id,
+            worker_target=target,
             agent_display_name=(agent.display_name if agent is not None else "") or agent_name,
             display_name=egress_service.display_name or service,
             hosts=secret_request_hosts(egress_service),
