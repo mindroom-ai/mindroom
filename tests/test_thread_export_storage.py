@@ -1049,10 +1049,8 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
         ["first", straddling_body],
         exported_at=datetime(2026, 10, 2, tzinfo=UTC),
     )
-    written = {
-        thread_id: write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()
-    }
-    assert not any(result.replaced for result in written.values())
+    written = [write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()]
+    assert not any(result.replaced for result in written)
     sizes = {path.name: path.stat().st_size for path in files}
     assert sizes[_thread_filename("$at-read-cap:localhost")] == read_cap
     assert sizes[_thread_filename(straddling_id)] == read_cap + 1
@@ -1067,7 +1065,7 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
         write_room_index(
             output_dir,
             room,
-            written_entries=[result.index_entry for result in written.values() if result.index_entry is not None],
+            written_entries=[result.index_entry for result in written if result.index_entry is not None],
         )
     assert [call.args[0] for call in parse.call_args_list] == [_thread_filename("$stale:localhost")]
     index_path = room_dir / "index.json"
@@ -1115,3 +1113,29 @@ def test_written_entry_is_not_used_for_a_file_changed_since(tmp_path: Path, chan
 
     [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
     assert entry["participants"] == ["@bob:localhost", "@carol:localhost"]
+
+
+def test_written_thread_whose_file_cannot_be_checked_after_the_write_is_still_written(tmp_path: Path) -> None:
+    """A failed check of the file just written leaves the thread written and its entry to the index rebuild."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    filename = _thread_filename("$thread:localhost")
+    real_stat = os.stat
+
+    def stat_failing_for_the_thread(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if path == filename:
+            raise PermissionError(path)
+        return real_stat(path, *args, **kwargs)
+
+    with patch.object(thread_export_storage.os, "stat", side_effect=stat_failing_for_the_thread):
+        written = write_thread_payload(
+            output_dir,
+            room,
+            "$thread:localhost",
+            _thread_with_bodies("$thread:localhost", ["a"]),
+        )
+
+    assert written == (True, None)
+    write_room_index(output_dir, room)
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["thread_id"] == "$thread:localhost"

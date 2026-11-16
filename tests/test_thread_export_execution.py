@@ -485,18 +485,15 @@ async def test_pass_indexes_the_threads_it_wrote_without_parsing_their_files(tmp
             thread_id="$active:localhost",
         ),
     )
-    parse = thread_export_storage._thread_index_entry
-    parsed: list[str] = []
-
-    def record_parse(filename: str, data: bytes) -> object:
-        parsed.append(filename)
-        return parse(filename, data)
-
-    with patch.object(thread_export_storage, "_thread_index_entry", side_effect=record_parse):
+    with patch.object(
+        thread_export_storage,
+        "_thread_index_entry",
+        wraps=thread_export_storage._thread_index_entry,
+    ) as parse:
         stats = await export(thread_ids[1:], truncated=True)
 
     assert stats.threads_unchanged == 1
-    assert parsed == [f"{quote('$older:localhost', safe='')}.yaml"]
+    assert [call.args[0] for call in parse.call_args_list] == [f"{quote('$older:localhost', safe='')}.yaml"]
     index_path = output_dir / "lobby" / "index.json"
     from_pass = index_path.read_bytes()
     index_path.unlink()

@@ -64,7 +64,7 @@ _MAX_WARNED_UNRECOGNIZED_ENTRIES = 4096
 _WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str]] = set()
 # A thread's last message timestamp, which orders the room index, and its entry there.
 type _ThreadIndexEntry = tuple[int, dict[str, object]]
-# What changes whenever any writer replaces or edits a file: its inode, size, and modification time.
+# A file's inode, size, and modification time, which replacing the file or an ordinary edit of it changes.
 type _FileIdentity = tuple[int, int, int]
 
 
@@ -582,7 +582,7 @@ def _yaml_node_count(value: object) -> int:
 
 
 def _file_identity(status: os.stat_result) -> _FileIdentity:
-    """Return the parts of a file's status that any replacement or edit changes."""
+    """Return the parts of a file's status that replacing the file or an ordinary edit of it changes."""
     return status.st_ino, status.st_size, status.st_mtime_ns
 
 
@@ -590,7 +590,8 @@ def _written_index_entry(room_fd: int, filename: str, payload: dict[str, object]
     """Return the index pair a parse of the file just left for one built thread payload would give, with its identity."""
     try:
         status = os.stat(filename, dir_fd=room_fd, follow_symlinks=False)
-    except FileNotFoundError:
+    except OSError:
+        # The write succeeded, so a file this check cannot see is left for the index rebuild to read.
         return None
     # A rebuild indexes a file past the read cap, or one the bounded loader refuses whole, from its header.
     # Of that loader's limits only the node count can refuse a built payload's dump, and libyaml gives every value back.
@@ -750,7 +751,7 @@ def write_room_index(
 ) -> None:
     """Rebuild a room index after YAML changes or detected filename-set drift.
 
-    ``written_entries`` are the entries ``write_thread_payload`` returned in this pass; only a file that changed since is parsed.
+    ``written_entries`` are the entries ``write_thread_payload`` returned in this pass; files without one, or changed since, are parsed.
     """
     root_fd = _open_owned_export_root(
         output_dir,
@@ -1061,9 +1062,9 @@ def write_thread_payload(
         # Compare bytes rather than parse them, so even a thread too long for the bounded parser is not rewritten unchanged.
         # A larger existing file has changed, so the read stops just past the new export's size, even above the read cap.
         existing = _read_bytes_at(room_fd, filename, max_bytes=len(data) + _EXPORTED_AT_SLACK_BYTES)
-        if existing is not None and _differs_only_in_exported_at(existing, data):
-            return _WrittenThread(replaced=False, index_entry=_written_index_entry(room_fd, filename, payload))
-        _atomic_write_at(room_fd, filename, data)
-        return _WrittenThread(replaced=True, index_entry=_written_index_entry(room_fd, filename, payload))
+        replaced = existing is None or not _differs_only_in_exported_at(existing, data)
+        if replaced:
+            _atomic_write_at(room_fd, filename, data)
+        return _WrittenThread(replaced=replaced, index_entry=_written_index_entry(room_fd, filename, payload))
     finally:
         os.close(room_fd)
