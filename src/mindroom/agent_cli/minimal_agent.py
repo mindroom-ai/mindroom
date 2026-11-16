@@ -85,7 +85,7 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
 
 
 def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
-    """Name a skill, the directory its files live in, its reference and script files, then its instructions.
+    """Name a skill and the directory its files live in, then give its instructions.
 
     A skill in the workspace is named relative to it, where Bash starts, because a worker mounts the workspace at
     another path than the primary's.
@@ -93,12 +93,7 @@ def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
     directory = skill.source_path
     if not policy.tools_use_workdir and directory.is_relative_to(policy.workspace_root):
         directory = directory.relative_to(policy.workspace_root)
-    lines = [skill.name, f"Directory: {directory.as_posix()}"]
-    if skill.references:
-        lines.append("References: " + ", ".join(f"references/{name}" for name in skill.references))
-    if skill.scripts:
-        lines.append("Scripts: " + ", ".join(f"scripts/{name}" for name in skill.scripts))
-    return "\n".join([*lines, "", skill.instructions])
+    return f"{skill.name}\nDirectory: {directory.as_posix()}\n\n{skill.instructions}"
 
 
 def minimal_turn(

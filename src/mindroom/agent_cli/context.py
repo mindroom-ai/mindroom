@@ -39,7 +39,7 @@ def minimal_system_message(
         skills = (
             "Skills: "
             + ", ".join(f"`{name}`" for name in skill_names)
-            + "; read one with `mindroom-agent context read skill:<name>` before following it."
+            + "; read one with `mindroom-agent context read skill:<name>`."
         )
         if len(skills) > 2000:
             skills = f"{len(skill_names)} skills available; use mindroom-agent context list."

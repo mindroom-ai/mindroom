@@ -134,8 +134,6 @@ def test_the_bootstrap_names_each_skill_and_its_document_says_where_its_files_li
             description="Review a diff.",
             instructions="Read the whole diff first.",
             source_path=review,
-            references=("checklist.md",),
-            scripts=("lint.sh",),
         ),
         Skill(
             name="tdd",
@@ -149,12 +147,10 @@ def test_the_bootstrap_names_each_skill_and_its_document_says_where_its_files_li
     turn = minimal_turn(build, session_preamble="", transient_memory="", system_enrichment=(), transient_enrichment=())
 
     system = system_text(turn.system_messages)
-    assert "Skills: `code-review`, `tdd`; read one with `mindroom-agent context read skill:<name>`" in system
+    assert "Skills: `code-review`, `tdd`; read one with `mindroom-agent context read skill:<name>`." in system
     assert "Read the whole diff first." not in system
     review_document = turn.context_documents["skill:code-review"]
     assert review_document.startswith("code-review\nDirectory: skills/code-review\n")
-    assert "references/checklist.md" in review_document
-    assert "scripts/lint.sh" in review_document
     assert review_document.endswith("Read the whole diff first.")
     assert turn.context_documents["skill:tdd"].startswith(f"tdd\nDirectory: {tdd.as_posix()}\n")
     assert turn.context_documents["skill:tdd"].endswith("Write the failing test.")
