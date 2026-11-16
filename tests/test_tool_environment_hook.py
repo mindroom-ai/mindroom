@@ -30,6 +30,7 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -127,6 +129,8 @@ class _Shell:
     runtime: Callable[[], AbstractContextManager[object]]
     # The agent workspace a worker command runs in; None for a local shell.
     workspace: Path | None = None
+    # The primary's runtime paths, which a Matrix reply of the agent runs with.
+    runtime_paths: RuntimePaths | None = None
 
     async def call(
         self,
@@ -153,6 +157,21 @@ class _Shell:
         assert not outcome.is_error, outcome.content
         return outcome.content.rsplit("\n", 1)[-1]
 
+    async def run_in_reply(self, registry: HookRegistry, command: str, *, model_name: str | None) -> str:
+        """Run ``command`` as one shell call of Mind's Matrix reply on ``model_name``; return the line it printed."""
+        assert self.runtime_paths is not None
+        context = _mind_tool_runtime_context(self.runtime_paths, _live_primary_config(self.runtime_paths))
+        context = replace(context, hooks=HookBindings(registry=registry), active_model_name=model_name)
+        with tool_runtime_context(context):
+            outcome = await execute_tool_call(
+                self.function,
+                {"args": ["bash", "-c", command]},
+                ToolCallContext(run_id="run-mind", session_id=_ALICE.session_id, user_id=None),
+                middleware=(detached_policy(HookRegistry.empty()),),
+            )
+        assert not outcome.is_error, outcome.content
+        return outcome.content.rsplit("\n", 1)[-1]
+
 
 def _function(toolkit: object, key: str, name: str) -> ToolFunction:
     return next(function for function in adapt_toolkit(toolkit, key=key).functions if function.name == name)
@@ -175,7 +194,12 @@ def _local_shell(tmp_path: Path, **shell_settings: str) -> _Shell:
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    return _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
+    return _Shell(
+        _function(toolkit, "shell", "run_shell_command"),
+        sent=[],
+        runtime=nullcontext,
+        runtime_paths=runtime_paths,
+    )
 
 
 def _worker_tool(
@@ -210,6 +234,7 @@ def _worker_tool(
         sent=sent,
         runtime=lambda: tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)),
         workspace=workspace,
+        runtime_paths=primary_paths,
     )
 
 
@@ -335,6 +360,38 @@ async def test_database_url_variables_reach_the_command_wherever_it_runs(shell: 
     output = await shell.run(_registry(database), 'printf "%s|%s" "${APP_DATABASE_URL-unset}" "${DATABASE_URL-unset}"')
 
     assert output == "postgres://app|postgres://primary"
+
+
+_PRINT_ASSISTED_BY = 'printf "%s" "${MINDROOM_ASSISTED_BY-unset}"'
+
+
+@pytest.mark.asyncio
+async def test_a_reply_s_shell_command_gets_the_agent_and_model_to_credit_wherever_it_runs(shell: _Shell) -> None:
+    """The command can credit the agent's display name and the id of the model this turn runs on."""
+    output = await shell.run_in_reply(HookRegistry.empty(), _PRINT_ASSISTED_BY, model_name="default")
+
+    assert output == "MindRoom Mind:gpt-6-astra <https://github.com/mindroom-ai/mindroom>"
+    if shell.sent:
+        assert shell.sent[-1]["execution_env"]["MINDROOM_ASSISTED_BY"] == output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "not-configured"])
+async def test_a_command_gets_no_credit_without_a_configured_model(shell: _Shell, model_name: str | None) -> None:
+    """MindRoom guesses no model: a turn without a known one, or a call without a reply, sets nothing."""
+    assert await shell.run_in_reply(HookRegistry.empty(), _PRINT_ASSISTED_BY, model_name=model_name) == "unset"
+    assert await shell.run(HookRegistry.empty(), _PRINT_ASSISTED_BY) == "unset"
+
+
+@hook(EVENT_TOOL_ENVIRONMENT)
+async def _own_credit(ctx: ToolEnvironmentContext) -> None:
+    ctx.set_env("MINDROOM_ASSISTED_BY", "Plugin Bot")
+
+
+@pytest.mark.asyncio
+async def test_a_hook_s_credit_wins_over_mindroom_s(shell: _Shell) -> None:
+    """A plugin can replace the value for the commands it serves, since it knows its own agents best."""
+    assert await shell.run_in_reply(_registry(_own_credit), _PRINT_ASSISTED_BY, model_name="default") == "Plugin Bot"
 
 
 def _broker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -683,6 +683,9 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     )
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
+    # The credit for a commit goes under the hooks' variables, so a plugin can replace or remove it.
+    if (registered_toolkit, tool_name) == _SHELL_COMMAND:
+        environment = _assisted_by_environment().then(environment)
     # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
     # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
     # types there.
@@ -721,6 +724,26 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     return await answer(result, "error" if _answered_failure(result) else "success")
+
+
+def _assisted_by_environment() -> ToolEnvironment:
+    """Return the credit a shell command can put on a Git commit it writes: the agent and the model this turn runs on.
+
+    Empty for a call outside an agent's reply or on a model the live config does not name, so nothing is guessed.
+    """
+    context = get_tool_runtime_context()
+    if context is None or not context.agent_name or context.active_model_name is None:
+        return ToolEnvironment()
+    config = context.current_config
+    model = config.models.get(context.active_model_name)
+    if model is None or not model.id.strip():
+        return ToolEnvironment()
+    try:
+        display_name = config.entity_display_name(context.agent_name)
+    except ValueError:
+        return ToolEnvironment()
+    credit = f"MindRoom {display_name}:{model.id.strip()} <https://github.com/mindroom-ai/mindroom>"
+    return ToolEnvironment(values={"MINDROOM_ASSISTED_BY": credit})
 
 
 async def _primary_shell_broker_environment(resolved_context: _ResolvedToolContext) -> ToolEnvironment:

@@ -100,6 +100,10 @@ _WORKDIR_CWD_NOTE = (
     "so relative paths name files there. `$MINDROOM_AGENT_WORKSPACE` is your agent workspace, which holds your "
     "skills, subagent profiles, saved tool outputs, and delegation records; use it for files meant for the workspace."
 )
+_COMMIT_CREDIT_NOTE = (
+    'For a git commit you write, add `--trailer "Assisted-by: $MINDROOM_ASSISTED_BY"` when that variable is set; '
+    "never add Signed-off-by or Co-authored-by for yourself."
+)
 # Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
 # removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
 # reserialized edits, unverified renames, truncated reads).
@@ -436,7 +440,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
         def offered_function(self, function: ToolFunction) -> ToolFunction:
             """Describe ``run_shell_command`` with the working directory and the working method it runs under."""
             cwd_note = _WORKDIR_CWD_NOTE if self._beside_workdir else _WORKSPACE_CWD_NOTE
-            notes = (cwd_note, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
+            notes = (cwd_note,) if self.base_dir is not None else ()
+            notes = (*notes, _COMMIT_CREDIT_NOTE, _WORKING_METHOD_NOTE)
             return replace(
                 function,
                 description="\n\n".join((function.description or "", *notes)).strip(),

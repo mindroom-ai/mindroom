@@ -141,6 +141,10 @@ For how stopping a response and worker restarts affect running commands, see [St
 
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](https://docs.mindroom.chat/deployment/sandbox-proxy/#shell-environment-and-path).
 
+In an agent's reply, each command, in the MindRoom process or a worker, also gets `MINDROOM_ASSISTED_BY`, such as `MindRoom DevAgent:claude-opus-5.5 <https://github.com/mindroom-ai/mindroom>`: the display name of the agent the call runs for, or of the team member, and the `id` of the configured model the turn runs on.
+The tool's description asks the agent to add it to the Git commits it writes as an `Assisted-by:` trailer.
+It is unset outside a reply and when the turn's model is not in `models`, and a [`tool:environment` hook](https://docs.mindroom.chat/hooks/) can replace or remove it.
+
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
