@@ -5724,6 +5724,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",
     "mindroom.origins",
+    "mindroom.runtime_resolution",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.authoring",

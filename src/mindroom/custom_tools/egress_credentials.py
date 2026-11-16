@@ -38,6 +38,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix_openid import homeserver_openid_binding, openid_audience
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
     SECRET_REQUEST_TTL_SECONDS,
@@ -460,9 +461,15 @@ class EgressCredentialsTools(Toolkit):
         refusal = _key_access_refusal(context, requester_id, agent_name, self._runtime_paths)
         if refusal is not None:
             return refusal
-        if requester_id != context.requester_id:
-            target = replace(context, requester_id=requester_id).resolve_worker_target()
         config = context.current_config
+        if requester_id != context.requester_id:
+            identity = replace(context.execution_identity, requester_id=requester_id)
+            target = resolve_agent_execution(
+                agent_name,
+                config,
+                self._runtime_paths,
+                execution_identity=identity,
+            ).worker_target
         manager = get_runtime_credentials_manager(self._runtime_paths)
         services = services_for_agent(effective_config(config.egress_broker, manager, target).services, agent_name)
         egress_service = _requestable_service(services, service)
