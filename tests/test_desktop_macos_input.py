@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mindroom.desktop import macos_input
 from mindroom.desktop.macos_input import click, drag, scroll
 
 
@@ -102,3 +103,17 @@ def test_drag_start_covered_before_press_posts_no_unpaired_release(quartz: Simpl
         drag((-1800, 100), (-1200, 400), duration=0.1, check=check)
     assert checked == [(-1800, 100), (-1800, 100)]
     assert [event["kind"] for event in quartz.posted] == [quartz.kCGEventMouseMoved]
+
+
+def test_process_bundle_id_reads_the_running_application(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A window owner's process resolves to its bundle ID, and a process without one to nothing."""
+    applications = {
+        7: SimpleNamespace(bundleIdentifier=lambda: "chat.mindroom.menubar"),
+        9: SimpleNamespace(bundleIdentifier=lambda: None),
+    }
+    lookup = SimpleNamespace(runningApplicationWithProcessIdentifier_=applications.get)
+    monkeypatch.setitem(sys.modules, "AppKit", SimpleNamespace(NSRunningApplication=lookup))
+
+    assert macos_input.process_bundle_id(7) == "chat.mindroom.menubar"
+    assert macos_input.process_bundle_id(8) is None
+    assert macos_input.process_bundle_id(9) is None

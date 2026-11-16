@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import sys
 from collections import OrderedDict, UserList
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,17 +32,26 @@ from mindroom.desktop.accessibility import (
 class FakeRunningApplication:
     """Small NSRunningApplication-compatible test object."""
 
-    def __init__(self, pid: int = 42, *, active: bool = True) -> None:
+    def __init__(
+        self,
+        pid: int = 42,
+        *,
+        active: bool = True,
+        bundle_id: str = "com.example.Editor",
+        name: str = "Editor",
+    ) -> None:
         self.pid = pid
         self.active = active
+        self.bundle_id = bundle_id
+        self.name = name
         self.activation_hook: Callable[[], None] | None = None
         self.activation_options: list[int] = []
 
     def bundleIdentifier(self) -> str:
-        return "com.example.Editor"
+        return self.bundle_id
 
     def localizedName(self) -> str:
-        return "Editor"
+        return self.name
 
     def processIdentifier(self) -> int:
         return self.pid
@@ -60,9 +71,13 @@ class FakeWorkspace:
 
     def __init__(self, application: FakeRunningApplication) -> None:
         self.applications = [application]
+        self.frontmost: FakeRunningApplication | None = application
 
     def runningApplications(self) -> list[FakeRunningApplication]:
         return self.applications
+
+    def frontmostApplication(self) -> FakeRunningApplication | None:
+        return self.frontmost
 
 
 class FakeMacServices:
@@ -193,6 +208,8 @@ def _fake_mac_backend() -> tuple[MacAccessibilityBackend, FakeMacServices, FakeW
     backend._services = services
     backend._workspace = workspace
     backend._states = OrderedDict()
+    backend._before_input = lambda: None
+    backend._collect_deadline = None
     return backend, services, workspace
 
 
@@ -911,3 +928,174 @@ def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:
     backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
     with pytest.raises(AccessibilityError, match="stale"):
         backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, "old-state")
+
+
+def test_primary_screen_keyboard_guard_refuses_a_frontmost_mindroom() -> None:
+    """Whole-screen keys go to whichever app is frontmost, so they stop whenever that is MindRoom."""
+    backend, _, workspace = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({PRIMARY_SCREEN_APP_ID})
+    state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    guard = backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)
+    guard()
+    workspace.frontmost = FakeRunningApplication(pid=45, bundle_id="chat.mindroom.menubar", name="MindRoom")
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="MindRoom became the active application"):
+        guard()
+    for mindroom_id in ("chat.mindroom.menubar", "chat.mindroom.desktophelper"):
+        workspace.frontmost = FakeRunningApplication(pid=45, bundle_id=mindroom_id, name="MindRoom")
+        with pytest.raises(AccessibilityError, match="nothing was typed") as refused:
+            backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
+        assert type(refused.value) is AccessibilityError
+    workspace.frontmost = None
+    backend.prepare_keyboard(PRIMARY_SCREEN_APP_ID, state.state_id)()
+
+
+def _refuse_input() -> None:
+    msg = "revoked"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.parametrize("action", ["click_element", "perform_action", "set_value", "prepare_typing"])
+def test_closed_input_gate_blocks_each_accessibility_effect_after_revalidation(action: str) -> None:
+    """The gate runs after every revalidation and immediately before the press, value write, or focus write."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    state = backend.get_app_state("com.example.Editor")
+    field = next(element for element in state.elements if element.name == "Save")
+    backend._before_input = _refuse_input
+    effects: dict[str, Callable[[], object]] = {
+        "click_element": lambda: backend.click_element(state.app_id, state.state_id, field.index),
+        "perform_action": lambda: backend.perform_action(state.app_id, state.state_id, field.index, "AXPress"),
+        "set_value": lambda: backend.set_value(state.app_id, state.state_id, field.index, "published"),
+        "prepare_typing": lambda: backend.prepare_typing(state.app_id, state.state_id, field.index),
+    }
+
+    with pytest.raises(RuntimeError, match="revoked"):
+        effects[action]()
+
+    assert services.performed_actions == []
+    assert services.attributes["button"]["value"] == "draft"
+    assert services.focused_element is None
+
+
+def test_revoke_between_the_focus_press_and_the_value_write_keeps_the_value() -> None:
+    """Each accessibility effect is gated on its own, so a revoke after the focus press stops the write."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    state = backend.get_app_state("com.example.Editor")
+    field = next(element for element in state.elements if element.name == "Save")
+    gate_checks = 0
+
+    def gate() -> None:
+        nonlocal gate_checks
+        gate_checks += 1
+        if gate_checks > 1:
+            _refuse_input()
+
+    backend._before_input = gate
+
+    with pytest.raises(RuntimeError, match="revoked"):
+        backend.set_value(state.app_id, state.state_id, field.index, "published")
+
+    assert services.performed_actions == [("button", "AXPress")]
+    assert services.attributes["button"]["value"] == "draft"
+
+
+def test_unresponsive_app_fails_within_the_collection_deadline_and_the_screen_still_observes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree read past its deadline fails instead of holding the lane, and the whole screen stays observable."""
+    backend, services, _ = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({"com.example.Editor", PRIMARY_SCREEN_APP_ID})
+    now = [100.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: now[0])
+    services.collection_hook = lambda _count: now.__setitem__(0, now[0] + 6.0)
+
+    with pytest.raises(AccessibilityError, match="did not answer accessibility requests in time") as caught:
+        backend.get_app_state("com.example.Editor")
+
+    assert str(caught.value) == (
+        "Application 'com.example.Editor' did not answer accessibility requests in time; "
+        "it may be busy or not responding."
+    )
+    assert backend._states == OrderedDict()
+    assert backend._collect_deadline is None
+    assert backend.get_app_state(PRIMARY_SCREEN_APP_ID).app_id == PRIMARY_SCREEN_APP_ID
+
+
+def test_hung_app_holds_a_collection_for_its_deadline_plus_at_most_one_message_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline is checked before each message, so a tree read can overrun it by one message timeout."""
+    backend, services, _ = _fake_mac_backend()
+    now = [100.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: now[0])
+    answer_attribute = services.AXUIElementCopyAttributeValue
+    answer_actions = services.AXUIElementCopyActionNames
+    hung = {"button", "password"}
+
+    # The window answers, but every message to an element inside it waits out the 2-second messaging timeout.
+    def copy_attribute(reference: object, attribute: str, unused: object) -> tuple[int, object | None]:
+        if reference in hung:
+            now[0] += 2.0
+            return -25204, None
+        return answer_attribute(reference, attribute, unused)
+
+    def copy_actions(reference: object, unused: object) -> tuple[int, object | None]:
+        if reference in hung:
+            now[0] += 2.0
+            return -25204, None
+        return answer_actions(reference, unused)
+
+    monkeypatch.setattr(services, "AXUIElementCopyAttributeValue", copy_attribute)
+    monkeypatch.setattr(services, "AXUIElementCopyActionNames", copy_actions)
+
+    with pytest.raises(AccessibilityError, match="did not answer"):
+        backend.get_app_state("com.example.Editor")
+
+    assert 5.0 < now[0] - 100.0 <= 5.0 + 2.0
+    assert backend._collect_deadline is None
+
+
+def test_an_action_on_an_app_that_stops_answering_drops_its_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revalidation past the deadline fails before input and the stale state cannot be used again."""
+    backend, services, _ = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    button = next(element for element in state.elements if element.name == "Save")
+    now = [100.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: now[0])
+    services.collection_hook = lambda _count: now.__setitem__(0, now[0] + 6.0)
+
+    with pytest.raises(AccessibilityError, match="did not answer"):
+        backend.click_element(state.app_id, state.state_id, button.index)
+
+    assert state.state_id not in backend._states
+    assert backend._collect_deadline is None
+    assert services.performed_actions == []
+
+
+def test_state_stabilization_gives_up_after_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tree that keeps changing is returned as unstable after the budget instead of after every attempt."""
+    backend, services, _ = _fake_mac_backend()
+    now = [100.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _delay: now.__setitem__(0, now[0] + 3.0))
+
+    def churn(count: int) -> None:
+        services.attributes["button"]["value"] = f"draft-{count}"
+
+    services.collection_hook = churn
+
+    assert backend.get_app_state("com.example.Editor").stability == "unstable"
+    assert services.collection_count == 4
+
+
+def test_mac_backend_bounds_every_accessibility_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The process-wide messaging timeout is set once, on the system-wide element, when the backend starts."""
+    services = SimpleNamespace(AXUIElementCreateSystemWide=lambda: "system", AXUIElementSetMessagingTimeout=Mock())
+    appkit = SimpleNamespace(NSWorkspace=SimpleNamespace(sharedWorkspace=object))
+    monkeypatch.setitem(sys.modules, "ApplicationServices", services)
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+
+    MacAccessibilityBackend(frozenset({"com.example.Editor"}), lambda: (1, 1), lambda: None)
+
+    services.AXUIElementSetMessagingTimeout.assert_called_once_with("system", 2.0)

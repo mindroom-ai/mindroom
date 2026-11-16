@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 import sys
+import threading
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -20,7 +21,7 @@ from mindroom.desktop.accessibility import (
     create_accessibility_backend,
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
-from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, normalize_key_chord
+from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, MINDROOM_APP_IDS, normalize_key_chord
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PillowImage
 
 _EMERGENCY_STOP_MESSAGE = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
+_CONTROL_REVOKED_MESSAGE = "Local desktop control was revoked; input stopped and this action's outcome may be partial."
 _MACOS_UNICODE_CHUNK_LENGTH = 20
 
 
@@ -37,6 +39,10 @@ class DesktopProviderError(RuntimeError):
 
 class DesktopEmergencyStopError(DesktopProviderError):
     """The local pointer fail-safe revoked input for this bridge process."""
+
+
+class DesktopControlRevokedError(DesktopProviderError):
+    """Local control ended while this input was starting or running; part of it may have been sent."""
 
 
 def request_macos_desktop_permissions() -> tuple[str, ...]:
@@ -93,6 +99,10 @@ class DesktopProvider(Protocol):
 
     def check_emergency_stop(self) -> None:
         """Raise when the machine-local pointer fail-safe is engaged."""
+        ...
+
+    def set_input_enabled(self, enabled: bool) -> None:
+        """Open input for a local control grant or close it at once, including for input already running."""
         ...
 
     def list_apps(self) -> list[DesktopApp]:
@@ -228,9 +238,12 @@ class PyAutoGuiDesktopProvider:
         self._display_geometry = macos_displays if sys.platform == "darwin" else self._primary_display_geometry
         self._max_screenshot_width = max_screenshot_width
         self._jpeg_quality = jpeg_quality
+        # Closed until the bridge opens it for a local control grant.
+        self._input_enabled = threading.Event()
         self._accessibility = accessibility_backend or create_accessibility_backend(
             allowed_app_ids,
             self._screen_size,
+            before_input=self._check_input,
         )
 
     def status(self) -> dict[str, object]:
@@ -252,13 +265,20 @@ class PyAutoGuiDesktopProvider:
         """Reject control while the pointer is on a PyAutoGUI fail-safe point."""
         self._check_emergency_stop()
 
+    def set_input_enabled(self, enabled: bool) -> None:
+        """Open or close input; once closed, no pointer event, key, text chunk, or accessibility effect starts."""
+        if enabled:
+            self._input_enabled.set()
+        else:
+            self._input_enabled.clear()
+
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed on this machine."""
         return self._accessibility.list_apps()
 
     def launch_app(self, app_id: str) -> None:
         """Launch or foreground one exact allowlisted application."""
-        self._check_emergency_stop()
+        self._check_input()
         self._accessibility.launch_app(app_id)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
@@ -323,7 +343,7 @@ class PyAutoGuiDesktopProvider:
 
     def click_element(self, *, app_id: str, state_id: str, element_index: int) -> None:
         """Invoke the element's semantic press action."""
-        self._check_emergency_stop()
+        self._check_input()
         self._accessibility.click_element(app_id, state_id, element_index)
 
     def set_value(self, *, app_id: str, state_id: str, element_index: int, value: str) -> None:
@@ -331,7 +351,7 @@ class PyAutoGuiDesktopProvider:
         if len(value) > 2000:
             msg = "value must not exceed 2000 characters."
             raise DesktopProviderError(msg)
-        self._check_emergency_stop()
+        self._check_input()
         self._accessibility.set_value(app_id, state_id, element_index, value)
 
     def scroll_element(
@@ -344,7 +364,7 @@ class PyAutoGuiDesktopProvider:
         pages: int,
     ) -> None:
         """Scroll at the center of one current semantic element."""
-        self._check_emergency_stop()
+        self._check_input()
         element, process_id = self._accessibility.element_for_action(app_id, state_id, element_index)
         if element.bounds is None:
             msg = f"Accessibility element {element_index} has no scrollable screen bounds."
@@ -363,7 +383,7 @@ class PyAutoGuiDesktopProvider:
         action_name: str,
     ) -> None:
         """Invoke one action explicitly advertised in the current state."""
-        self._check_emergency_stop()
+        self._check_input()
         self._accessibility.perform_action(app_id, state_id, element_index, action_name)
 
     def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
@@ -371,7 +391,7 @@ class PyAutoGuiDesktopProvider:
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        self._check_emergency_stop()
+        self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
         screen_x, screen_y = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
@@ -389,7 +409,7 @@ class PyAutoGuiDesktopProvider:
                 "characters; send Enter or Tab with keypress."
             )
             raise DesktopProviderError(msg)
-        self._check_emergency_stop()
+        self._check_input()
         if element_index is None:
             guard = self._accessibility.prepare_keyboard(app_id, state_id)
         else:
@@ -397,10 +417,15 @@ class PyAutoGuiDesktopProvider:
                 msg = "element_index must be a nonnegative integer."
                 raise DesktopProviderError(msg)
             guard = self._accessibility.prepare_typing(app_id, state_id, element_index)
-        if sys.platform == "darwin":
-            self._run_input(lambda: _type_macos_unicode(text, before_chunk=guard))
-        else:
+
+        def before_chunk() -> None:
+            self._check_input()
             guard()
+
+        if sys.platform == "darwin":
+            self._run_input(lambda: _type_macos_unicode(text, before_chunk=before_chunk))
+        else:
+            before_chunk()
             self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
 
     def scroll(
@@ -417,7 +442,7 @@ class PyAutoGuiDesktopProvider:
         if (x is None) != (y is None):
             msg = "x and y must either both be provided or both be omitted."
             raise DesktopProviderError(msg)
-        self._check_emergency_stop()
+        self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
         window = target.state.window
         point = _normalized_point(window, x=x, y=y) if x is not None and y is not None else _rect_center(window)
@@ -431,7 +456,7 @@ class PyAutoGuiDesktopProvider:
             normalized = normalize_key_chord(keys)
         except ValueError as exc:
             raise DesktopProviderError(str(exc)) from exc
-        self._check_emergency_stop()
+        self._check_input()
         self._accessibility.prepare_keyboard(app_id, state_id)()
         if len(normalized) == 1:
             self._run_input(lambda: self._pyautogui.press(normalized[0]))
@@ -472,7 +497,7 @@ class PyAutoGuiDesktopProvider:
         if type(duration_ms) is not int or not 100 <= duration_ms <= 2000:
             msg = "duration_ms must be an integer between 100 and 2000."
             raise DesktopProviderError(msg)
-        self._check_emergency_stop()
+        self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
         start = _normalized_point(target.state.window, x=start_x, y=start_y)
         end = _normalized_point(target.state.window, x=end_x, y=end_y)
@@ -502,26 +527,29 @@ class PyAutoGuiDesktopProvider:
                 self._pyautogui.FAILSAFE = enabled
 
     def _fallback_point(self, app_id: str, state_id: str, x: int, y: int) -> tuple[tuple[int, int], int | None]:
-        self._check_emergency_stop()
+        self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
         point = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
         return point, target.process_id
 
     def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
-        """Return a check for right before each Quartz pointer event: the fail-safe, then the window at the point."""
+        """Return a check for right before each Quartz pointer event: the input gate, then the window at the point.
+
+        An app target needs its own window on top; the whole-screen target, bound to no process, needs any window but
+        MindRoom's.
+        """
         posted = False
 
         # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
         def check(point: tuple[int, int]) -> None:
             nonlocal posted
-            self._check_emergency_stop()
-            if process_id is not None and macos_input.window_owner_at(point) != process_id:
-                if not posted:
-                    msg = "Another window covers the allowed app at the pointer; nothing was sent."
-                    raise AccessibilityError(msg)
-                msg = "Another window covers the allowed app at the pointer; input stopped and its outcome may be partial."
-                raise AccessibilityActionOutcomeUnknownError(msg)
+            self._check_input()
+            owner = macos_input.window_owner_at(point)
+            if process_id is not None and owner != process_id:
+                _refuse_pointer("Another window covers the allowed app at the pointer", posted=posted)
+            if process_id is None and owner is not None and macos_input.process_bundle_id(owner) in MINDROOM_APP_IDS:
+                _refuse_pointer("A MindRoom window is at the pointer", posted=posted)
             # Every passing check is followed by an event.
             posted = True
 
@@ -559,10 +587,17 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(str(exc)) from exc
 
     def _run_input(self, operation: Callable[[], None]) -> None:
+        self._check_input()
         try:
             operation()
         except self._pyautogui.FailSafeException as exc:
             raise DesktopEmergencyStopError(_EMERGENCY_STOP_MESSAGE) from exc
+
+    def _check_input(self) -> None:
+        """Run right before input starts and before each of its events: refuse once control is revoked or stopped."""
+        if not self._input_enabled.is_set():
+            raise DesktopControlRevokedError(_CONTROL_REVOKED_MESSAGE)
+        self._check_emergency_stop()
 
     def _check_emergency_stop(self) -> None:
         position = self._pyautogui.position()
@@ -573,6 +608,14 @@ class PyAutoGuiDesktopProvider:
     def _screen_size(self) -> tuple[int, int]:
         size = self._pyautogui.size()
         return int(size.width), int(size.height)
+
+
+def _refuse_pointer(reason: str, *, posted: bool) -> None:
+    if not posted:
+        msg = f"{reason}; nothing was sent."
+        raise AccessibilityError(msg)
+    msg = f"{reason}; input stopped and its outcome may be partial."
+    raise AccessibilityActionOutcomeUnknownError(msg)
 
 
 def _validate_region(region: DesktopRect, *, screen_width: int, screen_height: int) -> None:
@@ -596,7 +639,10 @@ def _capture_macos_primary_screen() -> PillowImage:
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
     try:
-        cg_image = macos_capture.capture_display(int(Quartz.CGMainDisplayID()))  # ty: ignore[unresolved-attribute]
+        cg_image = macos_capture.capture_display(
+            int(Quartz.CGMainDisplayID()),  # ty: ignore[unresolved-attribute]
+            excluded_bundle_ids=MINDROOM_APP_IDS,
+        )
     except macos_capture.MacOSCaptureError as exc:
         raise DesktopProviderError(str(exc)) from exc
     return _pillow_image_from_macos_capture(cg_image)
@@ -715,6 +761,7 @@ def _rect_center(rect: DesktopRect) -> tuple[int, int]:
 
 
 __all__ = [
+    "DesktopControlRevokedError",
     "DesktopEmergencyStopError",
     "DesktopProvider",
     "DesktopProviderError",

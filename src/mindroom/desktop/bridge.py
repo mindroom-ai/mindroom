@@ -8,7 +8,7 @@ import json
 import sys
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
@@ -49,7 +49,12 @@ from mindroom.desktop.protocol import (
     desktop_observation_mode,
     event_content,
 )
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
+from mindroom.desktop.provider import (
+    DesktopControlRevokedError,
+    DesktopEmergencyStopError,
+    DesktopProvider,
+    DesktopProviderError,
+)
 from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
@@ -76,6 +81,11 @@ _MAX_FUTURE_SKEW_MS = 30_000
 # Checking a handle is an observation; starting or killing a command has effects that must not repeat.
 _EFFECTFUL_SHELL_ACTIONS = frozenset({"run_shell", "kill_shell"})
 _STOP_DELIVERY_TIMEOUT_SECONDS = 2.0
+# A hung app can hold a native call that no task cancellation reaches, so stop waits for it only this long.
+_STOP_ACTIVE_ACTION_TIMEOUT_SECONDS = 5.0
+# The provider's input gate interrupts these actions; browser actions run to completion.
+_GATED_ACTIONS = DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS
+_STALE_AUTHORITY_ERROR = "Desktop control ended after this command arrived, so it was not run; check the current state before sending it again."
 
 
 async def _run_macos_application_events() -> None:
@@ -186,6 +196,11 @@ class DesktopBridge:
     _active_action: str | None = field(default=None, init=False)
     _control_revoked: bool = field(default=False, init=False)
     _control_lease_deadline: float | None = field(default=None, init=False)
+    # Each grant that starts control anew is a new generation; control commands run only under the one they arrived in.
+    _control_generation: int = field(default=0, init=False)
+    _admitted_generations: dict[str, int] = field(default_factory=dict, init=False)
+    # Input that a revoke interrupted may still be inside a native call; no grant may reopen input until it returns.
+    _input_interrupted: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Pair each enabled capability with its provider and convert the lease label to a local deadline."""
@@ -207,6 +222,8 @@ class DesktopBridge:
             controller_key=controller_journal_key(self.policy.controller),
             legacy_path=self.legacy_journal_path,
         )
+        if self.provider is not None:
+            self.provider.set_input_enabled(self.policy.allow_control)
         if self.policy.control_lease_expires_at_ms is None:
             return
         remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
@@ -236,6 +253,8 @@ class DesktopBridge:
         if command.action == "request_status":
             self._queue_response(self._request_status_response(command))
             return
+        if command.action in DESKTOP_CONTROL_ACTIONS:
+            self._admitted_generations[command.request_id] = self._control_generation
         self._journal.admit(command, fingerprint)
         (self._shell_work_available if command.action == "run_shell" else self._work_available).set()
 
@@ -344,8 +363,10 @@ class DesktopBridge:
                     )
                 finally:
                     self._in_flight.discard(command.request_id)
+                    self._admitted_generations.pop(command.request_id, None)
                     if not shell_starts:
                         self._active_action = None
+                        self._input_interrupted = False
 
     async def deliver_pending(self) -> bool:
         """Retry exact recorded results without running desktop work again."""
@@ -472,7 +493,11 @@ class DesktopBridge:
         return shell
 
     def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant control only through the local helper's private management channel."""
+        """Grant control only through the local helper's private management channel.
+
+        A grant while control is in force extends it; any other grant starts a new authority under which commands
+        that arrived earlier do not run.
+        """
         if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
             msg = "Local control duration must be between 60 and 3600 seconds."
             raise ValueError(msg)
@@ -482,19 +507,29 @@ class DesktopBridge:
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
+        if self._input_interrupted:
+            msg = "Wait for the interrupted desktop action to finish before granting control again."
+            raise ValueError(msg)
         self.provider.check_emergency_stop()
+        if not self._control_available():
+            self._control_generation += 1
         self.policy = replace(
             self.policy,
             allow_control=True,
             control_lease_expires_at_ms=round((self.clock() + duration_seconds) * 1000),
         )
         self._control_lease_deadline = self.monotonic_clock() + duration_seconds
+        self.provider.set_input_enabled(True)
         return self.local_status()
 
     def revoke_local_control(self) -> dict[str, object]:
-        """Revoke new input immediately without repeating or interrupting active actions."""
+        """End control now: queued control is refused and running app input stops before its next event."""
         self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
         self._control_lease_deadline = None
+        if self.provider is not None:
+            self.provider.set_input_enabled(False)
+        if self._active_action in _GATED_ACTIONS:
+            self._input_interrupted = True
         return self.local_status()
 
     def reset_local_emergency_stop(self) -> dict[str, object]:
@@ -511,13 +546,21 @@ class DesktopBridge:
         return self.local_status()
 
     async def stop(self) -> None:
-        """Fence admission, settle active work, and give recorded replies a bounded final delivery."""
+        """Fence admission, end input, wait a bounded time for active work, and give replies a bounded final delivery."""
         self._accepting = False
         self.revoke_local_control()
         if self.shell is not None:
             # Pending approval can otherwise hold the shell lane until the command expires.
             await self.shell.close()
-        async with self._execution_lock, self._shell_start_lock:
+        async with AsyncExitStack() as settled:
+            try:
+                async with asyncio.timeout(_STOP_ACTIVE_ACTION_TIMEOUT_SECONDS):
+                    await settled.enter_async_context(self._execution_lock)
+                    await settled.enter_async_context(self._shell_start_lock)
+            except TimeoutError:
+                # Input is closed, so the stuck call can send nothing more; its command stays started, and the
+                # next run reports its outcome as unknown.
+                logger.warning("desktop_stop_active_action_timed_out", active_action=self._active_action)
             try:
                 # Native/CLI shutdown closes transport immediately after this method returns.
                 # Include an already-busy sender in the bound; undelivered receipts stay durable.
@@ -538,14 +581,14 @@ class DesktopBridge:
             self.filesystem.close()
 
     async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
-        policy_error = self._policy_error(command)
+        policy_error = self._policy_error(command) or self._authority_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
         try:
             await resolve_pinned_device(self.client, self.policy.controller)
         except OlmToDeviceError as exc:
             return self._error_response(command, str(exc))
-        policy_error = self._policy_error(command)
+        policy_error = self._policy_error(command) or self._authority_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
         if command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS and "observation" in command.parameters:
@@ -621,7 +664,11 @@ class DesktopBridge:
         except DesktopEmergencyStopError as exc:
             self._control_revoked = True
             return self._error_response(command, str(exc))
-        except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
+        except (
+            AccessibilityActionOutcomeUnknownError,
+            DesktopControlRevokedError,
+            PlaywrightActionOutcomeUnknownError,
+        ) as exc:
             return self._unknown_control_response(command, reason=str(exc))
         except (
             AccessibilityError,
@@ -738,6 +785,14 @@ class DesktopBridge:
         else:
             error = None
         return error
+
+    def _authority_error(self, command: DesktopCommand) -> str | None:
+        """Refuse control that arrived under an earlier grant, or in an earlier run, than the one now in force."""
+        if command.action not in DESKTOP_CONTROL_ACTIONS:
+            return None
+        if self._admitted_generations.get(command.request_id) != self._control_generation:
+            return _STALE_AUTHORITY_ERROR
+        return None
 
     def _control_policy_error(self) -> str | None:
         if not self.policy.allow_control:

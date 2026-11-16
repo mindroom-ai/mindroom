@@ -32,7 +32,7 @@ def framework(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         isOnScreen=lambda: True,
     )
     display = SimpleNamespace(displayID=lambda: 7)
-    content = SimpleNamespace(windows=lambda: [window], displays=lambda: [display])
+    content = SimpleNamespace(windows=lambda: [window], displays=lambda: [display], applications=list)
     config = SimpleNamespace(
         setWidth_=Mock(),
         setHeight_=Mock(),
@@ -137,10 +137,36 @@ def test_missing_callback_has_bounded_wait(
 
 def test_primary_display_is_selected_by_id(framework: SimpleNamespace) -> None:
     """Primary display selection cannot fall through to an arbitrary screen."""
-    assert macos_capture.capture_display(7) == "image"
+    assert macos_capture.capture_display(7, excluded_bundle_ids=frozenset()) == "image"
     framework.filters.initWithDisplay_excludingWindows_.assert_called_once_with(framework.display, [])
     with pytest.raises(macos_capture.MacOSCaptureError, match="display"):
-        macos_capture.capture_display(8)
+        macos_capture.capture_display(8, excluded_bundle_ids=frozenset())
+
+
+def test_display_capture_leaves_out_every_window_of_excluded_applications(framework: SimpleNamespace) -> None:
+    """Excluded apps are found among all running apps with windows, not only those on screen at that instant."""
+    mindroom = SimpleNamespace(bundleIdentifier=lambda: "chat.mindroom.menubar")
+    other = SimpleNamespace(bundleIdentifier=lambda: "com.example.Editor")
+    bundleless = SimpleNamespace(bundleIdentifier=lambda: None)
+    framework.content.applications = lambda: [other, bundleless, mindroom]
+    framework.filters.initWithDisplay_excludingApplications_exceptingWindows_ = Mock(
+        return_value=framework.filter_object,
+    )
+    excluded = frozenset({"chat.mindroom.menubar", "chat.mindroom.desktophelper"})
+
+    assert macos_capture.capture_display(7, excluded_bundle_ids=excluded) == "image"
+
+    framework.filters.initWithDisplay_excludingApplications_exceptingWindows_.assert_called_once_with(
+        framework.display,
+        [mindroom],
+        [],
+    )
+    framework.filters.initWithDisplay_excludingWindows_.assert_not_called()
+    assert framework.shared.call_args.args[:2] == (True, False)
+
+    framework.content.applications = lambda: [other]
+    assert macos_capture.capture_display(7, excluded_bundle_ids=excluded) == "image"
+    framework.filters.initWithDisplay_excludingWindows_.assert_called_once_with(framework.display, [])
 
 
 def test_old_macos_is_rejected_before_framework_calls(

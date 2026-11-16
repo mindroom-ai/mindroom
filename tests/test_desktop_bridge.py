@@ -20,6 +20,7 @@ import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.accessibility import (
+    AccessibilityState,
     DesktopApp,
     MacAccessibilityBackend,
 )
@@ -75,6 +76,8 @@ from tests.desktop_helpers import (
     _stall_output_uploads,
 )
 from tests.desktop_helpers import selected_root as selected_root  # noqa: PLC0414
+from tests.test_desktop_provider import _fake_quartz, _window
+from tests.test_desktop_provider import _provider as _real_provider
 from tests.test_olm_to_device import olm_transport
 
 # The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
@@ -1180,13 +1183,17 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
     )
     appkit = SimpleNamespace(NSWorkspace=SimpleNamespace(sharedWorkspace=lambda: workspace))
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
-    monkeypatch.setitem(sys.modules, "ApplicationServices", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "ApplicationServices",
+        SimpleNamespace(AXUIElementCreateSystemWide=lambda: "system", AXUIElementSetMessagingTimeout=lambda *_: None),
+    )
     monkeypatch.setattr(
         "mindroom.desktop.accessibility._request_application_activation",
         lambda _app: launch_requested.set(),
     )
     monkeypatch.setattr("mindroom.desktop.accessibility._LAUNCH_ATTEMPTS", 6)
-    backend = MacAccessibilityBackend(frozenset({APP_ID}), lambda: (1920, 1080))
+    backend = MacAccessibilityBackend(frozenset({APP_ID}), lambda: (1920, 1080), lambda: None)
     provider = FakeProvider()
     monkeypatch.setattr(provider, "launch_app", backend.launch_app)
     bridge = DesktopBridge(object(), provider, _policy(allow_control=True), clock=lambda: NOW_SECONDS)
@@ -2469,3 +2476,212 @@ async def test_bridge_rejects_reference_observed_by_another_allowed_requester(tr
     assert not _response(transport).ok
     assert "scope" in _response(transport).error
     assert provider.calls == [("get_app_state", APP_ID)]
+
+
+_CLICK = {"app": APP_ID, "state_id": "state-1", "x": 10, "y": 20, "button": "left"}
+_STALE_AUTHORITY = "Desktop control ended after this command arrived, so it was not run; check the current state before sending it again."
+
+
+def test_bridge_opens_the_provider_input_gate_only_while_control_is_granted() -> None:
+    """The provider may send input exactly while a local grant is in force, from construction through stop."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    assert provider.input_enabled is False
+    bridge.grant_local_control(60)
+    assert provider.input_enabled is True
+    bridge.revoke_local_control()
+    assert provider.input_enabled is False
+    leased = FakeProvider()
+    DesktopBridge(client=object(), provider=leased, policy=_policy(allow_control=True), clock=lambda: NOW_SECONDS)
+    assert leased.input_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_the_provider_input_gate() -> None:
+    """A stopped bridge leaves no provider able to send input."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    bridge.grant_local_control(60)
+    await bridge.stop()
+    assert provider.input_enabled is False
+    with pytest.raises(ValueError, match="Restart or reset"):
+        bridge.grant_local_control(60)
+    assert provider.input_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_control_queued_before_a_revoke_never_reaches_the_provider(transport: AsyncMock) -> None:
+    """A command queued before a revoke is refused when it reaches the executor."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    command = _command("click", parameters=_CLICK)
+    bridge._observations.remember(STATE, command)
+    await bridge.on_to_device_event(_event(command))
+    bridge.revoke_local_control()
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).error == "Desktop control is disabled; this bridge is observe-only."
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+async def test_a_new_grant_never_runs_control_queued_under_the_previous_one(transport: AsyncMock, ending: str) -> None:
+    """Control that arrived under one grant is refused once that grant ends, even when a new grant follows."""
+    now = [NOW_SECONDS]
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: now[0],
+        monotonic_clock=lambda: now[0],
+    )
+    bridge.grant_local_control(60)
+    command = replace(_command("click", parameters=_CLICK), expires_at_ms=120_000)
+    bridge._observations.remember(STATE, command)
+    await bridge.on_to_device_event(_event(command))
+    if ending == "revoke":
+        bridge.revoke_local_control()
+    else:
+        now[0] += 61
+    bridge.grant_local_control(60)
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).error == _STALE_AUTHORITY
+    # Only the grants' fail-safe checks reached the provider.
+    assert {name for name, _ in provider.calls} == {"check_emergency_stop"}
+
+
+@pytest.mark.asyncio
+async def test_extending_an_active_grant_keeps_its_queued_control(transport: AsyncMock) -> None:
+    """Granting again while control is still in force continues the same authority."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    bridge.grant_local_control(60)
+    command = _command("click", parameters=_CLICK)
+    bridge._observations.remember(STATE, command)
+    await bridge.on_to_device_event(_event(command))
+    bridge.grant_local_control(600)
+    await _execute(bridge)
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert ("click", (APP_ID, "state-1", 10, 20, "left")) in provider.calls
+
+
+@pytest.mark.asyncio
+async def test_control_queued_before_a_restart_is_refused_under_the_new_run(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A durable queued command does not borrow the authority of the next run's lease."""
+    journal = tmp_path / "journal.sqlite3"
+    first = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal,
+    )
+    await first.on_to_device_event(_event(_command("click", parameters=_CLICK)))
+    first.close()
+    provider = FakeProvider()
+    second = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal,
+    )
+    await _execute(second)
+    await second.deliver_pending()
+    assert _response(transport).error == _STALE_AUTHORITY
+    assert provider.calls == []
+    second.close()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_waits_until_input_interrupted_by_a_revoke_has_settled(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drag stopped by a revoke cannot resume under a quick new grant: the grant waits until the drag has ended."""
+    provider, _, _ = _real_provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    monkeypatch.setitem(sys.modules, "Quartz", _fake_quartz(posted, [_window(42, 0, 0, 2000)]))
+    reached, release = threading.Event(), threading.Event()
+    sleeps: list[float] = []
+
+    def sleep(_delay: float) -> None:
+        sleeps.append(_delay)
+        if len(sleeps) == 3:
+            reached.set()
+            assert release.wait(5)
+
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", sleep)
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    drag = _command(
+        "drag",
+        parameters={"app": APP_ID, "state_id": "state-1", "start_x": 0, "start_y": 0, "end_x": 1000, "end_y": 0},
+    )
+    bridge._observations.remember(STATE, drag)
+    await bridge.on_to_device_event(_event(drag))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(reached.wait, 5)
+        bridge.revoke_local_control()
+        with pytest.raises(ValueError, match="Wait for the interrupted desktop action to finish"):
+            bridge.grant_local_control(60)
+        assert bridge.local_status()["control_available"] is False
+    finally:
+        release.set()
+    await executing
+    await bridge.deliver_pending()
+    response = _response(transport)
+    assert response.result["action_outcome"] == "unknown"
+    assert "Local desktop control was revoked" in response.result["warning"]
+    kinds = [event["kind"] for event in posted]
+    assert kinds.count(3) == 3
+    assert kinds[-1] == 2
+    bridge.grant_local_control(60)
+    assert bridge.local_status()["control_available"] is True
+    assert [event["kind"] for event in posted] == kinds
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_wait_for_a_stuck_observation_beyond_its_bound(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native call that never returns cannot hold stop, which still gives replies their final delivery."""
+    del transport
+    started, release = threading.Event(), threading.Event()
+
+    class StuckProvider(FakeProvider):
+        def get_app_state(self, app_id: str) -> AccessibilityState:
+            started.set()
+            assert release.wait(5)
+            return super().get_app_state(app_id)
+
+    monkeypatch.setattr("mindroom.desktop.bridge._STOP_ACTIVE_ACTION_TIMEOUT_SECONDS", 0.05)
+    bridge = DesktopBridge(client=object(), provider=StuckProvider(), policy=_policy(), clock=lambda: NOW_SECONDS)
+    await bridge.on_to_device_event(_event(_command("get_app_state")))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    assert await asyncio.to_thread(started.wait, 5)
+    try:
+        await asyncio.wait_for(bridge.stop(), timeout=2)
+        assert bridge.local_status()["gui_mode"] == "stopped"
+    finally:
+        release.set()
+    await executing

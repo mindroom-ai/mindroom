@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
+from mindroom.desktop.input import MINDROOM_APP_IDS
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -33,6 +35,8 @@ class _RunningApplication(Protocol):
 class _Workspace(Protocol):
     def runningApplications(self) -> list[_RunningApplication]: ...  # noqa: N802
 
+    def frontmostApplication(self) -> _RunningApplication | None: ...  # noqa: N802
+
 
 PRIMARY_SCREEN_APP_ID = "primary-screen"
 MAX_ACCESSIBILITY_ELEMENTS = 128
@@ -44,6 +48,12 @@ _MAX_TEXT_LENGTH = 160
 _STATE_STABILIZATION_ATTEMPTS = 12
 _STATE_STABILIZATION_DELAY_SECONDS = 0.05
 _STATE_STABILIZATION_MATCHES = 3
+# How long macOS waits for an app to answer one accessibility message before giving up.
+_AX_MESSAGING_TIMEOUT_SECONDS = 2.0
+# Checked before each message of one tree read, so a read can overrun it by one messaging timeout.
+_COLLECT_DEADLINE_SECONDS = 5.0
+# Checked before each stabilizing re-read, so get_app_state can overrun it by one tree read.
+_STATE_STABILIZATION_BUDGET_SECONDS = 8.0
 _VALUE_VERIFICATION_ATTEMPTS = 4
 _DIRECT_ACTIVATION_ATTEMPTS = 5
 _ACTIVATION_ATTEMPTS = 20
@@ -253,6 +263,12 @@ class _MacElementIdentity:
     content_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CollectionDeadline:
+    app_id: str
+    expires_at: float
+
+
 @dataclass(slots=True)
 class _StoredMacState:
     public: AccessibilityState
@@ -267,15 +283,28 @@ class _StoredMacState:
 class MacAccessibilityBackend:
     """macOS AXUIElement backend with exact app allowlisting and stale-state checks."""
 
-    def __init__(self, allowed_app_ids: frozenset[str], screen_size: Callable[[], tuple[int, int]]) -> None:
+    def __init__(
+        self,
+        allowed_app_ids: frozenset[str],
+        screen_size: Callable[[], tuple[int, int]],
+        before_input: Callable[[], None],
+    ) -> None:
         import AppKit  # noqa: PLC0415
         import ApplicationServices  # noqa: PLC0415
 
         self._allowed_app_ids = allowed_app_ids
         self._screen_size = screen_size
+        # Runs immediately before each press or value write and raises once local control has ended.
+        self._before_input = before_input
         self._services: Any = ApplicationServices
         self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
         self._states: OrderedDict[str, _StoredMacState] = OrderedDict()
+        self._collect_deadline: _CollectionDeadline | None = None
+        # Set on the system-wide element, the timeout applies to every accessibility message this process sends.
+        self._services.AXUIElementSetMessagingTimeout(  # ty: ignore[unresolved-attribute]
+            self._services.AXUIElementCreateSystemWide(),  # ty: ignore[unresolved-attribute]
+            _AX_MESSAGING_TIMEOUT_SECONDS,
+        )
 
     def availability(self) -> dict[str, object]:
         """Report whether macOS granted the process Accessibility permission."""
@@ -336,6 +365,7 @@ class MacAccessibilityBackend:
             self._remember_state(_StoredMacState(state, _state_fingerprint(state), (), None, None))
             return state
         state_id = uuid4().hex
+        started_at = time.monotonic()
         candidate = self._collect_app_state(app_id, state_id=state_id)
         if candidate.public.truncated:
             candidate.public = replace(candidate.public, stability="truncated")
@@ -343,6 +373,8 @@ class MacAccessibilityBackend:
             return candidate.public
         matching_observations = 0
         for _ in range(_STATE_STABILIZATION_ATTEMPTS):
+            if time.monotonic() - started_at >= _STATE_STABILIZATION_BUDGET_SECONDS:
+                break
             time.sleep(_STATE_STABILIZATION_DELAY_SECONDS)
             application = candidate.application
             if application is None or candidate.window_reference is None:
@@ -398,23 +430,22 @@ class MacAccessibilityBackend:
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Focus a revalidated target and return a guard to call right before each keyboard input is posted."""
         application = self._focused_fallback_state(app_id, state_id).application
-        if application is None:
-            return _primary_screen_keyboard_guard
-        input_posted = False
-
         # Keyboard events go to whichever app is frontmost when they are posted, not to the validated one.
-        def guard() -> None:
-            nonlocal input_posted
-            if application.isActive():
-                input_posted = True
-                return
-            if not input_posted:
-                msg = "The allowed application lost keyboard focus before any input was sent; nothing was typed."
-                raise AccessibilityError(msg)
-            msg = "The allowed application lost keyboard focus; input stopped and its outcome may be partial."
-            raise AccessibilityActionOutcomeUnknownError(msg)
+        if application is None:
+            return _keyboard_guard(
+                self._mindroom_not_frontmost,
+                nothing_typed="MindRoom is the active application; nothing was typed. Activate another application first.",
+                stopped="MindRoom became the active application; input stopped and its outcome may be partial.",
+            )
+        return _keyboard_guard(
+            application.isActive,
+            nothing_typed="The allowed application lost keyboard focus before any input was sent; nothing was typed.",
+            stopped="The allowed application lost keyboard focus; input stopped and its outcome may be partial.",
+        )
 
-        return guard
+    def _mindroom_not_frontmost(self) -> bool:
+        frontmost = self._workspace.frontmostApplication()
+        return frontmost is None or frontmost.bundleIdentifier() not in MINDROOM_APP_IDS
 
     def _focused_fallback_state(self, app_id: str, state_id: str) -> _StoredMacState:
         stored = self._fresh_state(app_id, state_id)
@@ -465,6 +496,7 @@ class MacAccessibilityBackend:
         current, index = self._current_action_state(app_id, state_id, element_index)
         reference = self._typing_target(current, index)
         content = self._element_content_fingerprint(reference, None)
+        self._before_input()
         error = self._services.AXUIElementSetAttributeValue(reference, self._services.kAXFocusedAttribute, True)
         if error != self._services.kAXErrorSuccess:
             msg = "macOS did not confirm text-field focus; the action outcome is unknown."
@@ -537,10 +569,12 @@ class MacAccessibilityBackend:
         reference = self._writable_value_target(current, current_index)
         element = current.public.elements[current_index]
         if element.role in _FOCUS_BEFORE_SET_ROLES and self._services.kAXPressAction in element.actions:
+            self._before_input()
             focus_error = self._services.AXUIElementPerformAction(reference, self._services.kAXPressAction)
             if focus_error != self._services.kAXErrorSuccess:
                 msg = f"macOS accessibility focus action returned error {focus_error}; the outcome is unknown."
                 raise AccessibilityActionOutcomeUnknownError(msg)
+        self._before_input()
         error = self._services.AXUIElementSetAttributeValue(
             reference,
             self._services.kAXValueAttribute,
@@ -558,6 +592,7 @@ class MacAccessibilityBackend:
         self._activate(current.application)
         current, current_index = self._current_action_state(app_id, state_id, element_index)
         reference = self._advertised_action_target(current, current_index, action)
+        self._before_input()
         error = self._services.AXUIElementPerformAction(reference, action)
         if error != self._services.kAXErrorSuccess:
             msg = f"macOS accessibility action returned error {error}; the outcome is unknown."
@@ -663,6 +698,25 @@ class MacAccessibilityBackend:
         state_id: str,
         expected_pid: int | None = None,
         expected_window: object | None = None,
+    ) -> _StoredMacState:
+        self._collect_deadline = _CollectionDeadline(app_id, time.monotonic() + _COLLECT_DEADLINE_SECONDS)
+        try:
+            return self._read_app_state(
+                app_id,
+                state_id=state_id,
+                expected_pid=expected_pid,
+                expected_window=expected_window,
+            )
+        finally:
+            self._collect_deadline = None
+
+    def _read_app_state(
+        self,
+        app_id: str,
+        *,
+        state_id: str,
+        expected_pid: int | None,
+        expected_window: object | None,
     ) -> _StoredMacState:
         if not self._services.AXIsProcessTrusted():
             msg = "macOS Accessibility permission is required for semantic desktop state."
@@ -771,7 +825,7 @@ class MacAccessibilityBackend:
             )
         ]
         content.append(raw_value)
-        action_error, actions = self._services.AXUIElementCopyActionNames(reference, None)
+        action_error, actions = self._copy_action_names(reference)
         if (
             action_error == self._services.kAXErrorSuccess
             and isinstance(actions, Sequence)
@@ -873,7 +927,7 @@ class MacAccessibilityBackend:
         return tuple(children)
 
     def _action_names(self, reference: object) -> tuple[str, ...]:
-        error, actions = self._services.AXUIElementCopyActionNames(reference, None)
+        error, actions = self._copy_action_names(reference)
         if error != self._services.kAXErrorSuccess or not isinstance(actions, Sequence) or isinstance(actions, str):
             return ()
         names = [
@@ -884,12 +938,28 @@ class MacAccessibilityBackend:
         return tuple(sorted(names))[:8]
 
     def _attribute_settable(self, reference: object, attribute: str) -> bool:
+        self._check_collect_deadline()
         error, settable = self._services.AXUIElementIsAttributeSettable(reference, attribute, None)
         return error == self._services.kAXErrorSuccess and settable is True
 
     def _copy_attribute(self, reference: object, attribute: str) -> object | None:
+        self._check_collect_deadline()
         error, value = self._services.AXUIElementCopyAttributeValue(reference, attribute, None)
         return value if error == self._services.kAXErrorSuccess else None
+
+    def _copy_action_names(self, reference: object) -> tuple[int, object]:
+        self._check_collect_deadline()
+        return self._services.AXUIElementCopyActionNames(reference, None)
+
+    def _check_collect_deadline(self) -> None:
+        """Before each message of a tree read, give up on an app that has used up the read's deadline."""
+        deadline = self._collect_deadline
+        if deadline is not None and time.monotonic() >= deadline.expires_at:
+            msg = (
+                f"Application {deadline.app_id!r} did not answer accessibility requests in time; "
+                "it may be busy or not responding."
+            )
+            raise AccessibilityError(msg)
 
     def _activate(self, application: _RunningApplication | None) -> None:
         if application is None:
@@ -1062,6 +1132,23 @@ def _primary_screen_keyboard_guard() -> None:
     """Accept any focused app: the primary-screen target already covers the whole screen."""
 
 
+def _keyboard_guard(may_type: Callable[[], bool], *, nothing_typed: str, stopped: str) -> Callable[[], None]:
+    """Return a check for right before each keyboard input that refuses once `may_type` fails."""
+    input_posted = False
+
+    def guard() -> None:
+        nonlocal input_posted
+        if may_type():
+            # Every passing check is followed by an input.
+            input_posted = True
+            return
+        if not input_posted:
+            raise AccessibilityError(nothing_typed)
+        raise AccessibilityActionOutcomeUnknownError(stopped)
+
+    return guard
+
+
 def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> bool:
     for _ in range(attempts):
         if application.isActive():
@@ -1093,11 +1180,13 @@ def _request_application_activation(app_id: str) -> None:
 def create_accessibility_backend(
     allowed_app_ids: frozenset[str],
     screen_size: Callable[[], tuple[int, int]],
+    *,
+    before_input: Callable[[], None],
 ) -> AccessibilityBackend:
-    """Create the native semantic backend or a state-bound pixel fallback."""
+    """Create the native semantic backend, which runs `before_input` before each effect, or a state-bound pixel fallback."""
     if sys.platform == "darwin":
         try:
-            return MacAccessibilityBackend(allowed_app_ids, screen_size)
+            return MacAccessibilityBackend(allowed_app_ids, screen_size, before_input)
         except ImportError:
             return ScreenshotOnlyAccessibilityBackend(allowed_app_ids, screen_size)
     return ScreenshotOnlyAccessibilityBackend(allowed_app_ids, screen_size)

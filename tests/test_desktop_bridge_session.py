@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -14,6 +15,7 @@ from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 from mindroom.desktop import native_config
+from mindroom.desktop.accessibility import AccessibilityState, DesktopRect
 from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.bridge_session import (
     DesktopBridgeSession,
@@ -22,7 +24,12 @@ from mindroom.desktop.bridge_session import (
     first_worker_exit,
     start_desktop_bridge_session,
 )
-from mindroom.desktop.command_journal import DesktopCommandJournalError
+from mindroom.desktop.command_journal import (
+    DesktopCommandJournal,
+    DesktopCommandJournalError,
+    controller_journal_key,
+    desktop_journal_path,
+)
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
@@ -32,12 +39,13 @@ from mindroom.desktop.native_config import (
     NativeFilesConfig,
     NativeShellConfig,
 )
-from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
+from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE, DesktopCommand
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 from tests.desktop_helpers import (
     SAVED_SESSION,
     FakeMatrixOwner,
+    FakeProvider,
     IdleSource,
     ManualBridge,
     offline_session_deps,
@@ -45,8 +53,12 @@ from tests.desktop_helpers import (
 )
 from tests.desktop_helpers import empty_selected_root as empty_selected_root  # noqa: PLC0414
 from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
+from tests.test_desktop_provider import _fake_quartz as fake_quartz
+from tests.test_desktop_provider import _provider as real_provider
+from tests.test_desktop_provider import _window as window
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -221,7 +233,7 @@ async def test_without_posix_screenshot_only_app_observation_still_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Screenshot-only app observation is the Windows target and loads no POSIX-only shell module."""
-    provider = object()
+    provider = FakeProvider()
     gui_provider = Mock(return_value=provider)
     monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", gui_provider)
     monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
@@ -502,3 +514,140 @@ async def test_default_matrix_preparation_checks_the_pinned_controller_before_pu
     await DesktopBridgeSessionDeps().prepare_client(client, controller)
 
     assert calls == [("resolve", client, controller), ("prepare", client)]
+
+
+def _record_late_journal_writes(
+    journal: DesktopCommandJournal,
+    monkeypatch: pytest.MonkeyPatch,
+    on_close: Callable[[], None],
+) -> list[str]:
+    """Return the journal writes attempted after `journal` closed; `on_close` runs right after it closes."""
+    late_writes: list[str] = []
+    closed = threading.Event()
+    for name in ("remember_started", "remember_response", "queue_response", "mark_delivered"):
+        write = getattr(journal, name)
+
+        def record(*args: object, _name: str = name, _write: Callable[..., None] = write) -> None:
+            if closed.is_set():
+                late_writes.append(_name)
+            _write(*args)
+
+        monkeypatch.setattr(journal, name, record)
+    close = journal.close
+
+    def close_and_notify() -> None:
+        close()
+        closed.set()
+        on_close()
+
+    monkeypatch.setattr(journal, "close", close_and_notify)
+    return late_writes
+
+
+def _drag_event(session: DesktopBridgeSession) -> AuthenticatedToDeviceEvent:
+    """Build an authenticated drag command for the session's app, with its observed state already retained."""
+    now_ms = round(time.time() * 1000)
+    drag = DesktopCommand(
+        request_id="drag-1",
+        session_id="session-1",
+        sequence=1,
+        issued_at_ms=now_ms,
+        expires_at_ms=now_ms + 60_000,
+        action="drag",
+        requester_id="@person:example.org",
+        agent_name="mind",
+        parameters={
+            "app": "com.example.Editor",
+            "state_id": "state-1",
+            "start_x": 0,
+            "start_y": 0,
+            "end_x": 900,
+            "end_y": 0,
+        },
+    )
+    state = AccessibilityState("state-1", "com.example.Editor", "Editor", DesktopRect(100, 50, 800, 600), (), False)
+    session.bridge._observations.remember(state, drag)
+    return AuthenticatedToDeviceEvent(
+        source={"content": drag.to_content()},
+        sender=_CONTROLLER.user_id,
+        type=DESKTOP_COMMAND_EVENT_TYPE,
+        authenticated_sender=AuthenticatedDevice(
+            _CONTROLLER.user_id,
+            _CONTROLLER.device_id,
+            "curve",
+            _CONTROLLER.ed25519,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_bounds_a_stuck_native_action_and_its_late_return_neither_records_nor_sends_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Close waits a bounded time for a hung drag, then releases the run; the drag's late return writes and sends nothing.
+
+    The drag returns just as the journal closes, the last moment its command could still be recorded, and its
+    command stays started, so the next run reports its outcome as unknown.
+    """
+    provider, _, _ = real_provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    quartz = fake_quartz(posted, [window(42, 0, 0, 2000)])
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    reached, release, released_button = threading.Event(), threading.Event(), threading.Event()
+
+    def post(_tap: int, event: dict[str, object]) -> None:
+        posted.append(event)
+        if event["kind"] == 2:
+            released_button.set()
+
+    def sleep(_delay: float) -> None:
+        if not reached.is_set():
+            reached.set()
+            assert release.wait(5)
+
+    def return_the_drag() -> None:
+        release.set()
+        assert released_button.wait(5)
+
+    quartz.CGEventPost = post
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", sleep)
+    monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", lambda **_kwargs: provider)
+    monkeypatch.setattr("mindroom.desktop.bridge._run_macos_application_events", asyncio.Event().wait)
+    monkeypatch.setattr("mindroom.desktop.bridge._STOP_ACTIVE_ACTION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.bridge.send_encrypted_to_device", AsyncMock())
+    session = await _start(
+        tmp_path,
+        _config(apps=("com.example.Editor",), shell=False),
+        offline_session_deps(FakeMatrixOwner()),
+        control_lease_seconds=600,
+    )
+    late_writes = _record_late_journal_writes(session.bridge._journal, monkeypatch, return_the_drag)
+    try:
+        await session.bridge.on_to_device_event(_drag_event(session))
+        assert await asyncio.to_thread(reached.wait, 5)
+        await asyncio.wait_for(session.close(), timeout=5)
+        # Give a coroutine still waiting on the drag every chance to record its late result.
+        for _ in range(10):
+            await asyncio.sleep(0)
+    finally:
+        release.set()
+
+    assert not session.live
+    assert released_button.is_set()
+    assert late_writes == []
+    # Pointer moved, pressed, took one drag step, then sent only the release once control ended.
+    assert [event["kind"] for event in posted] == [8, 1, 3, 2]
+    reopened = DesktopCommandJournal.load(
+        desktop_journal_path(tmp_path),
+        controller_key=controller_journal_key(_CONTROLLER),
+    )
+    try:
+        entry = reopened.get("drag-1")
+        assert entry is not None
+        assert (entry.state, entry.response) == ("started", None)
+    finally:
+        reopened.close()

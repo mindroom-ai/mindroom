@@ -183,6 +183,8 @@ class FakeProvider:
     """Record the local operations requested of the GUI provider."""
 
     calls: list[tuple[str, object]] = field(default_factory=list)
+    # The input gate the bridge opens and closes; None until the bridge first sets it.
+    input_enabled: bool | None = None
     emergency_stop: bool = False
     screenshot_error: bool = False
     click_error: bool = False
@@ -197,6 +199,10 @@ class FakeProvider:
             "screen": {"width": 1920, "height": 1080},
             "accessibility": {"available": True, "backend": "fake"},
         }
+
+    def set_input_enabled(self, enabled: bool) -> None:
+        """Record the input gate without counting it as a provider operation."""
+        self.input_enabled = enabled
 
     def check_emergency_stop(self) -> None:
         """Model the pointer fail-safe checked before every browser control call."""

@@ -42,6 +42,17 @@ def window_owner_at(point: tuple[int, int]) -> int | None:
     return None
 
 
+def process_bundle_id(process_id: int) -> str | None:
+    """Return the bundle ID of the application running as one process, or None for a process that is not an app."""
+    import AppKit  # noqa: PLC0415
+
+    application = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(process_id)  # ty: ignore[unresolved-attribute]
+    if application is None:
+        return None
+    bundle_id = application.bundleIdentifier()
+    return None if bundle_id is None else str(bundle_id)
+
+
 def move(x: int, y: int, *, check: Callable[[tuple[int, int]], None]) -> None:
     """Move to a verified global logical point without primary-screen clamping."""
     api = _quartz()
@@ -118,4 +129,4 @@ def scroll(x: int, y: int, *, clicks: int, horizontal: bool, check: Callable[[tu
     api.CGEventPost(api.kCGHIDEventTap, event)
 
 
-__all__ = ["click", "drag", "move", "scroll", "window_owner_at"]
+__all__ = ["click", "drag", "move", "process_bundle_id", "scroll", "window_owner_at"]

@@ -56,12 +56,12 @@ def _await_result(start: Callable[[Callable[..., None]], None], deadline: float)
     return value
 
 
-def _content(framework: Any, deadline: float) -> Any:
+def _content(framework: Any, deadline: float, *, on_screen_windows_only: bool) -> Any:
     return _await_result(
         lambda complete: (
             framework.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
                 True,
-                True,
+                on_screen_windows_only,
                 complete,
             )
         ),
@@ -122,7 +122,7 @@ def capture_window(window_id: int, process_id: int, region: DesktopRect) -> obje
     framework, objc = _frameworks()
     deadline = time.monotonic() + _CAPTURE_TIMEOUT_SECONDS
     with objc.autorelease_pool():
-        content = _content(framework, deadline)
+        content = _content(framework, deadline, on_screen_windows_only=True)
         matching = [
             window
             for window in content.windows()
@@ -144,15 +144,27 @@ def capture_window(window_id: int, process_id: int, region: DesktopRect) -> obje
         return _image(framework, content_filter, deadline, window=True)
 
 
-def capture_display(display_id: int) -> object:
-    """Capture one explicit display; callers own policy and logical cropping."""
+def capture_display(display_id: int, *, excluded_bundle_ids: frozenset[str]) -> object:
+    """Capture one explicit display without any window of the excluded applications; callers own policy and cropping."""
     framework, objc = _frameworks()
     deadline = time.monotonic() + _CAPTURE_TIMEOUT_SECONDS
     with objc.autorelease_pool():
-        content = _content(framework, deadline)
+        # Listing apps with off-screen windows too finds an excluded app whose window is only just appearing.
+        content = _content(framework, deadline, on_screen_windows_only=False)
         matching = [display for display in content.displays() if int(display.displayID()) == display_id]
         if len(matching) != 1:
             msg = "ScreenCaptureKit could not bind one exact display."
             raise MacOSCaptureError(msg)
-        content_filter = framework.SCContentFilter.alloc().initWithDisplay_excludingWindows_(matching[0], [])
+        excluded = [
+            application
+            for application in content.applications()
+            if application.bundleIdentifier() in excluded_bundle_ids
+        ]
+        filters = framework.SCContentFilter.alloc()
+        # Excluding an application leaves out every one of its windows, including any opened after this point.
+        content_filter = (
+            filters.initWithDisplay_excludingApplications_exceptingWindows_(matching[0], excluded, [])
+            if excluded
+            else filters.initWithDisplay_excludingWindows_(matching[0], [])
+        )
         return _image(framework, content_filter, deadline, window=False)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sys
+import threading
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
@@ -20,7 +21,9 @@ from mindroom.desktop.accessibility import (
     DesktopRect,
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
+from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.provider import (
+    DesktopControlRevokedError,
     DesktopEmergencyStopError,
     DesktopProviderError,
     PyAutoGuiDesktopProvider,
@@ -150,6 +153,8 @@ class FakeAccessibilityBackend:
     element_bounds: DesktopRect | None = None
     calls: list[tuple[str, object]] = field(default_factory=list)
     keyboard_focus_checks_left: int | None = None
+    # None models the primary-screen target, which is bound to no application process.
+    process_id: int | None = 42
 
     def launch_app(self, app_id: str) -> None:
         """Record one allowlisted application launch."""
@@ -159,12 +164,13 @@ class FakeAccessibilityBackend:
         """Record capture validation and return the current app window."""
         self.calls.append(("prepare_capture", (app_id, state_id)))
         state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
-        return AccessibilityCapture(state, 42)
+        return AccessibilityCapture(state, self.process_id)
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Record validation and return the current app window and its process."""
         self.calls.append(("prepare_fallback", (app_id, state_id)))
-        return AccessibilityCapture(AccessibilityState(state_id, app_id, "Editor", self.window, (), False), 42)
+        state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
+        return AccessibilityCapture(state, self.process_id)
 
     def element_for_action(
         self,
@@ -187,7 +193,7 @@ class FakeAccessibilityBackend:
             bounds=self.element_bounds,
             actions=(),
         )
-        return element, 42
+        return element, self.process_id
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Record validation and return a focus guard that fails once its allowed checks run out."""
@@ -219,6 +225,8 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
     provider._jpeg_quality = 80
     provider._accessibility = accessibility
     provider._display_geometry = lambda: (DisplayGeometry("primary", DesktopRect(0, 0, 1512, 982), 1512, 982),)
+    provider._input_enabled = threading.Event()
+    provider.set_input_enabled(True)
     return provider, pyautogui, accessibility
 
 
@@ -554,25 +562,23 @@ def test_secondary_macos_click_uses_global_quartz_points(monkeypatch: pytest.Mon
     assert pointer.calls == []
 
 
-@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
-def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
-    monkeypatch: pytest.MonkeyPatch,
-    action: str,
-) -> None:
-    """A foreign top window over the target, or one a drag moves into, stops input before an event reaches it.
+def _window(pid: int, layer: int, x: int, width: int, alpha: float = 1.0) -> dict[str, object]:
+    bounds = {"X": x, "Y": 0, "Width": width, "Height": 1000}
+    return {"layer": layer, "alpha": alpha, "pid": pid, "bounds": bounds}
 
-    Input covered before its first event sends nothing, so only a drag that moves under the window partway is unknown.
-    """
-    provider, _, accessibility = _provider()
-    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
-    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
 
-    def window(pid: int, layer: int, x: int, width: int, alpha: float = 1.0) -> dict[str, object]:
-        bounds = {"X": x, "Y": 0, "Width": width, "Height": 1000}
-        return {"layer": layer, "alpha": alpha, "pid": pid, "bounds": bounds}
+# Front to back: a transparent overlay, a floating panel over x >= 500, the allowed app, the desktop.
+_COVERED_WINDOWS = [
+    _window(9, 25, 0, 2000, alpha=0.0),
+    _window(7, 3, 500, 1000),
+    _window(42, 0, 100, 800),
+    _window(1, -2147483623, 0, 2000),
+]
 
-    posted: list[dict[str, object]] = []
-    quartz = SimpleNamespace(
+
+def _fake_quartz(posted: list[dict[str, object]], windows: list[dict[str, object]]) -> SimpleNamespace:
+    """Record posted pointer events and list `windows` front to back as Quartz would."""
+    return SimpleNamespace(
         kCGEventLeftMouseDown=1,
         kCGEventLeftMouseUp=2,
         kCGEventLeftMouseDragged=3,
@@ -597,15 +603,24 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
         CGEventSetIntegerValueField=lambda _event, _field, _value: None,
         CGEventCreateScrollWheelEvent=lambda *_args: {"kind": "wheel"},
         CGEventPost=lambda _tap, event: posted.append(event),
-        # Front to back: a transparent overlay, a floating panel over x >= 500, the allowed app, the desktop.
-        CGWindowListCopyWindowInfo=lambda _options, _relative: [
-            window(9, 25, 0, 2000, alpha=0.0),
-            window(7, 3, 500, 1000),
-            window(42, 0, 100, 800),
-            window(1, -2147483623, 0, 2000),
-        ],
+        CGWindowListCopyWindowInfo=lambda _options, _relative: windows,
     )
-    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+
+@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
+def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """A foreign top window over the target, or one a drag moves into, stops input before an event reaches it.
+
+    Input covered before its first event sends nothing, so only a drag that moves under the window partway is unknown.
+    """
+    provider, _, accessibility = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    posted: list[dict[str, object]] = []
+    monkeypatch.setitem(sys.modules, "Quartz", _fake_quartz(posted, _COVERED_WINDOWS))
 
     def act(x: int) -> None:
         target = {"app_id": "com.example.Editor", "state_id": "state-1"}
@@ -634,6 +649,224 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
         assert posted[-1]["kind"] == 2
     else:
         assert posted == []
+
+
+@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "drag"])
+def test_primary_screen_pointer_input_never_reaches_a_mindroom_window(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """The whole-screen target is bound to no app, yet a MindRoom window under the pointer stops input before its event.
+
+    Another app's window does not block the whole-screen target, and a drag that moves onto MindRoom partway is unknown.
+    """
+    provider, _, accessibility = _provider()
+    accessibility.process_id = None
+    accessibility.window = DesktopRect(0, 0, 1512, 982)
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    posted: list[dict[str, object]] = []
+    # Front to back: a window of process 7 over 500 <= x < 1600, then another app under the whole screen.
+    monkeypatch.setitem(
+        sys.modules,
+        "Quartz",
+        _fake_quartz(posted, [_window(7, 3, 500, 1100), _window(42, 0, 0, 2000)]),
+    )
+    owners: dict[int, str | None] = {7: "chat.mindroom.menubar", 42: "com.example.Editor"}
+    monkeypatch.setattr("mindroom.desktop.macos_input.process_bundle_id", owners.get)
+
+    def act(x: int) -> None:
+        target = {"app_id": "primary-screen", "state_id": "state-1"}
+        if action == "drag":
+            provider.drag(**target, start_x=0, start_y=0, end_x=x, end_y=0)
+        elif action == "scroll":
+            provider.scroll(**target, direction="down", pages=1, x=x, y=0)
+        elif action == "click":
+            provider.click(**target, x=x, y=0, button="left")
+        else:
+            getattr(provider, action)(**target, x=x, y=0)
+
+    act(300)
+    assert posted
+    posted.clear()
+    with pytest.raises(AccessibilityError, match="A MindRoom window is at the pointer") as caught:
+        act(700)
+    assert type(caught.value) is (AccessibilityActionOutcomeUnknownError if action == "drag" else AccessibilityError)
+    assert all(event["kind"] != "wheel" and event["point"][0] < 500 for event in posted)
+    if action == "drag":
+        assert [event["kind"] for event in posted[:2]] == [8, 1]
+        assert posted[-1]["kind"] == 2
+    else:
+        assert posted == []
+    for owner in ("chat.mindroom.desktophelper", "com.example.Other", None):
+        owners[7] = owner
+        posted.clear()
+        if owner in MINDROOM_APP_IDS:
+            with pytest.raises(AccessibilityError, match="A MindRoom window is at the pointer"):
+                act(700)
+            continue
+        act(700)
+        assert any(event["point"][0] >= 500 for event in posted)
+
+
+def _control_actions() -> dict[str, Callable[[PyAutoGuiDesktopProvider], None]]:
+    target = {"app_id": "com.example.Editor", "state_id": "state-1"}
+    return {
+        "launch_app": lambda provider: provider.launch_app("com.example.Editor"),
+        "click_element": lambda provider: provider.click_element(**target, element_index=0),
+        "set_value": lambda provider: provider.set_value(**target, element_index=0, value="text"),
+        "scroll_element": lambda provider: provider.scroll_element(
+            **target,
+            element_index=0,
+            direction="down",
+            pages=1,
+        ),
+        "perform_action": lambda provider: provider.perform_action(**target, element_index=0, action_name="AXPress"),
+        "click": lambda provider: provider.click(**target, x=10, y=10, button="left"),
+        "double_click": lambda provider: provider.double_click(**target, x=10, y=10),
+        "hover": lambda provider: provider.hover(**target, x=10, y=10),
+        "drag": lambda provider: provider.drag(**target, start_x=0, start_y=0, end_x=10, end_y=10),
+        "type_text": lambda provider: provider.type_text(**target, text="hello"),
+        "scroll": lambda provider: provider.scroll(**target, direction="down", pages=1, x=None, y=None),
+        "keypress": lambda provider: provider.keypress(**target, keys=["enter"]),
+    }
+
+
+@pytest.mark.parametrize("action", sorted(_control_actions()))
+def test_closed_input_gate_refuses_every_control_action_before_validation(action: str) -> None:
+    """After revocation no control action focuses, validates, or sends anything."""
+    provider, pyautogui, accessibility = _provider()
+    provider.set_input_enabled(False)
+
+    with pytest.raises(DesktopControlRevokedError, match="Local desktop control was revoked"):
+        _control_actions()[action](provider)
+
+    assert accessibility.calls == []
+    assert pyautogui.calls == []
+
+
+def test_observation_does_not_need_the_input_gate() -> None:
+    """Revocation leaves the bridge observing: screenshots still work with the gate closed."""
+    provider, _, _ = _provider()
+    provider.set_input_enabled(False)
+
+    assert provider.screenshot(app_id="com.example.Editor", state_id="state-1").mime_type == "image/jpeg"
+
+
+def test_revoke_during_a_drag_stops_motion_and_releases_the_button(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drag already moving sends no further motion once control is revoked, and its button is released."""
+    provider, _, _ = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    monkeypatch.setitem(sys.modules, "Quartz", _fake_quartz(posted, [_window(42, 0, 0, 2000)]))
+    sleeps: list[float] = []
+
+    def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            provider.set_input_enabled(False)
+
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", sleep)
+
+    with pytest.raises(DesktopControlRevokedError, match="outcome may be partial"):
+        provider.drag(app_id="com.example.Editor", state_id="state-1", start_x=0, start_y=0, end_x=1000, end_y=0)
+
+    kinds = [event["kind"] for event in posted]
+    assert kinds[:2] == [8, 1]
+    assert kinds.count(3) == 3
+    assert kinds[-1] == 2
+    assert len(kinds) == 6
+
+
+def test_revoke_during_a_click_still_releases_the_pressed_button(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revoke landing between press and release sends the release and nothing after it."""
+    provider, _, _ = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    quartz = _fake_quartz(posted, [_window(42, 0, 0, 2000)])
+
+    def post(_tap: int, event: dict[str, object]) -> None:
+        posted.append(event)
+        if event["kind"] == 1:
+            provider.set_input_enabled(False)
+
+    quartz.CGEventPost = post
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.double_click(app_id="com.example.Editor", state_id="state-1", x=10, y=10)
+
+    assert [event["kind"] for event in posted] == [1, 2]
+
+
+def test_revoke_while_typing_sends_no_further_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text already typed stays typed, but no chunk starts after control is revoked."""
+    provider, _, _ = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+
+    def post(_tap: int, event: dict[str, object]) -> None:
+        posted.append(event)
+        if not event["down"]:
+            provider.set_input_enabled(False)
+
+    quartz = SimpleNamespace(
+        CGEventCreateKeyboardEvent=lambda _source, _code, down: {"down": down},
+        CGEventKeyboardSetUnicodeString=lambda event, _length, text: event.update(text=text),
+        CGEventPost=post,
+        kCGHIDEventTap=0,
+    )
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41)
+
+    assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
+
+
+def test_revoke_while_focusing_for_a_keypress_sends_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revoke that lands while the app is focused for a key stops the key."""
+    provider, pyautogui, accessibility = _provider()
+
+    def prepare_keyboard(app_id: str, state_id: str) -> Callable[[], None]:
+        accessibility.calls.append(("prepare_keyboard", (app_id, state_id)))
+        provider.set_input_enabled(False)
+        return lambda: None
+
+    monkeypatch.setattr(accessibility, "prepare_keyboard", prepare_keyboard)
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["enter"])
+
+    assert pyautogui.calls == []
+
+
+def test_provider_checks_its_input_gate_before_each_accessibility_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backend's pre-effect hook is the provider's own gate and fail-safe check."""
+    hooks: list[Callable[[], None]] = []
+
+    def backend(_allowed: frozenset[str], _screen_size: object, before_input: Callable[[], None]) -> object:
+        hooks.append(before_input)
+        return FakeAccessibilityBackend()
+
+    pyautogui = FakePyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setattr("mindroom.desktop.provider.create_accessibility_backend", backend)
+    provider = PyAutoGuiDesktopProvider(allowed_app_ids=frozenset({"com.example.Editor"}))
+    [before_input] = hooks
+
+    with pytest.raises(DesktopControlRevokedError):
+        before_input()
+    provider.set_input_enabled(True)
+    before_input()
+    pyautogui.cursor = (0, 0)
+    with pytest.raises(DesktopEmergencyStopError):
+        before_input()
+    pyautogui.cursor = (10, 20)
+    provider.set_input_enabled(False)
+    with pytest.raises(DesktopControlRevokedError):
+        before_input()
 
 
 def test_drag_releases_when_motion_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -784,12 +1017,12 @@ def test_primary_capture_uses_screencapturekit(monkeypatch: pytest.MonkeyPatch) 
     captured = []
     monkeypatch.setattr(
         "mindroom.desktop.provider.macos_capture.capture_display",
-        lambda display_id: captured.append(display_id) or "image",
+        lambda display_id, *, excluded_bundle_ids: captured.append((display_id, excluded_bundle_ids)) or "image",
     )
     expected = FakeImage((800, 600))
     monkeypatch.setattr("mindroom.desktop.provider._pillow_image_from_macos_capture", lambda _image: expected)
     assert _capture_macos_primary_screen() is expected
-    assert captured == [7]
+    assert captured == [(7, MINDROOM_APP_IDS)]
 
 
 def test_macos_image_conversion_preserves_color_without_raw_layout_assumptions(
