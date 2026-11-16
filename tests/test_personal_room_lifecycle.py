@@ -622,32 +622,261 @@ async def test_live_trigger_preserves_cancellation(coordination: Coordination) -
         await coordination.lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
 
+_FAILED = "Personal-room reconciliation failed"
+_RECOVERED = "Personal-room reconciliation recovered"
+
+
+def reconciliation_logs(logs: list[dict]) -> list[tuple[str, str, bool, int]]:
+    """Return each reconciliation failure and recovery as (event, level, traceback, attempt count)."""
+    return [
+        (
+            entry["event"],
+            entry["log_level"],
+            entry.get("exc_info", False),
+            entry.get("attempt", entry.get("failed_attempts")),
+        )
+        for entry in logs
+        if entry["event"] in {_FAILED, _RECOVERED}
+    ]
+
+
 @pytest.mark.asyncio
-async def test_repeated_error_logs_its_traceback_once(coordination: Coordination, clock: Clock) -> None:
-    """Only the first of the same error in a row carries a traceback; retries report their attempt and next delay."""
+@pytest.mark.usefixtures("clock")
+async def test_a_failure_that_heals_logs_a_warning_and_its_recovery(coordination: Coordination) -> None:
+    """A first failure a retry heals is a warning with its traceback, and the success says how many attempts failed.
+
+    The reload between them, which each new user's provisioning requests, keeps the count; a candidate that never
+    failed logs no recovery.
+    """
+    lifecycle = coordination.lifecycle
+    for user in ("alice", "bob"):
+        record_intent(lifecycle, user)
+    healed = False
+
+    async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
+        if user_id == "@alice:localhost" and not healed:
+            msg = "Personal-room initial join failed"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        healed = True
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    assert not [entry for entry in logs if entry["log_level"] in {"error", "critical"}]
+    assert reconciliation_logs(logs) == [(_FAILED, "warning", True, 1), (_RECOVERED, "info", False, 1)]
+    failure, recovery = (entry for entry in logs if entry["event"] in {_FAILED, _RECOVERED})
+    assert (failure["user_id"], failure["error_type"], failure["error"], failure["retry_in_seconds"]) == (
+        "@alice:localhost",
+        "RuntimeError",
+        "Personal-room initial join failed",
+        30.0,
+    )
+    assert recovery == {
+        "event": _RECOVERED,
+        "log_level": "info",
+        "user_id": "@alice:localhost",
+        "room_id": "!lobby:localhost",
+        "failed_attempts": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failing_candidate_logs_one_error_at_its_third_failure_in_a_row(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Only the third failure in a row is an error; the traceback comes with the first, and later ones warn again."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
     with capture_logs() as logs:
         await lifecycle._reconcile()
-        clock.now += 30
-        await lifecycle._reconcile()
-        clock.now += 60
-        await lifecycle._reconcile()
-    failures = [entry for entry in logs if entry["event"] == "Personal-room reconciliation failed"]
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    failures = [entry for entry in logs if entry["event"] == _FAILED]
     assert [
         (entry["log_level"], entry.get("exc_info", False), entry["attempt"], entry["retry_in_seconds"])
         for entry in failures
-    ] == [("error", True, 1, 30.0), ("warning", False, 2, 60.0), ("warning", False, 3, 120.0)]
-    assert [(entry["error_type"], entry["error"]) for entry in failures[1:]] == [
+    ] == [
+        ("warning", True, 1, 30.0),
+        ("warning", False, 2, 60.0),
+        ("error", False, 3, 120.0),
+        ("warning", False, 4, 240.0),
+        ("warning", False, 5, 480.0),
+    ]
+    assert {(entry["error_type"], entry["error"]) for entry in failures} == {
         ("RuntimeError", "temporarily unavailable"),
-    ] * 2
+    }
     assert {(entry["user_id"], entry["room_id"]) for entry in failures} == {("@alice:localhost", "!lobby:localhost")}
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_reloads_do_not_restart_the_count_toward_an_error(coordination: Coordination) -> None:
+    """A reload retries at once and restarts the delays, but a candidate that keeps failing still reaches an error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for _ in range(2):
+            lifecycle.config_changed()
+            await lifecycle._reconcile()
+    assert [
+        (entry["log_level"], entry["attempt"], entry["retry_in_seconds"]) for entry in logs if entry["event"] == _FAILED
+    ] == [("warning", 1, 30.0), ("warning", 2, 30.0), ("error", 3, 30.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_live_success_ends_the_failure_count(coordination: Coordination, clock: Clock) -> None:
+    """A lobby command that succeeds logs the recovery, so the same failure coming back counts toward a new error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    failure = RuntimeError("temporarily unavailable")
+    coordination.owner.ensure.side_effect = [failure] * 3 + [None] + [failure] * 3
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60):
+            clock.now += delay
+            await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        for delay in (120, 240, 480):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_RECOVERED, "info", False, 3),
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_new_error_after_the_third_failure_is_one_new_error(coordination: Coordination, clock: Clock) -> None:
+    """A different failure in a candidate already past the threshold is a new problem: one error with its traceback."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [RuntimeError("unavailable")] * 3 + [KeyError("content")] * 3 + [None]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240, 480, 960):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", True, 4),
+        (_FAILED, "warning", False, 5),
+        (_FAILED, "warning", False, 6),
+        (_RECOVERED, "info", False, 6),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_behind_roster_mismatches_still_reaches_an_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Roster mismatches never log an error, so the first other failure at or past the threshold does, once."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable = RuntimeError("Personal-room ownership state unavailable")
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [unavailable, mismatch, mismatch, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_seen_before_another_reached_the_threshold_still_logs_its_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """The error at the third failure names one kind; another kind that keeps failing after it logs its own error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable, missing, missing, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", True, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lobby_command_that_leaves_a_reinvite_pending_does_not_end_the_failure_count(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """A command without re-invite authority does not do the failing re-invite, so it is no recovery."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    await lifecycle._reconcile()
+    invite_failed = RuntimeError("Personal-room invite failed")
+    coordination.owner.ensure.side_effect = [invite_failed, invite_failed, None, invite_failed]
+    with capture_logs() as logs:
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+        await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        clock.now += 30
+        await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [(_FAILED, "warning", True, 1), (_FAILED, "warning", False, 2)]
+    assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): True}
+
+
+@pytest.mark.asyncio
+async def test_errors_that_alternate_after_the_third_failure_log_one_error_each(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Two kinds of failure taking turns are two problems, so each logs one error, not one per attempt."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable] * 3 + [missing, unavailable, missing, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240, 480, 960):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", True, 4),
+        (_FAILED, "warning", False, 5),
+        (_FAILED, "warning", False, 6),
+        (_FAILED, "warning", False, 7),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_different_error_logs_a_new_traceback(coordination: Coordination, clock: Clock) -> None:
-    """A new kind of failure behind a waiting roster mismatch is a new problem, so it gets its own traceback."""
+    """A new kind of failure behind a waiting roster mismatch gets its own traceback, and the third failure is an error."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [
@@ -667,8 +896,8 @@ async def test_a_different_error_logs_a_new_traceback(coordination: Coordination
         if entry["log_level"] in {"warning", "error"}
     ] == [
         ("Personal-room imported roster has unattested members", "warning", False),
-        ("Personal-room reconciliation failed", "error", True),
-        ("Personal-room reconciliation failed", "warning", False),
+        (_FAILED, "warning", True),
+        (_FAILED, "error", False),
     ]
     assert logs[-1]["error_type"] == "KeyError"
 
@@ -698,9 +927,10 @@ async def test_imported_roster_mismatch_warns_once_until_its_members_change(
     coordination: Coordination,
     clock: Clock,
 ) -> None:
-    """A room waiting for someone to remove unattested members is warned about once, never as a crash.
+    """A room waiting for someone to remove unattested members is warned about once, never as a crash or an error.
 
     Retries that find the same members, including after a reload, log at debug; other members warn again.
+    The attempt count runs on across the reload until the room is fixed.
     """
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
@@ -726,8 +956,8 @@ async def test_imported_roster_mismatch_warns_once_until_its_members_change(
     assert [(entry["log_level"], entry["unexpected_user_ids"], entry["attempt"]) for entry in roster] == [
         ("warning", ("@bob:localhost", "@eve:localhost"), 1),
         ("debug", ("@bob:localhost", "@eve:localhost"), 2),
-        ("debug", ("@bob:localhost", "@eve:localhost"), 1),
-        ("warning", ("@eve:localhost",), 2),
+        ("debug", ("@bob:localhost", "@eve:localhost"), 3),
+        ("warning", ("@eve:localhost",), 4),
         ("warning", ("@eve:localhost",), 1),
     ]
     assert roster[0] == {
@@ -874,11 +1104,12 @@ async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordin
 
 @pytest.mark.asyncio
 async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coordination) -> None:
-    """A clean pass that no longer finds a requester drops what it reported and its pending immediate retry."""
+    """A clean pass that no longer finds a requester drops what it reported, its failure count, and its immediate retry."""
     lifecycle = coordination.lifecycle
     record_intent(lifecycle, "alice")
     coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
     await lifecycle._reconcile()
+    assert lifecycle._failure_streaks
     personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
 
     lifecycle.membership_changed("!personal:localhost", "$left")
@@ -888,6 +1119,7 @@ async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coord
     assert lifecycle._reconciled
     assert not lifecycle._roster_mismatches
     assert not lifecycle._membership_changed
+    assert not lifecycle._failure_streaks
 
 
 @pytest.mark.asyncio
@@ -1229,7 +1461,7 @@ async def test_template_provisioning_failure_backs_off_like_any_failure(
         await lifecycle.member_event(LOBBY, lobby_rejoin())
     assert [entry["event"] for entry in logs] == ["Personal-room onboarding trigger failed"]
     await lifecycle._reconcile()
-    assert lifecycle._candidate_backoff[("@alice:localhost", "!lobby:localhost")].failures == 1
+    assert lifecycle._failure_streaks[("@alice:localhost", "!lobby:localhost")].failures == 1
     clock.now += 29
     await lifecycle._reconcile()
     assert template_coordination.provision.await_count == 2
@@ -1415,7 +1647,7 @@ async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
     )
-    assert lifecycle._candidate_backoff[("@aaron:localhost", "!lobby:localhost")].failures == 1
+    assert lifecycle._failure_streaks[("@aaron:localhost", "!lobby:localhost")].failures == 1
 
 
 @pytest.mark.asyncio
