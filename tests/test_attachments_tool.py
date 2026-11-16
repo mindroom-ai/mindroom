@@ -262,6 +262,43 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("room_id", "viewable"), [("!room:localhost", True), ("!other:localhost", False)])
+async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_another_thread_of_its_room(
+    tmp_path: Path,
+    room_id: str,
+    viewable: bool,
+) -> None:
+    """A forked thread's turn is given its parent's images, so viewing one works; another room's image stays out."""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    image_path = tmp_path / "parent.png"
+    image_path.write_bytes(image_bytes)
+    attachment = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_parent",
+        mime_type="image/png",
+        room_id=room_id,
+        thread_id="$parent:localhost",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_parent",))):
+        result = await toolkit_offers(AttachmentTools(), "get_attachment").entrypoint(
+            attachment_id="att_parent",
+            view=True,
+        )
+
+    if viewable:
+        assert isinstance(result, ToolValue)
+        assert result.images
+    else:
+        assert "outside the authorized conversation context" in str(result)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("filename", "payload_bytes", "media_field", "mime_type"),
     [

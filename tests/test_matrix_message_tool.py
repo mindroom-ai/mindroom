@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
+    FORK_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -36,6 +37,7 @@ from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
@@ -1654,6 +1656,34 @@ async def test_matrix_message_read_returns_thread_messages() -> None:
         thread_id="$thread-other:localhost",
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_of_a_fork_starts_with_its_parent_up_to_the_fork_point() -> None:
+    """Reading a fork returns the parent's messages up to the fork point, then the fork's own."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    reference = {FORK_CONTENT_KEY: {"thread_id": "$parent", "event_id": "$kept"}}
+    threads = {
+        "$parent": [
+            make_visible_message(event_id="$parent", body="root"),
+            make_visible_message(event_id="$kept", thread_id="$parent", body="kept"),
+            make_visible_message(event_id="$later", thread_id="$parent", body="after the fork point"),
+        ],
+        "$fork": [make_visible_message(event_id="$fork", content={"body": "forked", **reference})],
+    }
+
+    async def read(_reader: object, _room_id: str, thread_id: str) -> ThreadHistoryResult:
+        return thread_history_result(threads[thread_id], is_full_history=True)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.matrix_conversation_operations.complete_thread_history", side_effect=read),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read", thread_id="$fork"))
+
+    assert payload["status"] == "ok"
+    assert [message["event_id"] for message in payload["messages"]] == ["$parent", "$kept", "$fork"]
 
 
 @pytest.mark.asyncio

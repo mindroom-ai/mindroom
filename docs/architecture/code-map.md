@@ -486,6 +486,7 @@ Matrix sync callback
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
 | `matrix/projected_thread_membership.py` | Thread-root proofs for tools and outbound mutations, read from the conversation projection like turns |
+| `matrix/thread_forks.py` | Forked threads: the parent chain's messages up to each fork point in front of a fork's reads, fork-root detection, and the parent threads a fork's attachments may come from |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/joined_members.py` | A room's joined members, read again while the durable client refuses a read that a membership change raced |

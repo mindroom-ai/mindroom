@@ -90,6 +90,16 @@ In `thread` mode, an agent answering a room-level message starts a new thread on
 Clients and bridges that send plain replies instead of thread replies still work: a plain reply whose reply chain reaches a thread joins that thread, and one that never reaches a thread stays room-level.
 Edits, reactions, and redactions belong to the same thread as the message they target.
 
+## Forked Threads
+
+A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
+An agent that answered in the parent counts as a participant of the fork.
+Agents in the fork can use the attachments of the threads it forks from.
+An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
+Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
+Moving a fork to another room copies only the fork's own messages.
+
 ## Multi-Human Thread Protection
 
 When two or more people have posted in a thread, agents answer only when explicitly mentioned, so they do not interrupt a human conversation.

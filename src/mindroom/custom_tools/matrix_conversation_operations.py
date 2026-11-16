@@ -25,6 +25,7 @@ from mindroom.custom_tools.attachments import (
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_visible_messages import (
     is_visible_room_message,
@@ -37,6 +38,7 @@ from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
+from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
 
@@ -51,6 +53,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_extras import MatrixMessageExtra
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+logger = get_logger(__name__)
 
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
@@ -539,7 +543,15 @@ class MatrixMessageOperations:
         thread_id: str,
         read_limit: int,
     ) -> MatrixMessageOperationResult:
-        thread_messages = await complete_thread_history(context.conversation_reader, room_id, thread_id)
+        reader = context.conversation_reader
+        # A fork reads as its parent's messages up to the fork point, then its own.
+        thread_messages = await with_fork_prefix(
+            await complete_thread_history(reader, room_id, thread_id),
+            room_id=room_id,
+            thread_id=thread_id,
+            read_thread=lambda parent_id: complete_thread_history(reader, room_id, parent_id),
+            logger=logger,
+        )
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",

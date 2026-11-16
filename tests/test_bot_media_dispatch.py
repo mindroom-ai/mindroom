@@ -16,6 +16,7 @@ from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoal
 from mindroom.coalescing.gate import CoalescingGate, LaneSlot, ReadyPendingEvent
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    FORK_CONTENT_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
@@ -65,6 +66,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     drain_coalescing,
     install_generate_response_mock,
+    make_visible_message,
     replace_turn_deps,
     runtime_paths_for,
 )
@@ -769,6 +771,7 @@ class TestAgentBot(AgentBotTestBase):
                 [current_attachment_id, history_attachment_id],
                 room_id="!test:localhost",
                 thread_id="$thread_root",
+                parent_thread_ids=frozenset(),
             ),
         ]
         # Only current-turn records convert to inline media; history records
@@ -971,6 +974,64 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         assert payload.attachment_ids == [revision_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inherits_a_fork_prefix_attachments_from_the_parent_thread(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A fork's turn can use what its parent's prefix carries, registered under the parent, and nothing else."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id="att_parent",
+            filename="parent.png",
+            thread_id="$parent",
+        )
+        parent_image_id = _attachment_id_for_event("$parent-image")
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id=parent_image_id,
+            filename="raw.png",
+            thread_id="$parent",
+        )
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id="att_other",
+            filename="other.png",
+            thread_id="$other",
+        )
+        image_content = {"msgtype": "m.image", "body": "raw.png", "url": "mxc://localhost/raw"}
+        thread_history = [
+            make_visible_message(event_id="$parent", body="question"),
+            make_visible_message(event_id="$parent-image", thread_id="$parent", content=image_content),
+            make_visible_message(
+                event_id="$parent-answer",
+                thread_id="$parent",
+                content={"body": "answer", ATTACHMENT_IDS_KEY: ["att_parent", "att_other"]},
+            ),
+            make_visible_message(
+                event_id="$thread",
+                content={"body": "go on", FORK_CONTENT_KEY: {"thread_id": "$parent", "event_id": "$parent-answer"}},
+            ),
+        ]
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="compare them",
+                current_attachment_ids=[],
+                thread_id="$thread",
+                media_thread_id="$thread",
+                thread_history=thread_history,
+            ),
+        )
+
+        assert payload.attachment_ids == ["att_parent", parent_image_id]
+        bot.client.download.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_dispatch_payload_inline_media_empty_when_no_attachments(
