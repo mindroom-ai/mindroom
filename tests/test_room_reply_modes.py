@@ -1011,7 +1011,8 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
     """The judge of general's running response learns which waiting messages mention nobody, also after an edit.
 
     Unjudged, another person's message that mentions nobody need not cut the response short, while one that
-    mentions general does, so an edit that adds the mention must count.
+    mentions general does, so an edit that adds the mention must count. The edited message keeps its place in the
+    queue, so the judge reads the messages in the order they were sent.
     """
     async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
         await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$untagged", "look at this"))
@@ -1025,17 +1026,16 @@ async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_
 
         edit = {
             "m.new_content": {
-                "body": "look at this",
+                "body": "look at this, general",
                 "msgtype": "m.text",
                 "m.mentions": {"user_ids": [_mention_id(paths, "general")]},
             },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$untagged"},
         }
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
-        assert {message.event_id: message.mentions_nobody for message in running.pending_message_snapshot()} == {
-            "$untagged": False,
-            "$tagged": False,
-        }
+        assert [
+            (message.event_id, message.text, message.mentions_nobody) for message in running.pending_message_snapshot()
+        ] == [("$untagged", "look at this, general", False), ("$tagged", "and this", False)]
 
 
 @pytest.mark.asyncio

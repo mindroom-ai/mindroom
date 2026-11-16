@@ -3236,7 +3236,7 @@ Earlier files and images appear only as their file name and any caption, such as
 Tool calls appear as `<tool name="..." input="..." output="..."/>` tags built from the previews the chat shows in its tool details: up to 1,200 characters of input and 500 of output per call, with recognized secrets already removed.
 Attachment contents, full tool output, system prompts, and memory are never sent, but message text and tool previews can still contain private information.
 
-The agent gets the wrap-up notice without a judgment when:
+Except for the queued messages described after this list, the agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
 - the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;

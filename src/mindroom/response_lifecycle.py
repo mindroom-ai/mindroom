@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mindroom import constants
@@ -242,6 +242,14 @@ class _QueuedMessageState:
         self._notify_changed()
         return True
 
+    def update_waiting_human_message(self, source_event_id: str, *, text: str | None, mentions_nobody: bool) -> None:
+        """Give a waiting message its edited text and mentions, keeping its place and the progress it arrived to."""
+        message = self._pending_messages.get(source_event_id)
+        if message is None:
+            return
+        self._pending_messages[source_event_id] = replace(message, text=text, mentions_nobody=mentions_nobody)
+        self._notify_changed()
+
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
@@ -298,10 +306,14 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
-    @property
-    def active(self) -> bool:
-        """Return whether this message still counts as waiting for the running response."""
-        return self._active
+    def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
+        """Show the running response's judge an edit of this waiting message; a released one stays released."""
+        if self._active:
+            self._state.update_waiting_human_message(
+                self._source_event_id,
+                text=message_text_for_judgment(response_envelope),
+                mentions_nobody=mentions_nobody,
+            )
 
     def release(self) -> None:
         """Stop counting this message as waiting for the running response; idempotent."""
