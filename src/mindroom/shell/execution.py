@@ -309,7 +309,7 @@ async def run_command(
             handle_reservations.discard(handle)
 
 
-async def _run_command_after_reservation(  # noqa: C901, PLR0912
+async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     registry: dict[str, ProcessRecord],
     *,
     namespace: str,
@@ -351,6 +351,10 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
         if capture is not None:
             capture.close()
         return ShellRunResult(message=f"Error: {exc}")
+    # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
+    # command starts later inherit the priority.
+    with contextlib.suppress(OSError):
+        os.setpriority(os.PRIO_PGRP, process.pid, 19)
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
