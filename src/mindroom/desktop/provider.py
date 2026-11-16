@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 _EMERGENCY_STOP_MESSAGE = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
 _CONTROL_REVOKED_MESSAGE = "Local desktop control was revoked; input stopped and this action's outcome may be partial."
-_MACOS_UNICODE_CHUNK_LENGTH = 20
+_TEXT_CHUNK_LENGTH = 20
 
 
 class DesktopProviderError(RuntimeError):
@@ -102,7 +102,7 @@ class DesktopProvider(Protocol):
         ...
 
     def set_input_enabled(self, enabled: bool) -> None:
-        """Open input for a local control grant or close it at once, including for input already running."""
+        """Open input for a local control grant, or close it so no new event starts after input next checks it."""
         ...
 
     def list_apps(self) -> list[DesktopApp]:
@@ -266,7 +266,7 @@ class PyAutoGuiDesktopProvider:
         self._check_emergency_stop()
 
     def set_input_enabled(self, enabled: bool) -> None:
-        """Open or close input; once closed, no pointer event, key, text chunk, or accessibility effect starts."""
+        """Open or close input; input checks the gate right before each event, key, chunk, or accessibility effect."""
         if enabled:
             self._input_enabled.set()
         else:
@@ -425,9 +425,11 @@ class PyAutoGuiDesktopProvider:
 
         if sys.platform == "darwin":
             self._run_input(lambda: _type_macos_unicode(text, before_chunk=before_chunk))
-        else:
+            return
+        for offset in range(0, len(text), _TEXT_CHUNK_LENGTH):
+            chunk = text[offset : offset + _TEXT_CHUNK_LENGTH]
             before_chunk()
-            self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
+            self._run_input(lambda chunk=chunk: self._pyautogui.write(chunk, interval=0.01))
 
     def scroll(
         self,
@@ -725,9 +727,9 @@ def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
     """Post layout-independent Unicode keyboard events to the active macOS app after each focus check."""
     import Quartz  # noqa: PLC0415
 
-    for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
+    for offset in range(0, len(text), _TEXT_CHUNK_LENGTH):
         before_chunk()
-        chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
+        chunk = text[offset : offset + _TEXT_CHUNK_LENGTH]
         utf16_length = len(chunk.encode("utf-16-le")) // 2
         key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]
         key_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)  # ty: ignore[unresolved-attribute]

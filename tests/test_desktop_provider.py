@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import io
 import sys
-import threading
-from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 import pytest
 from PIL import Image
 
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
-    AccessibilityCapture,
-    AccessibilityElement,
     AccessibilityError,
-    AccessibilityState,
     DesktopRect,
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
@@ -34,6 +29,15 @@ from mindroom.desktop.provider import (
     _type_macos_unicode,
     request_macos_desktop_permissions,
 )
+from tests.desktop_helpers import (
+    FakeAccessibilityBackend,
+    FakeFailSafeError,
+    FakeImage,
+    FakePyAutoGui,
+    _fake_quartz,
+    _provider,
+    _window,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,191 +47,6 @@ if TYPE_CHECKING:
 def _default_to_fake_pointer_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep generic fake-PyAutoGUI tests off the host's real macOS input backend."""
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "linux")
-
-
-class FakeImage:
-    """Minimal Pillow-like image exposing crop and resize geometry."""
-
-    def __init__(self, size: tuple[int, int]) -> None:
-        self.size = size
-
-    def crop(self, box: tuple[int, int, int, int]) -> FakeImage:
-        """Return the selected fake image region."""
-        left, top, right, bottom = box
-        return FakeImage((right - left, bottom - top))
-
-    def resize(self, size: tuple[int, int]) -> FakeImage:
-        """Return one resized fake image."""
-        return FakeImage(size)
-
-    def convert(self, _mode: str) -> FakeImage:
-        """Return an RGB-compatible fake image."""
-        return self
-
-    def save(self, output: io.BytesIO, **_kwargs: object) -> None:
-        """Write deterministic fake JPEG bytes."""
-        output.write(b"jpeg")
-
-
-class FakeFailSafeError(Exception):
-    """Fake PyAutoGUI fail-safe exception type."""
-
-
-class FakePyAutoGui:
-    """Expose logical screen points separately from Retina capture pixels."""
-
-    FailSafeException = FakeFailSafeError
-    FAILSAFE = True
-    FAILSAFE_POINTS: ClassVar[list[tuple[int, int]]] = [(0, 0)]
-    KEYBOARD_KEYS: ClassVar[list[str]] = ["enter", "command", "l"]
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, object]] = []
-        self.cursor = (10, 20)
-        self.fail_during_input = False
-
-    @staticmethod
-    def size() -> SimpleNamespace:
-        """Return logical coordinates accepted by click and scroll."""
-        return SimpleNamespace(width=1512, height=982)
-
-    def position(self) -> SimpleNamespace:
-        """Return a coarse cursor position."""
-        return SimpleNamespace(x=self.cursor[0], y=self.cursor[1])
-
-    @staticmethod
-    def screenshot() -> FakeImage:
-        """Return a two-times-density capture."""
-        return FakeImage((3024, 1964))
-
-    def click(self, *, x: int, y: int, button: str) -> None:
-        """Record a logical click."""
-        if self.fail_during_input:
-            raise FakeFailSafeError
-        self.calls.append(("click", (x, y, button)))
-
-    def moveTo(self, x: int, y: int, *, duration: float = 0) -> None:  # noqa: N802
-        """Record the corresponding external pointer operation."""
-        self.calls.append(("move", (x, y, duration)))
-        if self.fail_during_input:
-            raise FakeFailSafeError
-
-    def mouseDown(self, *, button: str) -> None:  # noqa: N802
-        """Record the corresponding external pointer operation."""
-        self.calls.append(("down", button))
-
-    def mouseUp(self, *, button: str) -> None:  # noqa: N802
-        """Record the corresponding external pointer operation."""
-        self.calls.append(("up", button))
-
-    def doubleClick(self, *, x: int, y: int, button: str, interval: float) -> None:  # noqa: N802
-        """Record the corresponding external pointer operation."""
-        self.calls.append(("double_click", (x, y, button, interval)))
-
-    def hscroll(self, clicks: int, *, x: int, y: int) -> None:
-        """Record the corresponding external pointer operation."""
-        self.calls.append(("hscroll", (clicks, x, y)))
-
-    def scroll(self, clicks: int, *, x: int | None, y: int | None) -> None:
-        """Record a logical scroll."""
-        self.calls.append(("scroll", (clicks, x, y)))
-
-    def write(self, text: str, *, interval: float) -> None:
-        """Record text fallback."""
-        self.calls.append(("write", (text, interval)))
-
-    def press(self, key: str) -> None:
-        """Record one key."""
-        self.calls.append(("press", key))
-
-    def hotkey(self, *keys: str) -> None:
-        """Record a key combination."""
-        self.calls.append(("hotkey", keys))
-
-
-@dataclass
-class FakeAccessibilityBackend:
-    """Return one state-bound app window for provider fallback tests."""
-
-    window: DesktopRect = field(default_factory=lambda: DesktopRect(100, 50, 800, 600))
-    element_bounds: DesktopRect | None = None
-    calls: list[tuple[str, object]] = field(default_factory=list)
-    keyboard_focus_checks_left: int | None = None
-    # None models the primary-screen target, which is bound to no application process.
-    process_id: int | None = 42
-
-    def launch_app(self, app_id: str) -> None:
-        """Record one allowlisted application launch."""
-        self.calls.append(("launch_app", app_id))
-
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
-        """Record capture validation and return the current app window."""
-        self.calls.append(("prepare_capture", (app_id, state_id)))
-        state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
-        return AccessibilityCapture(state, self.process_id)
-
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
-        """Record validation and return the current app window and its process."""
-        self.calls.append(("prepare_fallback", (app_id, state_id)))
-        state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
-        return AccessibilityCapture(state, self.process_id)
-
-    def element_for_action(
-        self,
-        app_id: str,
-        state_id: str,
-        element_index: int,
-    ) -> tuple[AccessibilityElement, int | None]:
-        """Record validation and return one element at the configured bounds and its process."""
-        self.calls.append(("element_for_action", (app_id, state_id, element_index)))
-        element = AccessibilityElement(
-            index=element_index,
-            depth=0,
-            parent_index=None,
-            role="AXScrollArea",
-            subrole=None,
-            name=None,
-            value=None,
-            enabled=True,
-            settable=False,
-            bounds=self.element_bounds,
-            actions=(),
-        )
-        return element, self.process_id
-
-    def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
-        """Record validation and return a focus guard that fails once its allowed checks run out."""
-        self.calls.append(("prepare_keyboard", (app_id, state_id)))
-
-        def guard() -> None:
-            self.calls.append(("keyboard_focus", app_id))
-            if self.keyboard_focus_checks_left is not None:
-                if not self.keyboard_focus_checks_left:
-                    msg = "The allowed application lost keyboard focus."
-                    raise AccessibilityActionOutcomeUnknownError(msg)
-                self.keyboard_focus_checks_left -= 1
-
-        return guard
-
-    def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
-        """Record semantic values, including the empty string used to clear a field."""
-        self.calls.append(("set_value", (app_id, state_id, element_index, value)))
-
-
-def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibilityBackend]:
-    pyautogui = FakePyAutoGui()
-    accessibility = FakeAccessibilityBackend()
-    provider = object.__new__(PyAutoGuiDesktopProvider)
-    provider._pyautogui = pyautogui
-    provider._capture_screen = pyautogui.screenshot
-    provider._capture_app_window = lambda _process_id, region: FakeImage((region.width * 2, region.height * 2))
-    provider._max_screenshot_width = 1600
-    provider._jpeg_quality = 80
-    provider._accessibility = accessibility
-    provider._display_geometry = lambda: (DisplayGeometry("primary", DesktopRect(0, 0, 1512, 982), 1512, 982),)
-    provider._input_enabled = threading.Event()
-    provider.set_input_enabled(True)
-    return provider, pyautogui, accessibility
 
 
 def test_app_capture_uses_window_bound_pixels() -> None:
@@ -562,11 +381,6 @@ def test_secondary_macos_click_uses_global_quartz_points(monkeypatch: pytest.Mon
     assert pointer.calls == []
 
 
-def _window(pid: int, layer: int, x: int, width: int, alpha: float = 1.0) -> dict[str, object]:
-    bounds = {"X": x, "Y": 0, "Width": width, "Height": 1000}
-    return {"layer": layer, "alpha": alpha, "pid": pid, "bounds": bounds}
-
-
 # Front to back: a transparent overlay, a floating panel over x >= 500, the allowed app, the desktop.
 _COVERED_WINDOWS = [
     _window(9, 25, 0, 2000, alpha=0.0),
@@ -574,37 +388,6 @@ _COVERED_WINDOWS = [
     _window(42, 0, 100, 800),
     _window(1, -2147483623, 0, 2000),
 ]
-
-
-def _fake_quartz(posted: list[dict[str, object]], windows: list[dict[str, object]]) -> SimpleNamespace:
-    """Record posted pointer events and list `windows` front to back as Quartz would."""
-    return SimpleNamespace(
-        kCGEventLeftMouseDown=1,
-        kCGEventLeftMouseUp=2,
-        kCGEventLeftMouseDragged=3,
-        kCGEventRightMouseDown=4,
-        kCGEventRightMouseUp=5,
-        kCGEventOtherMouseDown=6,
-        kCGEventOtherMouseUp=7,
-        kCGEventMouseMoved=8,
-        kCGMouseButtonLeft=0,
-        kCGMouseButtonRight=1,
-        kCGMouseButtonCenter=2,
-        kCGMouseEventClickState=10,
-        kCGHIDEventTap=0,
-        kCGScrollEventUnitLine=1,
-        kCGWindowListOptionOnScreenOnly=1,
-        kCGNullWindowID=0,
-        kCGWindowLayer="layer",
-        kCGWindowAlpha="alpha",
-        kCGWindowOwnerPID="pid",
-        kCGWindowBounds="bounds",
-        CGEventCreateMouseEvent=lambda _source, kind, point, _button: {"kind": kind, "point": point},
-        CGEventSetIntegerValueField=lambda _event, _field, _value: None,
-        CGEventCreateScrollWheelEvent=lambda *_args: {"kind": "wheel"},
-        CGEventPost=lambda _tap, event: posted.append(event),
-        CGWindowListCopyWindowInfo=lambda _options, _relative: windows,
-    )
 
 
 @pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
@@ -1140,3 +923,20 @@ def test_revoke_during_the_last_position_lookup_sends_no_key(monkeypatch: pytest
         provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["tab"])
 
     assert pyautogui.calls == []
+
+
+def test_revoke_while_typing_without_quartz_sends_no_further_chunk() -> None:
+    """Linux and Windows typing is sent in chunks too, so a revoke stops it before its next chunk."""
+    provider, pyautogui, _ = _provider()
+    write = pyautogui.write
+
+    def write_then_revoke(text: str, *, interval: float) -> None:
+        write(text, interval=interval)
+        provider.set_input_enabled(False)
+
+    pyautogui.write = write_then_revoke
+
+    with pytest.raises(DesktopControlRevokedError):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41)
+
+    assert pyautogui.calls == [("write", ("a" * 20, 0.01))]

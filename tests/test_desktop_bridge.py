@@ -68,16 +68,17 @@ from tests.desktop_helpers import (
     FakeProvider,
     _assert_upload_fallback,
     _command,
+    _fake_quartz,
     _handle_command,
     _local_shell,
     _longest_request_id,
     _root_id,
     _run_shell,
     _stall_output_uploads,
+    _window,
 )
+from tests.desktop_helpers import _provider as _real_provider
 from tests.desktop_helpers import selected_root as selected_root  # noqa: PLC0414
-from tests.test_desktop_provider import _fake_quartz, _window
-from tests.test_desktop_provider import _provider as _real_provider
 from tests.test_olm_to_device import olm_transport
 
 # The Matrix spec sets no to-device or EDU size limit (matrix-org/matrix-doc#3121). Synapse 1.148 caps
@@ -2772,3 +2773,75 @@ async def test_a_new_grant_waits_for_input_still_running_from_an_expired_lease(
     assert _response(transport).ok
     bridge.grant_local_control(60)
     assert bridge.local_status()["control_available"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["revoke", "expiry"])
+async def test_a_new_grant_waits_for_a_browser_action_from_the_ended_lease(transport: AsyncMock, ending: str) -> None:
+    """A browser action may finish after its lease ends, but never continues under a fresh grant."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class BlockingBrowserProvider(FakeBrowserProvider):
+        async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+            entered.set()
+            await release.wait()
+            return await super().execute(action, parameters)
+
+    now = [NOW_SECONDS]
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(browser_enabled=True),
+        browser_provider=BlockingBrowserProvider(),
+        clock=lambda: now[0],
+        monotonic_clock=lambda: now[0],
+    )
+    bridge.grant_local_control(60)
+    command = _command(
+        "browser_control",
+        parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.org"}},
+    )
+    await bridge.on_to_device_event(_event(command))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        await entered.wait()
+        if ending == "revoke":
+            bridge.revoke_local_control()
+        else:
+            now[0] += 61
+        with pytest.raises(ValueError, match="Wait for the desktop action that is still running to finish"):
+            bridge.grant_local_control(60)
+    finally:
+        release.set()
+    await executing
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert bridge.grant_local_control(60)["control_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_input_cancelled_while_its_native_call_runs_keeps_refusing_new_grants(transport: AsyncMock) -> None:
+    """A cancelled executor cannot stop the native call it was waiting on, so a revoke stays unrecoverable by a grant."""
+    del transport
+    started, release = threading.Event(), threading.Event()
+    provider = _BlockingClickProvider(started=started, release=release)
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    click = _command("click", parameters=_CLICK)
+    bridge._observations.remember(STATE, click)
+    await bridge.on_to_device_event(_event(click))
+    executing = asyncio.create_task(bridge.execute_pending(shell_starts=False))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        bridge.revoke_local_control()
+        executing.cancel()
+        with suppress(asyncio.CancelledError):
+            await executing
+        with pytest.raises(ValueError, match="Wait for the desktop action that is still running to finish"):
+            bridge.grant_local_control(60)
+    finally:
+        release.set()
