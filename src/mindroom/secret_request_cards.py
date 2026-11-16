@@ -143,8 +143,8 @@ def card_link(url: str | None) -> str | None:
         named = (parts.hostname, parts.port)[0]
     except ValueError:
         return None
-    sign_in = parts.username is not None or parts.password is not None
-    return link if parts.scheme in {"http", "https"} and named and not sign_in else None
+    with_account = parts.username is not None or parts.password is not None
+    return link if parts.scheme in {"http", "https"} and named and not with_account else None
 
 
 async def chat_refusal(runtime_paths: RuntimePaths, *, noun: str) -> str | None:
