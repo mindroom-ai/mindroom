@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
+from mindroom.token_counting.families import load_o200k
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
@@ -17,6 +18,9 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
+_SHORT_FOLLOW_UP_CHARS = 40
+# Absorbs float rounding, so a hit exactly ``relative_gap`` below the top hit is kept.
+_SCORE_GAP_TOLERANCE = 1e-9
 
 
 def redact_memory_text(text: str) -> str:
@@ -42,6 +46,41 @@ def format_memories_as_context(
 
     memory_lines = "\n".join(f"- {memory.get('memory', '')}" for memory in memories)
     return render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
+
+
+def select_recall_hits(
+    results: Sequence[MemoryResult],
+    *,
+    max_hits: int = 5,
+    relative_gap: float = 0.05,
+    token_budget: int = 800,
+) -> list[MemoryResult]:
+    """Return the leading recall hits worth injecting, in rank order.
+
+    Hits are kept while their score is within ``relative_gap`` (an absolute difference on the score scale) of the top
+    hit's, up to ``max_hits``, and while their memory text fits ``token_budget`` o200k tokens in total.
+    The first hit that fails any rule ends the selection, so a top hit larger than the budget selects nothing.
+    A result without a score counts as score 0.
+    """
+    if not results:
+        return []
+    top_score = results[0].get("score", 0.0)
+    encoder = load_o200k()
+    selected: list[MemoryResult] = []
+    tokens = 0
+    for result in results[:max_hits]:
+        if top_score - result.get("score", 0.0) > relative_gap + _SCORE_GAP_TOLERANCE:
+            break
+        tokens += len(encoder.encode_ordinary(result.get("memory", "")))
+        if tokens > token_budget:
+            break
+        selected.append(result)
+    return selected
+
+
+def is_short_follow_up(message: str, *, in_thread: bool) -> bool:
+    """Return whether ``message`` is a short reply inside an existing thread, where recall can be skipped."""
+    return in_thread and len(message.strip()) < _SHORT_FOLLOW_UP_CHARS
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

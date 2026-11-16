@@ -3875,6 +3875,10 @@ depends_on = [
 visibility = ["mindroom.memory._backend"]
 
 [[modules]]
+path = "mindroom.memory.entries"
+depends_on = ["mindroom.knowledge.chunking", "mindroom.knowledge.readers"]
+
+[[modules]]
 path = "mindroom.memory._prompting"
 depends_on = ["mindroom.prompt_templates", "mindroom.tool_system.events"]
 visibility = [
