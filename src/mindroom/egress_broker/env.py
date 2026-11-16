@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping  # noqa: TC003
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote, urlsplit
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RuntimePaths
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
+from mindroom.tool_system.tool_environment import git_config_env
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -22,10 +23,12 @@ __all__ = [
     "EgressAgentScope",
     "apply_runner_ca_bundle",
     "broker_execution_env",
+    "broker_git_config",
+    "broker_serves_primary_shell",
     "egress_agent_scope",
     "egress_broker_enabled",
     "egress_tool_unavailable",
-    "egress_tool_without_worker_commands",
+    "egress_tool_with_only_primary_python",
     "personal_page_served",
     "primary_callback_hosts",
 ]
@@ -77,28 +80,45 @@ type EgressAgentScope = Literal["user", "user_agent", "shared", "unscoped"]
 def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> EgressAgentScope | None:
     """Return whose store an agent's egress services and keys live in, or None when it does not use the broker.
 
-    An agent opts in by listing the `egress_credentials` tool, and its brokered traffic only comes from a tool the
-    sandbox proxy gives the broker environment (`EXECUTION_ENV_TOOL_NAMES`); both must be among its resolved tools,
-    presets and defaults included, and at least one such tool must run in a worker, since the sandbox proxy adds the
-    broker environment only to worker-routed calls. A name the config has no agent for does not use it. The store is
-    one `user_agent` agent's own per requester, every `user` agent's of a requester, everyone's on a `shared` agent,
-    or the global one all agents without a worker scope share (`unscoped`).
-    The sandbox proxy and both egress APIs decide here which agents use the broker.
+    An agent opts in by listing the `egress_credentials` tool, and its brokered traffic only comes from a command tool
+    that gets the broker environment: `shell`, wherever it runs, or any `EXECUTION_ENV_TOOL_NAMES` tool in a worker.
+    Both must be among its resolved tools, presets and defaults included. The sandbox proxy adds the broker
+    environment to worker-routed calls and the tool-call policy to shell calls in the primary; a primary `python`
+    runs in-process, where no call can get an environment of its own, so it alone does not qualify. A name the config
+    has no agent for does not use it. The store is one `user_agent` agent's own per requester, every `user` agent's
+    of a requester, everyone's on a `shared` agent, or the global one all agents without a worker scope share
+    (`unscoped`).
+    The sandbox proxy, the tool-call policy, and both egress APIs decide here which agents use the broker.
     """
     if agent_name not in config.agents:
         return None
-    agent_tools = _agent_tools(config, agent_name, runtime_paths)
     # While the broker is off, the egress tool is unavailable, so no agent uses the broker.
-    if _EGRESS_TOOL_NAME not in agent_tools.tool_names or not _runs_commands_in_a_worker(agent_tools, runtime_paths):
+    if not _uses_broker(_agent_tools(config, agent_name, runtime_paths), runtime_paths):
         return None
     execution_scope = config.resolve_agent(agent_name).policy.effective_execution_scope
     return "unscoped" if execution_scope is None else execution_scope
 
 
-def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
-    """Return whether an agent lists `egress_credentials` and shell or python, but none of them runs in a worker.
+def broker_serves_primary_shell(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether an agent that uses the broker runs its `shell` in the primary.
 
-    The broker then never reaches the agent's commands, so `egress_agent_scope` leaves it out. An agent with neither
+    The tool-call policy then gives each of its shell calls the broker environment; a worker-routed shell call gets it
+    from the sandbox proxy instead.
+    """
+    if agent_name not in config.agents:
+        return False
+    agent_tools = _agent_tools(config, agent_name, runtime_paths)
+    return (
+        _EGRESS_TOOL_NAME in agent_tools.tool_names
+        and "shell" in agent_tools.tool_names
+        and not _runs_in_a_worker(agent_tools, ("shell",), runtime_paths)
+    )
+
+
+def egress_tool_with_only_primary_python(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether an agent lists `egress_credentials`, and its only command tool is a `python` in the primary.
+
+    The broker then never reaches the agent's commands, so `egress_agent_scope` leaves it out. An agent with no command
     tool is not named: it has nothing to route, as with `egress_credentials` in `defaults.tools`.
     """
     if agent_name not in config.agents:
@@ -107,7 +127,7 @@ def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime
     return (
         _EGRESS_TOOL_NAME in agent_tools.tool_names
         and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(agent_tools.tool_names)
-        and not _runs_commands_in_a_worker(agent_tools, runtime_paths)
+        and not _uses_broker(agent_tools, runtime_paths)
     )
 
 
@@ -119,20 +139,26 @@ def _agent_tools(config: Config, agent_name: str, runtime_paths: RuntimePaths) -
     return resolve_agent_tools(config, agent_name, config_plugins(config, runtime_paths).tools)
 
 
-def _runs_commands_in_a_worker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
-    """Return whether any of the agent's own `EXECUTION_ENV_TOOL_NAMES` runs in a worker."""
+def _uses_broker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the agent lists `egress_credentials` and a `shell`, or another command tool in a worker."""
+    tool_names = agent_tools.tool_names
+    return _EGRESS_TOOL_NAME in tool_names and (
+        "shell" in tool_names
+        or _runs_in_a_worker(agent_tools, EXECUTION_ENV_TOOL_NAMES.intersection(tool_names), runtime_paths)
+    )
+
+
+def _runs_in_a_worker(agent_tools: AgentTools, tool_names: Iterable[str], runtime_paths: RuntimePaths) -> bool:
+    """Return whether any of the agent's own `tool_names` runs in a worker."""
     # Deferred: the sandbox proxy imports this module.
     from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
 
     try:
         placement = tool_placement(runtime_paths, agent_tools.tools)
-        return any(
-            agent_tools.runs_in_worker(tool_name, placement)
-            for tool_name in EXECUTION_ENV_TOOL_NAMES.intersection(agent_tools.tool_names)
-        )
+        return any(agent_tools.runs_in_worker(tool_name, placement) for tool_name in tool_names)
     except WorkerBackendError:
-        # An unreadable worker backend never runs these tools in the primary, so the agent stays listed and each
-        # page degrades per service instead of failing.
+        # An unreadable worker backend never runs the tool in the primary, so the agent stays listed and each page
+        # degrades per service instead of failing.
         return True
 
 
@@ -145,7 +171,7 @@ def broker_execution_env(
     extra_no_proxy_hosts: Iterable[str],
     call_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Return the native broker execution env overlay for worker calls.
+    """Return the native broker execution env overlay for one call's commands.
 
     Composes proxy env with the token as userinfo, includes git proxy config,
     NO_PROXY with callback hosts and extras, NODE_USE_ENV_PROXY=1, the broker
@@ -174,39 +200,16 @@ def broker_execution_env(
         # Git/libcurl does not always send proxy credentials from HTTPS_PROXY userinfo on CONNECT, so
         # environment-backed Git config names the same proxy without writing user or global Git config.
         # It extends the call's env, never the primary's process env, whose Git config must not leak to workers.
-        **_git_config_env(call_env or {}, [("http.proxy", proxy), ("http.proxyAuthMethod", "basic")]),
+        **git_config_env(call_env or {}, broker_git_config(proxy)),
         BROKER_CA_PEM_ENV: ca_pem,
         "NODE_USE_ENV_PROXY": "1",
         **placeholder_env,
     }
 
 
-def _git_config_env(call_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
-    """Append entries to any well-formed environment-backed Git config.
-
-    A malformed incoming block is discarded so Git never receives an
-    inconsistent count/key/value set.
-    """
-    existing_entries: list[tuple[str, str]] = []
-    try:
-        existing_count = int(call_env.get("GIT_CONFIG_COUNT", "0"))
-    except ValueError:
-        existing_count = 0
-    if existing_count > 0:
-        for index in range(existing_count):
-            key = call_env.get(f"GIT_CONFIG_KEY_{index}")
-            value = call_env.get(f"GIT_CONFIG_VALUE_{index}")
-            if key is None or value is None:
-                existing_entries = []
-                break
-            existing_entries.append((key, value))
-
-    merged_entries = [*existing_entries, *entries]
-    env = {"GIT_CONFIG_COUNT": str(len(merged_entries))}
-    for index, (key, value) in enumerate(merged_entries):
-        env[f"GIT_CONFIG_KEY_{index}"] = key
-        env[f"GIT_CONFIG_VALUE_{index}"] = value
-    return env
+def broker_git_config(proxy: str) -> tuple[tuple[str, str], ...]:
+    """Return the Git config entries that send Git through the broker proxy `proxy` with its credentials."""
+    return (("http.proxy", proxy), ("http.proxyAuthMethod", "basic"))
 
 
 def primary_callback_hosts(runtime_paths: RuntimePaths) -> list[str]:
@@ -234,12 +237,20 @@ def primary_callback_hosts(runtime_paths: RuntimePaths) -> list[str]:
     return list(dict.fromkeys(host for host in hosts if host))
 
 
-def apply_runner_ca_bundle(env: dict[str, str], directory: Path) -> None:
+def apply_runner_ca_bundle(
+    env: dict[str, str],
+    directory: Path,
+    *,
+    trusted_before: Mapping[str, str] | None = None,
+) -> None:
     """Materialize broker CA bundle into directory and set CA env vars.
 
     Pops BROKER_CA_PEM_ENV from env, writes combined and broker-only bundle
     files, and sets SSL_CERT_FILE (+ friends) to the combined bundle and
     NODE_EXTRA_CA_CERTS to the broker-only file.
+
+    `trusted_before` is the environment whose CA variables these replace; the files keep the certificates of the
+    CA files it names, so commands that trusted a private CA through them still do.
 
     `materialize_ca_bundle` creates the directory with mode 0700 if missing.
     An env without the broker CA is left unchanged.
@@ -252,7 +263,14 @@ def apply_runner_ca_bundle(env: dict[str, str], directory: Path) -> None:
     from mindroom.egress_broker.ca import materialize_ca_bundle  # noqa: PLC0415
 
     # Materialize CA bundle
-    combined, broker_only = materialize_ca_bundle(ca_pem, directory)
+    trusted_before = trusted_before or {}
+    node_extra = trusted_before.get("NODE_EXTRA_CA_CERTS")
+    combined, broker_only = materialize_ca_bundle(
+        ca_pem,
+        directory,
+        kept_bundles=[Path(trusted_before[name]) for name in RUNNER_CA_BUNDLE_ENV if trusted_before.get(name)],
+        kept_node_extra=Path(node_extra) if node_extra else None,
+    )
 
     # Set CA env vars
     for name in RUNNER_CA_BUNDLE_ENV:

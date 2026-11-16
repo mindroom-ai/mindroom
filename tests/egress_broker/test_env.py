@@ -14,9 +14,10 @@ from mindroom.egress_broker.env import (
     EgressAgentScope,
     apply_runner_ca_bundle,
     broker_execution_env,
+    broker_serves_primary_shell,
     egress_agent_scope,
     egress_broker_enabled,
-    egress_tool_without_worker_commands,
+    egress_tool_with_only_primary_python,
     personal_page_served,
     primary_callback_hosts,
 )
@@ -268,6 +269,8 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
 # A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
 _RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
 _RUNNER = {**_RUNNER_WITHOUT_BROKER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+# The broker without a worker backend, so every tool runs in the primary.
+_BROKER = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
 
 
 @pytest.mark.parametrize(
@@ -307,13 +310,19 @@ def test_only_agents_with_the_egress_credentials_tool_use_the_broker(
             id="shell-in-worker",
         ),
         pytest.param(
-            _agent("shell", "python", "egress_credentials", worker_tools=["python"]),
+            _agent("python", "egress_credentials", worker_tools=["python"]),
             _RUNNER,
             "unscoped",
             id="python-in-worker",
         ),
-        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), _RUNNER, None, id="shell-in-primary"),
-        pytest.param(_agent("shell", "egress_credentials"), {}, None, id="no-worker-backend"),
+        pytest.param(
+            _agent("shell", "egress_credentials", worker_tools=[]),
+            _RUNNER,
+            "unscoped",
+            id="shell-in-primary",
+        ),
+        pytest.param(_agent("shell", "egress_credentials"), _BROKER, "unscoped", id="no-worker-backend"),
+        pytest.param(_agent("python", "egress_credentials", worker_tools=[]), _RUNNER, None, id="python-in-primary"),
         pytest.param(
             _agent("python", "egress_credentials"),
             {**_RUNNER, "MINDROOM_SANDBOX_EXECUTION_MODE": "off"},
@@ -322,13 +331,13 @@ def test_only_agents_with_the_egress_credentials_tool_use_the_broker(
         ),
     ],
 )
-def test_agents_whose_shell_and_python_run_in_the_primary_do_not_use_the_broker(
+def test_a_shell_anywhere_or_a_worker_python_uses_the_broker(
     tmp_path: Path,
     agent: dict[str, object],
     process_env: dict[str, str],
     scope: EgressAgentScope | None,
 ) -> None:
-    """Only worker-routed calls get the broker env, so an agent whose shell and python run in the primary is not listed."""
+    """A shell gets the broker env wherever it runs; a primary python runs in-process, so alone it does not qualify."""
     config = Config(agents={"agent": agent})
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -340,21 +349,56 @@ def test_agents_whose_shell_and_python_run_in_the_primary_do_not_use_the_broker(
 
 
 @pytest.mark.parametrize(
-    ("agent", "unused"),
+    ("agent", "process_env", "primary"),
     [
-        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), True, id="shell-in-primary"),
-        pytest.param(_agent("egress_credentials"), False, id="tool-without-shell"),
-        pytest.param(_agent("shell", "egress_credentials", worker_tools=["shell"]), False, id="shell-in-worker"),
-        pytest.param(_agent("shell", worker_tools=[]), False, id="no-egress-tool"),
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), _RUNNER, True, id="shell-in-primary"),
+        pytest.param(_agent("shell", "egress_credentials"), _BROKER, True, id="no-worker-backend"),
+        pytest.param(
+            _agent("shell", "egress_credentials", worker_tools=["shell"]),
+            _RUNNER,
+            False,
+            id="shell-in-worker",
+        ),
+        pytest.param(_agent("shell", worker_tools=[]), _RUNNER, False, id="no-egress-tool"),
+        pytest.param(_agent("python", "egress_credentials", worker_tools=[]), _RUNNER, False, id="no-shell"),
     ],
 )
-def test_an_egress_tool_no_worker_command_uses_is_reported(
+def test_only_a_primary_shell_of_a_broker_agent_is_served_by_the_tool_call_policy(
+    tmp_path: Path,
+    agent: dict[str, object],
+    process_env: dict[str, str],
+    *,
+    primary: bool,
+) -> None:
+    """A worker-routed shell gets the broker env from the sandbox proxy, so only a primary one is named here."""
+    config = Config(agents={"agent": agent})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    assert broker_serves_primary_shell(config, "agent", runtime_paths) is primary
+    assert broker_serves_primary_shell(config, "removed", runtime_paths) is False
+
+
+@pytest.mark.parametrize(
+    ("agent", "unused"),
+    [
+        pytest.param(_agent("python", "egress_credentials", worker_tools=[]), True, id="python-in-primary"),
+        pytest.param(_agent("shell", "python", "egress_credentials", worker_tools=[]), False, id="shell-in-primary"),
+        pytest.param(_agent("egress_credentials"), False, id="no-command-tool"),
+        pytest.param(_agent("python", "egress_credentials", worker_tools=["python"]), False, id="python-in-worker"),
+        pytest.param(_agent("python", worker_tools=[]), False, id="no-egress-tool"),
+    ],
+)
+def test_an_egress_tool_whose_only_command_tool_is_a_primary_python_is_reported(
     tmp_path: Path,
     agent: dict[str, object],
     *,
     unused: bool,
 ) -> None:
-    """An agent whose shell or python could use Agent Keys but runs in the primary is named; one without them is not."""
+    """Only an agent whose sole command tool is a primary python, which the broker cannot reach, is named."""
     config = Config(agents={"agent": agent})
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -362,8 +406,8 @@ def test_an_egress_tool_no_worker_command_uses_is_reported(
         process_env=_RUNNER,
     )
 
-    assert egress_tool_without_worker_commands(config, "agent", runtime_paths) is unused
-    assert egress_tool_without_worker_commands(config, "removed", runtime_paths) is False
+    assert egress_tool_with_only_primary_python(config, "agent", runtime_paths) is unused
+    assert egress_tool_with_only_primary_python(config, "removed", runtime_paths) is False
 
 
 @pytest.mark.parametrize(

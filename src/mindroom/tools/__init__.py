@@ -272,8 +272,8 @@ def _homeassistant_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Egress Credentials",
     description=(
-        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
-        "and ask the user for a missing key"
+        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
+        "can use, and ask the user for a missing key"
     ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,

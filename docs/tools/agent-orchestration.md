@@ -19,7 +19,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 Related tools documented elsewhere:
 
 - [`contacts`](../agent-contacts.md#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](../deployment/egress-broker.md#asking-in-chat).
+- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's `shell` calls and worker-routed `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](../deployment/egress-broker.md#asking-in-chat).
 - [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](../usage.md#usage_stats) - Read-only summaries of retained usage.

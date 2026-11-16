@@ -462,14 +462,14 @@ def test_without_worker_target_explains_a_worker_scoped_agent_is_required(tmp_pa
     assert "worker-scoped" in str(payload["note"])
 
 
-def test_an_agent_whose_commands_run_in_the_primary_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
-    """Its shell runs in the primary, so the tool lists no services and sends the agent to the operator, not a page."""
+def test_an_agent_whose_only_command_tool_is_a_primary_python_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
+    """A primary python runs in-process, so the tool lists no services and sends the agent to the operator, not a page."""
     runtime_paths = _runtime_paths(
         tmp_path,
         MINDROOM_PUBLIC_URL="https://mindroom.example",
         MINDROOM_EGRESS_BROKER_PORT="8768",
     )
-    agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_tools=[])
+    agent = AgentConfig(display_name="Code", tools=["python", "egress_credentials"], worker_tools=[])
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, agents={"code": agent}))
 
@@ -504,8 +504,8 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
-        "and ask the user for a missing key"
+        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
+        "can use, and ask the user for a missing key"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
@@ -1256,7 +1256,10 @@ async def test_refuses_without_posting(
         "openai": {**_SERVICES["openai"], "admin_key": True},
         "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
     }
-    agent_fields = {"no-agent-keys": {"worker_tools": []}, "not-a-user": {"access": {"users": [_BOB]}}}.get(case)
+    agent_fields = {
+        "no-agent-keys": {"tools": ["python", "egress_credentials"], "worker_tools": []},
+        "not-a-user": {"access": {"users": [_BOB]}},
+    }.get(case)
     tool, context = _asking(
         tmp_path,
         services,
