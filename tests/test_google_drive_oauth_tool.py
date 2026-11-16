@@ -31,10 +31,11 @@ from mindroom.tool_system.agno_toolkits import (
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
-    from typing import BinaryIO
+    from typing import BinaryIO, Literal
 
     from mindroom.config.models import FileAccess
 
@@ -871,7 +872,7 @@ def test_google_drive_upload_rejects_workspace_escape(
     assert service.files_resource.create_kwargs is None
 
 
-def test_google_drive_update_replaces_binary_file_content(
+def test_google_drive_update_replaces_file_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -879,20 +880,10 @@ def test_google_drive_update_replaces_binary_file_content(
     replacement = workspace_root / "reports" / "plan.md"
     replacement.parent.mkdir()
     replacement.write_text("revised plan")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "plan.md",
-        "mimeType": "text/markdown",
-    }
 
     result = json.loads(tool.update_file("file-id", "reports/plan.md"))
 
     assert result == {"id": "file-id"}
-    assert service.files_resource.get_kwargs == {
-        "fileId": "file-id",
-        "fields": "id,name,mimeType",
-        "supportsAllDrives": True,
-    }
     assert service.files_resource.update_kwargs is not None
     media = service.files_resource.update_kwargs["media_body"]
     assert isinstance(media, _FakeMediaIoBaseUpload)
@@ -934,26 +925,87 @@ def test_google_drive_upload_and_update_type_a_file_by_its_name(
     assert service.files_resource.update_kwargs["media_body"].mimetype == mime_type
 
 
-def test_google_drive_update_rejects_google_workspace_file(
+@pytest.mark.parametrize(
+    ("convert_to", "mime_type"),
+    [
+        ("document", "application/vnd.google-apps.document"),
+        ("spreadsheet", "application/vnd.google-apps.spreadsheet"),
+        ("presentation", "application/vnd.google-apps.presentation"),
+    ],
+)
+def test_google_drive_upload_converts_a_file_to_a_google_workspace_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    convert_to: Literal["document", "spreadsheet", "presentation"],
+    mime_type: str,
+) -> None:
+    """Drive converts the file it is sent into the Workspace type the upload names, under the file's name less its extension."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    (workspace_root / "launch.plan.html").write_text("<h1>Plan</h1><table><tr><td>cell</td></tr></table>")
+
+    tool.upload_file("launch.plan.html", folder_id="folder-id", convert_to=convert_to)
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.create_kwargs["body"] == {
+        "name": "launch.plan",
+        "parents": ["folder-id"],
+        "mimeType": mime_type,
+    }
+    assert service.files_resource.create_kwargs["media_body"].mimetype == "text/html"
+
+
+def test_google_drive_converting_upload_keeps_a_given_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
-    replacement = workspace_root / "plan.txt"
-    replacement.write_text("revised plan")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "Plan",
+    (workspace_root / "plan.md").write_text("# Plan")
+
+    tool.upload_file("plan.md", name="Launch plan v1.2", convert_to="document")
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.create_kwargs["body"] == {
+        "name": "Launch plan v1.2",
         "mimeType": "application/vnd.google-apps.document",
     }
+    assert service.files_resource.create_kwargs["media_body"].mimetype == "text/markdown"
 
-    result = json.loads(tool.update_file("file-id", "plan.txt"))
 
-    assert result["error"] == (
-        "Google Drive content replacement only supports binary files; "
-        "application/vnd.google-apps.document requires its Google Workspace API"
-    )
-    assert service.files_resource.update_kwargs is None
+def test_google_drive_upload_schema_offers_only_the_workspace_types_drive_converts_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, _service, _workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+
+    parameters = dict(toolkit_offers(tool, "google_drive_upload_file").parameters)
+
+    assert parameters["properties"]["convert_to"]["enum"] == ["document", "spreadsheet", "presentation"]
+    assert "convert_to" not in parameters["required"]
+
+
+def test_google_drive_update_replaces_a_google_doc_with_the_converted_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Google Doc is sent its new contents as any file is, without first asking Drive what kind of file it is."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "plan.html"
+    replacement.write_text("<h1>Revised plan</h1>")
+
+    result = json.loads(tool.update_file("file-id", "plan.html"))
+
+    assert result == {"id": "file-id"}
+    assert service.files_resource.get_kwargs is None
+    assert service.files_resource.update_kwargs is not None
+    media = service.files_resource.update_kwargs["media_body"]
+    assert media.content == replacement.read_bytes()
+    assert media.mimetype == "text/html"
+    assert service.files_resource.update_kwargs == {
+        "fileId": "file-id",
+        "media_body": media,
+        "fields": "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink",
+        "supportsAllDrives": True,
+    }
 
 
 def test_google_drive_upload_rejects_absolute_workspace_escape(

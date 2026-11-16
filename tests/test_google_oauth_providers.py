@@ -114,7 +114,7 @@ _CALENDAR_SCOPES = (
             "Google Docs",
             "google_docs",
             ("https://www.googleapis.com/auth/documents",),
-            ("Docs create and read", "Docs text editing"),
+            ("Docs create and read", "Docs editing"),
             False,
         ),
         (
