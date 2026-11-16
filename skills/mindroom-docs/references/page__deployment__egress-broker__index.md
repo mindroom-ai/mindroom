@@ -696,10 +696,12 @@ agents:
 ### Asking in chat
 
 For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+It can also give the `url` of the page where the user gets or creates the key and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
   Other people in the thread see who the card waits for.
   When the service already has a key in that scope, the card says that saving replaces it.
+- A `url` becomes a button that names the page's host and opens it in the browser, and a `placeholder` becomes the hint in the empty field, as on a [temporary secret's card](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets).
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.

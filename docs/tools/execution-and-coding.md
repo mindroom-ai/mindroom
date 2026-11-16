@@ -226,9 +226,13 @@ agents:
 
 `temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](../deployment/egress-broker.md) service, a passphrase, or a pairing code.
 It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+The agent can also give a `label` that says what the secret is, the `url` of a page where the user gets or creates it, and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
   Other people in the thread see who the card waits for.
+- A `label` becomes the card's title and a `placeholder` the hint in the empty field, each cut to one line of 80 characters.
+  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host and no `user:password@` part.
+  The agent chooses the link, so the user should check the host on the button before signing in there.
 - The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
   A restart forgets a value kept in memory and reads back one kept in a file.
   The file is deleted at the first tool call or answer after the value expired.

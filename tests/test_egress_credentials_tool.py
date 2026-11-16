@@ -1036,9 +1036,10 @@ def _start(
     context: ToolRuntimeContext,
     service: str = "github",
     reason: str = _REASON,
+    **shown: str,
 ) -> asyncio.Task[str]:
     with tool_runtime_context(context):
-        return asyncio.create_task(tool.request_secret(service, reason))
+        return asyncio.create_task(tool.request_secret(service, reason, **shown))
 
 
 async def _ask(
@@ -1079,6 +1080,34 @@ def _final_card(context: ToolRuntimeContext, status: str) -> dict[str, object]:
     assert new_content["msgtype"] == "m.notice"
     assert new_content[SECRET_REQUEST_CONTENT_KEY] == {**card[SECRET_REQUEST_CONTENT_KEY], "status": status}
     return new_content
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_shows_a_link_and_a_field_hint(tmp_path: Path) -> None:
+    """The agent can name the page that gives the key and hint at its form; both stay on the card's edit."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, url="https://github.com/settings/tokens", placeholder=" ghp_…\n")
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["url"], content["placeholder"]) == ("https://github.com/settings/tokens", "ghp_…")
+    assert card["body"].endswith("Where to get it: https://github.com/settings/tokens")
+    _final_card(context, "declined")
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_refuses_a_link_no_card_can_show(tmp_path: Path) -> None:
+    """A link that is no `http` or `https` page posts no card and tells the agent why."""
+    tool, context = _asking(tmp_path)
+
+    result = json.loads(await _start(tool, context, url="javascript:alert(1)"))
+
+    assert result["status"] == "error"
+    assert "`url`" in result["message"]
+    context.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -96,9 +96,10 @@ def _start(
     context: ToolRuntimeContext | None,
     name: str = "SUDO_PASSWORD",
     reason: str = _REASON,
+    **shown: str,
 ) -> asyncio.Task[str]:
     with tool_runtime_context(context):
-        return asyncio.create_task(tool.request_temporary_secret(name, reason))
+        return asyncio.create_task(tool.request_temporary_secret(name, reason, **shown))
 
 
 def _sent(context: ToolRuntimeContext) -> list[dict[str, object]]:
@@ -235,6 +236,81 @@ async def test_refuses_without_posting(tmp_path: Path, case: str, name: str, rea
     assert set(result) == {"status", "message"}
     assert result["status"] == "error"
     assert message in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_card_shows_a_label_a_link_and_a_field_hint(tmp_path: Path) -> None:
+    """What the agent calls the secret, where the person gets it and what the empty field hints are on the card."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(
+        tool,
+        context,
+        "GITHUB_TOKEN",
+        label="  GitHub\n token ",
+        url=" https://github.com/settings/tokens?type=beta ",
+        placeholder="ghp_…",
+    )
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["label"], content["url"], content["placeholder"]) == (
+        "GitHub token",
+        "https://github.com/settings/tokens?type=beta",
+        "ghp_…",
+    )
+    # A client without the card reads what is asked and where to get it in the plain body.
+    assert card["body"] == (
+        "🔑 Code asks for a secret (GitHub token, GITHUB_TOKEN). Open MindRoom Chat to enter it. "
+        "Where to get it: https://github.com/settings/tokens?type=beta"
+    )
+    _card, edit = _sent(context)
+    assert edit["m.new_content"][SECRET_REQUEST_CONTENT_KEY] == {**content, "status": "declined"}
+    assert edit["m.new_content"]["body"] == "🔑 Secret request declined."
+
+
+@pytest.mark.asyncio
+async def test_a_long_label_or_field_hint_is_cut(tmp_path: Path) -> None:
+    """A label and a hint are one short line each, so a card stays a card."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, label="L" * 200, placeholder="P" * 200)
+    content = (await _posted_card(context, task))[SECRET_REQUEST_CONTENT_KEY]
+    secret_request_registry().resolve(content["request_id"], "declined")
+    await task
+
+    assert (content["label"], content["placeholder"]) == ("L" * 80, "P" * 80)
+    assert "url" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "github.com/settings/tokens",
+        "ftp://github.com/settings/tokens",
+        "javascript:alert(1)",
+        "https://",
+        "https:///settings/tokens",
+        "https://ada:secret@github.com/",
+        "https://github.com/settings tokens",
+        "https://github.com/\x00",
+        "https://github.com:99999/",
+        pytest.param("https://github.com/" + "a" * 2000, id="too-long"),
+    ],
+)
+async def test_refuses_a_link_no_card_can_show(tmp_path: Path, url: str) -> None:
+    """A link is an `http` or `https` page with a host and no sign-in part: anything else posts no card."""
+    tool, context = _asking(tmp_path)
+
+    result = json.loads(await _start(tool, context, url=url))
+
+    assert set(result) == {"status", "message"}
+    assert result["status"] == "error"
+    assert "`url`" in result["message"]
     context.client.room_send.assert_not_awaited()
 
 

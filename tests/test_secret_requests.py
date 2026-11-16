@@ -138,6 +138,25 @@ async def test_content_carries_metadata_only() -> None:
     assert content["hosts"] == ["api.github.com"]
 
 
+@pytest.mark.asyncio
+async def test_content_carries_a_link_and_a_field_hint_when_given() -> None:
+    """A key card can name the page that gives the key and hint at its form; its service is its name, so no label."""
+    request = _register(_SecretRequestRegistry())
+
+    content = secret_request_content(
+        request,
+        display_name="GitHub",
+        reason="to open a PR",
+        status="pending",
+        label="GitHub token",
+        url="https://github.com/settings/tokens",
+        placeholder="ghp_…",
+    )
+
+    assert (content["url"], content["placeholder"]) == ("https://github.com/settings/tokens", "ghp_…")
+    assert "label" not in content
+
+
 def test_bodies() -> None:
     """Each status has its body text."""
     kwargs = {"agent_display_name": "Code", "display_name": "GitHub"}
@@ -147,6 +166,12 @@ def test_bodies() -> None:
     assert secret_request_body("saved", **kwargs) == "🔑 GitHub key saved."
     assert secret_request_body("declined", **kwargs) == "🔑 GitHub key request declined."
     assert secret_request_body("expired", **kwargs) == "🔑 GitHub key request expired."
+    # Only a pending card says where the key comes from.
+    url = "https://github.com/settings/tokens"
+    assert secret_request_body("pending", **kwargs, url=url) == (
+        f"🔑 Code asks for your GitHub key. Open MindRoom Chat to enter it. Where to get it: {url}"
+    )
+    assert secret_request_body("saved", **kwargs, url=url) == "🔑 GitHub key saved."
 
 
 HOLDER = _SecretHolder(agent_name="code", room_id=ROOM, thread_id="$thread", requester_id="@alice:example.org")
@@ -320,6 +345,16 @@ def test_temporary_bodies() -> None:
     assert temporary_secret_body("saved", **kwargs) == "🔑 Secret received."
     assert temporary_secret_body("declined", **kwargs) == "🔑 Secret request declined."
     assert temporary_secret_body("expired", **kwargs) == "🔑 Secret request expired."
+    url = "https://example.org/admin"
+    assert temporary_secret_body("pending", **kwargs, label="Admin password") == (
+        "🔑 Code asks for a secret (Admin password, SUDO_PASSWORD). Open MindRoom Chat to enter it."
+    )
+    assert temporary_secret_body("pending", **kwargs, url=url) == (
+        f"🔑 Code asks for a secret (SUDO_PASSWORD). Open MindRoom Chat to enter it. Where to get it: {url}"
+    )
+    assert temporary_secret_body("declined", **kwargs, label="Admin password", url=url) == (
+        "🔑 Secret request declined."
+    )
 
 
 def test_a_file_that_cannot_be_deleted_never_fails_a_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
