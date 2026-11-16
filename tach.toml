@@ -3116,6 +3116,14 @@ depends_on = [
 visibility = ["mindroom.matrix.users"]
 
 [[modules]]
+path = "mindroom.matrix.user_masquerade"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_session",
+]
+visibility = []
+
+[[modules]]
 path = "mindroom.matrix.provisioning"
 depends_on = [
     "mindroom.http_error_detail",
@@ -4207,6 +4215,7 @@ visibility = [
     "mindroom.matrix.provisioning",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.typing",
+    "mindroom.matrix.user_masquerade",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
 ]
@@ -6965,6 +6974,7 @@ visibility = [
     "mindroom.matrix.typing",
     "mindroom.desktop.session",
     "mindroom.orchestration.runtime",
+    "mindroom.matrix.user_masquerade",
 ]
 
 [[interfaces]]
