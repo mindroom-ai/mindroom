@@ -78,11 +78,11 @@ def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
 
 @dataclass(frozen=True)
 class _FailureStreak:
-    """One candidate's failed reconciliation attempts in a row, the kinds of error they raised, and whether one logged an error."""
+    """One candidate's failed reconciliation attempts in a row, the kinds of error they raised, and those logged as errors."""
 
     failures: int
     error_types: frozenset[type[Exception]]
-    logged_error: bool
+    logged_error_types: frozenset[type[Exception]]
 
 
 @dataclass(frozen=True)
@@ -583,20 +583,20 @@ class PersonalRoomLifecycle:
             backoff = _next_backoff(previous)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset(), logged_error=False))
+            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset(), frozenset()))
             failures = streak.failures + 1
             new_error = type(error) not in streak.error_types
-            # A roster mismatch waits for a person and never logs an error; another failure logs one once the
-            # threshold is reached, and one for each kind of error first seen after that.
+            # A roster mismatch waits for a person and never logs an error; from the threshold on, each other kind
+            # of error logs one error, and its repeats stay warnings.
             persistent = (
                 not isinstance(error, PersonalRoomRosterMismatchError)
                 and failures >= _RECONCILIATION_ERROR_FAILURES
-                and (new_error or not streak.logged_error)
+                and type(error) not in streak.logged_error_types
             )
             self._failure_streaks[candidate] = _FailureStreak(
                 failures,
                 streak.error_types | {type(error)},
-                logged_error=streak.logged_error or persistent,
+                streak.logged_error_types | {type(error)} if persistent else streak.logged_error_types,
             )
             retry = {"attempt": failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):

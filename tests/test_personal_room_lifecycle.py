@@ -804,6 +804,30 @@ async def test_a_failure_behind_roster_mismatches_still_reaches_an_error(
 
 
 @pytest.mark.asyncio
+async def test_a_failure_seen_before_another_reached_the_threshold_still_logs_its_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """The error at the third failure names one kind; another kind that keeps failing after it logs its own error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable, missing, missing, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", True, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_lobby_command_that_leaves_a_reinvite_pending_does_not_end_the_failure_count(
     coordination: Coordination,
     clock: Clock,
