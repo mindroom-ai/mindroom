@@ -140,11 +140,11 @@ def card_link(url: str | None) -> str | None:
     try:
         parts = urlsplit(link)
         # Reading the port refuses one that is no port.
-        named = (parts.hostname, parts.port)[0]
+        host, _port = parts.hostname, parts.port
     except ValueError:
         return None
     with_account = parts.username is not None or parts.password is not None
-    return link if parts.scheme in {"http", "https"} and named and not with_account else None
+    return link if parts.scheme in {"http", "https"} and host and not with_account else None
 
 
 async def chat_refusal(runtime_paths: RuntimePaths, *, noun: str) -> str | None:
