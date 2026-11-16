@@ -297,10 +297,7 @@ class _QueuedMessageState:
 
         # A decision counts only for the queue it judged. A reply that does nothing but wait on jobs answers at once.
         defers = await gate.defers(pending, current=still_queued, judge=not self.calls.only_waiting())
-        if defers or not still_queued():
-            return False
-        self.stopped_reply_event_ids |= gate.stopped_for(pending)
-        return True
+        return not defers and still_queued()
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
@@ -684,6 +681,8 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
+                if mid_turn_gate is not None:
+                    mid_turn_gate.on_stop = queued_signal.stopped_reply_event_ids.update
                 with (
                     # A newer human message also releases the reply's tool waits; other queued turns wait for it.
                     pending_human_messages_context(queued_signal, calls=queued_signal.calls),

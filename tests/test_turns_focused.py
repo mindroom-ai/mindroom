@@ -6952,6 +6952,7 @@ async def test_a_message_the_running_reply_stopped_for_is_answered_without_parti
             active_text="Write the long report",
             evaluate=evaluate,
             requester_id=_SENDER,
+            on_stop=queue.stopped_reply_event_ids.update,
         )
     # Without text the message cannot be judged, so the reply wraps up without a verdict.
     text = None if judgment == "skipped" else "Stop, write the short summary instead"
@@ -7034,7 +7035,12 @@ async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered
         return verdicts.pop(0)
 
     queue = _QueuedMessageState()
-    queue.mid_turn_gate = MidTurnGate(active_text="Write the long report", evaluate=evaluate, requester_id=_SENDER)
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Write the long report",
+        evaluate=evaluate,
+        requester_id=_SENDER,
+        on_stop=queue.stopped_reply_event_ids.update,
+    )
     messages = (
         ("$remark:localhost", "@other:localhost", "Nice weather today"),
         ("$correction:localhost", _SENDER, "Stop, write the short summary instead"),

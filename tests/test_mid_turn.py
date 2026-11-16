@@ -1440,7 +1440,12 @@ async def test_only_messages_the_judge_did_not_let_wait_count_as_stopping_the_re
         return verdicts.pop(0)
 
     queue = _QueuedMessageState()
-    queue.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.stopped_reply_event_ids.update,
+    )
     queue.add_waiting_human_message(
         "$remark",
         text="Did you get the slides?",
@@ -1473,7 +1478,12 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
         return verdicts.pop(0)
 
     queue = _QueuedMessageState()
-    queue.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.stopped_reply_event_ids.update,
+    )
     first, edited = ("Thanks", "Stop, wrong file") if edit == "waited_into_stop" else ("Stop, wrong file", "Thanks")
     queue.add_waiting_human_message("$msg", text=first, requester_id=_OTHER, mentions_nobody=True)
     message = QueuedHumanNoticeReservation(queue, "$msg")
@@ -1486,6 +1496,63 @@ async def test_an_edit_counts_only_with_a_verdict_on_its_new_text(edit: str) -> 
     if edit == "waited_into_stop":
         assert await queue._interrupts()
     assert message.stopped_reply is (edit == "waited_into_stop")
+
+
+@pytest.mark.asyncio
+async def test_one_verdict_for_several_peoples_new_messages_marks_none() -> None:
+    """The judge answers once for a queue, so new messages from two people leave both to participation."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return False
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.stopped_reply_event_ids.update,
+    )
+    queue.add_waiting_human_message("$remark", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER, mentions_nobody=True)
+    assert await queue._interrupts()
+    assert queue.stopped_reply_event_ids == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [False, True], ids=["cannot-wait", "can-wait"])
+async def test_a_verdict_after_a_tool_batch_marks_the_waiting_message(*, verdict: bool) -> None:
+    """The judgment after a tool batch, where a reply wraps up, marks a message the reply cannot wait for."""
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdict
+
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    hook = queued_notice_after_tool_batch(_NOTICE)
+    notices = []
+
+    async def turn(_target: MessageTarget) -> list[Message]:
+        follow_up = request_envelope(
+            target=MessageTarget.resolve("!room:localhost", "$thread", "$stop"),
+            reply_to_event_id="$stop",
+            prompt="Stop, wrong file",
+        )
+        notices.append(lifecycle.reserve_waiting_human_message(target=follow_up.target, response_envelope=follow_up))
+        messages = _resumed_messages()
+        await hook(messages, ())
+        return messages
+
+    messages = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=request_envelope(target=target, reply_to_event_id="$active", prompt="Do the task"),
+        pipeline_timing=None,
+        locked_operation=turn,
+        mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate, conversation_context=()),
+    )
+    (notice,) = notices
+    assert notice is not None
+    assert _has_notice(messages) is not verdict
+    assert notice.stopped_reply is not verdict
 
 
 @pytest.mark.asyncio
