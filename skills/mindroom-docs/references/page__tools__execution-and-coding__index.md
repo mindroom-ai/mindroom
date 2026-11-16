@@ -227,7 +227,7 @@ The agent can also give a `label` that says what the secret is, the `url` of a p
 - MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
   Other people in the thread see who the card waits for.
 - A `label` becomes the card's title and a `placeholder` the hint in the empty field, each cut to one line of 80 characters.
-  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host and no `user:password@` part.
+  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host, no `user:password@` part, and no spaces.
   The agent chooses the link, so the user should check the host on the button before signing in there.
 - The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
   A restart forgets a value kept in memory and reads back one kept in a file.

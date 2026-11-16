@@ -45,7 +45,7 @@ _MAX_REASON_LENGTH = 500
 _MAX_LINE_LENGTH = 80
 _MAX_LINK_LENGTH = 2000
 LINK_REFUSAL = (
-    "Give `url` as an `http` or `https` link with a host and no sign-in part, at most "
+    "Give `url` as an `http` or `https` link with a host, no sign-in part and no spaces, at most "
     f"{_MAX_LINK_LENGTH} characters, or leave it out. No card was posted."
 )
 # How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
