@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import difflib
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -271,15 +273,20 @@ def _notice_files(files: dict[tuple[str, str], ReviewFile]) -> list[dict[str, ob
     for (directory, relative_path), file in files.items():
         if file.before is None and file.after is None:
             continue
-        before, after = (file.before or "").splitlines(), (file.after or "").splitlines()
+        # Lines split on newlines only, so a changed final newline or another line separator is a changed line.
+        before, after = (re.findall(r"[^\n]*\n|[^\n]+\Z", text or "") for text in (file.before, file.after))
         # The first two lines are the ---/+++ headers.
-        lines = [f"{line}\n" for line in difflib.unified_diff(before, after, n=2, lineterm="")][2:]
-        kept, limit = 0, min(_NOTICE_FILE_DIFF_CHARS, budget)
-        while kept < len(lines) and len(lines[kept]) <= limit:
-            limit -= len(lines[kept])
+        lines = [
+            line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+            for line in difflib.unified_diff(before, after, n=2)
+        ][2:]
+        # A line counts at its escaped JSON size, the most it can add to the event.
+        kept, used, limit = 0, 0, min(_NOTICE_FILE_DIFF_CHARS, budget)
+        while kept < len(lines) and used + (size := len(json.dumps(lines[kept]))) <= limit:
+            used += size
             kept += 1
         diff = "".join(lines[:kept])
-        budget -= len(diff)
+        budget -= used
         entry: dict[str, object] = {
             "skill": file.skill,
             "path": f"{directory}/{relative_path}",

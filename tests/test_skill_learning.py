@@ -44,6 +44,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.assistant_turn import stamp_model
@@ -2261,10 +2262,34 @@ def test_notice_diffs_stop_at_line_boundaries_within_their_budgets() -> None:
     full = "@@ -0,0 +1,1000 @@\n" + "".join(f"+{line}\n" for line in big.splitlines())
     diffs = [entry["diff"] for entry in entries if "diff" in entry]
     assert all(full.startswith(diff) and diff.endswith("\n") for diff in diffs)
-    # A 19-character hunk header and 11-character lines: 361 lines fill a file's 4,000, and the 30 characters left of
-    # the total after three files fit the fourth file's header and one line, leaving nothing for the fifth.
-    assert [len(diff) for diff in diffs] == [3_990, 3_990, 3_990, 30]
-    assert "diff" not in entries[-1]
+    # Serialized, the hunk header takes 22 characters and each line 14, so 284 lines fill a file's 4,000 at 3,998; the
+    # 6 left of the total after three files fit nothing more.
+    assert [len(diff) for diff in diffs] == [19 + 284 * 11] * 3
+    assert "diff" not in entries[3]
+    assert "diff" not in entries[4]
     assert all(entry["diff_truncated"] for entry in entries)
     assert all((entry["added"], entry["removed"]) == (1_000, 0) for entry in entries)
     assert [entry["path"] for entry in entries] == [f"big/references/{index}.md" for index in range(5)]
+
+
+def test_notice_diff_budgets_count_what_the_event_serializes() -> None:
+    """Characters JSON escapes, like non-ASCII text, quotes, and control characters, count at their escaped size."""
+    content = ("漢" * 60 + '"\\\x01\n') * 200
+    files = {("big", f"references/{index}.md"): ReviewFile("big", None, content) for index in range(5)}
+    entries = _notice_files(files)
+    assert "diff" in entries[0]
+    assert all(entry["diff_truncated"] for entry in entries)
+    notice = {"changes": {"big": "updated"}, "files": entries}
+    assert calculate_event_size(notice) < 16_000
+
+
+def test_notice_diffs_show_a_changed_final_newline_and_other_line_separators() -> None:
+    """Lines split on newlines only, so a final newline or a vertical tab becoming a newline is a changed line."""
+    files = {
+        ("notes", "a.md"): ReviewFile("notes", "text", "text\n"),
+        ("notes", "b.md"): ReviewFile("notes", "a\vb\n", "a\nb\n"),
+    }
+    assert [(entry["added"], entry["removed"], entry["diff"]) for entry in _notice_files(files)] == [
+        (1, 1, "@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text\n"),
+        (2, 1, "@@ -1 +1,2 @@\n-a\vb\n+a\n+b\n"),
+    ]
