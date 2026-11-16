@@ -443,11 +443,9 @@ class BotRoomLifecycle:
             self._logger().warning("Managed room notice delivery failed", room_id=room.room_id)
 
     async def _resolve_unmanaged_room(self) -> bool:
-        """Find the router's homeserver admin room, which it keeps but takes no part in; False when the lookup failed.
+        """Find `#admins:<server>`, whose membership makes the router a Tuwunel server admin; False when lookup failed.
 
-        On Tuwunel, an account is a server admin while it is joined to `#admins:<server_name>`, and the router needs
-        that for the admin join API. A homeserver without that alias, or a room MindRoom manages under it, such as
-        one configured as `admins`, leaves no room unmanaged.
+        A homeserver without that alias, or a room MindRoom manages under it such as one keyed `admins`, has none.
         """
         client = self._client()
         if self.deps.agent_name != ROUTER_AGENT_NAME or not isinstance(client, MindRoomAsyncClient):
@@ -883,8 +881,6 @@ class BotRoomLifecycle:
         The event only starts the work, in the background because joining waits for this bot's own sync, and the rooms'
         current state decides it, so a replayed or superseded event changes nothing.
         """
-        if room.room_id == unmanaged_room_id(self._client()):
-            return
         if event.source["content"].get("via"):
             self._follow_listed_rooms(room.room_id)
             return

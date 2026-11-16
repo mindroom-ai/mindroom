@@ -36,8 +36,9 @@ def _record_admission(
     record: SyncRecord,
     account_id: str,
     schedule_trigger_sender_is_managed: Callable[[str], bool],
+    ignores_room: Callable[[str | None], bool],
 ) -> ej.IngestionRecordAdmission:
-    admission = _record_disposition(record, account_id, schedule_trigger_sender_is_managed)
+    admission = _record_disposition(record, account_id, schedule_trigger_sender_is_managed, ignores_room)
     membership = record.membership
     if membership is None:
         if record.kind is RecordKind.ROOM_LIFECYCLE:
@@ -59,9 +60,13 @@ def _record_disposition(
     record: SyncRecord,
     account_id: str,
     schedule_trigger_sender_is_managed: Callable[[str], bool],
+    ignores_room: Callable[[str | None], bool],
 ) -> ej.IngestionRecordAdmission:
     if record.kind is RecordKind.ROOM_LIFECYCLE:
         return ej.IngestionRecordAdmission(ej.IngestionRecordDisposition.ROOM_LIFECYCLE)
+    if ignores_room(record.room_id):
+        # A room this account keeps but takes no part in: none of its events is stored or acted on.
+        return ej.IngestionRecordAdmission(ej.IngestionRecordDisposition.COMPATIBILITY_ONLY)
     if record.kind is RecordKind.LOSS:
         return ej.IngestionRecordAdmission(ej.IngestionRecordDisposition.HISTORY_LOSS, room_id=record.room_id)
     member_snapshot = record.kind is RecordKind.STATE and record.source.get("type") == "m.room.member"
@@ -105,12 +110,16 @@ def validate_ingestion_batch(
     *,
     account_id: str,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    ignores_room: Callable[[str | None], bool] = lambda _room_id: False,
 ) -> ej.IngestionBatchAdmission:
     """Convert the owned stream's typed observations into ordered application effects."""
     admission = ej.IngestionBatchAdmission(
         batch.stream_id,
         batch.sequence,
-        tuple(_record_admission(record, account_id, schedule_trigger_sender_is_managed) for record in batch.records),
+        tuple(
+            _record_admission(record, account_id, schedule_trigger_sender_is_managed, ignores_room)
+            for record in batch.records
+        ),
     )
     ej.validate_ingestion_batch_admission(admission)
     return admission
@@ -126,6 +135,7 @@ async def consume_one_ingestion_batch(
     after_sync: Callable[[], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    ignores_room: Callable[[str | None], bool] = lambda _room_id: False,
 ) -> ej.AdmissionFacts | None:
     """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
     batch = await session.next_batch()
@@ -135,6 +145,7 @@ async def consume_one_ingestion_batch(
         batch,
         account_id=account_id,
         schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+        ignores_room=ignores_room,
     )
     invalidate_membership_lookups(batch.records, account_id=account_id)
     if before_admission is not None:
@@ -144,15 +155,18 @@ async def consume_one_ingestion_batch(
     for record, converted_record, facts in zip(batch.records, converted.records, result.record_facts, strict=True):
         if after_admission is not None:
             await after_admission(converted_record, facts, record.provenance)
+        # A room the account takes no part in starts no decryption report and no callback either.
+        acted_on = not ignores_room(record.room_id)
         if (
-            record.kind is RecordKind.TIMELINE
+            acted_on
+            and record.kind is RecordKind.TIMELINE
             and record.clear is None
             and record.source.get("type") == "m.room.encrypted"
         ):
             if on_decryption_failure is not None:
                 on_decryption_failure(record)
             continue
-        if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
+        if acted_on and converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
             await _dispatch_auxiliary_record(session, record, account_id)
     if batch.completes_sync and after_sync is not None:
         await after_sync()
@@ -188,6 +202,7 @@ async def run_ingestion_pump(
     after_ack: Callable[[], None] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    ignores_room: Callable[[str | None], bool] = lambda _room_id: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
     while True:
@@ -202,6 +217,7 @@ async def run_ingestion_pump(
                 after_sync=after_sync,
                 on_decryption_failure=on_decryption_failure,
                 schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+                ignores_room=ignores_room,
             )
         except ej.DeliveryProjectionPendingError:
             if wait_for_delivery_projection is None:

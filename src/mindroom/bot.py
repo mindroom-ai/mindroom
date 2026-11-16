@@ -530,7 +530,6 @@ class AgentBot:
                 self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
             ),
             runtime_generation=self._approval_runtime_generation,
-            ignores_room=lambda room_id: room_id == unmanaged_room_id(self.client),
         )
         self._turn_store = TurnStore(
             TurnStoreDeps(
@@ -1091,12 +1090,7 @@ class AgentBot:
 
     def _on_thread_tag_state(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Index a live thread tag state event from sync; never raise into nio's callback loop."""
-        if (
-            event.type != THREAD_TAGS_EVENT_TYPE
-            or "state_key" not in event.source
-            or event.decrypted
-            or room.room_id == unmanaged_room_id(self.client)
-        ):
+        if event.type != THREAD_TAGS_EVENT_TYPE or "state_key" not in event.source or event.decrypted:
             return
         try:
             self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
@@ -2026,6 +2020,7 @@ class AgentBot:
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
                 schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
+                ignores_room=lambda room_id: room_id is not None and room_id == unmanaged_room_id(self.client),
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

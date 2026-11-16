@@ -53,7 +53,6 @@ from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.thread_summary import notices
-from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
@@ -3442,30 +3441,6 @@ async def test_router_cleanup_keeps_its_homeserver_admin_room(
 
 
 @pytest.mark.asyncio
-async def test_router_follows_no_room_its_homeserver_admin_room_lists(tmp_path: Path) -> None:
-    """A space child listed in the admin room starts no follow or leave work."""
-    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
-    assert await bot._room_lifecycle._resolve_unmanaged_room()
-    event = nio.RoomSpaceChildEvent.from_dict(
-        {
-            "event_id": "$child",
-            "sender": "@operator:localhost",
-            "origin_server_ts": 1,
-            "type": "m.space.child",
-            "state_key": "!listed:localhost",
-            "content": {"via": ["localhost"]},
-        },
-    )
-    room = nio.MatrixRoom("!admins:localhost", "@mindroom_router:localhost")
-    room.children.add("!listed:localhost")
-    bot.client.rooms["!admins:localhost"] = room
-
-    await bot._room_lifecycle.on_space_child(room, event)
-
-    assert not [task for task in asyncio.all_tasks() if "listed_rooms_join" in task.get_name()]
-
-
-@pytest.mark.asyncio
 async def test_orphan_cleanup_skips_the_routers_homeserver_admin_room(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3568,26 +3543,3 @@ async def test_router_start_fails_until_its_homeserver_admin_room_is_known(tmp_p
     ):
         await bot.start()
     assert bot.client is None
-
-
-@pytest.mark.asyncio
-async def test_router_tracks_no_thread_tags_in_its_homeserver_admin_room(tmp_path: Path) -> None:
-    """A thread tag set in that room starts no snooze work."""
-    bot = _router_with_admin_alias(tmp_path, _ADMINS_FOUND)
-    assert await bot._room_lifecycle._resolve_unmanaged_room()
-    observe = MagicMock()
-    bot.orchestrator.thread_snooze = SimpleNamespace(observe_state_event=observe)
-    event = nio.UnknownEvent.from_dict(
-        {
-            "event_id": "$tag",
-            "sender": "@operator:localhost",
-            "origin_server_ts": 1,
-            "type": THREAD_TAGS_EVENT_TYPE,
-            "state_key": "$thread",
-            "content": {"tags": {"snoozed": {}}},
-        },
-    )
-
-    bot._on_thread_tag_state(nio.MatrixRoom("!admins:localhost", "@mindroom_router:localhost"), event)
-
-    observe.assert_not_called()

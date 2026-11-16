@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -787,3 +788,77 @@ async def test_membership_rejects_a_skipped_producer_epoch(
         await consume_one_ingestion_batch(Session(SyncBatch(stream, 2, (invalid,))), principal, account_id=ACCOUNT)
     assert await membership_position(principal, ROOM) == RoomMembershipPosition("join", 0)
     assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("join", 0)
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_room_reaches_neither_the_journal_nor_any_callback(tmp_path: Path) -> None:
+    """Nothing of a room the account keeps but takes no part in is stored or acted on; other rooms are unchanged."""
+    ignored = "!admins:example.org"
+
+    def timeline(event_id: str, event_type: str, content: dict[str, object], **extra: object) -> SyncRecord:
+        source = {"type": event_type, "sender": "@alice:example.org", "event_id": event_id, "origin_server_ts": 10}
+        return SyncRecord(
+            RecordKind.TIMELINE,
+            ignored,
+            {**source, "content": content, **extra},
+            provenance=nio.TimelineEventProvenance.LIVE,
+            route="event",
+        )
+
+    records = (
+        timeline(
+            "$mention",
+            "m.room.message",
+            {"msgtype": "m.text", "body": "bot?", "m.mentions": {"user_ids": [ACCOUNT]}},
+        ),
+        timeline(
+            "$edit",
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": "* bot, now?",
+                "m.new_content": {"msgtype": "m.text", "body": "bot, now?"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$mention"},
+            },
+        ),
+        timeline(
+            "$reaction",
+            "m.reaction",
+            {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$mention", "key": "OK"}},
+        ),
+        timeline("$child", "m.space.child", {"via": ["example.org"]}, state_key="!listed:example.org"),
+        timeline("$tags", "com.mindroom.thread.tags", {"tags": {}}, state_key="$mention"),
+        SyncRecord(
+            RecordKind.ROOM_ACCOUNT_DATA,
+            ignored,
+            {"type": "m.fully_read", "content": {}},
+            route="room_account_data",
+        ),
+        SyncRecord(RecordKind.LOSS, ignored, {}),
+        message("$elsewhere"),
+    )
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    batch = SyncBatch(uuid4(), 1, records)
+    principal = await principal_for(store, batch.stream_id)
+    session = Session(batch)
+
+    facts = await consume_one_ingestion_batch(
+        session,
+        principal,
+        account_id=ACCOUNT,
+        ignores_room=lambda room_id: room_id == ignored,
+    )
+
+    assert facts is not None
+    assert [fact.semantic_event_new for fact in facts.record_facts] == [False] * 7 + [True]
+    assert session.dispatched == []
+    assert await principal.load_event("$elsewhere") is not None
+    await store.close()
+    with sqlite3.connect(tmp_path / "journal.db") as database:
+        tables = [name for (name,) in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        rows = sum(
+            database.execute(f"SELECT count(*) FROM {table} WHERE room_id = ?", (ignored,)).fetchone()[0]  # noqa: S608
+            for table in tables
+            if "room_id" in {column[1] for column in database.execute(f"PRAGMA table_info({table})")}
+        )
+    assert rows == 0
