@@ -1009,8 +1009,8 @@ def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
     }
     payloads["$empty:localhost"] = _thread_with_bodies("$empty:localhost", [])
     payloads["$above-read-cap:localhost"] = _thread_with_bodies("$above-read-cap:localhost", ["first", "x" * 5_000])
-    payloads["$at-node-limit:localhost"] = _thread_with_bodies("$at-node-limit:localhost", ["short"] * 30)
-    payloads["$above-node-limit:localhost"] = _thread_with_bodies("$above-node-limit:localhost", ["short"] * 31)
+    payloads["$at-node-limit:localhost"] = _thread_with_bodies("$at-node-limit:localhost", ["short"] * 8)
+    payloads["$above-node-limit:localhost"] = _thread_with_bodies("$above-node-limit:localhost", ["short"] * 9)
     at_limit = yaml_io.safe_dump(payloads["$at-node-limit:localhost"], sort_keys=False, allow_unicode=True)
     monkeypatch.setattr(
         yaml_io,
