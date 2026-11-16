@@ -1,4 +1,4 @@
-"""Run the egress broker inside the primary and give each worker-routed call its broker env."""
+"""Run the egress broker inside the primary and give each worker-routed call and primary shell call its broker env."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import (
+    BROKER_CA_PEM_ENV,
+    apply_runner_ca_bundle,
     broker_execution_env,
+    broker_serves_primary_shell,
     egress_broker_enabled,
     personal_page_served,
     primary_callback_hosts,
@@ -49,6 +52,7 @@ from mindroom.runtime_env_policy import (
     EGRESS_BROKER_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import normal_worker_key
 from mindroom.worker_computer.browser_proxy import browser_egress, proxy_env_setting
 
@@ -60,12 +64,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.secrets import SecretRequest
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 __all__ = [
     "active_audit_log",
     "active_ca_pem",
+    "execution_env_for_primary_shell",
     "execution_env_for_worker",
     "manage_url",
     "serve_egress_broker",
@@ -75,6 +80,8 @@ logger = get_logger(__name__)
 
 _THREAD_NAME = "mindroom-egress-broker"
 _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the container or pod network
+# Bind addresses that listen on every interface, loopback included, which primary commands then dial.
+_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})  # noqa: S104
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
 _STOP_TIMEOUT_SECONDS = 5.0
 # OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
@@ -90,16 +97,27 @@ class _BrokerSettings:
     url: str
     token_ttl_seconds: int
 
+    @property
+    def primary_url(self) -> str:
+        """Return where the primary's own commands reach the bound broker, since the worker-facing `url` may not."""
+        host = "127.0.0.1" if self.host in _WILDCARD_HOSTS else self.host
+        return f"http://[{host}]:{self.port}" if ":" in host else f"http://{host}:{self.port}"
+
 
 @dataclass(frozen=True)
 class _BrokerRuntime:
-    """What worker calls and the admin API need from the running broker."""
+    """What brokered calls and the admin API need from the running broker.
+
+    `primary_url` and `primary_ca_env` are the broker URL and CA file variables of shell commands run in the primary.
+    """
 
     url: str
     signer: TokenSigner
     ca_pem: str
     audit: AuditLog
     credentials_manager: CredentialsManager
+    primary_url: str
+    primary_ca_env: Mapping[str, str]
 
 
 @dataclass
@@ -413,12 +431,17 @@ class _BrokerService:
         self._listening.wait()
         if self._start_error is not None:
             raise self._start_error
+        # Primary shell commands trust the broker CA through files of the primary's own; its process trust is unchanged.
+        primary_ca_env = {BROKER_CA_PEM_ENV: ca.cert_pem}
+        apply_runner_ca_bundle(primary_ca_env, state_dir / "primary_ca")
         self.runtime = _BrokerRuntime(
             url=self._settings.url,
             signer=signer,
             ca_pem=ca.cert_pem,
             audit=audit,
             credentials_manager=credentials_manager,
+            primary_url=self._settings.primary_url,
+            primary_ca_env=primary_ca_env,
         )
 
     def stop(self) -> None:
@@ -526,6 +549,59 @@ def execution_env_for_worker(
     runtime = _active.runtime
     if runtime is None or config is None or worker_target is None:
         return {}
+    return _execution_env(runtime, runtime_paths, config, worker_target, call_env=call_env, broker_url=runtime.url)
+
+
+def execution_env_for_primary_shell(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None,
+    call_env: Mapping[str, str],
+) -> dict[str, str]:
+    """Return the broker env for one shell call that runs in the primary, as a worker-routed call gets it.
+
+    Empty unless the broker is running and `agent_name` uses it with a shell that runs in the primary. The proxy is
+    the broker's loopback URL and the CA the files materialized at start, never the PEM variable.
+    `call_env` is the env the call already carries, whose Git config entries are kept.
+    The call runs without the broker env when building it fails.
+    """
+    runtime = _active.runtime
+    if runtime is None:
+        return {}
+    try:
+        if not broker_serves_primary_shell(config, agent_name, runtime_paths):
+            return {}
+        worker_target = resolve_agent_execution(agent_name, config, runtime_paths, execution_identity).worker_target
+        env = _execution_env(
+            runtime,
+            runtime_paths,
+            config,
+            worker_target,
+            call_env=call_env,
+            broker_url=runtime.primary_url,
+        )
+    except Exception as exc:
+        # Config, credential-store, and identity resolution can raise anything; the shell command still runs.
+        logger.warning("egress_broker_primary_shell_env_failed", agent=agent_name, error_type=type(exc).__name__)
+        return {}
+    if not env:
+        return {}
+    env.pop(BROKER_CA_PEM_ENV)
+    return {**env, **runtime.primary_ca_env}
+
+
+def _execution_env(
+    runtime: _BrokerRuntime,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    worker_target: ResolvedWorkerTarget,
+    *,
+    call_env: Mapping[str, str] | None,
+    broker_url: str,
+) -> dict[str, str]:
+    """Return the broker env of one call for `worker_target` through `broker_url`; empty without a signable target."""
     claims = WorkerClaims.from_worker_target(_signable_target(worker_target))
     if claims is None:
         return {}
@@ -568,7 +644,7 @@ def execution_env_for_worker(
             from_config = name in config.egress_broker.services
             (config_placeholders if from_config else user_placeholders).update(egress_service.placeholder_env)
     return broker_execution_env(
-        broker_url=runtime.url,
+        broker_url=broker_url,
         token=runtime.signer.mint(claims),
         ca_pem=runtime.ca_pem,
         # A config service's placeholder wins over a user service's for the same variable.

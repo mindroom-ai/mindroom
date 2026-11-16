@@ -281,7 +281,7 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool, without the `egress_credentials` tool, or whose command tools run in the primary.
+    without a command tool, without the `egress_credentials` tool, or whose only command tool is a primary python.
     Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
@@ -295,12 +295,13 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
             "mine": _keys_agent(["shell"], private={"per": "user_agent"}),
             "notes": _keys_agent(["calculator"]),
             "coder": _agent(["shell"]),
+            "host_python": _keys_agent(["python"], worker_scope="shared", worker_tools=[]),
             "host_shell": _keys_agent(["shell"], worker_scope="shared", worker_tools=[]),
         },
     )
 
-    assert _key_targets(client) == (["preset_team"], False)
-    assert _key_targets(client, "preset_team") == (["preset_team"], False)
+    assert _key_targets(client) == (["host_shell", "preset_team"], False)
+    assert _key_targets(client, "preset_team") == (["host_shell", "preset_team"], False)
 
 
 def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environment(

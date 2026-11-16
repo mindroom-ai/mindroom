@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import os
+import socket
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -20,7 +21,10 @@ from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_paths
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker import service as egress_service
+from mindroom.egress_broker.secrets import save_secret
+from mindroom.egress_broker.service import serve_egress_broker
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_TOOL_AFTER_CALL,
@@ -45,6 +49,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.worker_routing import resolve_worker_target
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
@@ -67,7 +72,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from mindroom.tool_system.invocation import ToolCall, ToolNext
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -130,9 +135,10 @@ class _Shell:
         *,
         identity: ToolExecutionIdentity = _ALICE,
         function: ToolFunction | None = None,
+        policy: ToolMiddleware | None = None,
     ) -> ToolOutcome:
-        """Run one tool call with ``arguments`` through the tool-call policy built from ``registry``."""
-        policy = detached_policy(registry)
+        """Run one tool call with ``arguments`` through ``policy``, by default the tool-call policy of ``registry``."""
+        policy = policy or detached_policy(registry)
         with self.runtime(), detached_tool_scope(identity):
             return await execute_tool_call(
                 function or self.function,
@@ -361,6 +367,66 @@ async def test_the_egress_proxy_a_worker_call_gets_wins_over_a_hook(
         change(ctx)
 
     assert await shell.run(_registry(proxy), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_env(tmp_path: Path) -> None:
+    """A shell that runs in the primary reaches the broker on loopback and trusts it through files, like a worker does.
+
+    The worker-facing URL is not used, since it may not resolve on the primary's host, and the CA PEM stays out.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_EGRESS_BROKER_PORT": str(port),
+            "MINDROOM_EGRESS_BROKER_HOST": "127.0.0.1",
+            "MINDROOM_EGRESS_BROKER_URL": f"http://host.docker.internal:{port}",
+        },
+    )
+    config = Config(
+        agents={
+            "mind": {"display_name": "Mind", "tools": ["shell", "egress_credentials"], "include_default_tools": False},
+        },
+        egress_broker={
+            "services": {
+                "github": {
+                    "rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}],
+                    "placeholder_env": {"GH_TOKEN": "mindroom-brokered"},
+                },
+            },
+        },
+    )
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    save_secret(manager, resolve_worker_target(None, "mind", _ALICE), "github", "s3cret")
+    toolkit = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    shell = _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
+    command = (
+        'printf "%s|%s|%s|%s" "${HTTPS_PROXY##*@}" "${GH_TOKEN-unset}" '
+        '"$(test -s "$SSL_CERT_FILE" && test -s "$NODE_EXTRA_CA_CERTS" && echo files)" '
+        '"${MINDROOM_EGRESS_BROKER_CA_PEM-unset}"'
+    )
+
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        outcome = await shell.call(
+            HookRegistry.empty(),
+            {"args": ["bash", "-c", command]},
+            policy=detached_policy(HookRegistry.empty(), config=config, runtime_paths=runtime_paths),
+        )
+
+    assert not outcome.is_error, outcome.content
+    assert outcome.content.rsplit("\n", 1)[-1] == f"127.0.0.1:{port}|mindroom-brokered|files|unset"
 
 
 @pytest.mark.asyncio

@@ -10393,7 +10393,7 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
-With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, worker-routed `shell` and `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls and worker-routed `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
 Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
@@ -15307,7 +15307,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 Related tools documented elsewhere:
 
 - [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` calls and worker-routed `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones. It also asks the user for a missing key with a [card in chat](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat).
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -17484,7 +17484,7 @@ Knowledge indexes, including private agents' indexes and their publication and r
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
-When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
+When the broker is enabled, the `shell` calls and worker-routed `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
 Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
@@ -17960,6 +17960,13 @@ The password is not a secret.
 Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
+
+**A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
+Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
+The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment (the config warnings name such agents), so the broker adds convenience there and no new exposure.
+Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
+It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
+A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
 
 **A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
 The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
@@ -23144,7 +23151,7 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` and `python` call that an agent with the [`egress_credentials` tool](#agent-tool) routes to a worker gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool), and each of its `python` calls that runs in a worker, gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
@@ -23163,6 +23170,8 @@ Set these on the primary runtime to enable the broker:
 | `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` | Bind address for the broker listener |
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
+
+A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is a wildcard address (`0.0.0.0` or `::`), and at the bound address otherwise.
 
 When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
 Keys and accounts can only be entered while the port is set.
@@ -23464,7 +23473,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell` or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`, or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -23763,9 +23772,10 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: only such agents' worker-routed `shell` and `python` calls go through the broker and get keys, and only they appear on the Agent Keys pages.
+Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: such an agent's `shell` calls, wherever they run, and its `python` calls that run in a worker go through the broker and get keys, and only such agents appear on the Agent Keys pages.
+A `shell` in the primary process, for example under `worker_tools: []`, works the same as one in a worker, but there the broker keeps nothing from the agent (see [Code in the primary process](#what-the-broker-cannot-protect-against)).
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
-So does an agent whose `shell` and `python` run in the primary process, for example because its `worker_tools` leave them out: the broker never sees those calls, so the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
+So does an agent whose only command tool is `python` running in the primary process, which runs inside MindRoom itself where the broker cannot reach it: the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 
 ```yaml
@@ -23960,6 +23970,7 @@ Each of these is a choice you make, so make it on purpose.
 
 - **Code in the primary process.** An agent whose code runs in the primary process can read every stored key and token.
   That is the case when no sandbox runner or dedicated worker is configured, so tools run in the primary process (the default when `MINDROOM_SANDBOX_PROXY_URL` is unset), with `MINDROOM_SANDBOX_EXECUTION_MODE` set to `off`, `local`, or `disabled`, with a `MINDROOM_SANDBOX_PROXY_TOOLS` list that leaves a tool out (unless the mode is `all`), with `worker_tools: []`, and with primary-only tools such as `duckdb`, `pandas`, `sql`, and `script`.
+  Its `shell` commands still get the broker environment, so its stored keys work there as in a worker, but that is a convenience, not a protection: the same commands can read the keys directly.
   Path tools that run in the primary process, such as `attachments` or `gmail`, can also open any file the primary can reach under `file_access: unrestricted`.
   Use a dedicated worker backend or a sandbox runner, keep `file_access` at `workspace`, and keep such tools off agents that should not see secrets.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.

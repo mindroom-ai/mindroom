@@ -5692,6 +5692,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
     "mindroom.origins",
+    "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
     "mindroom.workers.backend_kinds",
@@ -5711,6 +5712,7 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -5789,6 +5791,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.egress_broker",
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.tool_jobs.control",
