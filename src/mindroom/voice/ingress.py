@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.coalescing.batch import PendingEvent, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.thread_utils import mentions_another_participant
@@ -182,7 +183,9 @@ class VoiceIngress:
                 envelope=envelope,
                 reservation=queued_notice_reservation,
                 may_be_for_me=may_be_for_me,
-                mentions_nobody=for_another_participant is None,
+                # Without a transcript, whom the voice message mentions stays unknown.
+                mentions_nobody=for_another_participant is None
+                and normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True,
             )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(

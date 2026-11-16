@@ -1161,21 +1161,22 @@ async def test_an_edit_that_makes_a_message_wait_records_that_it_mentions_nobody
     [
         pytest.param("🎤 look at this", True, id="mentions-nobody"),
         pytest.param("🎤 @general look at this", False, id="mentions-general"),
+        pytest.param(None, False, id="not-transcribed"),
     ],
 )
 async def test_a_waiting_voice_message_records_whether_its_transcript_mentions_anyone(
     tmp_path: Path,
-    transcript: str,
+    transcript: str | None,
     *,
     mentions_nobody: bool,
 ) -> None:
     """Once transcribed, a voice message waiting for general's running response records whom it mentions, as text does.
 
-    Until then whom it mentions is unknown, so it counts as mentioning someone.
+    Until then, or when it cannot be transcribed, whom it mentions is unknown, so it counts as mentioning someone.
     """
     async with _general_answering_in_its_thread(tmp_path, voice=True) as (bot, room, _paths, running):
 
-        async def transcribe(*_args: object, **_kwargs: object) -> str:
+        async def transcribe(*_args: object, **_kwargs: object) -> str | None:
             assert [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()] == [
                 ("$voice", False),
             ]
