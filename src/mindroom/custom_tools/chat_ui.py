@@ -481,10 +481,10 @@ class ChatUITools(Toolkit):
         conversation. The panel shows raw pages too, at the panel's own width.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
-        blocked, and so are external scripts, styles, and fonts unless your
-        instructions name a library source; otherwise draw charts with inline SVG.
-        Embed images as data: URLs.
+        and JavaScript. Fetch, XHR, and WebSocket requests are always blocked.
+        External images, scripts, styles, and fonts are blocked too unless your
+        instructions name a source that works; otherwise draw charts with inline SVG
+        and embed images as data: URLs.
         The panel can be resized from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
