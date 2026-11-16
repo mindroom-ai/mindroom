@@ -236,7 +236,7 @@ When another human message arrives while an agent is responding, MindRoom normal
 A "thanks" or "is this still running?" can therefore cut a long task short.
 These messages send the agent no wrap-up notice and get no ⏳ reaction from it: one that mentions only other agents or people who have joined the room (unless it asks for a team the agent answers for), and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
 A person's edit of a text message still waiting in the coalescing queue decides it again, though a ⏳ already on it stays; an edited media caption, or a message not yet queued, is not decided again.
-A voice message counts as waiting while it is transcribed, so a tool batch that ends before its transcript is ready still gets the notice; once the transcript shows it is for someone else, a notice not yet sent is dropped and no ⏳ appears.
+A running agent hears of a voice message only once it is transcribed, so a voice message for someone else sends no notice and gets no ⏳.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
@@ -274,7 +274,8 @@ Attachment contents, full tool output, system prompts, and memory are never sent
 Except for the queued messages described after this list, the agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
-- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
+- the active request has an attachment or is not typed text, such as a scheduled task or a voice message;
+- a queued message has an attachment or is not typed text, except a transcribed voice message, whose transcript the judge reads;
 - the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
 - anything the judge would see looks like a credential;
 - the agent replies in `thread_mode: room`.

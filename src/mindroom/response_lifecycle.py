@@ -514,8 +514,9 @@ class ResponseLifecycleCoordinator:
         target: MessageTarget,
         response_envelope: MessageEnvelope,
         mentions_nobody: bool = False,
+        transcript: str | None = None,
     ) -> QueuedHumanNoticeReservation | None:
-        """Reserve an active-turn notice before queued dispatch owns the follow-up."""
+        """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -524,7 +525,7 @@ class ResponseLifecycleCoordinator:
         queued_signal = self._get_or_create_queued_signal(target)
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
-            text=message_text_for_judgment(response_envelope),
+            text=transcript if transcript is not None else message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
             mentions_nobody=mentions_nobody,
         ):

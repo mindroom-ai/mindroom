@@ -1157,37 +1157,29 @@ async def test_an_edit_that_makes_a_message_wait_records_that_it_mentions_nobody
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("transcript", "busy_from_start", "mentions_nobody"),
+    ("transcript", "judged_text", "mentions_nobody"),
     [
-        pytest.param("🎤 look at this", True, True, id="mentions-nobody"),
-        pytest.param("🎤 look at this", False, True, id="mentions-nobody-reply-started-while-transcribing"),
-        pytest.param("🎤 @general look at this", True, False, id="mentions-general"),
-        pytest.param(None, True, False, id="not-transcribed"),
+        pytest.param("🎤 look at this", "🎤 look at this", True, id="mentions-nobody"),
+        pytest.param("🎤 @general look at this", "🎤 @general look at this", False, id="mentions-general"),
+        pytest.param(None, None, False, id="not-transcribed"),
     ],
 )
-async def test_a_waiting_voice_message_records_whether_its_transcript_mentions_anyone(
+async def test_a_voice_message_waits_for_generals_running_response_once_transcribed(
     tmp_path: Path,
     transcript: str | None,
+    judged_text: str | None,
     *,
-    busy_from_start: bool,
     mentions_nobody: bool,
 ) -> None:
-    """Once transcribed, a voice message waiting for general's running response records whom it mentions, as text does.
+    """General's running response hears of a voice message once it is transcribed; its judge reads the transcript.
 
-    Until then, or when it cannot be transcribed, whom it mentions is unknown, so it counts as mentioning someone. A
-    response that starts while the voice message is transcribed learns the same once the transcript is ready.
+    The message records whom the transcript mentions, as text does. One that cannot be transcribed waits unjudged, and
+    whom it mentions is unknown, so it counts as mentioning someone.
     """
     async with _general_answering_in_its_thread(tmp_path, voice=True) as (bot, room, _paths, running):
-        if not busy_from_start:
-            running.finish_response_turn()
 
         async def transcribe(*_args: object, **_kwargs: object) -> str | None:
-            waiting = [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()]
-            if busy_from_start:
-                assert waiting == [("$voice", False)]
-            else:
-                assert waiting == []
-                running.begin_response_turn()
+            assert not running.has_pending_human_messages()
             return transcript
 
         voice = {
@@ -1208,9 +1200,9 @@ async def test_a_waiting_voice_message_records_whether_its_transcript_mentions_a
             await bot._turn_ingress.handle_media_event(room, nio.RoomMessageAudio.from_dict(event))
             await _queued(bot, "$voice")
         transcribed.assert_awaited_once()
-        assert [(message.event_id, message.mentions_nobody) for message in running.pending_message_snapshot()] == [
-            ("$voice", mentions_nobody),
-        ]
+        assert [
+            (message.event_id, message.text, message.mentions_nobody) for message in running.pending_message_snapshot()
+        ] == [("$voice", judged_text, mentions_nobody)]
 
 
 @pytest.mark.asyncio
