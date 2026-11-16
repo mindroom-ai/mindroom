@@ -78,10 +78,10 @@ def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
 
 @dataclass(frozen=True)
 class _FailureStreak:
-    """One candidate's failed reconciliation attempts in a row and the error of the latest."""
+    """One candidate's failed reconciliation attempts in a row and the kinds of error they raised."""
 
     failures: int
-    error_type: type[Exception]
+    error_types: frozenset[type[Exception]]
 
 
 @dataclass(frozen=True)
@@ -581,10 +581,10 @@ class PersonalRoomLifecycle:
             backoff = _next_backoff(previous)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            streak = self._failure_streaks.get(candidate)
-            new_error = streak is None or streak.error_type is not type(error)
-            failures = 1 if streak is None else streak.failures + 1
-            self._failure_streaks[candidate] = _FailureStreak(failures, type(error))
+            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset()))
+            new_error = type(error) not in streak.error_types
+            failures = streak.failures + 1
+            self._failure_streaks[candidate] = _FailureStreak(failures, streak.error_types | {type(error)})
             retry = {"attempt": failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):
                 # Expected until a person changes the room, so no traceback, and a warning only when the members change.
@@ -603,7 +603,7 @@ class PersonalRoomLifecycle:
                     # The room changed while this attempt read it, possibly before the router knew it was this room.
                     self._retry_at_once({candidate})
             else:
-                # One error when the failures reach the threshold, and one for each new error after it.
+                # One error when the failures reach the threshold, and one for each kind of error first seen after it.
                 persistent = failures == _RECONCILIATION_ERROR_FAILURES or (
                     failures > _RECONCILIATION_ERROR_FAILURES and new_error
                 )

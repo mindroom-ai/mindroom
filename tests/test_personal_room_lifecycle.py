@@ -781,6 +781,32 @@ async def test_a_new_error_after_the_third_failure_is_one_new_error(coordination
 
 
 @pytest.mark.asyncio
+async def test_errors_that_alternate_after_the_third_failure_log_one_error_each(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Two kinds of failure taking turns are two problems, so each logs one error, not one per attempt."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable] * 3 + [missing, unavailable, missing, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240, 480, 960):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", True, 4),
+        (_FAILED, "warning", False, 5),
+        (_FAILED, "warning", False, 6),
+        (_FAILED, "warning", False, 7),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_different_error_logs_a_new_traceback(coordination: Coordination, clock: Clock) -> None:
     """A new kind of failure behind a waiting roster mismatch gets its own traceback, and the third failure is an error."""
     lifecycle = coordination.lifecycle
