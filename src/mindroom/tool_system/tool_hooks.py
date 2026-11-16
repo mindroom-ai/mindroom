@@ -714,11 +714,7 @@ def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
     holder = secret_holder(resolved_context.execution_identity)
     if holder is None:
         return {}
-    return temporary_secrets().values(
-        holder,
-        now=time.time(),
-        storage_root=resolved_context.runtime_paths.storage_root,
-    )
+    return temporary_secrets().values(holder, storage_root=resolved_context.runtime_paths.storage_root)
 
 
 def _without_given_secrets(result: object, given: Mapping[str, str]) -> object:

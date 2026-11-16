@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -272,10 +273,10 @@ class _TemporarySecrets:
                 earlier.path.unlink(missing_ok=True)
             self._given[(holder, name)] = _Given(value, expires_at, path)
 
-    def values(self, holder: _SecretHolder, *, now: float, storage_root: Path) -> dict[str, str]:
-        """Return `holder`'s live values by variable name."""
+    def values(self, holder: _SecretHolder, *, storage_root: Path, now: float | None = None) -> dict[str, str]:
+        """Return `holder`'s live values by variable name, at `now` or else at this moment."""
         with self._lock:
-            self._refresh(storage_root / _TEMPORARY_SECRETS_DIRECTORY, now)
+            self._refresh(storage_root / _TEMPORARY_SECRETS_DIRECTORY, time.time() if now is None else now)
             return {name: given.value for (owner, name), given in self._given.items() if owner == holder}
 
     def _refresh(self, directory: Path, now: float) -> None:
