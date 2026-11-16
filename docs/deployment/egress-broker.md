@@ -653,7 +653,7 @@ agents:
       - egress_credentials
 ```
 
-Its one function, `list_egress_credentials`, takes no arguments and returns JSON:
+`list_egress_credentials` takes no arguments and returns JSON:
 
 ```json
 {
@@ -702,6 +702,9 @@ For a missing key, the agent calls `request_secret` with a `service` (a name fro
   The key never goes through Matrix, the model, the worker, or the logs.
 - The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
   A card expires after 15 minutes or when the reply is stopped, and a restart of MindRoom ends every pending request.
+  It also expires when an answer arrives after its service changed or the agent's keys moved to another scope; the agent can then ask again with a new card.
+- When the call runs as a [background job](../tools/agent-orchestration.md#background-jobs), the reply waits for the answer for `background_tool_jobs.approval_wait_timeout` seconds (default 300) and then goes on; the outcome arrives later as the job's result.
+  Stop withdraws the card only while the reply still waits for it.
 - The requester answers.
   For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
 - The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.

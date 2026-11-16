@@ -2113,6 +2113,7 @@ depends_on = [
 path = "mindroom.api.secret_requests"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.api.egress_status",
     "mindroom.egress_broker",
     "mindroom.plugin_http",
 ]

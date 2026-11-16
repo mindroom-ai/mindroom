@@ -24,6 +24,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.egress_broker.secrets import load_secret, save_secret
 from mindroom.secret_requests import SECRET_REQUEST_TTL_SECONDS, secret_request_registry
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room, _room
 from tests.egress_broker.conftest import worker_target
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.secret_requests import PendingSecretRequest
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -41,23 +43,38 @@ NOT_ACTIVE = "This request is no longer active."
 CANNOT_SET = "You can no longer set keys for this agent."
 # A static runner's URL places the agents' shell calls in a worker, and the broker's port turns Agent Keys on.
 ENV = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+GITHUB: dict[str, object] = {
+    "display_name": "GitHub",
+    "rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}],
+}
+TOOLS = ["shell", "egress_credentials"]
+# The scope each agent's tool calls run in, which the tool records with the request.
+SCOPES: dict[str, WorkerScope | None] = {"code": "user_agent", "team": "shared", "old": None}
 
 
-def _config(*, code_users: tuple[str, ...] = (ALICE, BOB), team_managers: tuple[str, ...] = (ALICE,)) -> Config:
-    """``code`` for ``code_users``, and ``team`` for Alice and Bob, whose keys ``team_managers`` manage."""
-    tools = ["shell", "egress_credentials"]
+def _config(
+    *,
+    code_users: tuple[str, ...] = (ALICE, BOB),
+    team_managers: tuple[str, ...] = (ALICE,),
+    services: dict[str, object] | None = None,
+) -> Config:
+    """``code`` for ``code_users``, and ``team`` for Alice and Bob, whose keys ``team_managers`` manage.
+
+    Both use ``services``, by default the GitHub service the requests ask for.
+    """
     return Config(
+        egress_broker={"services": {"github": GITHUB} if services is None else services},
         agents={
             "code": AgentConfig(
                 display_name="Code",
-                tools=tools,
+                tools=TOOLS,
                 include_default_tools=False,
                 private=AgentPrivateConfig(per="user_agent"),
                 access=ResponderAccessConfig(users=list(code_users)),
             ),
             "team": AgentConfig(
                 display_name="Team",
-                tools=tools,
+                tools=TOOLS,
                 include_default_tools=False,
                 worker_scope="shared",
                 credential_managers=list(team_managers),
@@ -67,13 +84,19 @@ def _config(*, code_users: tuple[str, ...] = (ALICE, BOB), team_managers: tuple[
     )
 
 
-@pytest.fixture
-def room(tmp_path: Path) -> _Room:
-    """The router, Alice, Bob and Carol in ``ROOM`` with both agents, on an app serving the route."""
-    room = _room(tmp_path, dict(_config().agents), **ENV)
+def _answering_room(tmp_path: Path, config: Config) -> _Room:
+    """The router, Alice, Bob and Carol in ``ROOM`` with ``config``'s agents, on an app serving it and the route."""
+    room = _room(tmp_path, dict(config.agents), **ENV)
+    room.serve(config)
     room.app.include_router(secret_requests.router)
     room.app.add_exception_handler(RequestValidationError, validation_error_response)
     return room
+
+
+@pytest.fixture
+def room(tmp_path: Path) -> _Room:
+    """The router, Alice, Bob and Carol in ``ROOM`` with both agents, on an app serving the route."""
+    return _answering_room(tmp_path, _config())
 
 
 @pytest.fixture
@@ -88,7 +111,8 @@ def ask() -> Iterator[Callable[..., PendingSecretRequest]]:
             requester_id=ALICE,
             agent_name=agent,
             service="github",
-            worker_target=worker_target(ALICE, agent, scope="user_agent" if agent == "code" else "shared"),
+            worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
+            hosts=("api.github.com",),
             now=time.time() if now is None else now,
         )
         registered.append(request.request_id)
@@ -260,6 +284,80 @@ async def test_revoked_permission_gets_403_and_stores_nothing(
     assert not request.outcome.done()
     assert (await _answer(room, ALICE, request.request_id, {"decline": True})).status_code == 204
     assert request.outcome.result() == "declined"
+
+
+@pytest.mark.asyncio
+async def test_a_card_for_a_scope_its_agent_left_takes_no_key(
+    tmp_path: Path,
+    ask: Callable[..., PendingSecretRequest],
+) -> None:
+    """Alice may set her personal keys now, but the card was for the global ones, which another agent still uses."""
+
+    def config(old: dict[str, object]) -> Config:
+        """``old`` and ``other``, two agents without a worker scope for Alice and Bob; Bob manages ``other``'s keys."""
+        agent = {"tools": TOOLS, "include_default_tools": False, "access": {"users": [ALICE, BOB]}}
+        return Config(
+            egress_broker={"services": {"github": GITHUB}},
+            agents={
+                "old": AgentConfig.model_validate({**agent, "display_name": "Old", **old}),
+                "other": AgentConfig.model_validate({**agent, "display_name": "Other", "credential_managers": [BOB]}),
+            },
+        )
+
+    room = _answering_room(tmp_path, config({"credential_managers": [ALICE]}))
+    manager = get_runtime_credentials_manager(room.paths)
+    save_secret(manager, None, "github", "bobs-global-key")
+    request = ask("old")
+    room.serve(config({"worker_scope": "user_agent"}))
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert request.outcome.result() == "expired"
+    assert load_secret(manager, None, "github") == "bobs-global-key"
+    assert load_secret(manager, worker_target(ALICE, "old", scope="user_agent"), "github") is None
+    assert (await _answer(room, ALICE, request.request_id, {"secret": SECRET})).status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "services",
+    [
+        pytest.param({}, id="deleted"),
+        pytest.param({"github": {**GITHUB, "admin_key": True}}, id="admin-key"),
+        pytest.param(
+            {
+                "github": {
+                    **GITHUB,
+                    "github_app": {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}},
+                },
+            },
+            id="keyless",
+        ),
+        pytest.param({"github": {**GITHUB, "agents": ["team"]}}, id="agent-excluded"),
+        pytest.param(
+            {"github": {**GITHUB, "rules": [{"host": "api.other.test", "auth": {"type": "bearer"}}]}},
+            id="hosts-changed",
+        ),
+    ],
+)
+async def test_a_card_for_a_service_that_changed_takes_no_key(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    services: dict[str, object],
+) -> None:
+    """The key would no longer go where the card said, so the request ends and the agent can ask again."""
+    request = ask()
+    room.serve(_config(services=services))
+
+    with capture_logs() as logs:
+        response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert request.outcome.result() == "expired"
+    assert _stored(room, request) is None
+    assert [entry["status"] for entry in logs if entry["event"] == "secret_request_answered"] == ["stale"]
+    assert (await _answer(room, ALICE, request.request_id, {"decline": True})).status_code == 404
 
 
 @pytest.mark.asyncio

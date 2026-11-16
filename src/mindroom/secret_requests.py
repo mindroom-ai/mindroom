@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from mindroom.config.egress_broker import EgressService
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SECRET_REQUEST_CONTENT_KEY = "io.mindroom.secret_request"  # noqa: S105 - Matrix content key, not a secret
@@ -32,9 +33,13 @@ class PendingSecretRequest:
     agent_name: str
     service: str
     worker_target: ResolvedWorkerTarget
+    # The service's hosts the card shows, which the key may only ever be sent to.
+    hosts: tuple[str, ...]
     expires_at: float
     outcome: asyncio.Future[SecretRequestOutcome]
     claimed: bool = False
+    # Set while no answer is being saved, so the waiting tool stops waiting for one whose save failed.
+    claim_released: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _SecretRequestRegistry:
@@ -51,6 +56,7 @@ class _SecretRequestRegistry:
         agent_name: str,
         service: str,
         worker_target: ResolvedWorkerTarget,
+        hosts: tuple[str, ...],
         now: float,
     ) -> PendingSecretRequest:
         """Create and store a pending request that expires after the TTL."""
@@ -61,6 +67,7 @@ class _SecretRequestRegistry:
             agent_name=agent_name,
             service=service,
             worker_target=worker_target,
+            hosts=hosts,
             expires_at=now + SECRET_REQUEST_TTL_SECONDS,
             outcome=asyncio.get_running_loop().create_future(),
         )
@@ -79,6 +86,7 @@ class _SecretRequestRegistry:
         ):
             return None
         request.claimed = True
+        request.claim_released.clear()
         return request
 
     def release(self, request_id: str) -> None:
@@ -86,6 +94,7 @@ class _SecretRequestRegistry:
         request = self._requests.get(request_id)
         if request is not None:
             request.claimed = False
+            request.claim_released.set()
 
     def resolve(self, request_id: str, outcome: SecretRequestOutcome) -> None:
         """Set the outcome unless the request is unknown or already done."""
@@ -104,6 +113,11 @@ _REGISTRY = _SecretRequestRegistry()
 def secret_request_registry() -> _SecretRequestRegistry:
     """Return the process-wide registry."""
     return _REGISTRY
+
+
+def secret_request_hosts(service: EgressService) -> tuple[str, ...]:
+    """Return the hosts a key for `service` is sent to, as a card shows them and an answer must still find them."""
+    return tuple(sorted({rule.host for rule in service.rules}))
 
 
 def secret_request_body(
@@ -126,7 +140,6 @@ def secret_request_content(
     request: PendingSecretRequest,
     *,
     display_name: str,
-    hosts: list[str],
     reason: str,
     status: SecretRequestStatus,
 ) -> dict[str, object]:
@@ -136,7 +149,7 @@ def secret_request_content(
         "requester_id": request.requester_id,
         "service": request.service,
         "display_name": display_name,
-        "hosts": list(hosts),
+        "hosts": list(request.hosts),
         "reason": reason,
         "status": status,
         "expires_at": int(request.expires_at * 1000),

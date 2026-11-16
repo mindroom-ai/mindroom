@@ -47,10 +47,17 @@ from tests.conftest import (
 )
 from tests.egress_broker.conftest import account_store, allow_oauth_reuse, connect_account, worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    ProcessRuntime,
+    job_owner,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1127,11 +1134,22 @@ async def test_request_declined_and_expired(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.01)
     tool, context = _asking(tmp_path)
+    settled_during_edit: list[bool] = []
+
+    async def send(**kwargs: object) -> nio.RoomSendResponse:
+        content = kwargs["content"]
+        assert isinstance(content, dict)
+        if content.get("m.relates_to", {}).get("rel_type") == "m.replace":
+            settled_during_edit.append(secret_request_registry()._requests[_request_id(content)].outcome.done())
+        return nio.RoomSendResponse(_CARD, _ROOM)
+
+    context.client.room_send.side_effect = send
     expired = await _ask(tool, context)
 
     assert _final_card(context, "expired")["body"] == "🔑 GitHub key request expired."
     assert (expired["status"], expired["service"]) == ("expired", "github")
     assert "15 minutes" in expired["note"]
+    assert settled_during_edit == [True]
 
 
 @pytest.mark.asyncio
@@ -1178,6 +1196,7 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         ("separate-account", "mine", _REASON, "Google Drive takes no key; connect an account instead"),
         ("no-agent-keys", "github", _REASON, "This agent's commands do not reach Agent Keys"),
         ("not-a-user", "github", _REASON, "The requester may not use this agent"),
+        ("not-a-person", "github", _REASON, "Only a person can answer a card"),
     ],
     ids=[
         "unknown",
@@ -1190,6 +1209,7 @@ async def test_cancelled_wait_edits_card_expired_and_discards(tmp_path: Path) ->
         "separate-account",
         "no-agent-keys",
         "not-a-user",
+        "not-a-person",
     ],
 )
 async def test_refuses_without_posting(
@@ -1228,6 +1248,13 @@ async def test_refuses_without_posting(
         )
     if case == "no-memberships":
         context = replace(context, agent_reply_memberships=None)
+    if case == "not-a-person":
+        # A bot account asks: no person could answer its card.
+        context = replace(
+            context,
+            requester_id="@bridge-bot:example.org",
+            config=context.config.model_copy(update={"bot_accounts": ["@bridge-bot:example.org"]}),
+        )
 
     result = await _ask(tool, context, service, reason)
 
@@ -1252,62 +1279,157 @@ async def test_refusal_names_the_agent_keys_page(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("origins", "binding", "message"),
+    ("case", "message"),
     [
-        ("[]", True, "MINDROOM_COMPUTER_ALLOWED_ORIGINS"),
-        ('["https://chat.example.org"]', False, "binds OpenID tokens"),
-        ('["https://chat.example.org"]', None, "binds OpenID tokens"),
+        ("no-chat-origin", "MINDROOM_COMPUTER_ALLOWED_ORIGINS"),
+        ("no-openid-audience", "set `MINDROOM_PUBLIC_URL`"),
+        ("no-openid-binding", "the homeserver binds OpenID tokens"),
+        ("binding-check-failed", "the homeserver binds OpenID tokens"),
     ],
-    ids=["no-chat-origin", "no-openid-binding", "binding-check-failed"],
+    ids=["no-chat-origin", "no-openid-audience", "no-openid-binding", "binding-check-failed"],
 )
 async def test_refuses_when_chat_cannot_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    origins: str,
-    binding: bool | None,
+    case: str,
     message: str,
 ) -> None:
     """Without Chat allowed to call this MindRoom with a client session, nobody could answer, so no card is posted."""
+    binding = {"no-openid-binding": False, "binding-check-failed": None}.get(case, True)
     monkeypatch.setattr(egress_credentials_module, "homeserver_openid_binding", AsyncMock(return_value=binding))
+    if case == "no-openid-audience":
+        monkeypatch.setattr(egress_credentials_module, "openid_audience", lambda _paths: None)
     tool, context = _asking(
         tmp_path,
         **_PAGE_SERVED,
         MINDROOM_PUBLIC_URL="https://mindroom.example.org",
-        MINDROOM_COMPUTER_ALLOWED_ORIGINS=origins,
+        MINDROOM_COMPUTER_ALLOWED_ORIGINS="[]" if case == "no-chat-origin" else '["https://chat.example.org"]',
     )
 
     result = await _ask(tool, context)
 
     assert result["status"] == "error"
     assert message in result["message"]
-    assert "Agent Keys page (`link`)" in result["message"]
+    assert ("homeserver" in result["message"]) is (case in {"no-openid-binding", "binding-check-failed"})
+    assert "The user can add the key on the Agent Keys page instead" in result["message"]
     assert result["link"] == "https://mindroom.example.org/connections/egress"
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_without_a_page_says_where_the_key_goes(tmp_path: Path) -> None:
+    """With no Agent Keys page to link, the refusal still reads right: the operator names the page."""
+    tool, context = _asking(tmp_path, MINDROOM_COMPUTER_ALLOWED_ORIGINS="[]")
+
+    result = await _ask(tool, context)
+
+    assert result["link"] is None
+    assert "or, when it is null, the page the operator names" in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+async def _published_job_runtime(context: ToolRuntimeContext) -> ProcessRuntime:
+    """Start the background job runtime of the context's storage root, which a call running in one of its jobs finds."""
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    return runtime
+
+
+async def _start_reply_job(
+    runtime: ProcessRuntime,
+    context: ToolRuntimeContext,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+) -> None:
+    """Start `operation` as a job of the reply `reply`, inside the context's tool calls."""
+    with tool_runtime_context(context):
+        await start_job(
+            runtime,
+            "ask",
+            tool_name="request_secret",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+            reply_id="reply",
+        )
+
+
+async def _sends(context: ToolRuntimeContext, count: int) -> list[dict[str, object]]:
+    """Return the events the tool sent once there are `count` of them."""
+    while context.client.room_send.await_count < count:  # noqa: ASYNC110 - the job sends from its own task
+        await asyncio.sleep(0)
+    return _sent(context)
+
+
+@pytest.mark.asyncio
+async def test_stop_before_the_card_is_posted_posts_none(tmp_path: Path) -> None:
+    """A Stop of the reply that started the call's job, before the call posts its card, cancels the job without one."""
+    tool, context = _asking(tmp_path)
+    runtime = await _published_job_runtime(context)
+    go = asyncio.Event()
+
+    async def ask_later() -> BackgroundOutcome:
+        await go.wait()
+        return BackgroundOutcome("completed", await tool.request_secret("github", _REASON))
+
+    try:
+        await _start_reply_job(runtime, context, ask_later)
+        await runtime.cancel_stopped_reply("reply")
+        go.set()
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_withdraws_both_cards_of_a_job_after_one_is_answered(tmp_path: Path) -> None:
+    """Two cards in one job: answering one leaves the job waiting on the other, so Stop still expires that card."""
+    tool, context = _asking(tmp_path)
+    runtime = await _published_job_runtime(context)
+
+    async def ask_both() -> BackgroundOutcome:
+        results = await asyncio.gather(tool.request_secret("github", _REASON), tool.request_secret("openai", _REASON))
+        return BackgroundOutcome("completed", json.dumps(results))
+
+    try:
+        await _start_reply_job(runtime, context, ask_both)
+        cards = await asyncio.wait_for(_sends(context, 2), JOB_TEST_TIMEOUT)
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "awaiting_approval"), JOB_TEST_TIMEOUT)
+        github, openai = sorted(cards, key=lambda card: card[SECRET_REQUEST_CONTENT_KEY]["service"])
+        secret_request_registry().resolve(_request_id(github), "saved")
+        answered = (await asyncio.wait_for(_sends(context, 3), JOB_TEST_TIMEOUT))[2]
+
+        assert answered["m.new_content"][SECRET_REQUEST_CONTENT_KEY]["status"] == "saved"
+        assert runtime._entries["ask"].job.status == "awaiting_approval"
+
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "ask", "cancelled"), JOB_TEST_TIMEOUT)
+    finally:
+        await runtime.shutdown()
+
+    withdrawn = _sent(context)[3]
+    assert withdrawn["m.new_content"][SECRET_REQUEST_CONTENT_KEY] == {
+        **openai[SECRET_REQUEST_CONTENT_KEY],
+        "status": "expired",
+    }
+    # The answer route claims before anything else, so it answers this request 404.
+    assert secret_request_registry().claim(_request_id(openai), room_id=_ROOM, now=time.time()) is None
 
 
 @pytest.mark.asyncio
 async def test_stop_withdraws_the_card_of_a_background_job(tmp_path: Path) -> None:
     """Run as a background job, the call waits on its card as an approval does, so the reply's Stop expires the card."""
     tool, context = _asking(tmp_path)
-    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
-    pin_background_tool_jobs(context.config, context.runtime_paths)
-    register_background_runtime(context.runtime_paths, runtime)
+    runtime = await _published_job_runtime(context)
 
     async def ask() -> BackgroundOutcome:
         return BackgroundOutcome("completed", await tool.request_secret("github", _REASON))
 
     try:
-        with tool_runtime_context(context):
-            await start_job(
-                runtime,
-                "ask",
-                tool_name="request_secret",
-                depth=0,
-                adapter={},
-                owner=job_owner(),
-                operation=ask,
-                reply_id="reply",
-            )
+        await _start_reply_job(runtime, context, ask)
         await asyncio.wait_for(wait_for_status(runtime, "ask", "awaiting_approval"), JOB_TEST_TIMEOUT)
         request_id = _request_id(_sent(context)[0])
 
@@ -1319,6 +1441,24 @@ async def test_stop_withdraws_the_card_of_a_background_job(tmp_path: Path) -> No
     _final_card(context, "expired")
     assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is None
     assert request_id not in secret_request_registry()._requests
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_fails_after_expiry_ends_the_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the claimed answer's save fails and gives the claim back, nobody can answer, so the card expires at once."""
+    monkeypatch.setattr(secret_requests_module, "SECRET_REQUEST_TTL_SECONDS", 0.2)
+    tool, context = _asking(tmp_path)
+    task = _start(tool, context)
+    request_id = _request_id(await _posted_card(context, task))
+    assert secret_request_registry().claim(request_id, room_id=_ROOM, now=time.time()) is not None
+
+    await asyncio.sleep(0.3)  # The request expires while its claimed answer is still being saved.
+    assert not task.done()
+    secret_request_registry().release(request_id)
+    result = json.loads(await asyncio.wait_for(task, 5))
+
+    assert result["status"] == "expired"
+    _final_card(context, "expired")
 
 
 @pytest.mark.asyncio

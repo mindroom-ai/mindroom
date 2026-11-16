@@ -6,11 +6,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.credentials.manager import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials.manager import (
+    delete_scoped_credentials,
+    load_scoped_credentials,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
 from mindroom.credentials.policy import egress_credential_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from mindroom.config.egress_broker import EgressGitHubApp, EgressService
     from mindroom.credentials.manager import CredentialsManager
@@ -35,6 +41,7 @@ __all__ = [
     "SecretUnavailable",
     "delete_egress_document",
     "delete_secret",
+    "egress_key_path",
     "is_personal_target",
     "load_egress_document",
     "load_github_app_credentials",
@@ -188,6 +195,15 @@ def save_secret(
         "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     save_egress_document(manager, *_key_location(target, name, admin_key=admin_key), credentials)
+
+
+def egress_key_path(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> Path | None:
+    """Return the file `save_secret` writes service `name`'s key to for `target`, None when the target has no store."""
+    store_target, credential_service = _key_location(target, name, admin_key=False)
+    try:
+        return scoped_credentials_path(credential_service, credentials_manager=manager, worker_target=store_target)
+    except ValueError:
+        return None
 
 
 def delete_secret(

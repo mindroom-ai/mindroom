@@ -24,6 +24,7 @@ def _register(registry: _SecretRequestRegistry, *, now: float = 1000.0) -> secre
         agent_name="code",
         service="github",
         worker_target=worker_target(),
+        hosts=("api.github.com",),
         now=now,
     )
 
@@ -39,12 +40,15 @@ async def test_claim_is_single_use() -> None:
 
 @pytest.mark.asyncio
 async def test_release_lets_a_failed_save_retry() -> None:
-    """Releasing a claim makes the request claimable again."""
+    """Releasing a claim makes the request claimable again and tells a waiting tool no save is in flight."""
     registry = _SecretRequestRegistry()
     request = _register(registry)
     assert registry.claim(request.request_id, room_id=ROOM, now=1001.0) is request
+    assert not request.claim_released.is_set()
     registry.release(request.request_id)
+    assert request.claim_released.is_set()
     assert registry.claim(request.request_id, room_id=ROOM, now=1002.0) is request
+    assert not request.claim_released.is_set()
 
 
 @pytest.mark.asyncio
@@ -101,7 +105,6 @@ async def test_content_carries_metadata_only() -> None:
     content = secret_request_content(
         request,
         display_name="GitHub",
-        hosts=["api.github.com"],
         reason="to open a PR",
         status="pending",
     )

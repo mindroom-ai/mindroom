@@ -1,8 +1,8 @@
-"""Who may use and manage an agent's Agent Keys."""
+"""Who may use and manage an agent's Agent Keys, and which services take a user's key."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.egress_broker.env import egress_agent_scope
@@ -10,10 +10,13 @@ from mindroom.requester_identity import is_platform_administrator
 
 if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-__all__ = ["egress_key_access"]
+__all__ = ["ServiceKeyRefusal", "egress_key_access", "service_key_refusal"]
+
+type ServiceKeyRefusal = Literal["admin_key", "restrict_only", "separate_account", "github_app"]
 
 
 def egress_key_access(
@@ -27,7 +30,8 @@ def egress_key_access(
 
     Eligibility requires an agent that reaches the broker (`egress_agent_scope`) and permission to use it.
     Administrators manage every shared or unscoped agent's keys, including a personal agent they may not use.
-    Listing, portal catalog, mutations, and the request log's shared-agent rows all decide through this one rule.
+    Listing, portal catalog, mutations, the request log's shared-agent rows, and secret requests all decide through
+    this one rule.
     """
     scope = egress_agent_scope(config, agent_name, runtime_paths)
     if scope is None:
@@ -54,3 +58,21 @@ def egress_key_access(
         runtime_paths,
     )
     return is_shared, can_manage
+
+
+def service_key_refusal(service: EgressService) -> ServiceKeyRefusal | None:
+    """Return why a user may not store a key for `service`, or None when they may.
+
+    Only an administrator sets an `admin_key` service's key; a limit sends nothing, a service with its own account only
+    that account, and a GitHub App service only its App's tokens. The Agent Keys pages, secret requests, and the tool
+    that asks for them refuse the same services through this one rule.
+    """
+    if service.admin_key:
+        return "admin_key"
+    if service.restrict_only:
+        return "restrict_only"
+    if service.oauth_separate_account:
+        return "separate_account"
+    if service.github_app is not None:
+        return "github_app"
+    return None
