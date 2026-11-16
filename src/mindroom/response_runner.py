@@ -483,11 +483,13 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self.lifecycle_coordinator.reserve_waiting_human_message(
             target=target,
             response_envelope=response_envelope,
+            mentions_nobody=mentions_nobody,
         )
 
     async def reserve_response_lifecycle(

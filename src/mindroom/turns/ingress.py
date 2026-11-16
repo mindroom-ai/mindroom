@@ -244,6 +244,7 @@ class TurnIngress:
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
+                mentions_nobody=self._mentions_another_participant(room, event.source) is None,
             )
         await self._enqueue_for_dispatch(
             event,
@@ -476,12 +477,16 @@ class TurnIngress:
                 pending_event.notice.release()
                 pending_event.notice = None
             return
+        mentions_nobody = event.for_another_participant is None
         if pending_event.notice is None:
             pending_event.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
+                mentions_nobody=mentions_nobody,
             )
+        else:
+            pending_event.notice.update(envelope, mentions_nobody=mentions_nobody)
         # The reaction's transaction ID is stable, so a message that already shows ⏳ gets no second one.
         mark_waiting_for_approval(self.deps, target, envelope)
 

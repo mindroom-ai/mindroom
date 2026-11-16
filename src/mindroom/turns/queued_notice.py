@@ -31,8 +31,12 @@ def queued_notice_reservation_if_busy(
     *,
     target: MessageTarget,
     envelope: MessageEnvelope,
+    mentions_nobody: bool = False,
 ) -> QueuedHumanNoticeReservation | None:
-    """Reserve the mid-turn queued notice when this conversation has a running response."""
+    """Reserve the mid-turn queued notice when this conversation has a running response.
+
+    ``mentions_nobody`` stays False when whom the message mentions is not checked, as for voice.
+    """
     if not envelope.origin.may_answer_interactive_prompt:
         return None
     if not response_runner.has_active_response_for_target(target):
@@ -40,6 +44,7 @@ def queued_notice_reservation_if_busy(
     return response_runner.reserve_waiting_human_message(
         target=target,
         response_envelope=envelope,
+        mentions_nobody=mentions_nobody,
     )
 
 

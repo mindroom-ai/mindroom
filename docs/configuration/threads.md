@@ -248,7 +248,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 |-------|------|---------|-------------|
 | `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait, except another person's message that mentions nobody, which the agent may decline to answer after the task |
 
 ```yaml
 agents:
@@ -264,17 +264,18 @@ agents:
 ```
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
-When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
+It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
-The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, whether each was sent by the person the agent is answering or by another person, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
 Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
 Tool calls appear as `<tool name="..." input="..." output="..."/>` tags built from the previews the chat shows in its tool details: up to 1,200 characters of input and 500 of output per call, with recognized secrets already removed.
 Attachment contents, full tool output, system prompts, and memory are never sent, but message text and tool previews can still contain private information.
 
-The agent gets the wrap-up notice without a judgment when:
+Except for the queued messages described after this list, the agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
 - the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
@@ -282,7 +283,9 @@ The agent gets the wrap-up notice without a judgment when:
 - anything the judge would see looks like a credential;
 - the agent replies in `thread_mode: room`.
 
-Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
+When the judgment is skipped, fails, or gives no answer, and every queued message comes from another person than the one the agent is answering and mentions nobody, the task continues instead, without a `defer_reaction`.
+This does not apply when the agent answers a scheduled task, a hook, or another agent.
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large` and an `outcome` of `waits` or `wraps_up`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
 With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).

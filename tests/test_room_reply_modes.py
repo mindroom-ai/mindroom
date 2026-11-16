@@ -36,6 +36,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.mid_turn import MidTurnGate
 from mindroom.response_runner import ResponseRunner
 from mindroom.room_reply_modes import (
     _store_path,
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.response_lifecycle import _QueuedMessageState
 
 ROOM_ID = "!test:localhost"
@@ -1002,6 +1004,85 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
         assert running.has_pending_human_messages() is ("general" in edited_mentions)
         assert await _shows_waiting(bot, "$follow-up")
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_message_records_whether_it_mentions_anyone_and_an_edit_records_it_again(
+    tmp_path: Path,
+) -> None:
+    """The judge of general's running response learns which waiting messages mention nobody, also after an edit.
+
+    Unjudged, another person's message that mentions nobody need not cut the response short, while one that
+    mentions general does, so an edit that adds the mention must count. The edited message keeps its place in the
+    queue and the reply progress it arrived to, so the judge reads the messages in the order they were sent.
+    """
+
+    async def never_judged(_request: JudgmentRequest) -> bool | None:
+        pytest.fail("Nothing waits on this queue")
+
+    async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
+        running.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=never_judged)
+        running.mid_turn_gate.visible_response_text = "Step 1 done"
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$untagged", "look at this"))
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$tagged", "and this", "general"))
+        await _queued(bot, "$untagged")
+        await _queued(bot, "$tagged")
+        assert {message.event_id: message.mentions_nobody for message in running.pending_message_snapshot()} == {
+            "$untagged": True,
+            "$tagged": False,
+        }
+
+        running.mid_turn_gate.visible_response_text = "Step 2 done"
+        edit = {
+            "m.new_content": {
+                "body": "look at this, general",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_mention_id(paths, "general")]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$untagged"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
+        assert [
+            (message.event_id, message.text, message.mentions_nobody, message.visible_response)
+            for message in running.pending_message_snapshot()
+        ] == [
+            ("$untagged", "look at this, general", False, "Step 1 done"),
+            ("$tagged", "and this", False, "Step 1 done"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_editing_a_waiting_message_handed_to_a_later_turn_asks_the_running_response_nothing(
+    tmp_path: Path,
+) -> None:
+    """A waiting message whose notice a split-off turn already released stays released when its sender edits it.
+
+    Another requester's turn that the queue split off now holds the conversation, and this message waits for that turn
+    to end; asking it to wrap up would hand its unfinished work to the next requester's turn.
+    """
+    async with _general_answering_in_its_thread(tmp_path) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this"))
+        await _queued(bot, "$follow-up")
+        keys = (
+            requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER),
+            active_follow_up_coalescing_key(ROOM_ID, THREAD_ID),
+        )
+        (pending,) = [
+            pending
+            for key in keys
+            for pending in bot._coalescing_gate.queued_pending_events(key)
+            if pending.event.event_id == "$follow-up"
+        ]
+        assert pending.notice is not None
+        pending.notice.release()
+        assert not running.has_pending_human_messages()
+
+        edit = {
+            "m.new_content": {"body": "look at this one", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this one", **edit))
+        assert not running.has_pending_human_messages()
 
 
 @pytest.mark.asyncio

@@ -47,16 +47,15 @@ def create_mid_turn_gate(
         return None
     threshold = None if isinstance(settings.judgment, LLMJudgmentConfig) else settings.judgment.threshold
 
-    async def may_finish(request: JudgmentRequest) -> bool:
+    async def may_finish(request: JudgmentRequest) -> bool | None:
         result = await evaluate(request)
         probability = 1 - result.probability if result.probability is not None else None
-        finish = (
-            result.failure is None
-            and result.decision is not None
-            and (
-                result.decision is False if threshold is None else probability is not None and probability >= threshold
-            )
-        )
+        finish = None
+        if result.failure is None and result.decision is not None:
+            if threshold is None:
+                finish = result.decision is False
+            elif probability is not None:
+                finish = probability >= threshold
         logger.info(
             "Mid-turn continuation evaluated",
             finish_current_turn=finish,
@@ -69,6 +68,7 @@ def create_mid_turn_gate(
     return MidTurnGate(
         active_text=None if has_media or message_text_for_judgment(envelope) is None else prompt,
         evaluate=may_finish,
+        requester_id=envelope.requester_id if envelope.origin.may_answer_interactive_prompt else None,
         instructions=settings.instructions,
         on_defer=(
             partial(on_defer, settings.defer_reaction)
