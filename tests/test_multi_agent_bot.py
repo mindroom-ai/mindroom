@@ -195,7 +195,7 @@ class TestAgentBot(AgentBotTestBase):
         assert type(login_kwargs["new_consumer_generation"]) is UUID
         ingestion_config = login_kwargs["config"]
         assert isinstance(ingestion_config, DurableSyncConfig)
-        assert ingestion_config.sync_timeout_ms == 5_000
+        assert ingestion_config.sync_timeout_ms == 30_000
         assert ingestion_config.sync_filter == {"room": {"timeline": {"limit": 5000}}}
         # The owned ingestion pump is the sole durable source owner. The
         # public client keeps only compatibility callbacks; it must not retain

@@ -159,10 +159,10 @@ __all__ = ["AgentBot", "create_bot_for_entity"]
 
 
 # Constants
-# Clean restart waits for one final source response before cancelling the
-# receive loop. Keep that poll comfortably inside the 15-second restart budget
-# so shutdown still leaves time for the replacement to boot and authenticate.
-_SYNC_TIMEOUT_MS = 5_000
+# Matrix long-poll timeout. Every sync response, even an empty one, commits the
+# durable store several times, so a short poll costs idle agents disk syncs on
+# the event loop. Stop and restart do not wait for it: quiescing cancels the poll.
+_SYNC_TIMEOUT_MS = 30_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 # Startup recovery applies turn retention once. A running bot repeats that pass
