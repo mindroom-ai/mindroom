@@ -944,6 +944,7 @@ async def set_thread_tags_if_empty(
         applied_tags: list[str] = []
         failed_tags: list[str] = []
         first_failure: Exception | None = None
+        refusal: ThreadTagsPermissionError | None = None
         for tag in tags:
             try:
                 await _set_thread_tag_under_lock(
@@ -953,9 +954,10 @@ async def set_thread_tags_if_empty(
                     tag,
                     set_by=normalized_set_by,
                 )
-            except ThreadTagsPermissionError:
+            except ThreadTagsPermissionError as exc:
                 # Power levels that refuse the write refuse every tag, checked before a tag is written; the caller decides.
-                raise
+                refusal = exc
+                break
             except Exception as exc:
                 first_failure = first_failure or exc
                 failed_tags.append(tag)
@@ -969,6 +971,8 @@ async def set_thread_tags_if_empty(
                 tags=failed_tags,
                 exc_info=first_failure,
             )
+        if refusal is not None:
+            raise refusal
 
         return SetThreadTagsIfEmptyResult(
             had_existing_tags=False,

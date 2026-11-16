@@ -714,11 +714,16 @@ async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller() -> None:
-    """Power levels that refuse a tag, also partway through the batch, stop it without an error of its own."""
+@pytest.mark.parametrize("earlier", ["written", "failed"])
+async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller(earlier: str) -> None:
+    """Power levels that refuse a tag, also partway through the batch, stop it without an error of their own.
+
+    A different failure of an earlier tag is still logged once.
+    """
     client = AsyncMock()
     client.room_get_state.return_value = _thread_tags_room_state_response()
-    write_tag = AsyncMock(side_effect=[None, ThreadTagsPermissionError("refused"), None])
+    first = None if earlier == "written" else TimeoutError("timed out")
+    write_tag = AsyncMock(side_effect=[first, ThreadTagsPermissionError("refused"), None])
 
     with (
         patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
@@ -734,7 +739,8 @@ async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller() -> No
         )
 
     assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
-    assert [log for log in logs if log["log_level"] == "error"] == []
+    errors = [(log["event"], log["tags"]) for log in logs if log["log_level"] == "error"]
+    assert errors == ([] if earlier == "written" else [("Failed to write automatic thread tags", ["first"])])
 
 
 @pytest.mark.asyncio
