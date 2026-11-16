@@ -39,6 +39,7 @@ Set these on the primary runtime to enable the broker:
 
 A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is `0.0.0.0`, at `http://[::1]:<port>` when it is `::`, and at the bound address otherwise.
 Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`) point at files under `<storage>/egress_broker/primary_ca/` that add the broker CA to the system roots and to the certificates of the CA files the primary's own values of those variables name, exported or set in the `.env` beside `config.yaml`, read when the broker starts.
+Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
 On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
 
 When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
