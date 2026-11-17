@@ -26,6 +26,8 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
     RuntimePaths,
 )
 from mindroom.dispatch_source import (
@@ -484,6 +486,52 @@ async def test_a_forks_replayed_parent_messages_end_at_a_fork_divider(
     assert all("$f" not in content for content in contents[: contents.index(divider)])
     assert current_event_id == "$f" or 'event_id="$f"' in contents[contents.index(divider) + 1]
     assert divider == "[forked from $p after $p1]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+async def test_a_fork_divider_survives_its_fork_point_being_filtered(persisted_replay: bool) -> None:
+    """A fork after the responder's interrupted reply, which replay drops, still marks where the parent ends."""
+
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    history = [
+        make_visible_message(body="question", event_id="$p"),
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="partial answer",
+            event_id="$p1",
+            thread_id="$p",
+            content={"body": "partial answer", STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+        ),
+        make_visible_message(
+            body="carry on",
+            event_id="$f",
+            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$p", "event_id": "$p1"}},
+        ),
+    ]
+    config = Config.model_validate(
+        {"prompts": {"THREAD_FORK_MARKER_TEMPLATE": "[forked from {parent_thread_id} after {fork_point_event_id}]"}},
+    )
+    prepared = await _prepare_common(
+        prepare_scope_history,
+        make_turn_context(reply_to_event_id="$f"),
+        scope_context=None,
+        prompt="carry on",
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+        current_event_id="$f",
+        config=config,
+        timezone="UTC",
+    )
+
+    contents = [str(message.content) for message in prepared.turn.context]
+    assert all("partial answer" not in content for content in contents)
+    assert contents.count("[forked from $p after $p1]") == 1
+    assert "question" in contents[contents.index("[forked from $p after $p1]") - 1]
 
 
 @pytest.mark.asyncio

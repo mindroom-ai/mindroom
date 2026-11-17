@@ -46,7 +46,7 @@ from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.matrix.thread_forks import fork_points
+from mindroom.matrix.thread_forks import fork_roots
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.prompt_message_tags import render_msg_tag
@@ -81,7 +81,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
-_NO_FORK_DIVIDERS: Mapping[str, Message] = MappingProxyType({})
 
 _IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
 _HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
@@ -276,6 +275,26 @@ def _context_message_from_visible_message(
     return Message(role="user", content=content, provider_data=media)
 
 
+@dataclass(frozen=True)
+class _ForkDividers:
+    """The note marking where each fork's own messages begin in a thread history, after its parent thread's.
+
+    A note sits right before its fork root, which a turn consumes, so the note is turn context its run stores once.
+    """
+
+    # Each fork root's place in the history, its event id and its note, oldest first.
+    notes: tuple[tuple[int, str, Message], ...]
+    # Every event's place in the history.
+    positions: Mapping[str, int]
+
+    def unseen(self, seen_event_ids: Collection[str]) -> _ForkDividers:
+        """Drop the notes of fork roots an earlier turn consumed, which stored them."""
+        return replace(self, notes=tuple(note for note in self.notes if note[1] not in seen_event_ids))
+
+
+_NO_FORK_DIVIDERS = _ForkDividers(notes=(), positions=MappingProxyType({}))
+
+
 def _context_messages_from_visible_messages(
     messages: Sequence[ResolvedVisibleMessage],
     *,
@@ -285,12 +304,17 @@ def _context_messages_from_visible_messages(
     missing_sender_label: str | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-    fork_dividers: Mapping[str, Message] = _NO_FORK_DIVIDERS,
+    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> tuple[Message, ...]:
-    """Convert visible Matrix context into provider-native message objects, each fork divider after its fork point."""
+    """Convert visible Matrix context into provider-native message objects, each fork divider before its fork's own."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
     context_messages: list[Message] = []
+    pending_dividers = list(fork_dividers.notes)
     for message in visible_messages:
+        # A divider goes before the first message from its fork root on, so filtering the parent's last cannot drop it.
+        position = fork_dividers.positions.get(message.event_id, -1)
+        while pending_dividers and pending_dividers[0][0] <= position:
+            context_messages.append(pending_dividers.pop(0)[2])
         # Strip before length capping so display-only markers do not consume the
         # model-context budget or leave marker-only turns behind.
         body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
@@ -307,26 +331,33 @@ def _context_messages_from_visible_messages(
                     member_display_names=member_display_names,
                 ),
             )
-        if message.event_id in fork_dividers:
-            context_messages.append(fork_dividers[message.event_id])
+    # A fork root this context ends before, such as the current prompt, has its divider last.
+    context_messages.extend(note for _position, _root, note in pending_dividers)
     return tuple(context_messages)
 
 
-def _fork_dividers(thread_history: Sequence[ResolvedVisibleMessage] | None, config: Config) -> dict[str, Message]:
-    """Return the note that follows each fork point of a fork's history, where its parent thread's messages end.
-
-    The note is turn context, so the run stores it and the fork's later turns replay it.
-    """
-    return {
-        event_id: thread_context_note(
-            config.render_prompt(
-                "THREAD_FORK_MARKER_TEMPLATE",
-                parent_thread_id=parent_thread_id,
-                fork_point_event_id=event_id,
-            ),
-        )
-        for event_id, parent_thread_id in fork_points(thread_history or ()).items()
-    }
+def _fork_dividers(thread_history: Sequence[ResolvedVisibleMessage] | None, config: Config) -> _ForkDividers:
+    """Return a fork's dividers between its parent threads' messages and its own, none for a plain thread."""
+    roots = fork_roots(thread_history or ())
+    if not roots or thread_history is None:
+        return _NO_FORK_DIVIDERS
+    return _ForkDividers(
+        notes=tuple(
+            (
+                position,
+                root_event_id,
+                thread_context_note(
+                    config.render_prompt(
+                        "THREAD_FORK_MARKER_TEMPLATE",
+                        parent_thread_id=parent_thread_id,
+                        fork_point_event_id=fork_point_event_id,
+                    ),
+                ),
+            )
+            for position, (root_event_id, parent_thread_id, fork_point_event_id) in roots.items()
+        ),
+        positions=MappingProxyType({message.event_id: position for position, message in enumerate(thread_history)}),
+    )
 
 
 def _messages_with_capped_context(
@@ -423,7 +454,7 @@ def _build_unseen_context_messages(
     config: Config,
     timezone: str,
     attachment_context: _ThreadAttachmentContext | None,
-    fork_dividers: Mapping[str, Message] = _NO_FORK_DIVIDERS,
+    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
@@ -439,7 +470,7 @@ def _build_unseen_context_messages(
         response_sender_id=response_sender_id,
         attachment_context=attachment_context,
         member_display_names=member_display_names,
-        fork_dividers=fork_dividers,
+        fork_dividers=fork_dividers.unseen(seen_event_ids),
     )
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
     if in_progress_event_ids:
@@ -486,7 +517,7 @@ def _build_thread_history_messages(
     static_token_budget: int | None,
     turn_tokens: Callable[[TurnMessages], int],
     attachment_context: _ThreadAttachmentContext | None,
-    fork_dividers: Mapping[str, Message] = _NO_FORK_DIVIDERS,
+    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
 
