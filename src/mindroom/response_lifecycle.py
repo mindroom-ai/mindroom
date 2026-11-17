@@ -50,7 +50,7 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.message_target import ResponseLifecycleKey
-from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
+from mindroom.mid_turn import MidTurnMode, QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
@@ -230,6 +230,7 @@ class _QueuedMessageState:
         text: str | None = None,
         requester_id: str | None = None,
         mentions_nobody: bool = False,
+        mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> bool:
         if source_event_id in self._pending_messages:
             return False
@@ -240,6 +241,7 @@ class _QueuedMessageState:
             progress,
             requester_id,
             mentions_nobody,
+            mode,
         )
         self._notify_changed()
         return True
@@ -541,6 +543,7 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope,
         mentions_nobody: bool = False,
         transcript: str | None = None,
+        mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -554,6 +557,7 @@ class ResponseLifecycleCoordinator:
             text=transcript if transcript is not None else message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
             mentions_nobody=mentions_nobody,
+            mode=mode,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)

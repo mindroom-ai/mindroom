@@ -42,6 +42,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.mid_turn import MidTurnMode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -485,6 +486,7 @@ class ResponseRunner:
         response_envelope: MessageEnvelope,
         mentions_nobody: bool = False,
         transcript: str | None = None,
+        mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self.lifecycle_coordinator.reserve_waiting_human_message(
@@ -492,6 +494,7 @@ class ResponseRunner:
             response_envelope=response_envelope,
             mentions_nobody=mentions_nobody,
             transcript=transcript,
+            mode=mode,
         )
 
     async def reserve_response_lifecycle(

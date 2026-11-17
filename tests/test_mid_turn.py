@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 from agno.media import Image as AgnoImage
@@ -35,7 +35,7 @@ from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
-from mindroom.mid_turn import MidTurnGate, QueuedMessage
+from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode, QueuedMessage, mid_turn_mode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
@@ -242,6 +242,36 @@ def test_mid_turn_follows_only_the_configured_agent(tmp_path: Path, room: str, a
         has_media=False,
     )
     assert (gate is not None) is (agent == "helper")
+
+
+@pytest.mark.parametrize(
+    ("content", "mode"),
+    [
+        pytest.param(None, MidTurnMode.AUTO, id="no-content"),
+        pytest.param("steer", MidTurnMode.AUTO, id="content-not-a-mapping"),
+        pytest.param({"body": "hi"}, MidTurnMode.AUTO, id="missing"),
+        pytest.param({MID_TURN_MODE_KEY: "STEER"}, MidTurnMode.AUTO, id="uppercase"),
+        pytest.param({MID_TURN_MODE_KEY: " steer"}, MidTurnMode.AUTO, id="padded"),
+        pytest.param({MID_TURN_MODE_KEY: "later"}, MidTurnMode.AUTO, id="unknown"),
+        pytest.param({MID_TURN_MODE_KEY: 1}, MidTurnMode.AUTO, id="integer"),
+        pytest.param({MID_TURN_MODE_KEY: ["steer"]}, MidTurnMode.AUTO, id="list"),
+        pytest.param({MID_TURN_MODE_KEY: {"mode": "steer"}}, MidTurnMode.AUTO, id="dict"),
+        pytest.param({MID_TURN_MODE_KEY: None}, MidTurnMode.AUTO, id="null"),
+        pytest.param({MID_TURN_MODE_KEY: "steer"}, MidTurnMode.STEER, id="steer"),
+        pytest.param({MID_TURN_MODE_KEY: "queue"}, MidTurnMode.QUEUE, id="queue"),
+        pytest.param({MID_TURN_MODE_KEY: "auto"}, MidTurnMode.AUTO, id="auto"),
+    ],
+)
+def test_mid_turn_mode_reads_known_values_and_rejects_malformed_content(
+    content: object,
+    mode: MidTurnMode,
+) -> None:
+    """Only an exact known value picks a mode; anything else a client sends is Auto."""
+    assert MID_TURN_MODE_KEY == "io.mindroom.mid_turn"
+    # A client can send any JSON, so the reader gets content its type does not promise.
+    assert mid_turn_mode(cast("Mapping[str, object] | None", content)) is mode
+    # The queued entry defaults to Auto, so a mode-less admission keeps today's behavior.
+    assert QueuedMessage("$event", "hi").mode is MidTurnMode.AUTO
 
 
 def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:

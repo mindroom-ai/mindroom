@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, TypeGuard
 
 from mindroom.attachments.storage import mentions_attachments
@@ -50,6 +52,31 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
+MID_TURN_MODE_KEY = "io.mindroom.mid_turn"
+
+
+class MidTurnMode(StrEnum):
+    """What a person asks a message sent while an agent replies to do; a client that sends none gets Auto."""
+
+    STEER = "steer"
+    QUEUE = "queue"
+    AUTO = "auto"
+
+
+def mid_turn_mode(content: Mapping[str, object] | None) -> MidTurnMode:
+    """Read the mode a message's content names; missing, malformed, and unknown values are Auto."""
+    # Event content comes from any client, so neither it nor the value is trusted to have the expected type.
+    if not isinstance(content, Mapping):
+        return MidTurnMode.AUTO
+    value = content.get(MID_TURN_MODE_KEY)
+    if not isinstance(value, str):
+        return MidTurnMode.AUTO
+    try:
+        return MidTurnMode(value)
+    except ValueError:
+        return MidTurnMode.AUTO
+
+
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
     return text is not None and bool(text.strip()) and not mentions_attachments(text)
 
@@ -75,6 +102,8 @@ class QueuedMessage:
     requester_id: str | None = None
     # Unknown counts as mentioning someone, so an unjudged queue holding it wraps the reply up.
     mentions_nobody: bool = False
+    # The mode it was admitted with; an edit keeps it.
+    mode: MidTurnMode = MidTurnMode.AUTO
 
 
 @dataclass

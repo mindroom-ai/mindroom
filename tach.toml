@@ -3422,6 +3422,7 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",
     "mindroom.matrix.guarded_rooms",
+    "mindroom.mid_turn",
     "mindroom.mid_turn_judgment",
     "mindroom.orchestration.runtime",
     "mindroom.participation",
@@ -6207,7 +6208,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.turns.queued_notice"
-depends_on = []
+depends_on = ["mindroom.mid_turn"]
 visibility = [
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
@@ -6240,6 +6241,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.transport_progress",
+    "mindroom.mid_turn",
     "mindroom.turn_record",
     "mindroom.turns.queued_notice",
 ]
@@ -9539,7 +9541,13 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 [[modules]]
 path = "mindroom.mid_turn"
 depends_on = ["mindroom.judgment.state", "mindroom.tool_system.events"]
-visibility = ["mindroom.mid_turn_judgment", "mindroom.response_lifecycle"]
+visibility = [
+    "mindroom.mid_turn_judgment",
+    "mindroom.response_lifecycle",
+    "mindroom.response_runner",
+    "mindroom.turns.ingress",
+    "mindroom.turns.queued_notice",
+]
 
 [[modules]]
 path = "mindroom.mid_turn_judgment"

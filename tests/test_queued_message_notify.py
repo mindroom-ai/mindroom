@@ -68,7 +68,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import QueuedMessage
+from mindroom.mid_turn import MidTurnMode, QueuedMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -87,6 +87,7 @@ from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
+from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.bot_helpers import make_test_agent_bot
@@ -2493,6 +2494,38 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
 
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.has_pending_human_messages()
+
+
+def test_real_queued_notice_helper_forwards_mode_through_runner(tmp_path: Path) -> None:
+    """Ingress's helper hands the message's mode through the runner to the waiting entry; idle ingress waits for nothing."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$queued")
+    envelope = _envelope(source_event_id="$queued", target=target)
+    queued_signal = runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+
+    assert queued_notice_reservation_if_busy(runner, target=target, envelope=envelope, mode=MidTurnMode.QUEUE) is None
+    assert queued_signal.pending_message_snapshot() == ()
+
+    queued_signal.begin_response_turn()
+    try:
+        reservation = queued_notice_reservation_if_busy(
+            runner,
+            target=target,
+            envelope=envelope,
+            mode=MidTurnMode.QUEUE,
+        )
+        assert reservation is not None
+        # A caller that names no mode, as voice and other content-less ingress, keeps Auto.
+        later_target = MessageTarget.resolve("!room:localhost", "$thread", "$later")
+        later = replace(envelope, source_event_id="$later", target=later_target)
+        assert queued_notice_reservation_if_busy(runner, target=later.target, envelope=later) is not None
+        assert [(message.event_id, message.mode) for message in queued_signal.pending_message_snapshot()] == [
+            ("$queued", MidTurnMode.QUEUE),
+            ("$later", MidTurnMode.AUTO),
+        ]
+    finally:
+        queued_signal.finish_response_turn()
 
 
 def test_queued_human_reservation_is_idempotent() -> None:

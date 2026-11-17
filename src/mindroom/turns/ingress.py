@@ -57,6 +57,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.matrix.transport_progress import is_unfinished_reply
+from mindroom.mid_turn import mid_turn_mode
 from mindroom.thread_utils import (
     check_agent_mentioned,
     mentions_another_participant,
@@ -245,6 +246,7 @@ class TurnIngress:
                 target=target,
                 envelope=envelope,
                 mentions_nobody=self._mentions_another_participant(room, event.source) is None,
+                mode=mid_turn_mode(event.source.get("content")),
             )
         await self._enqueue_for_dispatch(
             event,
@@ -485,6 +487,8 @@ class TurnIngress:
                 target=target,
                 envelope=envelope,
                 mentions_nobody=mentions_nobody,
+                # The gate kept the mode the message was sent with on its edited content.
+                mode=mid_turn_mode(event.source.get("content")),
             )
         else:
             pending_event.notice.update(envelope, mentions_nobody=mentions_nobody)
