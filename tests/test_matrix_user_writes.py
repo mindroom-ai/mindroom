@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlsplit
 
@@ -558,6 +560,96 @@ async def test_a_failed_second_read_records_nothing_and_names_the_room(
         f"Nothing was sent; to send there, use room_id {NEW_DM}.",
     )
     assert [request for request in _changes(homeserver) if request.path == DIRECT_PATH] == []
+
+
+@dataclass
+class _SlowHomeserver(FakeHomeserver):
+    """A homeserver that lets another call's request in before it answers one, and keeps the `m.direct` it is given."""
+
+    direct: dict[str, object] = field(default_factory=dict)
+    # The ID each new room gets, in turn.
+    new_rooms: list[str] = field(default_factory=list)
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        await asyncio.sleep(0)
+        return await super().request(method, url, **kwargs)
+
+    def _answer(self, path: str) -> Answer:
+        request = self.requests[-1]
+        if path == DIRECT_PATH:
+            if request.method == "PUT":
+                assert isinstance(request.body, dict)
+                self.direct = request.body
+            return Answer(self.direct)
+        if path == CREATE_PATH:
+            return Answer({"room_id": self.new_rooms.pop(0)})
+        return super()._answer(path)
+
+
+async def _write_both(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    first: dict[str, object],
+    second: dict[str, object],
+) -> list[dict]:
+    """Make two `matrix_user_write` calls of Alice's agent at once and return the fields of each."""
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        toolkit = owner_toolkit(config, paths)
+        results = await asyncio.gather(toolkit.matrix_user_write(**first), toolkit.matrix_user_write(**second))
+    return [json.loads(result) for result in results]
+
+
+@pytest.mark.asyncio
+async def test_two_first_sends_to_one_person_at_once_make_one_dm(config: Config, paths: RuntimePaths) -> None:
+    """The second call waits for the first to make and record the DM, then sends there too."""
+    homeserver = _SlowHomeserver(
+        {
+            _members_path(NEW_DM): _members(alice="join", bob="invite"),
+            f"{_send_path(NEW_DM)}*": Answer({"event_id": "$dm"}),
+        },
+        new_rooms=[NEW_DM, "!second:example.com"],
+    )
+
+    results = await _write_both(
+        config,
+        paths,
+        homeserver,
+        {"action": "send", "user_id": BOB, "message": "Lunch?"},
+        {"action": "send", "user_id": BOB, "message": "At one?"},
+    )
+
+    assert results == [_ok("send", room_id=NEW_DM, event_id="$dm")] * 2
+    assert len(homeserver.requests_to(CREATE_PATH)) == 1
+    assert homeserver.direct == {BOB: [NEW_DM]}
+    assert sorted(content["body"] for content in _sent(homeserver, NEW_DM)) == ["At one?", "Lunch?"]
+
+
+@pytest.mark.asyncio
+async def test_first_sends_to_two_people_at_once_record_both_dms(config: Config, paths: RuntimePaths) -> None:
+    """`m.direct` is written whole, so the second call reads it only after the first has written its DM there."""
+    carol_dm = "!carol-dm:example.com"
+    homeserver = _SlowHomeserver(
+        {
+            f"{_send_path(NEW_DM)}*": Answer({"event_id": "$dm"}),
+            f"{_send_path(carol_dm)}*": Answer({"event_id": "$carol"}),
+        },
+        new_rooms=[NEW_DM, carol_dm],
+    )
+
+    results = await _write_both(
+        config,
+        paths,
+        homeserver,
+        {"action": "send", "user_id": BOB, "message": "Lunch?"},
+        {"action": "send", "user_id": CAROL, "message": "Lunch?"},
+    )
+
+    assert results == [
+        _ok("send", room_id=NEW_DM, event_id="$dm"),
+        _ok("send", room_id=carol_dm, event_id="$carol"),
+    ]
+    assert homeserver.direct == {BOB: [NEW_DM], CAROL: [carol_dm]}
 
 
 @pytest.mark.asyncio

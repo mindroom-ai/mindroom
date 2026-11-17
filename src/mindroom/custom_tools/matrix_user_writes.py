@@ -8,6 +8,7 @@ event would go out in plain text.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unicodedata
 from collections import defaultdict, deque
@@ -17,6 +18,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import aiohttp
 
@@ -67,6 +69,9 @@ _RECENT_WRITES: defaultdict[tuple[str, str, str], deque[float]] = defaultdict(de
 # A DM made for the person with someone, by the two of them, that could not be added to the person's `m.direct`: the
 # next send to that someone uses it rather than making another.
 _UNRECORDED_DIRECT_ROOMS: dict[tuple[str, str], str] = {}
+# One call at a time finds or makes a DM for a person: two at once would each make one with the same someone, or
+# each write the person's `m.direct` whole and drop the DM the other added.
+_DIRECT_ROOM_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _ONE_TARGET = "send needs exactly one of room_id and user_id."
 _NOTHING_TO_SEND = "send needs message, attachments, or both."
 _REPLY_NEEDS_TEXT = "A reply (event_id) needs message."
@@ -467,28 +472,34 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
     two of them; one made earlier that could not be added there comes first. A room made now is added there.
+    Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
     """
-    direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
-    direct = await optional_json(client, direct_path) or {}
-    listed = direct.get(them)
-    listed = [room_id for room_id in listed if isinstance(room_id, str)] if isinstance(listed, list) else []
-    unrecorded = _UNRECORDED_DIRECT_ROOMS.get((person, them))
-    candidates = [*([unrecorded] if unrecorded is not None and unrecorded not in listed else []), *reversed(listed)]
-    for room_id in candidates:
-        if await _only_the_two(client, room_id, person, them):
-            if room_id not in listed:
-                await _record_direct_room(client, direct_path, person, them, room_id)
-            return room_id, False
-    created = await matrix_json(
-        client,
-        "POST",
-        "/createRoom",
-        {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]},
-    )
-    room_id = _created_room(created)
-    _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
-    await _record_direct_room(client, direct_path, person, them, room_id)
-    return room_id, True
+    lock = _DIRECT_ROOM_LOCKS.get(person)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DIRECT_ROOM_LOCKS[person] = lock
+    async with lock:
+        direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
+        direct = await optional_json(client, direct_path) or {}
+        listed = direct.get(them)
+        listed = [room_id for room_id in listed if isinstance(room_id, str)] if isinstance(listed, list) else []
+        unrecorded = _UNRECORDED_DIRECT_ROOMS.get((person, them))
+        candidates = [*([unrecorded] if unrecorded is not None and unrecorded not in listed else []), *reversed(listed)]
+        for room_id in candidates:
+            if await _only_the_two(client, room_id, person, them):
+                if room_id not in listed:
+                    await _record_direct_room(client, direct_path, person, them, room_id)
+                return room_id, False
+        created = await matrix_json(
+            client,
+            "POST",
+            "/createRoom",
+            {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]},
+        )
+        room_id = _created_room(created)
+        _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
+        await _record_direct_room(client, direct_path, person, them, room_id)
+        return room_id, True
 
 
 async def _record_direct_room(
@@ -501,7 +512,8 @@ async def _record_direct_room(
     """Add ``room_id`` to the person's `m.direct` list for ``them``, as it is when this writes.
 
     `m.direct` is written as a whole, and the person's own client may have changed it since it was first read, so it is
-    read again just before the write and that copy, not the early one, is written back.
+    read again just before the write and that copy, not the early one, is written back. The caller holds the person's
+    lock, so no other call of this runtime writes it between that read and the write.
     """
     try:
         fresh = await optional_json(client, direct_path) or {}
