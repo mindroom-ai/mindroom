@@ -1642,6 +1642,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MATRIX_REGISTRATION_SHARED_SECRET`, `MATRIX_REGISTRATION_SHARED_SECRET_FILE` | Synapse shared registration secret, or a file containing it, for creating managed agent accounts without pairing | _(unset)_ |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` or `appservice` authentication for accounts MindRoom creates and operates (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)) | `password` |
 | `MATRIX_APPSERVICE_TOKEN`, `MATRIX_APPSERVICE_TOKEN_FILE` | Application-service token, or a file containing it, used when `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` | _(unset)_ |
+| `MATRIX_USER_APPSERVICE_TOKEN`, `MATRIX_USER_APPSERVICE_TOKEN_FILE` | Token of a separate application service, or a file containing it, that lets a personal agent's [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool act as its owner | _(unset)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait at startup for the homeserver to respond (`0` waits indefinitely); a certificate verification failure stops startup immediately | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Positive seconds the sync watchdog and `/api/health` keep waiting while event catch-up is still making progress; set it above the deployment's observed healthy catch-up time | `600` |
@@ -1958,7 +1959,7 @@ List these only if you trust everyone whose messages the agent hears.
 
 MindRoom holds a silent turn to a few lines of its own:
 
-- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
 - The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
 - No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
 - A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
@@ -8257,7 +8258,7 @@ Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent
 | `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
-It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, or `dynamic_tools`, which fail validation with `contacts.tools may not include <tool>`.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
@@ -8647,7 +8648,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, snoozing, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, snoozing, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, a personal agent reading Matrix as its owner, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
@@ -12709,6 +12710,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
+- [`matrix_user`] - Read Matrix as a personal agent's owner: their rooms and DMs, invitations, a room's members, and people.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -12717,7 +12719,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-These tools work only while an agent is responding in a Matrix conversation.
+Except [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
@@ -12992,6 +12994,46 @@ matrix_api(
     keys=["content.body"],
     event_context={"before_limit": 1, "after_limit": 1, "include_profile": True},
 )
+```
+
+## [`matrix_user`]
+
+`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in.
+It acts only for the agent's owner, in a chat with the agent or through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+
+`matrix_user_read(action, room_id=None, query=None, limit=None)` never writes.
+
+| Action | Returns |
+|--------|---------|
+| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 50, at most 200) caps the lines, with `left_out` counting the rest |
+| `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
+| `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
+
+The toolkit has no device or encryption keys, so messages in encrypted rooms are not readable.
+
+To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
+The token can act as anyone in that namespace, so only MindRoom's primary runtime reads it: workers never receive it, and no tool result or error shows it.
+Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
+
+```yaml
+# The homeserver's registration file; MindRoom needs only as_token.
+id: mindroom-user
+url: null
+as_token: <a long random secret>
+hs_token: <another long random secret>
+sender_localpart: mindroom-user
+namespaces:
+  users:
+    - exclusive: false
+      regex: "@.*:example.com"
+```
+
+```yaml
+personal_agents:
+  mind:
+    agent:
+      tools:
+        - matrix_user
 ```
 
 ## Related Matrix Runtime Features
@@ -17483,6 +17525,7 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
 Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
 Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy or in a per-call credential lease.
+`MATRIX_USER_APPSERVICE_TOKEN`, which can act as any person in its application service's namespace, is read only from the primary's own environment: it is in no worker's or tool request's environment, never stored, and never in a tool result, and the `matrix_user` toolkit, which runs only in the primary, uses it only as the owner of the personal agent making the call.
 OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
 A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
 A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.

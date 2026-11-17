@@ -320,6 +320,32 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "The owner's own Matrix account: catch up on their rooms and DMs, search, read, and, when they ask for exactly that, write as them",
+      "display_name": "Matrix as the Owner",
+      "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "matrix_user_read"
+      ],
+      "helper_text": null,
+      "icon": "UserRound",
+      "icon_color": "text-blue-500",
+      "name": "matrix_user",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "authored_override": false,

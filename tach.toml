@@ -2544,7 +2544,23 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.tool_system.runtime_context",
 ]
-visibility = []
+visibility = ["mindroom.custom_tools.matrix_user"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.matrix_user_authority",
+    "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.matrix.user_masquerade",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user_reads"
+depends_on = ["mindroom.bounded_bytes"]
+visibility = ["mindroom.custom_tools.matrix_user"]
 
 [[modules]]
 path = "mindroom.custom_tools.computer_announcement"
@@ -3130,7 +3146,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_session",
 ]
-visibility = []
+visibility = ["mindroom.custom_tools.matrix_user"]
 
 [[modules]]
 path = "mindroom.matrix.provisioning"

@@ -306,6 +306,7 @@ matrix_calls = [
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []
+matrix_user = []
 matrix_voice_message = []
 mem0 = [
   "mem0ai>=2.2.1",

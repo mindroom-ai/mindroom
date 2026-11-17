@@ -17722,6 +17722,77 @@
       }
     ]
   },
+  "matrix_user": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "matrix_user_read",
+        "description": "Read Matrix as your owner: their own rooms and DMs, including those you are not in.\nActions:\n- rooms: Their rooms, unread first, then invitations, then the rest, one line each:\n  `<room_id> | <name> | unread <n>, mentions <m>[, marked unread]` or `<room_id> | <name> | invited by <user>`.\n  query keeps rooms whose name contains it. limit: default 50, at most 200.\n- room: room_id's name, topic, encryption, whether it is a DM, and up to limit (default 50) members.\n- people: query is a full Matrix ID for that profile, or a name to search the user directory\n  (limit: default 10, at most 50).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "rooms",
+                "room",
+                "people"
+              ]
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "matrix_voice_message": {
     "instructions": null,
     "guidance": null,
