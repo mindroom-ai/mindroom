@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from structlog.testing import capture_logs
 
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
+from mindroom.orchestration import tool_job_runtime as tool_job_runtime_module
 from mindroom.tool_jobs import publication
 from mindroom.tool_jobs.publication import JobStatePublisher, _jobs_state_content
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
@@ -66,16 +68,37 @@ def test_content_lists_live_jobs_without_arguments() -> None:
     jobs = content["jobs"]
     assert isinstance(jobs, list)
     assert [job["job_id"] for job in jobs] == ["job_1", "job_2"]
-    assert set(jobs[0]) == {"job_id", "thread_id", "kind", "tool", "status", "requester_id", "started_at"}
+    assert set(jobs[0]) == {"job_id", "thread_id", "kind", "tool", "status", "started_at"}
     assert jobs[0]["tool"] == "run_tests"
     assert jobs[0]["kind"] == "tool"
     assert jobs[0]["thread_id"] == "$thread"
     assert jobs[1]["status"] == "awaiting_approval"
 
 
+def _aged(job: BackgroundJob, age: timedelta) -> BackgroundJob:
+    return replace(job, created_at=(datetime.now(UTC) - age).isoformat())
+
+
+def test_a_job_running_for_moments_is_not_listed() -> None:
+    """A call that ends within seconds never reaches the room; one waiting on a person or a cancel shows at once."""
+    fresh = timedelta(seconds=1)
+    content = _jobs_state_content(
+        [
+            _aged(_job("job_1"), fresh),
+            _aged(_job("job_2", status="awaiting_approval"), fresh),
+            _aged(_job("job_3", status="cancel_requested"), fresh),
+            _aged(_job("job_4"), timedelta(seconds=60)),
+        ],
+    )
+    jobs = content["jobs"]
+    assert isinstance(jobs, list)
+    assert sorted(job["job_id"] for job in jobs) == ["job_2", "job_3", "job_4"]
+    assert content["total"] == 3
+
+
 def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     """A person sees which agent a subagent job runs, not the tool that started it."""
-    job = replace(completed_delegation_job(), status="running")
+    job = _aged(replace(completed_delegation_job(), status="running"), timedelta(minutes=1))
     content = _jobs_state_content([job])
     jobs = content["jobs"]
     assert isinstance(jobs, list)
@@ -88,11 +111,7 @@ def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listin
     Tuwunel counts the replaced state's content (``unsigned.prev_content``) toward the 65,535-byte event limit, so two
     contents must fit together with the rest of the event, allowed 10,240 bytes as in Tuwunel's admin responder.
     """
-    owner = replace(
-        job_owner(),
-        requester_id="@" + "p" * 242 + ":example.org",
-        resolved_thread_id="$" + "e" * 43,
-    )
+    owner = replace(job_owner(), resolved_thread_id="$" + "e" * 43)
     jobs = [
         replace(
             _job("job_0", status="awaiting_approval"),
@@ -147,6 +166,59 @@ async def test_a_room_whose_jobs_all_ended_is_cleared() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_job_running_for_moments_writes_nothing() -> None:
+    """A room whose state lists no jobs is not written again for a job that has only just started."""
+    bots = _bots("agent_a")
+    publisher = JobStatePublisher()
+    await publisher.publish(bots.get, [_job("job_1", status="completed")])
+    await publisher.publish(bots.get, [_aged(_job("job_2"), timedelta(seconds=1))])
+    bots["agent_a"].client.room_put_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_worker_lists_a_job_once_it_has_run_past_the_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's periodic pass lists a running job once it is old enough, though nothing about the job changed."""
+    monkeypatch.setattr(tool_job_runtime_module, "_RETRY_SECONDS", 0.01)
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    bot = _bot(owner.recipient)
+    bot.client.rooms = {owner.room_id: MagicMock()}
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    put = bot.client.room_put_state
+    listed = asyncio.Event()
+
+    def write(**call: object) -> nio.RoomPutStateResponse:
+        if call["content"]["jobs"]:  # type: ignore[index]
+            listed.set()
+        return nio.RoomPutStateResponse(event_id="$state", room_id=owner.room_id)
+
+    put.side_effect = write
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+    worker = asyncio.create_task(coordinator._run())
+    try:
+        # Many passes of the worker find the job too fresh to list.
+        await asyncio.sleep(0.1)
+        assert not listed.is_set()
+        # Time passes: the job was started a minute ago, and nothing wakes the worker.
+        entry = runtime._entries["job_1"]
+        entry.job = _aged(entry.job, timedelta(minutes=1))
+        await asyncio.wait_for(listed.wait(), timeout=5)
+        assert [job["job_id"] for job in put.await_args.kwargs["content"]["jobs"]] == ["job_1"]
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_write_is_retried_on_the_next_pass() -> None:
     """A write the homeserver refused is written again on the next pass."""
     bots = _bots("agent_a")
@@ -194,6 +266,8 @@ async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> 
 
     try:
         await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+        entry = runtime._entries["job_1"]
+        entry.job = _aged(entry.job, timedelta(minutes=1))
         await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
         assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
         await coordinator.quiesce()

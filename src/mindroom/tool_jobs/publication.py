@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import nio
@@ -27,6 +28,9 @@ _MAX_REFUSED_ROOMS = 4096
 _MAX_LISTED_BYTES = 27_000
 # Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
 _FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
+# Most calls end within seconds, and each write is a state event clients keep, so a running job shows only once it has
+# run this long; the worker's periodic pass lists it then. A job waiting on a person or a cancel shows at once.
+_LISTED_AFTER = timedelta(seconds=10)
 
 
 class _PublishingBot(Protocol):
@@ -47,15 +51,20 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
         "kind": "subagent" if job.kind == "delegation" else "tool",
         "tool": job.tool_name,
         "status": job.status,
-        "requester_id": job.owner.requester_id,
         "started_at": job.created_at,
     }
 
 
 def _jobs_state_content(jobs: Sequence[BackgroundJob]) -> dict[str, object]:
     """Return the state content listing the newest live jobs among ``jobs`` that fit, oldest first, and their total."""
+    started_before = datetime.now(UTC) - _LISTED_AFTER
     live = sorted(
-        (job for job in jobs if job.status not in TERMINAL_STATUSES),
+        (
+            job
+            for job in jobs
+            if job.status not in TERMINAL_STATUSES
+            and (job.status != "running" or datetime.fromisoformat(job.created_at) <= started_before)
+        ),
         key=lambda job: (job.created_at, job.job_id),
     )
     listed: list[dict[str, object]] = []
