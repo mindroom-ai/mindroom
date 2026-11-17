@@ -1143,6 +1143,64 @@ async def test_failed_progress_edit_neither_stops_progress_nor_fails_its_owner(c
 
 
 @pytest.mark.asyncio
+async def test_a_failed_progress_edit_is_retried_at_the_update_cadence_not_on_the_next_token(config: Config) -> None:
+    """A failed edit restarts the throttle window, so an outage is retried once per interval with the full reply."""
+    now = 1_000.0
+    edits: list[str] = []
+
+    async def fail_first_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, Any],
+        new_text: str,
+    ) -> DeliveredMatrixEvent | None:
+        edits.append(new_text)
+        if len(edits) == 1:
+            return None
+        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        event_id="$stream_1",
+        last_update=float("-inf"),
+        update_interval=5.0,
+        interval_ramp_seconds=0.0,
+        # Only the update interval may open the throttle in this test.
+        update_char_threshold=10_000,
+        min_update_char_threshold=10_000,
+        max_idle=1_000.0,
+        **FakeReplyRecords().hooks(),
+    )
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+
+    with (
+        patch("mindroom.streaming.time.time", side_effect=lambda: now),
+        patch("mindroom.streaming.edit_message_result", new=fail_first_edit),
+    ):
+        streaming._append_incremental_text("Checking")
+        await streaming._throttled_send(client)
+        assert edits == ["Checking"]
+        assert streaming.last_update == 1_000.0
+        # Nothing was committed, so the text is still owed.
+        assert streaming.chars_since_last_update == len("Checking")
+
+        now = 1_002.0
+        streaming._append_incremental_text(" the logs")
+        await streaming._throttled_send(client)
+        assert edits == ["Checking"]
+
+        now = 1_005.0
+        await streaming._throttled_send(client)
+
+    assert edits == ["Checking", "Checking the logs"]
+    assert streaming.last_update == 1_005.0
+    assert streaming.chars_since_last_update == 0
+
+
+@pytest.mark.asyncio
 async def test_progress_tool_boundaries_are_delivered_without_waiting_for_a_later_event(config: Config) -> None:
     """With the real clock, tool starts and completions reach the reply at once like ordinary streamed tools."""
     gateway = _FakeGateway()
