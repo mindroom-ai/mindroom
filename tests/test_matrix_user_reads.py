@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import TYPE_CHECKING
 
 import aiohttp
 import pytest
 
 from mindroom.attachments.storage import load_attachment, register_audio_attachment
-from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.matrix_user_reads import (
     MatrixRequestError,
     download_file,
@@ -22,7 +22,10 @@ from mindroom.custom_tools.matrix_user_reads import (
 )
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
 from tests.matrix_user_helpers import (
+    OWNER,
+    ROOM,
     SYNC_PATH,
+    TOKEN,
     Answer,
     FakeHomeserver,
     edit_of,
@@ -30,6 +33,7 @@ from tests.matrix_user_helpers import (
     joined_room,
     matrix_error,
     message_line,
+    owner_runtime_paths,
     reaction,
     room_event,
     search_answer,
@@ -43,15 +47,12 @@ if TYPE_CHECKING:
 
     import nio
 
-PERSON = "@alice:example.com"
 AGENT = "@mind:example.com"
-TOKEN = "as-user-secret"  # noqa: S105
-ROOM = "!room:example.com"
 ROOM_PATH = f"/_matrix/client/v3/rooms/{ROOM}"
 MESSAGES_PATH = f"{ROOM_PATH}/messages"
 SEARCH_PATH = "/_matrix/client/v3/search"
 MEDIA_PATH = "/_matrix/client/v1/media/download/example.com/abc"
-MARKED_UNREAD_PATH = f"/_matrix/client/v3/user/{PERSON}/rooms/{ROOM}/account_data/m.marked_unread"
+MARKED_UNREAD_PATH = f"/_matrix/client/v3/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread"
 # What a page of messages asks for: the messages, and the reactions to count on them.
 MESSAGES_FILTER = {"types": ["m.room.message", "m.room.encrypted", "m.reaction"]}
 CAROL = "@carol:example.com"
@@ -68,17 +69,18 @@ def homeserver() -> FakeHomeserver:
 @pytest.fixture
 def client(tmp_path: Path, homeserver: FakeHomeserver) -> nio.AsyncClient:
     """A client that acts as the person, talking to the fake homeserver."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        process_env={"MATRIX_HOMESERVER": "https://matrix.example.com"},
-    )
     return homeserver.serve(
-        create_user_masquerade_client(paths, token=TOKEN, person_user_id=PERSON, agent_user_id=AGENT),
+        create_user_masquerade_client(
+            owner_runtime_paths(tmp_path),
+            token=TOKEN,
+            person_user_id=OWNER,
+            agent_user_id=AGENT,
+        ),
     )
 
 
 def _sync_filter(homeserver: FakeHomeserver, index: int = 0) -> dict[str, object]:
-    [sync_filter] = [request for request in homeserver.requests if request.path == SYNC_PATH][index].query["filter"]
+    [sync_filter] = homeserver.requests_to(SYNC_PATH)[index].query["filter"]
     return json.loads(sync_filter)
 
 
@@ -96,7 +98,7 @@ async def test_rooms_lists_unread_first_then_invitations_then_the_rest(
             "!quiet:example.com": joined_room("archive"),
             "!flag:example.com": joined_room("Billing", marked_unread=True),
         },
-        invite={"!party:example.com": invited_room(PERSON, "@bob:example.com", "Party")},
+        invite={"!party:example.com": invited_room(OWNER, "@bob:example.com", "Party")},
     )
 
     result = await read_rooms(client, query=None, limit=None)
@@ -115,7 +117,7 @@ async def test_rooms_lists_unread_first_then_invitations_then_the_rest(
     assert request.method == "GET"
     assert request.query["timeout"] == ["0"]
     assert request.query["set_presence"] == ["offline"]
-    assert request.query["user_id"] == [PERSON]
+    assert request.query["user_id"] == [OWNER]
 
 
 @pytest.mark.asyncio
@@ -152,7 +154,7 @@ async def test_rooms_names_a_dm_by_the_other_person(client: nio.AsyncClient, hom
     """A direct chat without a name is named by the other person, a direct invitation by who sent it."""
     homeserver.answers[SYNC_PATH] = sync_answer(
         join={"!dm:example.com": joined_room(unread=1), "!group:example.com": joined_room()},
-        invite={"!ask:example.com": invited_room(PERSON, "@carol:example.com", is_direct=True)},
+        invite={"!ask:example.com": invited_room(OWNER, "@carol:example.com", is_direct=True)},
         direct={"@bob:example.com": ["!dm:example.com"]},
     )
 
@@ -193,7 +195,7 @@ async def test_a_name_cannot_fake_a_column(client: nio.AsyncClient, homeserver: 
             SYNC_PATH: sync_answer(
                 join={ROOM: joined_room("Team | unread 99")},
                 invite={
-                    "!ask:example.com": invited_room(PERSON, "@x|y:example.com", "Ask | invited by @bob:example.com"),
+                    "!ask:example.com": invited_room(OWNER, "@x|y:example.com", "Ask | invited by @bob:example.com"),
                 },
             ),
             "/_matrix/client/v3/user_directory/search": {
@@ -222,7 +224,7 @@ async def test_rooms_filters_by_name(client: nio.AsyncClient, homeserver: FakeHo
             "!other:example.com": joined_room("Other"),
             "!dm:example.com": joined_room(),
         },
-        invite={"!steam:example.com": invited_room(PERSON, "@bob:example.com", "Steam room")},
+        invite={"!steam:example.com": invited_room(OWNER, "@bob:example.com", "Steam room")},
         direct={"@teammate:example.com": ["!dm:example.com"]},
     )
 
@@ -287,15 +289,15 @@ async def test_room_reports_encryption_and_members(client: nio.AsyncClient, home
             f"{ROOM_PATH}/joined_members": {
                 "joined": {
                     "@carol:example.com": {"display_name": "Carol"},
-                    PERSON: {"display_name": "Alice"},
+                    OWNER: {"display_name": "Alice"},
                     "@bob:example.com": {"display_name": None},
                 },
             },
             f"{ROOM_PATH}/state/m.room.name": {"name": "Planning"},
             f"{ROOM_PATH}/state/m.room.topic": {"topic": "Next quarter"},
             f"{ROOM_PATH}/state/m.room.encryption": {"algorithm": "m.megolm.v1.aes-sha2"},
-            f"/_matrix/client/v3/user/{PERSON}/account_data/m.direct": {"@bob:example.com": [ROOM]},
-            f"/_matrix/client/v3/rooms/{plain}/joined_members": {"joined": {PERSON: {"display_name": "Alice"}}},
+            f"/_matrix/client/v3/user/{OWNER}/account_data/m.direct": {"@bob:example.com": [ROOM]},
+            f"/_matrix/client/v3/rooms/{plain}/joined_members": {"joined": {OWNER: {"display_name": "Alice"}}},
         },
     )
 
@@ -448,22 +450,21 @@ async def test_an_oversized_room_list_says_what_to_do(client: nio.AsyncClient, h
     )
 
 
-async def _messages(
-    client: nio.AsyncClient,
-    *,
-    event_id: str | None = None,
-    thread_id: str | None = None,
-    page_token: str | None = None,
-    limit: int | None = None,
-) -> dict[str, object]:
-    return await read_messages(
-        client,
-        ROOM,
-        event_id=event_id,
-        thread_id=thread_id,
-        page_token=page_token,
-        limit=limit,
-    )
+# A page of ``ROOM``'s messages, leaving out what a call does not name.
+_messages = partial(read_messages, room_id=ROOM, event_id=None, thread_id=None, page_token=None, limit=None)
+
+
+def _encrypted_event(event_id: str, *, minute: int = 0, edits: str | None = None) -> dict[str, object]:
+    """Return a message that cannot be read, or an encrypted edit of ``edits`` when given."""
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "AwgA",
+        "session_id": "s",
+        "device_id": "D",
+    }
+    if edits is not None:
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edits}
+    return room_event(event_id, "m.room.encrypted", content, minute=minute)
 
 
 def _thread_reply(event_id: str, root: str, body: str, *, minute: int) -> dict[str, object]:
@@ -589,17 +590,8 @@ async def test_reactions_are_counted_once_per_sender(client: nio.AsyncClient, ho
 @pytest.mark.asyncio
 async def test_an_encrypted_event_is_reported_not_dropped(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
     """A message that cannot be read is a line that says so; an encrypted edit of it is no line of its own."""
-    encrypted = {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA", "session_id": "s", "device_id": "D"}
     homeserver.answers[MESSAGES_PATH] = {
-        "chunk": [
-            room_event(
-                "$secret_edit",
-                "m.room.encrypted",
-                {**encrypted, "m.relates_to": {"rel_type": "m.replace", "event_id": "$secret"}},
-                minute=1,
-            ),
-            room_event("$secret", "m.room.encrypted", encrypted),
-        ],
+        "chunk": [_encrypted_event("$secret_edit", minute=1, edits="$secret"), _encrypted_event("$secret")],
     }
 
     result = await _messages(client)
@@ -613,20 +605,14 @@ async def test_a_run_of_encrypted_messages_is_one_line(client: nio.AsyncClient, 
 
     An edit among them is no message of its own, so it does not break the run.
     """
-    encrypted = {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA", "session_id": "s", "device_id": "D"}
     homeserver.answers[MESSAGES_PATH] = {
         "chunk": [
-            room_event("$e4", "m.room.encrypted", encrypted, minute=6),
+            _encrypted_event("$e4", minute=6),
             text_message("$back", "Back in the clear", minute=5),
-            room_event("$e3", "m.room.encrypted", encrypted, minute=4),
-            room_event(
-                "$e2_edit",
-                "m.room.encrypted",
-                {**encrypted, "m.relates_to": {"rel_type": "m.replace", "event_id": "$e2"}},
-                minute=3,
-            ),
-            room_event("$e2", "m.room.encrypted", encrypted, minute=2),
-            room_event("$e1", "m.room.encrypted", encrypted, minute=1),
+            _encrypted_event("$e3", minute=4),
+            _encrypted_event("$e2_edit", minute=3, edits="$e2"),
+            _encrypted_event("$e2", minute=2),
+            _encrypted_event("$e1", minute=1),
             text_message("$hi", "Hello"),
         ],
     }
@@ -687,7 +673,7 @@ async def test_names_topics_and_types_are_cut(
         {
             SYNC_PATH: sync_answer(
                 join={ROOM: joined_room(long)},
-                invite={"!ask:example.com": invited_room(PERSON, bob, long)},
+                invite={"!ask:example.com": invited_room(OWNER, bob, long)},
             ),
             f"{ROOM_PATH}/joined_members": {"joined": {bob: {"display_name": long}}},
             f"{ROOM_PATH}/state/m.room.name": {"name": long},
@@ -1083,7 +1069,7 @@ async def test_download_registers_an_attachment_within_the_size_cap(
     assert record.local_path.read_bytes() == data
     assert (record.kind, record.room_id, record.thread_id, record.sender) == (kind, CHAT, "$turn", "@bob:example.com")
     [download] = homeserver.requests_to(MEDIA_PATH)
-    assert download.query["user_id"] == [PERSON]
+    assert download.query["user_id"] == [OWNER]
     # The token travels only in the Authorization header.
     assert TOKEN not in download.url
     assert "access_token" not in download.url
@@ -1210,49 +1196,30 @@ async def test_mark_read_sends_a_private_receipt_and_clears_the_flag(
 
 
 @pytest.mark.asyncio
-async def test_mark_read_reports_when_only_the_markers_moved(
-    client: nio.AsyncClient,
-    homeserver: FakeHomeserver,
-) -> None:
-    """When the marked-unread flag cannot be cleared, the error says the read markers moved all the same."""
-    homeserver.answers.update(
-        {
-            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
-            f"{ROOM_PATH}/read_markers": {},
-            MARKED_UNREAD_PATH: matrix_error(500, "M_UNKNOWN", "Internal error"),
-        },
-    )
-
-    with pytest.raises(MatrixRequestError) as error:
-        await mark_read(client, ROOM, event_id="$seen")
-
-    assert str(error.value) == (
-        "The room is read up to $seen, but it is still marked unread: Matrix answered 500 M_UNKNOWN: Internal error"
-    )
-    assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure", "said"),
+    ("answer", "said"),
     [
+        (matrix_error(500, "M_UNKNOWN", "Internal error"), "Matrix answered 500 M_UNKNOWN: Internal error"),
         (TimeoutError(), "The homeserver took too long to answer."),
         (aiohttp.ServerDisconnectedError(), "The Matrix homeserver could not be reached."),
     ],
-    ids=["timeout", "unreachable"],
+    ids=["refused", "timeout", "unreachable"],
 )
-async def test_mark_read_reports_when_the_flag_step_cannot_reach_the_homeserver(
+async def test_mark_read_reports_when_only_the_markers_moved(
     client: nio.AsyncClient,
     homeserver: FakeHomeserver,
-    failure: Exception,
+    answer: Answer | Exception,
     said: str,
 ) -> None:
-    """A flag step that times out or finds no homeserver still says the read markers moved, never the transport's text."""
+    """When the marked-unread flag cannot be cleared, the error says the read markers moved all the same.
+
+    A flag step that times out or finds no homeserver says so, never the transport's text.
+    """
     homeserver.answers.update(
         {
             f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
             f"{ROOM_PATH}/read_markers": {},
-            MARKED_UNREAD_PATH: failure,
+            MARKED_UNREAD_PATH: answer,
         },
     )
 
@@ -1260,6 +1227,7 @@ async def test_mark_read_reports_when_the_flag_step_cannot_reach_the_homeserver(
         await mark_read(client, ROOM, event_id="$seen")
 
     assert str(error.value) == f"The room is read up to $seen, but it is still marked unread: {said}"
+    assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
 
 
 @pytest.mark.asyncio
