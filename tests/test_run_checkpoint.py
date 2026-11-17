@@ -362,15 +362,17 @@ async def test_a_turn_that_keeps_being_interrupted_stops_continuing_from_its_rec
     """Past the limit nothing is recovered and what was recovered leaves history, so the turn starts over."""
     await _crash_mid_call(tmp_path, monkeypatch, _crashing_turns())
     crashed = _config(tmp_path / "crashed")
-    assert _recover(crashed)
+    [recovered] = _recover(crashed)
 
-    assert not _recover(crashed, natively=False)
+    # The run stays linked to the turn's answer, which a redaction removes it with.
+    assert _recover(crashed, natively=False) == [recovered]
 
     run = _only_run(crashed)
     assert run.status is RunStatus.error
     assert "kept being interrupted" in str(run.error)
     # A later recovery does not bring the run back.
-    assert not _recover(crashed)
+    _recover(crashed)
+    assert _only_run(crashed).status is RunStatus.error
     model = ScriptedModel([answer("Started over")])
     install_model_providers(monkeypatch, {"default": model})
     await _respond(crashed)
@@ -564,8 +566,12 @@ async def test_redacting_a_reply_removes_the_recovered_attempt_a_compaction_fold
 
 
 @pytest.mark.asyncio
-async def test_redacting_a_reply_removes_an_attempt_whose_calls_a_mid_turn_fold_all_took(tmp_path: Path) -> None:
-    """An attempt cut short after a mid-turn fold took all its calls is still recovered and linked to the reply."""
+@pytest.mark.parametrize("natively", [True, False], ids=["recovered", "past the recovery limit"])
+async def test_redacting_a_reply_removes_an_attempt_whose_calls_a_mid_turn_fold_all_took(
+    tmp_path: Path,
+    natively: bool,
+) -> None:
+    """An attempt cut short after a mid-turn fold took all its calls is recovered and stays linked to the reply."""
     config = _config(tmp_path)
     store = _store(config)
     session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
@@ -587,6 +593,9 @@ async def test_redacting_a_reply_removes_an_attempt_whose_calls_a_mid_turn_fold_
     await save_run_checkpoint(store, session, replace(run, messages=run.messages[:1]))
 
     continued = _recover(config)
+    if not natively:
+        # The turn keeps being interrupted; the run leaves history, but its fold's summary stays.
+        continued = _recover(config, natively=False)
 
     assert continued == ["crashed"]
     session = store.load_session(_SESSION)

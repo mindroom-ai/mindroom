@@ -171,13 +171,14 @@ def recover_interrupted_turn(
     *,
     natively: bool,
 ) -> list[str]:
-    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the recovered runs it holds.
+    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the turn's recovered runs.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
-    attempt starts from the conversation before the turn. A recovered run a compaction folded stays in the scope's
-    summary either way and is returned, so the turn's answer links it too (``link_response_event``).
+    attempt starts from the conversation before the turn. Every recovered run is returned either way, so the turn's
+    answer links it too (``link_response_event``): a summary can still hold its work, from a later compaction or from
+    the run's own mid-turn fold.
     """
     session = store.load_session(session_id)
     if session is None:
@@ -190,13 +191,11 @@ def recover_interrupted_turn(
             continue
         if not source_event_ids(run.metadata).intersection(event_ids):
             continue
-        earlier = is_recovered_run(run) and is_model_history_visible_run(run)
-        if natively and (earlier or recover_interrupted_run(store, session, run)):
-            recovered.append(run.run_id)
-        elif earlier and run.run_id in loaded:
+        if not is_recovered_run(run) and not (natively and recover_interrupted_run(store, session, run)):
+            continue
+        if not natively and is_model_history_visible_run(run) and run.run_id in loaded:
             store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
-        elif earlier:
-            recovered.append(run.run_id)
+        recovered.append(run.run_id)
     return recovered
 
 
