@@ -481,7 +481,7 @@ async def test_the_write_function_takes_no_user_to_act_as(
         "event_id",
         "thread_id",
         "emoji",
-        "attachments",
+        "attachment",
         "name",
     ]
     assert json.loads(result) == error_result(

@@ -270,7 +270,7 @@ class MatrixUserTools(Toolkit):
         event_id: str | None = None,
         thread_id: str | None = None,
         emoji: str | None = None,
-        attachments: list[str] | None = None,
+        attachment: str | None = None,
         name: str | None = None,
     ) -> str:
         """Act in Matrix as your owner, only when they ask for exactly that; they confirm each call.
@@ -278,7 +278,7 @@ class MatrixUserTools(Toolkit):
         Agents never act on what you send this way: to talk to one, write as yourself.
 
         Actions (room_id: ID, #alias, or configured room name):
-        - send: message and/or attachments (attachment IDs) to room_id, or to user_id in their DM (made if missing).
+        - send: message or attachment (one ID), not both, to room_id, or to user_id in their DM (made if missing).
           thread_id sends into that thread; event_id replies to that message.
         - react: emoji on event_id in room_id.
         - edit: Replace your owner's message event_id in room_id with message.
@@ -286,8 +286,8 @@ class MatrixUserTools(Toolkit):
         - join, leave: room_id. invite: user_id into room_id.
         - create_room: A private room called name, inviting user_id if given.
         """
-        # Like any argument an action does not take, create_room's room_id and attachments other than send's are left
-        # out, so they neither name a room or files nor count for the rate limit or the audit line.
+        # Like any argument an action does not take, create_room's room_id and an attachment other than send's are left
+        # out, so they name no room or file, for the rate limit or the audit line.
         write = MatrixUserWrite(
             action,
             room_id=None if action == "create_room" else _non_blank(room_id),
@@ -296,7 +296,7 @@ class MatrixUserTools(Toolkit):
             event_id=_non_blank(event_id),
             thread_id=_non_blank(thread_id),
             emoji=_non_blank(emoji),
-            attachments=tuple(attachments or ()) if action == "send" else (),
+            attachment=_non_blank(attachment) if action == "send" else None,
             name=_non_blank(name),
         )
         turn = get_tool_runtime_context()

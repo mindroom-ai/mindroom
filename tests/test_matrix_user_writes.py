@@ -311,10 +311,76 @@ async def test_send_with_an_attachment(
     tmp_path: Path,
     agent_id: str,
 ) -> None:
-    """A file of the turn goes out after the text, uploaded as the owner and marked as the agent's."""
+    """A file of the turn goes out as one event, uploaded as the owner and marked as the agent's."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
-    homeserver.answers[f"{_send_path()}*"] = [Answer({"event_id": "$text"}), Answer({"event_id": "$file"})]
+
+    with capture_logs() as logs:
+        result = await _write(
+            config,
+            paths,
+            homeserver,
+            attachment_ids=(record.attachment_id,),
+            action="send",
+            room_id=ROOM,
+            attachment=record.attachment_id,
+        )
+
+    assert result == ok_result("send", room_id=ROOM, event_id="$sent")
+    [upload] = homeserver.requests_to(UPLOAD_PATH)
+    assert upload.uploaded == b"Remember the milk"
+    assert upload.query["user_id"] == [OWNER]
+    # The token travels only in the Authorization header.
+    assert TOKEN not in upload.url
+    assert "access_token" not in upload.url
+    [file] = _sent(homeserver)
+    assert (file["msgtype"], file["url"], file["filename"]) == ("m.file", "mxc://example.com/notes", "notes.txt")
+    assert file[AGENT_AUTHORED_KEY] == agent_id
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["event_id"], audit["attachments"]) == ("ok", "$sent", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_file_sent_into_a_thread_follows_its_newest_message(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A file goes into a thread as a text does: after the thread's newest message."""
+    record = _notes(paths, tmp_path, mime_type="text/plain")
+    homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
+    homeserver.answers[THREAD_PATH] = {"chunk": [text_message("$latest", "Newest reply")]}
+
+    await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        action="send",
+        room_id=ROOM,
+        thread_id="$root",
+        attachment=record.attachment_id,
+    )
+
+    [file] = _sent(homeserver)
+    assert file["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$root",
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": "$latest"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_message_and_a_file_in_one_send_are_refused_before_any_request(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A send is one event, so it cannot end with one of two sent: a text and a file are two calls."""
+    record = _notes(paths, tmp_path, mime_type="text/plain")
 
     result = await _write(
         config,
@@ -324,19 +390,14 @@ async def test_send_with_an_attachment(
         action="send",
         room_id=ROOM,
         message="Here it is",
-        attachments=[record.attachment_id],
+        attachment=record.attachment_id,
     )
 
-    assert result == ok_result("send", room_id=ROOM, event_id="$text", event_ids=["$text", "$file"])
-    [upload] = homeserver.requests_to(UPLOAD_PATH)
-    assert upload.uploaded == b"Remember the milk"
-    assert upload.query["user_id"] == [OWNER]
-    # The token travels only in the Authorization header.
-    assert TOKEN not in upload.url
-    assert "access_token" not in upload.url
-    [_, file] = _sent(homeserver)
-    assert (file["msgtype"], file["url"], file["filename"]) == ("m.file", "mxc://example.com/notes", "notes.txt")
-    assert file[AGENT_AUTHORED_KEY] == agent_id
+    assert result == error_result(
+        "send",
+        "send takes message or attachment, not both: send the text and the file as two calls.",
+    )
+    assert homeserver.requests == []
 
 
 @pytest.mark.asyncio
@@ -346,7 +407,7 @@ async def test_an_attachment_the_turn_does_not_hold_is_refused_before_any_reques
     homeserver: FakeHomeserver,
 ) -> None:
     """Only the turn's own files can be sent."""
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachments=["att_elsewhere"])
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachment="att_elsewhere")
 
     assert result == error_result("send", "Attachment ID is not available in this context: att_elsewhere")
     assert homeserver.requests == []
@@ -368,7 +429,7 @@ async def test_a_file_stored_for_another_conversation_is_refused_before_any_requ
     """A stored file the turn does not hold is sent only when it was stored for the turn's own room and thread."""
     record = _notes(paths, tmp_path, **stored_for)
 
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachments=[record.attachment_id])
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachment=record.attachment_id)
 
     assert result == error_result("send", f"Attachment ID is not available in this context: {record.attachment_id}")
     assert homeserver.requests == []
@@ -399,7 +460,7 @@ async def test_an_ephemeral_attachment_is_named_as_such(
         result = await owner_toolkit(config, paths).matrix_user_write(
             action="send",
             room_id=ROOM,
-            attachments=["att_media"],
+            attachment="att_media",
         )
 
     assert json.loads(result) == error_result(
@@ -431,7 +492,7 @@ async def test_a_command_like_file_name_is_refused(
         attachment_ids=(record.attachment_id,),
         action="send",
         room_id=ROOM,
-        attachments=[record.attachment_id],
+        attachment=record.attachment_id,
     )
 
     assert result == error_result(
@@ -545,7 +606,7 @@ async def test_a_file_downloaded_in_a_run_is_sent_once_the_owner_confirms(
     async def name_the_download() -> None:
         # The model sends the attachment that its download's result named.
         fetched = json.loads(str(model.requests[-1].messages[-1].content))
-        arguments = {"action": "send", "room_id": ROOM, "attachments": [fetched["attachment_id"]]}
+        arguments = {"action": "send", "room_id": ROOM, "attachment": fetched["attachment_id"]}
         send["function"]["arguments"] = json.dumps(arguments)
 
     model = ScriptedModel(
@@ -1098,14 +1159,15 @@ async def test_every_built_content_carries_the_marker_before_the_client_stamps_i
         results = [
             json.loads(await toolkit.matrix_user_write(room_id=ROOM, **arguments))
             for arguments in [
-                {"action": "send", "message": "Here it is", "attachments": [record.attachment_id]},
+                {"action": "send", "message": "Here it is"},
+                {"action": "send", "attachment": record.attachment_id},
                 {"action": "react", "event_id": "$own", "emoji": "👍"},
                 {"action": "edit", "event_id": "$own", "message": "Hello"},
                 {"action": "redact", "event_id": "$own"},
             ]
         ]
 
-    assert [result["status"] for result in results] == ["ok"] * 4
+    assert [result["status"] for result in results] == ["ok"] * 5
     assert [kind for kind, _ in handed] == [
         "m.room.message",
         "m.room.message",
@@ -1249,7 +1311,7 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
     homeserver: FakeHomeserver,
     tmp_path: Path,
 ) -> None:
-    """Twelve writes per 30 seconds into one room, a file counting as one more; another room has its own count."""
+    """Twelve writes per 30 seconds into one room, a file being one write like any other; another room has its own count."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
     homeserver.answers[f"{_send_path(OTHER_ROOM, 'm.reaction')}*"] = {"event_id": "$elsewhere"}
@@ -1260,10 +1322,9 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
             json.loads(await toolkit.matrix_user_write(action="react", room_id=ROOM, event_id="$own", emoji="👍"))
             for _ in range(11)
         ]
-        with_file = json.loads(
-            await toolkit.matrix_user_write(action="send", room_id=ROOM, attachments=[record.attachment_id]),
+        twelfth = json.loads(
+            await toolkit.matrix_user_write(action="send", room_id=ROOM, attachment=record.attachment_id),
         )
-        twelfth = json.loads(await toolkit.matrix_user_write(action="react", room_id=ROOM, event_id="$own", emoji="✅"))
         thirteenth = json.loads(
             await toolkit.matrix_user_write(action="react", room_id=ROOM, event_id="$own", emoji="🎉"),
         )
@@ -1272,12 +1333,9 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
         )
 
     assert {result["status"] for result in allowed} == {"ok"}
-    rate_limited = error_result("send", "Rate limit exceeded for matrix_user writes (12 per 30s).")
-    assert with_file == rate_limited
-    assert twelfth["status"] == "ok"
-    assert thirteenth == {**rate_limited, "action": "react"}
+    assert twelfth == ok_result("send", room_id=ROOM, event_id="$sent")
+    assert thirteenth == error_result("react", "Rate limit exceeded for matrix_user writes (12 per 30s).")
     assert elsewhere == ok_result("react", room_id=OTHER_ROOM, event_id="$elsewhere")
-    assert homeserver.requests_to(UPLOAD_PATH) == []
     # Each count belongs to the agent, the person it acts for, and the room.
     assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, ROOM), (AGENT, OWNER, OTHER_ROOM)}
 
@@ -1327,7 +1385,7 @@ async def test_a_stray_attachment_on_react_counts_for_nothing(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """Only send takes attachments: one given to a reaction, even one the turn does not hold, is not looked at."""
+    """Only send takes an attachment: one given to a reaction, even one the turn does not hold, is not looked at."""
     with capture_logs() as logs:
         result = await _write(
             config,
@@ -1337,7 +1395,7 @@ async def test_a_stray_attachment_on_react_counts_for_nothing(
             room_id=ROOM,
             event_id="$own",
             emoji="👍",
-            attachments=["att_missing"],
+            attachment="att_missing",
         )
 
     assert result == ok_result("react", room_id=ROOM, event_id="$reaction")
@@ -1442,8 +1500,9 @@ async def test_the_audit_line_of_an_unrecorded_dm_names_its_room(
         ({"room_id": ROOM}, {"thread_id": " "}),
         ({"room_id": ROOM}, {"user_id": ""}),
         ({"user_id": BOB}, {"room_id": "  "}),
+        ({"room_id": ROOM}, {"attachment": " "}),
     ],
-    ids=["event_id", "thread_id", "user_id", "room_id"],
+    ids=["event_id", "thread_id", "user_id", "room_id", "attachment"],
 )
 async def test_a_blank_write_argument_is_left_out(
     config: Config,
@@ -1452,7 +1511,7 @@ async def test_a_blank_write_argument_is_left_out(
     arguments: dict[str, str],
     blank: dict[str, str],
 ) -> None:
-    """A blank argument, as a model may send for one it means to leave out, is no reply target, thread, or recipient."""
+    """A blank argument, as a model may send for one it means to leave out, is no reply target, thread, recipient, or file."""
     homeserver.answers.update(
         {
             DIRECT_PATH: {BOB: [NEW_DM]},
@@ -1479,9 +1538,9 @@ async def test_a_blank_write_argument_is_left_out(
             {"action": "send", "room_id": ROOM, "user_id": BOB, "message": "Hi"},
             "send needs exactly one of room_id and user_id.",
         ),
-        ({"action": "send", "room_id": ROOM}, "send needs message, attachments, or both."),
+        ({"action": "send", "room_id": ROOM}, "send needs message or attachment."),
         (
-            {"action": "send", "room_id": ROOM, "event_id": "$x", "attachments": ["att_x"]},
+            {"action": "send", "room_id": ROOM, "event_id": "$x", "attachment": "att_x"},
             "A reply (event_id) needs message.",
         ),
         (
@@ -1512,13 +1571,13 @@ async def test_each_action_names_what_it_is_missing(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_attachment_names_what_was_already_sent(
+async def test_a_file_that_failed_to_go_out_is_named(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     tmp_path: Path,
 ) -> None:
-    """A message whose file failed to go out says so and which events did, so the model does not send them again."""
+    """A file the homeserver did not take is named in the error."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = matrix_error(413, "M_TOO_LARGE", "Too large")
 
@@ -1529,14 +1588,11 @@ async def test_a_failed_attachment_names_what_was_already_sent(
         attachment_ids=(record.attachment_id,),
         action="send",
         room_id=ROOM,
-        message="Here it is",
-        attachments=[record.attachment_id],
+        attachment=record.attachment_id,
     )
 
-    assert result == error_result(
-        "send",
-        f"Attachment {record.attachment_id} could not be sent; already sent into {ROOM}: $sent.",
-    )
+    assert result == error_result("send", f"Attachment {record.attachment_id} could not be sent.")
+    assert _sent(homeserver) == []
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
-"""What the `matrix_user` toolkit writes as the person: messages and files, reactions, edits, redactions, and membership.
+"""What the `matrix_user` toolkit writes as the person: a message or a file, reactions, edits, redactions, and membership.
 
+Each write makes at most one event, so none ends with only a part of it sent.
 Each event's content names the agent as its author before any send helper sees it, so the uploaded full text of a long
 message, which history reads instead of the event, says so too; the client marks every event again on the wire.
 Nothing is sent into an encrypted room, or one whose encryption could not be read: the client has no device, so the
@@ -12,7 +13,7 @@ import asyncio
 import json
 import unicodedata
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http import HTTPStatus
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -73,7 +74,8 @@ _UNRECORDED_DIRECT_ROOMS: dict[tuple[str, str], str] = {}
 # each write the person's `m.direct` whole and drop the DM the other added.
 _DIRECT_ROOM_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _ONE_TARGET = "send needs exactly one of room_id and user_id."
-_NOTHING_TO_SEND = "send needs message, attachments, or both."
+_NOTHING_TO_SEND = "send needs message or attachment."
+_ONE_EVENT = "send takes message or attachment, not both: send the text and the file as two calls."
 _REPLY_NEEDS_TEXT = "A reply (event_id) needs message."
 _NOT_A_USER_ID = "user_id is a full Matrix ID such as @bob:example.com."
 _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
@@ -116,7 +118,8 @@ class MatrixUserWrite:
     event_id: str | None = None
     thread_id: str | None = None
     emoji: str | None = None
-    attachments: tuple[str, ...] = ()
+    # The ID of the file a send sends in place of a message.
+    attachment: str | None = None
     name: str | None = None
 
     def problem(self) -> str | None:  # noqa: PLR0911 - one return per action's own check
@@ -148,8 +151,10 @@ class MatrixUserWrite:
             return _ONE_TARGET
         if (problem := _user_problem(self.user_id)) is not None:
             return problem
-        if self.message is None and not self.attachments:
+        if self.message is None and self.attachment is None:
             return _NOTHING_TO_SEND
+        if self.message is not None and self.attachment is not None:
+            return _ONE_EVENT
         if self.event_id is not None and self.message is None:
             return _REPLY_NEEDS_TEXT
         return _command_problem(self.message)
@@ -160,8 +165,8 @@ class _Written:
     """What a write has done so far, for its result and its audit line."""
 
     room_id: str | None
-    event_ids: list[str] = field(default_factory=list)
-    # The content of its first event; only its keys and size are logged.
+    event_id: str | None = None
+    # The content of its event, unless it is a file's, which the send helper builds; only its keys and size are logged.
     content: dict[str, Any] | None = None
     # Whom it invited: into a room, into a new room, or into a DM made for a send.
     invited: str | None = None
@@ -197,10 +202,10 @@ def _audit(actor: MatrixUserActor, write: MatrixUserWrite, written: _Written, *,
         room_id=written.room_id,
         action=write.action,
         status="ok" if error is None else "error",
-        event_id=written.event_ids[0] if written.event_ids else None,
+        event_id=written.event_id,
         content_keys=sorted(content),
         content_bytes=len(json.dumps(content).encode()) if content else 0,
-        attachments=len(write.attachments),
+        attachments=int(write.attachment is not None),
         **({} if written.invited is None else {"invited": written.invited}),
         **({} if error is None else {"error": error}),
     )
@@ -217,7 +222,7 @@ async def _write(
         raise MatrixRequestError(_NOT_THE_OWNER)
     if write.room_id is not None and send_refused(write.room_id):
         raise MatrixRequestError(_CONTACT_ROOM)
-    files = _turn_files(turn, write.attachments)
+    file = None if write.attachment is None else _turn_file(turn, write.attachment)
     limited = check_rate_limit(
         lock=_RATE_LIMIT_LOCK,
         recent_actions=_RECENT_WRITES,
@@ -226,14 +231,13 @@ async def _write(
         tool_name="matrix_user",
         context=turn,
         room_id=write.room_id or write.user_id or "",
-        weight=1 + len(files),
         limit_label="matrix_user writes",
     )
     if limited is not None:
         raise MatrixRequestError(limited)
     marker = {AGENT_AUTHORED_KEY: actor.agent_user_id}
     if write.action == "send":
-        return await _send(client, actor, turn, write, written, files, marker)
+        return await _send(client, actor, turn, write, written, file, marker)
     if write.action in {"react", "edit", "redact"}:
         return await _event_write(client, actor, turn, write, written, marker)
     if write.action == "create_room":
@@ -272,24 +276,21 @@ def _conversation_file(turn: ToolRuntimeContext, attachment_id: str) -> Attachme
     return stored if ours else None
 
 
-def _turn_files(turn: ToolRuntimeContext, attachment_ids: tuple[str, ...]) -> list[AttachmentRecord]:
-    """Return the stored files that ``attachment_ids`` name, refusing any the turn and its conversation do not hold.
+def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord:
+    """Return the stored file that ``attachment_id`` names, refusing one the turn and its conversation do not hold.
 
     A file goes out with its name as its text, which whoever sent the file chose, so a name that would read as a
     command is refused too.
     """
-    files: list[AttachmentRecord] = []
-    for attachment_id in attachment_ids:
-        record = resolve_context_attachment_record(turn, attachment_id)
-        if isinstance(record, str):
-            record = _conversation_file(turn, attachment_id) or record
-        if isinstance(record, str):
-            raise MatrixRequestError(record)
-        if (problem := _command_problem(record.filename)) is not None:
-            msg = f"Attachment {attachment_id}'s file name is sent as its text. {problem}"
-            raise MatrixRequestError(msg)
-        files.append(record)
-    return files
+    record = resolve_context_attachment_record(turn, attachment_id)
+    if isinstance(record, str):
+        record = _conversation_file(turn, attachment_id) or record
+    if isinstance(record, str):
+        raise MatrixRequestError(record)
+    if (problem := _command_problem(record.filename)) is not None:
+        msg = f"Attachment {attachment_id}'s file name is sent as its text. {problem}"
+        raise MatrixRequestError(msg)
+    return record
 
 
 def _created_room(answer: dict[str, Any]) -> str:
@@ -327,10 +328,10 @@ async def _send(
     turn: ToolRuntimeContext,
     write: MatrixUserWrite,
     written: _Written,
-    files: list[AttachmentRecord],
+    file: AttachmentRecord | None,
     marker: dict[str, str],
 ) -> dict[str, object]:
-    """Send the text, formatted as the agent's own messages are, then each file, into the room or the person's DM."""
+    """Send one event, the file or the text formatted as the agent's own messages are, into the room or the person's DM."""
     if write.room_id is not None:
         room_id, made = write.room_id, False
     else:
@@ -344,51 +345,44 @@ async def _send(
         msg = f"{_made_dm(room_id, str(write.user_id))}. {refused}"
         raise MatrixRequestError(msg) from None
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
-    if write.message is not None:
-        content = format_message_with_mentions(
-            turn.config,
-            turn.runtime_paths,
-            write.message.strip(),
-            thread_event_id=write.thread_id,
-            reply_to_event_id=write.event_id if write.thread_id is not None else None,
-            latest_thread_event_id=latest,
-            extra_content=marker,
-        )
-        if write.event_id is not None and write.thread_id is None:
-            # A reply that every client shows as one, not MindRoom's own unquoted kind.
-            content["m.relates_to"] = {"m.in_reply_to": {"event_id": write.event_id}}
-        written.content = content
-        # A message too long for one event goes out whole, with its full text uploaded, or not at all.
-        outcome = await send_message_outcome(
+    if file is not None:
+        written.event_id = await send_file_message(
             client,
             room_id,
-            content,
-            operation="matrix_user_send",
-            sidecar_required=True,
-        )
-        latest = _delivered(outcome)
-        written.event_ids.append(latest)
-    for record in files:
-        sent = await send_file_message(
-            client,
-            room_id,
-            record.local_path,
+            file.local_path,
             thread_id=write.thread_id,
             latest_thread_event_id=latest,
-            filename=record.filename,
-            mimetype=record.mime_type,
+            filename=file.filename,
+            mimetype=file.mime_type,
             extra_content=marker,
         )
-        if sent is None:
-            already = f"; already sent into {room_id}: {', '.join(written.event_ids)}" if written.event_ids else ""
-            msg = f"Attachment {record.attachment_id} could not be sent{already}."
+        if written.event_id is None:
+            msg = f"Attachment {file.attachment_id} could not be sent."
             raise MatrixRequestError(msg)
-        written.event_ids.append(sent)
-        latest = sent
-    fields: dict[str, object] = {"room_id": room_id, "event_id": written.event_ids[0]}
-    if len(written.event_ids) > 1:
-        fields["event_ids"] = written.event_ids
-    return fields
+        return {"room_id": room_id, "event_id": written.event_id}
+    content = format_message_with_mentions(
+        turn.config,
+        turn.runtime_paths,
+        str(write.message).strip(),
+        thread_event_id=write.thread_id,
+        reply_to_event_id=write.event_id if write.thread_id is not None else None,
+        latest_thread_event_id=latest,
+        extra_content=marker,
+    )
+    if write.event_id is not None and write.thread_id is None:
+        # A reply that every client shows as one, not MindRoom's own unquoted kind.
+        content["m.relates_to"] = {"m.in_reply_to": {"event_id": write.event_id}}
+    written.content = content
+    # A message too long for one event goes out whole, with its full text uploaded, or not at all.
+    outcome = await send_message_outcome(
+        client,
+        room_id,
+        content,
+        operation="matrix_user_send",
+        sidecar_required=True,
+    )
+    written.event_id = _delivered(outcome)
+    return {"room_id": room_id, "event_id": written.event_id}
 
 
 async def _event_write(
@@ -409,7 +403,7 @@ async def _event_write(
         path = f"/rooms/{quote(room_id, safe='')}/redact/{quote(event_id, safe='')}/{uuid4().hex}"
         redaction = await matrix_json(client, "PUT", path, written.content)
         if isinstance(redaction.get("event_id"), str):
-            written.event_ids.append(redaction["event_id"])
+            written.event_id = redaction["event_id"]
         return {"room_id": room_id, "event_id": redaction.get("event_id")}
     await _require_unencrypted(client, room_id)
     if write.action == "react":
@@ -439,8 +433,8 @@ async def _event_write(
             operation="matrix_user_edit",
             sidecar_required=True,
         )
-    written.event_ids.append(_delivered(outcome))
-    return {"room_id": room_id, "event_id": written.event_ids[0]}
+    written.event_id = _delivered(outcome)
+    return {"room_id": room_id, "event_id": written.event_id}
 
 
 async def _require_changeable(
