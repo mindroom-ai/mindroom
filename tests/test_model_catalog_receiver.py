@@ -13,6 +13,7 @@ import pytest
 from nio.crypto import OlmDevice
 from nio.crypto.device import TrustState
 from PIL import Image
+from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, register_model_catalog_receiver
@@ -46,6 +47,11 @@ def device_request(user_id: str, device_id: str, request_id: str) -> nio.Authent
     event.sender = user_id
     event.authenticated_sender = nio.AuthenticatedDevice(user_id, device_id, device_id, device_id)
     return event
+
+
+def dropped(logs: list[dict]) -> list[str]:
+    """Return the reason of each logged drop, in order."""
+    return [entry["reason"] for entry in logs if entry["event"] == "model_catalog_dropped"]
 
 
 def known_devices(devices: dict[str, list[str]]) -> SimpleNamespace:
@@ -82,7 +88,20 @@ def receiver_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
 async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Discovery returns exact allowlisted scope and current inherited model."""
     callback, client, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
+    [answered] = logs
+    assert answered["event"] == "model_catalog_answered"
+    assert answered["log_level"] == "info"
+    assert answered["model_count"] == 1
+    assert answered["elapsed_ms"] >= 0
+    assert {key: answered[key] for key in ("sender", "sender_device_id", "request_id", "room_id", "thread_id")} == {
+        "sender": USER,
+        "sender_device_id": "REQUESTER",
+        "request_id": "request-1",
+        "room_id": ROOM,
+        "thread_id": "$root",
+    }
     reply = sent.call_args.kwargs
     assert reply["event_type"] == "io.mindroom.models.response"
     assert sent.call_args.args[1].device_id == "REQUESTER"
@@ -120,24 +139,39 @@ async def test_malformed_requests_receive_nothing(
 ) -> None:
     """Unknown fields, bounds and optional-thread typing fail closed."""
     callback, client, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
-    await callback(request(**changes))
+    with capture_logs() as logs:
+        await callback(request(**changes))
     sent.assert_not_awaited()
     client.joined_members.assert_not_awaited()
+    assert dropped(logs) == ["unparseable"]
+    assert "request_id" not in logs[0]
+
+
+@pytest.mark.asyncio
+async def test_other_to_device_types_are_not_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only model requests count as dropped; the router receives other to-device traffic too."""
+    callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    event = request()
+    event.type = "m.room_key_request"
+    with capture_logs() as logs:
+        await callback(event)
+    sent.assert_not_awaited()
+    assert logs == []
 
 
 @pytest.mark.parametrize(
-    "denial",
+    ("denial", "reason"),
     [
-        "plaintext",
-        "blocked",
-        "deleted",
-        "historical_fingerprint",
-        "historical_curve",
-        "unknown_device",
-        "requester_left",
-        "agent_left",
-        "wrong_thread",
-        "wrong_room",
+        ("plaintext", None),
+        ("blocked", "unknown_sender_device"),
+        ("deleted", "unknown_sender_device"),
+        ("historical_fingerprint", "unknown_sender_device"),
+        ("historical_curve", "unknown_sender_device"),
+        ("unknown_device", "unknown_sender_device"),
+        ("requester_left", "not_joined"),
+        ("agent_left", "no_addressable_agent"),
+        ("wrong_thread", "thread_root_unreadable"),
+        ("wrong_room", "room_unavailable"),
     ],
 )
 @pytest.mark.asyncio
@@ -145,6 +179,7 @@ async def test_unauthorized_requests_receive_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     denial: str,
+    reason: str | None,
 ) -> None:
     """Authenticated device and current real room/root access are both required."""
     callback, client, _, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
@@ -169,8 +204,10 @@ async def test_unauthorized_requests_receive_nothing(
         event = request(thread_id="$other")
     else:
         event = request(room_id="!other:localhost")
-    await callback(event)
+    with capture_logs() as logs:
+        await callback(event)
     sent.assert_not_awaited()
+    assert dropped(logs) == ([] if reason is None else [reason])
 
 
 @pytest.mark.asyncio
@@ -185,8 +222,10 @@ async def test_departure_during_icon_upload_prevents_reply(tmp_path: Path, monke
         return nio.UploadResponse("mxc://localhost/image"), None
 
     client.upload.side_effect = upload
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     sent.assert_not_awaited()
+    assert dropped(logs) == ["not_joined"]
 
 
 @pytest.mark.parametrize("large", ["count", "payload"])
@@ -202,8 +241,10 @@ async def test_limits_do_not_return_partial_catalog(
         str(i): ModelConfig(provider="openai", id="x" * (300 if large == "payload" else 1))
         for i in range(256 if large == "payload" else 257)
     }
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     sent.assert_not_awaited()
+    assert dropped(logs) == ["response_too_large" if large == "payload" else "too_many_models"]
 
 
 @pytest.mark.asyncio
@@ -231,10 +272,43 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
-    await asyncio.gather(*(callback(request()) for _ in range(50)))
+    with capture_logs() as logs:
+        await asyncio.gather(*(callback(request()) for _ in range(50)))
     assert len(queued) == 1
-    await asyncio.gather(*(callback(request(request_id=str(i))) for i in range(50)))
+    assert dropped(logs) == ["duplicate_in_flight"] * 49
+    with capture_logs() as logs:
+        await asyncio.gather(*(callback(request(request_id=str(i))) for i in range(50)))
     assert len(queued) <= 8
+    assert dropped(logs) == ["rate_limited_user_inflight"] * (50 - len(queued) + 1)
+
+
+@pytest.mark.asyncio
+async def test_shared_in_flight_pool_drop_is_logged(tmp_path: Path) -> None:
+    """A request beyond the shared in-flight pool logs the global limit as its reason."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    users = [f"@user{i}:localhost" for i in range(9)]
+    client.olm = known_devices({user: ["DEVICE"] for user in users})
+
+    def wrapper(_callback: object) -> object:
+        async def enqueue(_event: object) -> None:
+            return None
+
+        return enqueue
+
+    register_model_catalog_receiver(
+        client=client,
+        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=index,
+        callback_wrapper=wrapper,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+    with capture_logs() as logs:
+        for user in users:
+            await callback(device_request(user, "DEVICE", "same-id"))
+    assert dropped(logs) == ["rate_limited_global"]
+    assert logs[0]["sender"] == users[-1]
 
 
 @pytest.mark.asyncio
@@ -399,9 +473,12 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 
     original = client.joined_members.return_value
     client.joined_members.side_effect = stalled
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     assert cancelled.is_set()
     sent.assert_not_awaited()
+    assert dropped(logs) == ["timeout"]
+    assert logs[0]["elapsed_ms"] >= 0
     client.joined_members.side_effect = None
     client.joined_members.return_value = original
     await callback(request())
@@ -412,9 +489,12 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Finishing each request cannot bypass the per-user request window."""
     callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
-    for i in range(20):
-        await callback(request(request_id=str(i)))
+    with capture_logs() as logs:
+        for i in range(20):
+            await callback(request(request_id=str(i)))
     assert sent.await_count == 8
+    assert dropped(logs) == ["rate_limited_user_window"] * 12
+    assert [entry["event"] for entry in logs].count("model_catalog_answered") == 8
 
 
 @pytest.mark.asyncio
@@ -448,8 +528,10 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
         {"ed25519": "replacement", "curve25519": "new-curve"},
     )
     callback, event = pending[0]
-    await callback(event)
+    with capture_logs() as logs:
+        await callback(event)
     sent.assert_not_awaited()
+    assert dropped(logs) == ["sender_device_changed"]
 
 
 @pytest.mark.parametrize("change", ["blocked", "left", "config"])
@@ -477,9 +559,13 @@ async def test_final_authorization_rechecks_after_selection_work(
         return result
 
     monkeypatch.setattr(asyncio, "to_thread", selection_work)
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     assert prepared
     sent.assert_not_awaited()
+    assert dropped(logs) == [
+        {"blocked": "sender_device_changed", "left": "not_joined", "config": "config_changed"}[change],
+    ]
 
 
 @pytest.mark.asyncio
@@ -503,10 +589,12 @@ async def test_config_reload_during_final_scope_await_prevents_delivery(
         return membership
 
     client.joined_members.side_effect = joined_members
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     assert membership_reads == 6
     assert current[0] is not original_config
     sent.assert_not_awaited()
+    assert dropped(logs) == ["config_changed"]
 
 
 @pytest.mark.asyncio
