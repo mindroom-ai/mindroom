@@ -22,6 +22,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     read_room,
     read_rooms,
     search_messages,
+    transport_failure,
 )
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
@@ -33,17 +34,17 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
     type _Read = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
-_UNREACHABLE = "The Matrix homeserver could not be reached."
-_TIMED_OUT = "The homeserver took too long to answer."
 _ROOM_ACTIONS = frozenset({"room", "messages", "download", "mark_read"})
 _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
+_TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
 _UNKNOWN_ACTION = "action must be rooms, messages, search, room, people, download, or mark_read."
 
 
@@ -110,27 +111,26 @@ class MatrixUserTools(Toolkit):
         except MatrixRequestError as error:
             return self._payload("error", action=action, message=str(error))
         except (TimeoutError, aiohttp.ClientError) as failed:
-            # Never the transport's own text, which names the host or URL it requested. Some of aiohttp's timeouts are
-            # ClientErrors too, so the timeout is checked first.
-            message = _TIMED_OUT if isinstance(failed, TimeoutError) else _UNREACHABLE
-            return self._payload("error", action=action, message=message)
+            return self._payload("error", action=action, message=transport_failure(failed))
         finally:
             await client.close()
         return self._payload("ok", action=action, **fields)
 
-    async def _download(self, client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, object]:
-        """Fetch a message's file as an attachment of the turn's conversation, which its tools are then offered.
-
-        A call without a turn, such as the MCP gateway's, keeps it for the file's own room and returns its ID.
-        """
-        context = get_tool_runtime_context()
+    async def _download(
+        self,
+        client: nio.AsyncClient,
+        turn: ToolRuntimeContext,
+        room_id: str,
+        event_id: str,
+    ) -> dict[str, object]:
+        """Fetch a message's file as an attachment of the turn's conversation, which its tools are then offered."""
         fields = await download_file(
             client,
             room_id,
             event_id,
             storage_path=self._runtime_paths.storage_root,
-            for_room_id=room_id if context is None else context.room_id,
-            for_thread_id=None if context is None else context.resolved_thread_id,
+            for_room_id=turn.room_id,
+            for_thread_id=turn.resolved_thread_id,
         )
         append_tool_runtime_attachment_id(str(fields["attachment_id"]))
         return fields
@@ -182,7 +182,7 @@ class MatrixUserTools(Toolkit):
         page_token: str | None,
         limit: int | None,
     ) -> _Read | str:
-        """Return the read of the room ``room_id`` that ``action`` asks for, or which of its arguments is missing."""
+        """Return the read of the room ``room_id`` that ``action`` asks for, or what it is missing."""
         if action == "room":
             return lambda client: read_room(client, room_id, limit=limit)
         if action == "messages":
@@ -196,9 +196,13 @@ class MatrixUserTools(Toolkit):
             )
         if action == "mark_read":
             return lambda client: mark_read(client, room_id, event_id=event_id)
+        # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
+        turn = get_tool_runtime_context()
+        if turn is None:
+            return _TURN_NEEDED
         if event_id is None or not event_id.strip():
             return _EVENT_NEEDED
-        return lambda client: self._download(client, room_id, event_id)
+        return lambda client: self._download(client, turn, room_id, event_id)
 
     async def matrix_user_read(
         self,

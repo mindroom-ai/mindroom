@@ -286,6 +286,7 @@ async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimeP
         ),
         ({"action": "people"}, "people needs query: a name, or a full Matrix ID such as @alice:example.com."),
         ({"action": "messages"}, "messages needs room_id, a room ID such as !abc:example.com."),
+        ({"action": "search"}, "search needs query: the words to look for."),
         ({"action": "search", "query": " "}, "search needs query: the words to look for."),
         ({"action": "download", "room_id": ROOM}, "download needs event_id: the ID of the message with the file."),
     ],
@@ -366,6 +367,33 @@ async def test_a_downloaded_file_is_an_attachment_of_the_turn(
     assert record is not None
     assert (record.room_id, record.thread_id) == (ROOM, context.resolved_thread_id)
     assert homeserver.closed
+
+
+@pytest.mark.asyncio
+async def test_download_without_a_turn_is_refused_before_any_request(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A call without a chat turn, such as the MCP gateway's, has no conversation to hand a file to, so fetches none."""
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
+
+    with homeserver.serving_the_toolkit():
+        result = await gateway.invoke_tool(
+            resolve_connection_agent(owner, AGENT),
+            toolkit="matrix_user",
+            function="matrix_user_read",
+            arguments={"action": "download", "room_id": ROOM, "event_id": "$file"},
+        )
+
+    assert "error" not in result
+    assert json.loads(result["result"]) == {
+        "status": "error",
+        "tool": "matrix_user",
+        "action": "download",
+        "message": "download needs a chat turn: the file is handed to the conversation it was asked in.",
+    }
+    assert homeserver.requests == []
 
 
 @pytest.mark.asyncio

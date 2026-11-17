@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import aiohttp
 import pytest
 
-from mindroom.attachments.storage import load_attachment
+from mindroom.attachments.storage import load_attachment, register_audio_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.matrix_user_reads import (
     MatrixRequestError,
@@ -53,6 +54,8 @@ MARKED_UNREAD_PATH = f"/_matrix/client/v3/user/{PERSON}/rooms/{ROOM}/account_dat
 # What a page of messages asks for: the messages, and the reactions to count on them.
 MESSAGES_FILTER = {"types": ["m.room.message", "m.room.encrypted", "m.reaction"]}
 CAROL = "@carol:example.com"
+CHAT = "!chat:example.com"
+NOT_FETCHED = "The file could not be fetched (refused, unreachable, or larger than 64 MiB)."
 
 
 @pytest.fixture
@@ -603,6 +606,89 @@ async def test_a_long_text_is_cut_at_2000_characters(client: nio.AsyncClient, ho
 
 
 @pytest.mark.asyncio
+async def test_a_file_name_and_a_reaction_key_are_cut(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A file's name, from its body when it has no filename, and a reaction's key show their first 200 characters."""
+    content = {"msgtype": "m.file", "body": "n" * 201, "url": "mxc://example.com/abc"}
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [reaction("$r1", "$file", "k" * 201), room_event("$file", "m.room.message", content)],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [message_line("$file", f"[file: {'n' * 200} […]] [reactions: {'k' * 200} […]1]")]
+
+
+@pytest.mark.asyncio
+async def test_a_replys_quoted_original_is_not_repeated(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A reply shows its own text, not the quote of the message it answers; a message that is no reply keeps its quote."""
+    reply = {
+        "msgtype": "m.text",
+        "body": "> <@carol:example.com> Lunch at noon?\n> Or later?\n\nNoon works",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$ask"}},
+    }
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            text_message("$quote", "> to be or not to be\n\nthat is the question", minute=2),
+            room_event("$answer", "m.room.message", reply, minute=1),
+            text_message("$ask", "Lunch at noon?\nOr later?", sender=CAROL),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$ask", "Lunch at noon? Or later?", sender=CAROL),
+        message_line("$answer", "Noon works", minute=1),
+        message_line("$quote", "> to be or not to be that is the question", minute=2),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("malformed", "lines"),
+    [
+        (
+            room_event("$odd", "m.room.message", {"msgtype": "m.text"}),
+            [message_line("$odd", "(no text)")],
+        ),
+        (
+            room_event("$odd", "m.room.message", {"msgtype": "m.text", "body": 42}),
+            [message_line("$odd", "(no text)")],
+        ),
+        (
+            {"event_id": "$odd", "type": "m.room.message", "sender": CAROL, "content": {"body": "Undated"}},
+            [f"$odd | … | {CAROL} | Undated"],
+        ),
+        ({"type": "m.room.message", "sender": CAROL, "origin_server_ts": 0, "content": {"body": "Nameless"}}, []),
+        (
+            room_event("$odd", "m.room.message", {"msgtype": ["m.file"], "body": "Listed"}),
+            [message_line("$odd", "Listed")],
+        ),
+        (
+            room_event("$odd", "m.room.message", {"body": "Related", "m.relates_to": {"rel_type": ["m.replace"]}}),
+            [message_line("$odd", "Related")],
+        ),
+    ],
+    ids=["no-body", "body-not-text", "no-time", "no-event-id", "msgtype-not-text", "rel-type-not-text"],
+)
+async def test_malformed_events_are_listed_without_crashing(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    malformed: dict[str, object],
+    lines: list[str],
+) -> None:
+    """An event missing a field is listed with what it has, and the page's other messages all the same.
+
+    An event with no ID, which no later call could name, is left out.
+    """
+    homeserver.answers[MESSAGES_PATH] = {"chunk": [text_message("$ok", "Fine", minute=1), malformed]}
+
+    result = await _messages(client)
+
+    assert result["messages"] == [*lines, message_line("$ok", "Fine", minute=1)]
+
+
+@pytest.mark.asyncio
 async def test_a_page_token_continues_into_older_history(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
     """The token of the previous page asks for the messages before it, at most 100, and the oldest page has none."""
     homeserver.answers[MESSAGES_PATH] = {"chunk": [text_message("$first", "Welcome")], "start": "t1"}
@@ -650,16 +736,38 @@ async def test_a_thread_is_its_root_and_newest_replies(client: nio.AsyncClient, 
     assert newest == {
         "messages": [
             message_line("$root", "Lunch? [thread: 3 replies]", sender=CAROL),
-            message_line("$r2", "Pizza", minute=2),
-            message_line("$r3", "Tacos", minute=3),
+            message_line("$r2", "Pizza [in thread $root]", minute=2),
+            message_line("$r3", "Tacos [in thread $root]", minute=3),
         ],
         "next_page_token": "n1",
     }
-    assert older == {"messages": [message_line("$r1", "Yes", minute=1)]}
+    assert older == {"messages": [message_line("$r1", "Yes [in thread $root]", minute=1)]}
     assert homeserver.paths() == [f"{ROOM_PATH}/event/$root", relations_path, relations_path]
     first, second = homeserver.requests_to(relations_path)
     assert (first.query["dir"], first.query["limit"], "from" in first.query) == (["b"], ["2"], False)
     assert second.query["from"] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_reply_names_its_thread(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A reply in a thread names the thread's root, in a page of the room and in a search; the root counts replies."""
+    root = text_message("$root", "Lunch?", sender=CAROL, unsigned={"m.relations": {"m.thread": {"count": 1}}})
+    reply = _thread_reply("$r1", "$root", "Tacos", minute=1)
+    homeserver.answers.update(
+        {
+            MESSAGES_PATH: {"chunk": [reply, root]},
+            SEARCH_PATH: {"search_categories": {"room_events": {"results": [{"result": {**reply, "room_id": ROOM}}]}}},
+        },
+    )
+
+    page = await _messages(client)
+    found = await search_messages(client, "tacos", room_id=None, page_token=None, limit=None)
+
+    assert page["messages"] == [
+        message_line("$root", "Lunch? [thread: 1 reply]", sender=CAROL),
+        message_line("$r1", "Tacos [in thread $root]", minute=1),
+    ]
+    assert found["messages"] == [f"{ROOM} | {message_line('$r1', 'Tacos [in thread $root]', minute=1)}"]
 
 
 @pytest.mark.asyncio
@@ -744,7 +852,11 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
     client: nio.AsyncClient,
     homeserver: FakeHomeserver,
 ) -> None:
-    """An edit found is shown as the message it edits, with its new text, once; a deleted message is not shown."""
+    """An edit found is shown under the ID of the message it edits, with its own sender and text; a deletion is not.
+
+    Its sender need not be the message's author, so it is not shown as the message's own text.
+    """
+    mallory = "@mallory:example.com"
     redacted = room_event(
         "$gone",
         "m.room.message",
@@ -758,7 +870,7 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
                 "results": [
                     {"result": edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM)},
                     {"result": redacted},
-                    {"result": text_message("$typo", "budget is due fridya", room_id=ROOM)},
+                    {"result": edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=4, room_id=ROOM)},
                 ],
             },
         },
@@ -766,7 +878,33 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
 
     result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
 
-    assert result == {"messages": [f"{ROOM} | {message_line('$typo', 'budget is due friday [edited]', minute=5)}"]}
+    assert result == {
+        "messages": [
+            f"{ROOM} | {message_line('$typo', 'budget is due friday [edit]', minute=5)}",
+            f"{ROOM} | {message_line('$plan', 'budget cut [edit]', sender=mallory, minute=4)}",
+        ],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_first", [True, False], ids=["original-first", "edit-first"])
+async def test_search_prefers_the_original_hit_over_its_edit_hit(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    *,
+    original_first: bool,
+) -> None:
+    """A page with both a message and an edit of it shows the message, with its latest edit, whatever their order."""
+    fix = edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM)
+    original = text_message("$typo", "budget is due fridya", room_id=ROOM, unsigned={"m.relations": {"m.replace": fix}})
+    hits = [{"result": original}, {"result": fix}]
+    homeserver.answers[SEARCH_PATH] = {
+        "search_categories": {"room_events": {"results": hits if original_first else hits[::-1]}},
+    }
+
+    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+
+    assert result == {"messages": [f"{ROOM} | {message_line('$typo', 'budget is due friday [edited]')}"]}
 
 
 def _file_event(msgtype: str, name: str, mime_type: str, size: int) -> dict[str, object]:
@@ -777,11 +915,11 @@ def _file_event(msgtype: str, name: str, mime_type: str, size: int) -> dict[str,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("msgtype", "name", "mime_type", "data"),
+    ("msgtype", "kind", "name", "mime_type", "data"),
     [
-        ("m.file", "notes.txt", "text/plain", b"Remember the milk"),
-        ("m.image", "cat.png", "image/png", b"\x89PNG\r\n\x1a\n" + bytes(8)),
-        ("m.audio", "voice.ogg", "audio/ogg", b"OggS" + bytes(12)),
+        ("m.file", "file", "notes.txt", "text/plain", b"Remember the milk"),
+        ("m.image", "image", "cat.png", "image/png", b"\x89PNG\r\n\x1a\n" + bytes(8)),
+        ("m.audio", "audio", "voice.ogg", "audio/ogg", b"OggS" + bytes(12)),
     ],
 )
 async def test_download_registers_an_attachment_within_the_size_cap(
@@ -790,6 +928,7 @@ async def test_download_registers_an_attachment_within_the_size_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     msgtype: str,
+    kind: str,
     name: str,
     mime_type: str,
     data: bytes,
@@ -803,14 +942,7 @@ async def test_download_registers_an_attachment_within_the_size_cap(
     )
     storage = tmp_path / "storage"
 
-    result = await download_file(
-        client,
-        ROOM,
-        "$file",
-        storage_path=storage,
-        for_room_id="!chat:example.com",
-        for_thread_id="$turn",
-    )
+    result = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id="$turn")
 
     record = load_attachment(storage, str(result["attachment_id"]))
     assert record is not None
@@ -821,15 +953,65 @@ async def test_download_registers_an_attachment_within_the_size_cap(
         "size_bytes": len(data),
     }
     assert record.local_path.read_bytes() == data
-    assert (record.room_id, record.thread_id, record.sender) == ("!chat:example.com", "$turn", "@bob:example.com")
+    assert (record.kind, record.room_id, record.thread_id, record.sender) == (kind, CHAT, "$turn", "@bob:example.com")
     [download] = homeserver.requests_to(MEDIA_PATH)
     assert download.query["user_id"] == [PERSON]
 
     monkeypatch.setattr("mindroom.matrix.media.RETAINED_MEDIA_MAX_BYTES", len(data) - 1)
     elsewhere = tmp_path / "elsewhere"
-    with pytest.raises(MatrixRequestError, match="could not be fetched"):
-        await download_file(client, ROOM, "$file", storage_path=elsewhere, for_room_id=ROOM, for_thread_id=None)
+    with pytest.raises(MatrixRequestError) as error:
+        await download_file(client, ROOM, "$file", storage_path=elsewhere, for_room_id=CHAT, for_thread_id="$turn")
+    assert str(error.value) == NOT_FETCHED
     assert load_attachment(elsewhere, record.attachment_id) is None
+
+
+@pytest.mark.asyncio
+async def test_download_leaves_an_existing_record_of_the_event_untouched(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A download keeps a record of its own for its conversation; the one the agent made on receiving it stays as it was.
+
+    Downloading it again in the same conversation gives the same record, and in another thread another one.
+    """
+    data = b"OggS" + bytes(12)
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$file": _file_event("m.audio", "voice.ogg", "audio/ogg", len(data)),
+            MEDIA_PATH: Answer(data),
+        },
+    )
+    storage = tmp_path / "storage"
+    received = await register_audio_attachment(
+        storage,
+        event_id="$file",
+        audio_bytes=data,
+        mime_type="audio/ogg",
+        room_id=ROOM,
+        thread_id="$voice",
+        sender="@bob:example.com",
+    )
+    assert received is not None
+
+    downloaded = await download_file(
+        client,
+        ROOM,
+        "$file",
+        storage_path=storage,
+        for_room_id=CHAT,
+        for_thread_id="$turn",
+    )
+    again = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id="$turn")
+    unthreaded = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
+
+    assert load_attachment(storage, received.attachment_id) == received
+    record = load_attachment(storage, str(downloaded["attachment_id"]))
+    assert record is not None
+    assert record.attachment_id != received.attachment_id
+    assert (record.room_id, record.thread_id) == (CHAT, "$turn")
+    assert again == downloaded
+    assert unthreaded["attachment_id"] not in {downloaded["attachment_id"], received.attachment_id}
 
 
 @pytest.mark.asyncio
@@ -920,6 +1102,36 @@ async def test_mark_read_reports_when_only_the_markers_moved(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "said"),
+    [
+        (TimeoutError(), "The homeserver took too long to answer."),
+        (aiohttp.ServerDisconnectedError(), "The Matrix homeserver could not be reached."),
+    ],
+    ids=["timeout", "unreachable"],
+)
+async def test_mark_read_reports_when_the_flag_step_cannot_reach_the_homeserver(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    failure: Exception,
+    said: str,
+) -> None:
+    """A flag step that times out or finds no homeserver still says the read markers moved, never the transport's text."""
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
+            f"{ROOM_PATH}/read_markers": {},
+            MARKED_UNREAD_PATH: failure,
+        },
+    )
+
+    with pytest.raises(MatrixRequestError) as error:
+        await mark_read(client, ROOM, event_id="$seen")
+
+    assert str(error.value) == f"The room is read up to $seen, but it is still marked unread: {said}"
+
+
+@pytest.mark.asyncio
 async def test_mark_read_of_an_event_outside_the_room_changes_nothing(
     client: nio.AsyncClient,
     homeserver: FakeHomeserver,
@@ -931,3 +1143,29 @@ async def test_mark_read_of_an_event_outside_the_room_changes_nothing(
         await mark_read(client, ROOM, event_id="$elsewhere")
 
     assert homeserver.paths() == [f"{ROOM_PATH}/event/$elsewhere"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["mark_read", "download"])
+async def test_an_event_from_another_room_is_refused(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    """An event the homeserver gives from another room is refused before any marker moves or any file is fetched."""
+    elsewhere = {**_file_event("m.file", "notes.txt", "text/plain", 4), "room_id": "!other:example.com"}
+    homeserver.answers.update({f"{ROOM_PATH}/event/$file": elsewhere, MEDIA_PATH: Answer(b"note")})
+    storage = tmp_path / "storage"
+    read = (
+        mark_read(client, ROOM, event_id="$file")
+        if action == "mark_read"
+        else download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
+    )
+
+    with pytest.raises(MatrixRequestError) as error:
+        await read
+
+    assert str(error.value) == "That event is in another room."
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$file"]
+    assert not storage.exists()

@@ -187,10 +187,11 @@ class _Response:
 class FakeHomeserver:
     """Stands in for a client's HTTP session and answers each request by its unquoted path.
 
-    A path with a list of answers gives them in turn and then repeats the last; a path with none is a 404 `M_NOT_FOUND`.
+    A path with a list of answers gives them in turn and then repeats the last; a path with an exception raises it, as
+    a failed transport does; a path with none is a 404 `M_NOT_FOUND`.
     """
 
-    answers: dict[str, Answer | list[Answer] | dict[str, object]] = field(default_factory=dict)
+    answers: dict[str, Answer | list[Answer] | dict[str, object] | Exception] = field(default_factory=dict)
     # Raised for each request instead of an answer, as a failed transport raises it.
     failure: Exception | None = None
     requests: list[HomeserverRequest] = field(default_factory=list)
@@ -243,6 +244,8 @@ class FakeHomeserver:
         answer = self.answers.get(path)
         if answer is None:
             return matrix_error(404, "M_NOT_FOUND", "Not found")
+        if isinstance(answer, Exception):
+            raise answer
         if isinstance(answer, list):
             return answer.pop(0) if len(answer) > 1 else answer[0]
         return answer if isinstance(answer, Answer) else Answer(answer)

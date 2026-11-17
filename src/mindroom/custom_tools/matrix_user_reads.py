@@ -3,31 +3,36 @@
 Each read takes a client that acts as the person and returns its result's fields, with rooms, messages, and people as
 compact lines. Every request goes through ``matrix_json``, which reads an answer up to 2 MiB and retries a 429 at most
 twice, waiting at most 5 seconds each time, as matrix-mcp does; only a file's download, which is not JSON, goes through
-the attachment store's capped download instead.
+the capped media download instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
-from mindroom.attachments.storage import register_audio_attachment, register_matrix_media_attachment
+import aiohttp
+
+from mindroom.attachments.storage import register_bytes_attachment
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.matrix.media import (
+    MATRIX_MEDIA_EVENT_TYPES,
     download_media_bytes,
-    is_audio_message_event,
-    is_matrix_media_dispatch_event,
     media_mime_type,
     parse_matrix_media_event_source,
 )
+from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -45,6 +50,7 @@ __all__ = [
     "read_room",
     "read_rooms",
     "search_messages",
+    "transport_failure",
 ]
 
 _MAX_ANSWER_BYTES = 2 * 1024 * 1024
@@ -58,13 +64,17 @@ _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT = 10, 50
 _MESSAGES_LIMIT, _MAX_MESSAGES_LIMIT = 30, 100
 _SEARCH_LIMIT, _MAX_SEARCH_LIMIT = 10, 50
 _MAX_TEXT_CHARACTERS = 2000
+# For the other fields a room member writes, such as a file's name or a reaction's key.
+_MAX_NAME_CHARACTERS = 200
 # What a page of messages asks for: the messages, and the reactions to count on them. Some homeservers filter by type
 # after taking the newest events, so a page can be shorter than asked while older messages remain; only the absence of
 # the homeserver's token ends the history.
 _MESSAGES_FILTER = json.dumps({"types": ["m.room.message", "m.room.encrypted", "m.reaction"]})
-_MEDIA_MSGTYPES = frozenset({"m.image", "m.file", "m.video", "m.audio"})
+type _MediaKind = Literal["audio", "file", "image", "video"]
+_MEDIA_KINDS: dict[str, _MediaKind] = {"m.image": "image", "m.file": "file", "m.video": "video", "m.audio": "audio"}
 # An event about another one, rather than a message of its own.
 _EDIT, _REACTION = "m.replace", "m.annotation"
+_THREAD = "m.thread"
 # The first millisecond of the year 10000, which no date reaches.
 _END_OF_DATES_MS = 253_402_300_800_000
 _MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
@@ -79,10 +89,13 @@ _TOO_MANY_ROOMS = (
 _NO_FILE = "That message has no file."
 _ENCRYPTED = "That message is encrypted and cannot be read."
 _NOT_FETCHED = (
-    "The file could not be fetched: the homeserver refused it, or it is larger than "
-    f"{RETAINED_MEDIA_MAX_BYTES // (1024 * 1024)} MiB."
+    "The file could not be fetched (refused, unreachable, or larger than "
+    f"{RETAINED_MEDIA_MAX_BYTES // (1024 * 1024)} MiB)."
 )
+_OTHER_ROOM = "That event is in another room."
 _NOTHING_TO_MARK = "The room has no events to mark read."
+_UNREACHABLE = "The Matrix homeserver could not be reached."
+_TIMED_OUT = "The homeserver took too long to answer."
 
 
 class MatrixRequestError(Exception):
@@ -161,6 +174,15 @@ def _refusal(status: int, answer: dict[str, Any]) -> MatrixRequestError:
     error = answer.get("error") if isinstance(answer.get("error"), str) else None
     message = f"Matrix answered {status}" + (f" {errcode}" if errcode else "") + (f": {error}" if error else "")
     return MatrixRequestError(message, status=status, errcode=errcode)
+
+
+def transport_failure(failed: TimeoutError | aiohttp.ClientError) -> str:
+    """Return what the model reads of a request that got no answer.
+
+    Never the transport's own text, which names the host or URL it requested. Some of aiohttp's timeouts are
+    ClientErrors too, so the timeout is checked first.
+    """
+    return _TIMED_OUT if isinstance(failed, TimeoutError) else _UNREACHABLE
 
 
 async def _optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
@@ -415,7 +437,8 @@ def _is_message(event: dict[str, Any]) -> bool:
     return (
         event.get("type") in {"m.room.message", "m.room.encrypted"}
         and isinstance(event.get("event_id"), str)
-        and _relation(event).get("rel_type") not in {_EDIT, _REACTION}
+        # A tuple, as a sender's `rel_type` need not be hashable.
+        and _relation(event).get("rel_type") not in (_EDIT, _REACTION)
     )
 
 
@@ -444,23 +467,37 @@ def _minute(timestamp: object) -> str:
     return datetime.fromtimestamp(timestamp / 1000, UTC).strftime("%Y-%m-%dT%H:%MZ")
 
 
-def _cut(text: str | None) -> str | None:
-    if text is None or len(text) <= _MAX_TEXT_CHARACTERS:
+def _cut(text: str | None, limit: int = _MAX_TEXT_CHARACTERS) -> str | None:
+    if text is None or len(text) <= limit:
         return text
-    return f"{text[:_MAX_TEXT_CHARACTERS]} […]"
+    return f"{text[:limit]} […]"
+
+
+def _media_kind(content: dict[str, Any]) -> _MediaKind | None:
+    """Return the kind of file a message carries, None for a message without; a `msgtype` that is not text is none."""
+    msgtype = content.get("msgtype")
+    return _MEDIA_KINDS.get(msgtype) if isinstance(msgtype, str) else None
+
+
+def _file_name(content: dict[str, Any]) -> str:
+    """Return the name of a message's file: its filename, else its body."""
+    return _text(content.get("filename")) or _text(content.get("body")) or "unnamed"
 
 
 def _said(message: dict[str, Any], content: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return what a message says, and the note naming its file when it has one."""
     if message.get("type") == "m.room.encrypted":
         return "[encrypted, not readable]", None
-    body = _text(content.get("body"))
-    if content.get("msgtype") not in _MEDIA_MSGTYPES:
-        return _cut(body), None
-    name = _text(content.get("filename")) or body
+    body = content.get("body")
+    if _media_kind(content) is None:
+        if isinstance(body, str) and "m.in_reply_to" in _relation(message):
+            # A reply's body starts with the message it answers, quoted, which would repeat that message's text.
+            body = strip_matrix_rich_reply_fallback(body)
+        return _cut(_text(body)), None
+    body, name = _text(body), _file_name(content)
     info = _mapping(content.get("info"))
     size = _count(info.get("size"))
-    details = [name or "unnamed", _text(info.get("mimetype")), f"{size} bytes" if size else None]
+    details = [_cut(name, _MAX_NAME_CHARACTERS), _text(info.get("mimetype")), f"{size} bytes" if size else None]
     # A body that is not the file's name is a caption.
     caption = body if body != name else None
     return _cut(caption), f"[file: {', '.join(detail for detail in details if detail)}]"
@@ -476,13 +513,19 @@ def _reactions_note(message: dict[str, Any], senders_by_key: dict[str, set[str]]
         key = group.get("key")
         if isinstance(key, str):
             counts[key] = max(counts.get(key, 0), _count(group.get("count")))
-    shown = [(name, count) for key, count in counts.items() if count and (name := _text(key))]
+    shown = [
+        (name, count) for key, count in counts.items() if count and (name := _cut(_text(key), _MAX_NAME_CHARACTERS))
+    ]
     shown.sort(key=lambda reaction: (-reaction[1], reaction[0]))
     return f"[reactions: {' '.join(f'{name}{count}' for name, count in shown)}]" if shown else None
 
 
 def _thread_note(message: dict[str, Any]) -> str | None:
-    replies = _count(_bundled(message, "m.thread").get("count"))
+    """Return the thread a reply in one is in, or how many replies a thread's root has."""
+    relation = _relation(message)
+    if relation.get("rel_type") == _THREAD and (root := _cut(_text(relation.get("event_id")), _MAX_NAME_CHARACTERS)):
+        return f"[in thread {root}]"
+    replies = _count(_bundled(message, _THREAD).get("count"))
     return f"[thread: {replies} {'reply' if replies == 1 else 'replies'}]" if replies else None
 
 
@@ -490,10 +533,13 @@ def _message_columns(
     message: dict[str, Any],
     edits: list[dict[str, Any]],
     reactions: dict[str, set[str]],
+    *,
+    edited: str = "[edited]",
 ) -> tuple[str, str, str, str]:
     """Return a message's ID, minute, sender, and text, with its latest edit and its reactions folded in.
 
-    The edits are the page's and the one the homeserver bundles; the latest that may replace the message wins.
+    The edits are the page's and the one the homeserver bundles; the latest that may replace the message wins, and
+    ``edited`` says so.
     """
     latest = max(
         (edit for edit in [*edits, _bundled(message, _EDIT)] if _replaces(edit, message)),
@@ -504,7 +550,7 @@ def _message_columns(
     text, file_note = _said(message, content)
     notes = [
         text,
-        "[edited]" if latest else None,
+        edited if latest else None,
         file_note,
         _reactions_note(message, reactions),
         _thread_note(message),
@@ -614,8 +660,8 @@ async def search_messages(
     """Return the messages the homeserver finds for ``query``, newest first, each line starting with its room.
 
     It searches the person's joined rooms, or only ``room_id``; ``limit`` defaults to 10, at most 50, and
-    ``page_token`` continues. An edit found is shown, once, as the message it edits with its new text; a deleted
-    message is not shown.
+    ``page_token`` continues. An edit found is shown under the ID of the message it edits, as its own sender wrote
+    it, unless that message is found too; a deleted message is not shown.
     """
     search_filter: dict[str, object] = {"limit": _clamped(limit, _SEARCH_LIMIT, _MAX_SEARCH_LIMIT)}
     if room_id is not None:
@@ -627,23 +673,43 @@ async def search_messages(
     lines: dict[str, str] = {}
     for hit in _objects(found, "results"):
         event = _mapping(hit.get("result"))
-        message, edits = event, []
-        if _relation(event).get("rel_type") == _EDIT:
-            # The message it edits, by the same sender, as the edit shows it.
-            fields = ("type", "sender", "origin_server_ts")
-            message = {"event_id": _relation(event).get("event_id"), **{field: event.get(field) for field in fields}}
-            edits = [event]
-        room, shown = event.get("room_id"), message.get("event_id")
-        if (
-            _redacted(event)
-            or not isinstance(room, str)
-            or not _is_message(message)
-            or (edits and not _replaces(event, message))
-            or shown in lines
-        ):
+        room = event.get("room_id")
+        if _redacted(event) or not isinstance(room, str):
             continue
-        lines[str(shown)] = _line(room, *_message_columns(message, edits, {}))
+        if _relation(event).get("rel_type") != _EDIT:
+            if _is_message(event):
+                # The message itself, with the homeserver's latest edit of it, replaces the line of an edit found.
+                lines[event["event_id"]] = _line(room, *_message_columns(event, [], {}))
+            continue
+        # The edit's sender need not be the message's author, so the edit is shown as its sender's, not the message.
+        original = _relation(event).get("event_id")
+        fields = ("type", "sender", "origin_server_ts")
+        message = {"event_id": original, **{field: event.get(field) for field in fields}}
+        if isinstance(original, str) and original not in lines and _is_message(message) and _replaces(event, message):
+            lines[original] = _line(room, *_message_columns(message, [event], {}, edited="[edit]"))
     return _messages_page(list(lines.values()), found.get("next_batch"))
+
+
+async def _room_event(client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, Any]:
+    """Return the event ``event_id`` of the room ``room_id``, refusing one that says it is in another room.
+
+    A homeserver finds an event under a room only when the room holds it; the event's own room is checked too, so a
+    homeserver that answers otherwise moves no marker and hands over no file.
+    """
+    event = await matrix_json(client, "GET", f"/rooms/{quote(room_id, safe='')}/event/{quote(event_id, safe='')}")
+    if "room_id" in event and event["room_id"] != room_id:
+        raise MatrixRequestError(_OTHER_ROOM)
+    return event
+
+
+def _download_attachment_id(room_id: str, event_id: str, *, for_room_id: str, for_thread_id: str | None) -> str:
+    """Return the attachment ID of a message's file fetched for one conversation, the same on each fetch there.
+
+    The attachment store names the file the agent received with a message after the event alone, and that record
+    belongs to the conversation the message reached; an ID of its own keeps a download from taking it over.
+    """
+    scope = json.dumps([for_room_id, for_thread_id, room_id, event_id])
+    return f"att_{hashlib.sha256(scope.encode()).hexdigest()[:24]}"
 
 
 async def download_file(
@@ -659,42 +725,40 @@ async def download_file(
 
     The download stops at the attachment store's size cap. Returns the attachment's ID, name, type, and size.
     """
-    event = await matrix_json(client, "GET", f"/rooms/{quote(room_id, safe='')}/event/{quote(event_id, safe='')}")
+    event = await _room_event(client, room_id, event_id)
     if event.get("type") == "m.room.encrypted":
         raise MatrixRequestError(_ENCRYPTED)
-    media = parse_matrix_media_event_source(event)
-    if is_matrix_media_dispatch_event(media):
-        record = await register_matrix_media_attachment(
-            client,
+    content, media = _content(event), parse_matrix_media_event_source(event)
+    kind = _media_kind(content)
+    if kind is None or not isinstance(media, MATRIX_MEDIA_EVENT_TYPES):
+        raise MatrixRequestError(_NO_FILE)
+    # Refused, unreachable, or over the cap: the download says which only in the log.
+    data = await download_media_bytes(client, media)
+    if data is None:
+        raise MatrixRequestError(_NOT_FETCHED)
+    name, mime_type = _file_name(content), media_mime_type(media) or "application/octet-stream"
+    record = await run_blocking_until_complete(
+        partial(
+            register_bytes_attachment,
             storage_path,
-            room_id=for_room_id,
-            thread_id=for_thread_id,
-            event=media,
-        )
-    elif is_audio_message_event(media):
-        filename = _text(_content(event).get("filename"))
-        record = await register_audio_attachment(
-            storage_path,
-            event_id=media.event_id,
-            audio_bytes=await download_media_bytes(client, media),
-            mime_type=media_mime_type(media),
+            data,
+            kind=kind,
+            mime_type=mime_type,
+            attachment_id=_download_attachment_id(
+                room_id,
+                event_id,
+                for_room_id=for_room_id,
+                for_thread_id=for_thread_id,
+            ),
+            filename=name,
             room_id=for_room_id,
             thread_id=for_thread_id,
             sender=media.sender,
-            event_timestamp=media.server_timestamp,
-            filename=filename or media.body,
-        )
-    else:
-        raise MatrixRequestError(_NO_FILE)
+        ),
+    )
     if record is None:
         raise MatrixRequestError(_NOT_FETCHED)
-    fields = {
-        "attachment_id": record.attachment_id,
-        "name": record.filename,
-        "mime_type": record.mime_type,
-        "size_bytes": record.size_bytes,
-    }
-    return {name: value for name, value in fields.items() if value is not None}
+    return {"attachment_id": record.attachment_id, "name": name, "mime_type": mime_type, "size_bytes": len(data)}
 
 
 async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | None) -> dict[str, object]:
@@ -710,15 +774,15 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
         if not isinstance(read_up_to, str):
             raise MatrixRequestError(_NOTHING_TO_MARK)
     else:
-        # A homeserver finds the event under this room only when the room holds it.
-        await matrix_json(client, "GET", f"/rooms/{room}/event/{quote(event_id, safe='')}")
+        await _room_event(client, room_id, event_id)
         read_up_to = event_id
     markers = {"m.fully_read": read_up_to, "m.read.private": read_up_to}
     await matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)
     person = quote(client.user_id, safe="")
     try:
         await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
-    except MatrixRequestError as error:
-        msg = f"The room is read up to {read_up_to}, but it is still marked unread: {error}"
+    except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
+        failure = str(error) if isinstance(error, MatrixRequestError) else transport_failure(error)
+        msg = f"The room is read up to {read_up_to}, but it is still marked unread: {failure}"
         raise MatrixRequestError(msg) from None
     return {} if event_id is not None else {"read_up_to": read_up_to}
