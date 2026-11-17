@@ -15,12 +15,20 @@ import mindroom.streaming as streaming_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
+from mindroom.constants import COMPACTIONS_CONTENT_KEY
+from mindroom.history.reply_compactions import ReplyCompactions
+from mindroom.history.types import CompactionLifecycleStart
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
-from mindroom.streaming import send_streaming_response, stream_progress_edits
+from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
+    StreamingResponse,
+    send_streaming_response,
+    stream_progress_edits,
+)
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -120,16 +128,18 @@ def _records() -> FakeReplyRecords:
 
 
 async def _stream(
-    *chunks: str | float | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted,
+    *chunks: str | float | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted | Callable[[], object],
 ) -> AsyncIterator[Any]:
-    """Yield text, reasoning, and tool events, pausing for each float as a model or a tool call would."""
+    """Yield text, reasoning, and tool events, pausing for each float and calling each callable as the turn would."""
     for chunk in chunks:
         if isinstance(chunk, float):
             await asyncio.sleep(chunk)
         elif isinstance(chunk, str):
             yield TextDelta(chunk)
-        else:
+        elif isinstance(chunk, ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted):
             yield chunk
+        else:
+            chunk()
 
 
 async def _run(
@@ -140,6 +150,7 @@ async def _run(
     *,
     placeholder_event_id: str | None = None,
     show_tool_calls: bool = True,
+    compactions: ReplyCompactions | None = None,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
@@ -151,6 +162,7 @@ async def _run(
             existing_event_id=placeholder_event_id,
             adopt_existing_placeholder=placeholder_event_id is not None,
             show_tool_calls=show_tool_calls,
+            compactions=compactions,
             **records.hooks(),
         )
 
@@ -360,6 +372,194 @@ async def test_reasoning_time_starts_when_the_provider_says_reasoning_began(tmp_
 
     assert frames.sent
     assert _terminal(records)["io.mindroom.reasoning"]["duration_ms"] >= 3000
+
+
+class _Compaction:
+    """One automatic compaction the turn runs while its reply streams, recorded through the reply's recorder."""
+
+    def __init__(self, recorder: ReplyCompactions) -> None:
+        self.recorder = recorder
+        self.entry_id: str | None = None
+
+    def start(self) -> None:
+        self.entry_id = self.recorder.start(
+            CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:code",
+                summary_model="haiku",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+                phase="mid_turn",
+            ),
+        )
+
+    def progress(self) -> None:
+        assert self.entry_id is not None
+        self.recorder.update(self.entry_id, status="running", after_tokens=9_000, runs_remaining=12, duration_ms=50)
+
+    def succeed(self) -> None:
+        assert self.entry_id is not None
+        self.recorder.update(self.entry_id, status="success", after_tokens=4_000, compacted_run_count=20)
+
+    def fail(self) -> None:
+        assert self.entry_id is not None
+        self.recorder.update(self.entry_id, status="failed", failure_reason="Summary model failed.", duration_ms=70)
+
+
+def _two_tool_calls_then(*after: str | float | Callable[[], object]) -> AsyncIterator[Any]:
+    first = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"})
+    second = ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={"query": "nio"})
+    return _stream(
+        ToolStarted(first),
+        0.03,
+        ToolCompleted(ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={}, result="ok")),
+        0.03,
+        ToolStarted(second),
+        0.03,
+        ToolCompleted(ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={}, result="ok")),
+        0.03,
+        *after,
+    )
+
+
+def _live_compactions(sent: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The compaction entries the frames left, taking each snapshot's and each delta that carries them."""
+    compactions: list[dict[str, Any]] = []
+    for frame in sent:
+        compactions = frame.get("snapshot", frame.get("delta", {})).get("compactions", compactions)
+    return compactions
+
+
+async def _anchored_compaction(tmp_path: Path, frames: _Frames, *, show_tool_calls: bool) -> tuple[int, int]:
+    """Run a compaction after two tool calls; return where the final event and the frames anchor it."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    stream = _two_tool_calls_then(compaction.start, 0.05, compaction.succeed, 0.05, "Answer.", 0.03)
+    await _run(
+        _config(tmp_path),
+        stream,
+        records,
+        edits,
+        placeholder_event_id="$placeholder",
+        show_tool_calls=show_tool_calls,
+        compactions=recorder,
+    )
+
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    [live_entry] = _live_compactions(frames.sent)
+    assert live_entry["status"] == "success"
+    return entry["after_tool"], live_entry["after_tool"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_after_two_visible_tools_anchors_after_tool_2(tmp_path: Path, frames: _Frames) -> None:
+    """A compaction that began after two shown tool calls sits after the second, in frames and the final event."""
+    assert await _anchored_compaction(tmp_path, frames, show_tool_calls=True) == (2, 2)
+
+
+@pytest.mark.asyncio
+async def test_compaction_with_hidden_tool_calls_anchors_at_zero(tmp_path: Path, frames: _Frames) -> None:
+    """Without tool-call markers in the body, a compaction sits at the top of the reply."""
+    assert await _anchored_compaction(tmp_path, frames, show_tool_calls=False) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_compaction_start_on_placeholder_sends_progress_edit(tmp_path: Path) -> None:
+    """A compaction that starts while only the placeholder shows edits the placeholder at once to show it."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    config = _config(tmp_path, live_frames=False)
+    stream = _stream(compaction.start, 0.1, compaction.progress, 0.1, compaction.succeed, 0.1, "Done.", 0.03)
+    await _run(config, stream, records, edits, placeholder_event_id="$placeholder", compactions=recorder)
+
+    statuses = [
+        [entry["status"] for entry in content[COMPACTIONS_CONTENT_KEY]]
+        for content in edits.contents
+        if COMPACTIONS_CONTENT_KEY in content
+    ]
+    assert statuses[0] == ["running"]
+    assert ["success"] in statuses
+    placeholder_edit = next(content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content)
+    assert placeholder_edit["body"] == PROGRESS_PLACEHOLDER
+    assert "runs_remaining" not in _terminal(records)[COMPACTIONS_CONTENT_KEY][0]
+
+
+@pytest.mark.asyncio
+async def test_compaction_change_schedules_checkpoint_with_live_frames(tmp_path: Path, frames: _Frames) -> None:
+    """While frames carry progress, a compaction change alone still earns the next durable checkpoint."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    # "Hello" is the reply's first event, so after it only the compaction is left to checkpoint.
+    stream = _stream("Hello", 0.05, compaction.start, 0.4)
+    await _run(_config(tmp_path, update_interval=0.1), stream, records, edits, compactions=recorder)
+
+    checkpoints = [content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content]
+    assert checkpoints
+    assert checkpoints[0]["body"] == "Hello"
+    assert "io.mindroom.live_checkpoint" in checkpoints[0]
+    assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
+
+
+def test_compaction_change_is_uncommitted_once_the_reply_has_an_event(tmp_path: Path) -> None:
+    """A change the reply's event does not show yet is uncommitted; before the event exists, its first write shows it."""
+    recorder = ReplyCompactions()
+    config = _config(tmp_path)
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve(_ROOM_ID, None, "$question"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        compactions=recorder,
+        **_records().hooks(),
+    )
+    _Compaction(recorder).start()
+    assert not streaming.has_uncommitted_presentation()
+
+    streaming.event_id = "$placeholder"
+    assert streaming.has_uncommitted_presentation()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+async def test_final_event_keeps_success_entry(tmp_path: Path) -> None:
+    """The final event keeps the finished compaction, without the running-only remaining-runs count."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    stream = _stream(compaction.start, 0.03, compaction.progress, 0.03, compaction.succeed, "Answer.", 0.03)
+    await _run(_config(tmp_path), stream, records, edits, placeholder_event_id="$placeholder", compactions=recorder)
+
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    assert entry["status"] == "success"
+    assert entry["after_tokens"] == 4_000
+    assert entry["compacted_run_count"] == 20
+    assert "runs_remaining" not in entry
+    assert _terminal(records)["body"] == "Answer."
+
+
+@pytest.mark.asyncio
+async def test_failed_compaction_is_terminal_on_final_event(tmp_path: Path, frames: _Frames) -> None:
+    """A compaction that failed mid-reply ends failed on the final event, with its reason."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    stream = _stream("Partial", 0.03, compaction.start, 0.03, compaction.progress, compaction.fail, " answer.", 0.03)
+    await _run(_config(tmp_path), stream, records, edits, compactions=recorder)
+
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    assert entry["status"] == "failed"
+    assert entry["failure_reason"] == "Summary model failed."
+    assert "runs_remaining" not in entry
+    assert [live["status"] for live in _live_compactions(frames.sent)] == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_reply_without_compactions_carries_no_key(tmp_path: Path, frames: _Frames) -> None:
+    """A reply that ran no compaction writes no compactions key, durably or live."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    await _run(_config(tmp_path), _stream("Hello", 0.05), records, edits, compactions=recorder)
+
+    assert COMPACTIONS_CONTENT_KEY not in _terminal(records)
+    assert _live_compactions(frames.sent) == []
 
 
 @pytest.mark.asyncio

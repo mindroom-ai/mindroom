@@ -74,3 +74,15 @@ def test_publisher_ids_order_by_start_time() -> None:
     second = new_publisher_id()
     assert len(first.split("-")[0]) == 13
     assert first.split("-")[0] <= second.split("-")[0]
+
+
+def test_live_frames_carry_compactions_in_snapshot_and_delta() -> None:
+    """A snapshot carries the compaction entries; a delta carries the whole list, and only when it changed."""
+    running = {"id": "c1", "phase": "mid_turn", "after_tool": 2, "status": "running"}
+    before = LiveDocs(md="a", reasoning="", tools=(), status="streaming", activity="", compactions=(running,))
+    assert before.to_json()["compactions"] == [running]
+
+    assert "compactions" not in live_delta(before, replace(before, md="ab"))
+    finished = {**running, "status": "success", "after_tokens": 4_000}
+    after = replace(before, compactions=(finished,))
+    assert live_delta(before, after) == {"compactions": [finished]}

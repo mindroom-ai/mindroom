@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
 from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -278,6 +279,8 @@ class _CommittedDeliveryState:
     stream_status: str
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
+    # The version of the reply's compaction entries this delivery carries.
+    compactions_version: int = 0
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -371,6 +374,7 @@ class _StreamingDeliverySnapshot:
     markdown_renderer: Callable[[str], str]
     chars_since_last_update: int
     untransformed_text: str | None = None
+    compactions_version: int = 0
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -476,6 +480,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             interactive_metadata=interactive_metadata,
             stream_status=snapshot.stream_status,
             untransformed_text=snapshot.untransformed_text,
+            compactions_version=snapshot.compactions_version,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
         chars_since_last_update=snapshot.chars_since_last_update,
@@ -599,6 +604,9 @@ class StreamingResponse:
     # the first trace slots so the continuation's markers number after them.
     resumed_text: str = ""
     resumed_tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # The reply's automatic compactions, which every write and frame shows.
+    compactions: ReplyCompactions | None = None
+    _last_delivered_compactions_version: int = field(default=0, init=False, repr=False)
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -722,6 +730,16 @@ class StreamingResponse:
             segments=tuple(
                 {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
             ),
+            compactions=tuple(self.compactions.content() or ()) if self.compactions is not None else (),
+        )
+
+    @property
+    def _compactions_unshown(self) -> bool:
+        """Whether the reply's event lacks a compaction change; with no event yet, the first write carries it."""
+        return (
+            self.compactions is not None
+            and self.event_id is not None
+            and self.compactions.version != self._last_delivered_compactions_version
         )
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
@@ -845,8 +863,8 @@ class StreamingResponse:
             if elapsed_since_last_update >= self.update_interval:
                 await self._send_or_edit_message(
                     client,
-                    # A finished warm-up line is cleared even before any text arrived.
-                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit,
+                    # A finished warm-up line is cleared, and a compaction change shown, even before any text arrived.
+                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit or self._compactions_unshown,
                     capture_completions=capture_completions,
                 )
             else:
@@ -1134,7 +1152,12 @@ class StreamingResponse:
     ) -> _StreamingDeliverySnapshot | None:
         """Freeze all mutable stream state needed for one formatting pass."""
         warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
-        if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
+        if (
+            not self.accumulated_text.strip()
+            and not allow_empty_progress
+            and not warmup_suffix_lines
+            and not self._compactions_unshown
+        ):
             return None
 
         return _StreamingDeliverySnapshot(
@@ -1156,14 +1179,19 @@ class StreamingResponse:
             interactive_source_event_id=self.interactive_source_event_id,
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
+            compactions_version=self.compactions.version if self.compactions is not None else 0,
         )
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
-        """Return the extra content of one durable write: the caller's, the live watermark, and the final reasoning."""
+        """Return one durable write's extra content: the caller's, the watermark, compactions, and final reasoning."""
         extra_content = dict(deepcopy(self.extra_content)) if self.extra_content is not None else {}
         checkpoint = self.live.checkpoint() if self.live is not None else None
         if checkpoint is not None:
             extra_content[LIVE_CHECKPOINT_KEY] = checkpoint
+        # Unlike reasoning, compactions show their running status on progress edits too.
+        compactions = self.compactions.content() if self.compactions is not None else None
+        if compactions is not None:
+            extra_content[COMPACTIONS_CONTENT_KEY] = compactions
         if is_final and self.reasoning_text.strip():
             extra_content[REASONING_CONTENT_KEY] = {
                 "text": self.reasoning_text,
@@ -1213,6 +1241,7 @@ class StreamingResponse:
         self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
+        self._last_delivered_compactions_version = committed_state.compactions_version
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
         if self.visible_progress_callback is not None:
             # Hidden tool calls leave no markers, so the text keeps its marker-shaped lines.
@@ -1257,6 +1286,7 @@ class StreamingResponse:
             != _normalize_stream_accumulated_text(self._last_delivered_text)
             or not _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
             or self.presentation_state != self._last_delivered_presentation_state
+            or self._compactions_unshown
         )
 
     async def record_live_presentation(self) -> None:
@@ -2185,9 +2215,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
     stream continues below it instead of replacing it. ``placeholder_ready``
     resolves ``True`` once a reply that started without a placeholder may show one.
-    ``compactions`` records the reply's automatic compactions, which the stream does not show yet.
+    ``compactions`` records the reply's automatic compactions, which every write and frame of the stream shows.
     """
-    del compactions  # Not shown by the stream yet; the caller's terminal writes carry the entries.
     sc = config.defaults.streaming
     streaming = streaming_cls(
         final_text_transform=final_text_transform,
@@ -2212,6 +2241,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         allow_new_terminal_message=allow_new_terminal_message,
         resumed_text=resumed.resumed_text if resumed is not None else "",
         resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
+        compactions=compactions,
         initial_send=initial_send,
         progress_write_ahead=progress_write_ahead,
         progress_delivered=progress_delivered,
@@ -2237,6 +2267,20 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
         )
         live_task = _start_live_frames(client, streaming, delivery_queue)
+        if compactions is not None:
+            # A compaction anchors after the tool calls shown so far, and each change is shown at once, like a
+            # worker's progress, even over the placeholder.
+            def _compaction_changed() -> None:
+                _queue_delivery_request(
+                    delivery_queue,
+                    force_refresh=True,
+                    allow_empty_progress=not streaming.accumulated_text.strip(),
+                )
+
+            compactions.bind(
+                tool_count=lambda: len(streaming.tool_trace) if streaming.show_tool_calls else 0,
+                changed=_compaction_changed,
+            )
         try:
             try:
                 await _consume_stream_with_progress_supervision(
@@ -2306,6 +2350,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         finally:
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
+            if compactions is not None:
+                compactions.unbind()
 
     return transport_outcome
 

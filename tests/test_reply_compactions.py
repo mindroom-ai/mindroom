@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 
@@ -71,14 +71,14 @@ def _outcome(entry_id: str | None, mode: CompactionMode = "auto") -> CompactionO
     )
 
 
-def _failure(entry_id: str | None) -> CompactionLifecycleFailure:
+def _failure(entry_id: str | None, status: Literal["failed", "timeout"] = "timeout") -> CompactionLifecycleFailure:
     return CompactionLifecycleFailure(
         notice_event_id=entry_id,
         mode="auto",
         session_id="session-1",
         scope="agent:test_agent",
         summary_model="haiku-fallback",
-        status="timeout",
+        status=status,
         duration_ms=30_000,
         failure_reason="Summary request timed out.",
         history_budget_tokens=351_792,
@@ -129,19 +129,20 @@ async def test_start_progress_success_updates_one_entry_in_place() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failure_sets_status_and_reason() -> None:
+@pytest.mark.parametrize("status", ["failed", "timeout"])
+async def test_failure_sets_status_and_reason(status: Literal["failed", "timeout"]) -> None:
     """A failed compaction ends in its failure status with the reason and without remaining runs."""
     recorder = ReplyCompactions()
     lifecycle = _lifecycle(recorder)
 
     entry_id = await lifecycle.start(_start())
     await lifecycle.progress(_progress(entry_id))
-    await lifecycle.complete_failure(_failure(entry_id))
+    await lifecycle.complete_failure(_failure(entry_id, status))
 
     content = recorder.content()
     assert content is not None
     [entry] = content
-    assert entry["status"] == "timeout"
+    assert entry["status"] == status
     assert entry["failure_reason"] == "Summary request timed out."
     assert entry["summary_model"] == "haiku-fallback"
     assert entry["duration_ms"] == 30_000
@@ -166,6 +167,28 @@ async def test_manual_goes_to_notice_and_routes_back() -> None:
         CompactionOutcome,
     ]
     assert recorder.content() is None
+
+
+@pytest.mark.asyncio
+async def test_two_compactions_completed_out_of_order_stay_in_start_order() -> None:
+    """Each entry keeps its own state by id, and the list stays in start order whatever order they finish in."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+
+    first_id = await lifecycle.start(_start())
+    second_id = await lifecycle.start(_start())
+    assert first_id != second_id
+    await lifecycle.complete_success(_outcome(second_id))
+    running = recorder.content()
+    assert running is not None
+    assert [(entry["id"], entry["status"]) for entry in running] == [(first_id, "running"), (second_id, "success")]
+    await lifecycle.complete_failure(_failure(first_id))
+
+    content = recorder.content()
+    assert content is not None
+    assert [(entry["id"], entry["status"]) for entry in content] == [(first_id, "timeout"), (second_id, "success")]
+    assert "failure_reason" not in content[1]
+    assert "after_tokens" not in content[0]
 
 
 def test_after_tool_read_once_at_start() -> None:

@@ -2817,7 +2817,11 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_send_compaction_lifecycle_start.assert_not_awaited()
         # The final answer edits the reply's placeholder; its new content carries the compaction.
-        final_content = sent_contents[-1]["m.new_content"]
+        placeholder, final_edit = sent_contents[0], sent_contents[-1]
+        assert "m.new_content" not in placeholder
+        assert final_edit["m.relates_to"]["rel_type"] == "m.replace"
+        assert final_edit["m.relates_to"]["event_id"] == "$response"
+        final_content = final_edit["m.new_content"]
         assert final_content["body"] == "ok"
         [entry] = final_content[COMPACTIONS_CONTENT_KEY]
         assert entry["status"] == "success"
@@ -2825,6 +2829,83 @@ class TestAgentBot(AgentBotTestBase):
         assert entry["mode"] == "auto"
         assert entry["after_tool"] == 0
         assert entry["after_tokens"] == 4_000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 2), (False, 0)])
+    async def test_collected_compaction_anchors_after_the_tools_collected_so_far(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        show_tool_calls: bool,
+        after_tool: int,
+    ) -> None:
+        """A compaction in a collected reply sits after the tool calls shown before it began, or at the top if hidden."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=show_tool_calls,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        async def fake_stream_agent_response(
+            ctx: ResponseTurnContext,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncIterator[object]:
+            yield ToolStarted(ReportedCall(tool_call_id="call-1", tool_name="read_file", tool_args={"path": "a"}))
+            yield ToolStarted(ReportedCall(tool_call_id="call-2", tool_name="read_file", tool_args={"path": "b"}))
+            lifecycle = ctx.compaction_lifecycle
+            assert lifecycle is not None
+            await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:calculator",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                    phase="mid_turn",
+                ),
+            )
+            yield "Answer after compacting"
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=fake_stream_agent_response,
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Read both",
+                    reply_to_event_id="$event",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Read both",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
+        [entry] = content[COMPACTIONS_CONTENT_KEY]
+        assert entry["phase"] == "mid_turn"
+        assert entry["after_tool"] == after_tool
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_non_streaming_model_error_unsuccessful_for_post_effects(
