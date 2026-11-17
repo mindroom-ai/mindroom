@@ -21,6 +21,7 @@ from nio.durable import DurableSyncConfig
 from nio.store.database import DefaultStore, SqliteStore
 from structlog.testing import capture_logs
 
+from mindroom.config.main import Config
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
@@ -39,6 +40,7 @@ from mindroom.matrix.client_session import (
     login_flows,
     matrix_client_config,
 )
+from mindroom.matrix.sync_loop import bot_ingestion_config
 from tests.conftest import legacy_default_store_client
 
 if TYPE_CHECKING:
@@ -671,6 +673,47 @@ async def test_owned_matrix_session_factory_reopens_with_established_consumer_id
         if reopened is not None:
             await reopened.session.close()
             await reopened.client.close()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first_mode", "second_mode"), [("classic", "sliding"), ("sliding", "classic")])
+async def test_owned_matrix_session_reopens_after_matrix_sync_mode_change(
+    tmp_path: Path,
+    first_mode: str,
+    second_mode: str,
+) -> None:
+    """Changing matrix_sync.mode reopens the same device store and stream on the new transport."""
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials = _owned_session.MatrixCredentials("@agent:example.org", "AGENTDEVICE", "access-token")
+    journal = EventJournalStore.open_sqlite(tmp_path / "event-journal.db")
+    principal = journal.principal(credentials.user_id)
+
+    async def open_session(mode: str) -> _owned_session.OwnedMatrixSession:
+        config = Config.model_validate({"matrix_sync": {"mode": mode}})
+        return await _owned_session.open_owned_matrix_session(
+            "https://matrix.example.org",
+            credentials,
+            runtime_paths,
+            consumer_store=principal,
+            new_consumer_generation=UUID("22222222-2222-4222-8222-222222222222"),
+            config=bot_ingestion_config(config, agent_name="agent", room_ids=[], timeout_ms=0, sync_filter={}),
+        )
+
+    try:
+        first = await open_session(first_mode)
+        established = first.consumer
+        await first.session.close()
+        await first.client.close()
+
+        reopened = await open_session(second_mode)
+        try:
+            assert reopened.consumer == established
+            assert (reopened.session.config.sliding is not None) == (second_mode == "sliding")
+        finally:
+            await reopened.session.close()
+            await reopened.client.close()
+    finally:
         await journal.close()
 
 
