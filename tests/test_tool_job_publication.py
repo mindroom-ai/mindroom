@@ -32,6 +32,8 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.tool_jobs.runtime import JobClaim, ToolJobRuntime
+
 
 def _job(job_id: str, *, agent: str = "agent_a", room: str = "!room:test", status: str = "running") -> BackgroundJob:
     owner = replace(job_owner(), agent_name=agent, room_id=room, resolved_thread_id="$thread")
@@ -80,7 +82,7 @@ def _aged(job: BackgroundJob, age: timedelta) -> BackgroundJob:
 
 
 def test_a_job_running_for_moments_is_not_listed() -> None:
-    """A call that ends within seconds never reaches the room; one waiting on a person or a cancel shows at once."""
+    """A call still awaited inline that ends within seconds never reaches the room; one waiting on a person shows."""
     fresh = timedelta(seconds=1)
     content = _jobs_state_content(
         [
@@ -89,6 +91,7 @@ def test_a_job_running_for_moments_is_not_listed() -> None:
             _aged(_job("job_3", status="cancel_requested"), fresh),
             _aged(_job("job_4"), timedelta(seconds=60)),
         ],
+        awaited={"job_1", "job_2", "job_3", "job_4"},
     )
     jobs = content["jobs"]
     assert isinstance(jobs, list)
@@ -96,9 +99,17 @@ def test_a_job_running_for_moments_is_not_listed() -> None:
     assert content["total"] == 3
 
 
+def test_a_job_its_call_no_longer_waits_for_is_listed_at_once() -> None:
+    """A job its call left running in the background shows at once, while one its call still waits for does not."""
+    fresh = timedelta(seconds=1)
+    content = _jobs_state_content([_aged(_job("job_1"), fresh), _aged(_job("job_2"), fresh)], awaited={"job_2"})
+    assert [job["job_id"] for job in content["jobs"]] == ["job_1"]  # type: ignore[union-attr]
+    assert content["total"] == 1
+
+
 def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     """A person sees which agent a subagent job runs, not the tool that started it."""
-    job = _aged(replace(completed_delegation_job(), status="running"), timedelta(minutes=1))
+    job = replace(completed_delegation_job(), status="running")
     content = _jobs_state_content([job])
     jobs = content["jobs"]
     assert isinstance(jobs, list)
@@ -127,8 +138,8 @@ def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listin
     assert content["total"] == 300
     listed = content["jobs"]
     assert isinstance(listed, list)
-    # Dozens of jobs still show at these lengths, and about twice as many at typical ones.
-    assert len(listed) >= 40
+    # 89 jobs show at these lengths, and about 110 at typical ones.
+    assert len(listed) >= 85
     assert [job["job_id"] for job in listed] == [job.job_id for job in jobs[-len(listed) :]]
 
 
@@ -167,12 +178,65 @@ async def test_a_room_whose_jobs_all_ended_is_cleared() -> None:
 
 @pytest.mark.asyncio
 async def test_a_job_running_for_moments_writes_nothing() -> None:
-    """A room whose state lists no jobs is not written again for a job that has only just started."""
+    """A job its call waits for that has only just started writes no state, in a room never written or one cleared."""
     bots = _bots("agent_a")
+    put = bots["agent_a"].client.room_put_state
     publisher = JobStatePublisher()
-    await publisher.publish(bots.get, [_job("job_1", status="completed")])
-    await publisher.publish(bots.get, [_aged(_job("job_2"), timedelta(seconds=1))])
-    bots["agent_a"].client.room_put_state.assert_awaited_once()
+    fresh = _aged(_job("job_2"), timedelta(seconds=1))
+    await publisher.publish(bots.get, [])
+    await publisher.publish(bots.get, [fresh], awaited={"job_2"})
+    put.assert_not_awaited()
+    # An ended job may still be listed by an earlier process, so its room is cleared once.
+    await publisher.publish(bots.get, [_job("job_1", status="completed"), fresh], awaited={"job_2"})
+    await publisher.publish(bots.get, [_job("job_1", status="completed"), fresh], awaited={"job_2"})
+    put.assert_awaited_once()
+    assert put.await_args.kwargs["content"] == {"jobs": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_job_approved_in_its_first_seconds_stays_listed() -> None:
+    """A job listed while it awaited approval stays listed once approved, instead of seeming to have finished."""
+    bots = _bots("agent_a")
+    put = bots["agent_a"].client.room_put_state
+    publisher = JobStatePublisher()
+    job = _aged(_job("job_1", status="awaiting_approval"), timedelta(seconds=1))
+    await publisher.publish(bots.get, [job], awaited={"job_1"})
+    await publisher.publish(bots.get, [replace(job, status="running")], awaited={"job_1"})
+    assert put.await_count == 2
+    content = put.await_args.kwargs["content"]
+    assert [(listed["job_id"], listed["status"]) for listed in content["jobs"]] == [("job_1", "running")]
+    assert content["total"] == 1
+
+
+async def _awaited_job_and_worker(
+    tmp_path: Path,
+) -> tuple[ToolJobRuntime, JobClaim, asyncio.Task[None], asyncio.Event, AsyncMock]:
+    """Start a job whose call keeps waiting for it, and the worker; the event is set once a write lists a job."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    bot = _bot(owner.recipient)
+    bot.client.rooms = {owner.room_id: MagicMock()}
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    listed = asyncio.Event()
+
+    def write(**call: object) -> nio.RoomPutStateResponse:
+        if call["content"]["jobs"]:  # type: ignore[index]
+            listed.set()
+        return nio.RoomPutStateResponse(event_id="$state", room_id=owner.room_id)
+
+    bot.client.room_put_state.side_effect = write
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    _, claim = await runtime.start("job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+    assert claim is not None
+    worker = asyncio.create_task(coordinator._run())
+    # Many passes of the worker find the job too fresh to list.
+    await asyncio.sleep(0.1)
+    assert not listed.is_set()
+    return runtime, claim, worker, listed, bot.client.room_put_state
 
 
 @pytest.mark.asyncio
@@ -182,35 +246,27 @@ async def test_the_worker_lists_a_job_once_it_has_run_past_the_grace(
 ) -> None:
     """The worker's periodic pass lists a running job once it is old enough, though nothing about the job changed."""
     monkeypatch.setattr(tool_job_runtime_module, "_RETRY_SECONDS", 0.01)
-    runtime = await tool_job_runtime(tmp_path)
-    owner = job_owner()
-    bot = _bot(owner.recipient)
-    bot.client.rooms = {owner.room_id: MagicMock()}
-    coordinator = job_coordinator(tmp_path, runtime, bot)
-    put = bot.client.room_put_state
-    listed = asyncio.Event()
-
-    def write(**call: object) -> nio.RoomPutStateResponse:
-        if call["content"]["jobs"]:  # type: ignore[index]
-            listed.set()
-        return nio.RoomPutStateResponse(event_id="$state", room_id=owner.room_id)
-
-    put.side_effect = write
-
-    async def forever() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        raise AssertionError
-
-    await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
-    worker = asyncio.create_task(coordinator._run())
+    runtime, _claim, worker, listed, put = await _awaited_job_and_worker(tmp_path)
     try:
-        # Many passes of the worker find the job too fresh to list.
-        await asyncio.sleep(0.1)
-        assert not listed.is_set()
         # Time passes: the job was started a minute ago, and nothing wakes the worker.
         entry = runtime._entries["job_1"]
         entry.job = _aged(entry.job, timedelta(minutes=1))
         await asyncio.wait_for(listed.wait(), timeout=5)
+        assert [job["job_id"] for job in put.await_args.kwargs["content"]["jobs"]] == ["job_1"]
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_worker_lists_a_job_at_once_when_its_call_stops_waiting(tmp_path: Path) -> None:
+    """A call that leaves its job running in the background, as with `background_after`, shows it without the grace."""
+    runtime, claim, worker, listed, put = await _awaited_job_and_worker(tmp_path)
+    try:
+        await runtime.release_wait("job_1", claim)
+        # Well before the worker's periodic pass: the released wait wakes it.
+        await asyncio.wait_for(listed.wait(), timeout=1)
         assert [job["job_id"] for job in put.await_args.kwargs["content"]["jobs"]] == ["job_1"]
     finally:
         worker.cancel()
@@ -266,8 +322,6 @@ async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> 
 
     try:
         await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
-        entry = runtime._entries["job_1"]
-        entry.job = _aged(entry.job, timedelta(minutes=1))
         await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
         assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
         await coordinator.quiesce()

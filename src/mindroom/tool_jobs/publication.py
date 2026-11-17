@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
 
@@ -14,7 +14,7 @@ from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_jobs.runtime import BackgroundJob
@@ -28,9 +28,11 @@ _MAX_REFUSED_ROOMS = 4096
 _MAX_LISTED_BYTES = 27_000
 # Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
 _FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
-# Most calls end within seconds, and each write is a state event clients keep, so a running job shows only once it has
-# run this long; the worker's periodic pass lists it then. A job waiting on a person or a cancel shows at once.
+# Most calls end within seconds, and each write is a state event clients keep, so a running job its call still waits for
+# shows only once it has run this long; the worker's periodic pass lists it then. A job waiting on a person or a cancel,
+# one its call left running in the background, and one already listed show at once.
 _LISTED_AFTER = timedelta(seconds=10)
+_EMPTY: dict[str, object] = {"jobs": [], "total": 0}
 
 
 class _PublishingBot(Protocol):
@@ -55,15 +57,29 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
     }
 
 
-def _jobs_state_content(jobs: Sequence[BackgroundJob]) -> dict[str, object]:
-    """Return the state content listing the newest live jobs among ``jobs`` that fit, oldest first, and their total."""
+def _jobs_state_content(
+    jobs: Sequence[BackgroundJob],
+    *,
+    awaited: Collection[str] = frozenset(),
+    listed_before: Collection[str] = frozenset(),
+) -> dict[str, object]:
+    """Return the state content listing the newest live jobs among ``jobs`` that fit, oldest first, and their total.
+
+    A running job in ``awaited``, which a call still waits for, is left out until it has run ``_LISTED_AFTER``, unless
+    it is in ``listed_before``.
+    """
     started_before = datetime.now(UTC) - _LISTED_AFTER
     live = sorted(
         (
             job
             for job in jobs
             if job.status not in TERMINAL_STATUSES
-            and (job.status != "running" or datetime.fromisoformat(job.created_at) <= started_before)
+            and (
+                job.status != "running"
+                or job.job_id not in awaited
+                or job.job_id in listed_before
+                or datetime.fromisoformat(job.created_at) <= started_before
+            )
         ),
         key=lambda job: (job.created_at, job.job_id),
     )
@@ -87,19 +103,32 @@ class JobStatePublisher:
     # Each (agent, room) whose last write was refused, so the refusal warns once however often the jobs change.
     _refused: set[tuple[str, str]] = field(default_factory=set)
 
-    async def publish(self, bots: Callable[[str], _PublishingBot | None], jobs: Sequence[BackgroundJob]) -> None:
+    async def publish(
+        self,
+        bots: Callable[[str], _PublishingBot | None],
+        jobs: Sequence[BackgroundJob],
+        *,
+        awaited: Collection[str] = frozenset(),
+    ) -> None:
         """Rewrite the state of every agent and room whose live jobs changed; a failed write is retried next time.
 
         ``jobs`` are every retained job, so a new process also clears state an earlier one left listing jobs that a
-        restart interrupted.
+        restart interrupted. ``awaited`` names the jobs a call still waits for.
         """
         groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in self._published}
         for job in jobs:
             if job.owner.room_id is not None:
                 groups.setdefault((job.owner.recipient, job.owner.room_id), []).append(job)
         for (agent, room_id), group in groups.items():
-            content = _jobs_state_content(group)
-            if self._published.get((agent, room_id)) == content:
+            published = self._published.get((agent, room_id))
+            listed = [] if published is None else cast("list[dict[str, object]]", published["jobs"])
+            listed_before = {str(job["job_id"]) for job in listed}
+            content = _jobs_state_content(group, awaited=awaited, listed_before=listed_before)
+            # An earlier process's state can list only jobs it left, which are retained as ended, so a room with none
+            # holds no listing to clear.
+            if published is None and not any(job.status in TERMINAL_STATUSES for job in group):
+                published = _EMPTY
+            if published == content:
                 continue
             bot = bots(agent)
             # A room the bot left can no longer show its jobs, and refuses its writes.
