@@ -284,7 +284,7 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 ### Seeing and cancelling jobs
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
-A call the reply still waits for joins the bar once it has run for 10 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
+A call the reply still waits for joins the bar once it has run for 5 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 The bar lists only the newest of an agent's running jobs in a room that fit in 27,000 bytes of room state.
 That is about 110 jobs with typical names.

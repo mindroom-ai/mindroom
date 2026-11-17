@@ -99,6 +99,15 @@ def test_a_job_running_for_moments_is_not_listed() -> None:
     assert content["total"] == 3
 
 
+def test_an_awaited_job_is_listed_once_it_has_run_five_seconds() -> None:
+    """A call that runs longer than a few seconds shows in the bar; one just under that does not yet."""
+    content = _jobs_state_content(
+        [_aged(_job("job_1"), timedelta(seconds=4)), _aged(_job("job_2"), timedelta(seconds=6))],
+        awaited={"job_1", "job_2"},
+    )
+    assert [job["job_id"] for job in content["jobs"]] == ["job_2"]  # type: ignore[union-attr]
+
+
 def test_a_job_its_call_no_longer_waits_for_is_listed_at_once() -> None:
     """A job its call left running in the background shows at once, while one its call still waits for does not."""
     fresh = timedelta(seconds=1)
