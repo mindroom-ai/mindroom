@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires the release whose durable sync sends a Classic run's first poll with timeout 0."""
+    """The wheel requires the release whose Classic and Sliding sync runs send their first poll with timeout 0."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -274,7 +274,8 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
         "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6",
         "1.2.0", "1.2.1",
         "1.3.0",
+        "1.4.0",
     ):  # fmt: skip
         assert Version(older) not in requirement.specifier
-    assert Version("1.4.0") in requirement.specifier
+    assert Version("1.4.1") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier
