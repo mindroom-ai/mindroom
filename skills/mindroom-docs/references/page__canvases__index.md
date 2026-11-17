@@ -160,6 +160,7 @@ The room header's **Canvas** button lists the conversation's canvases, newest up
 ### Pages in the thread
 
 With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
+A page whose height follows its viewport, such as a `100vh` hero section, instead gets a window like a browser's (16:10 of its width, 568 to 1080 pixels) and scrolls inside it.
 Agents use it for mockups, diagrams, charts, and previews the user should see in the flow.
 An inline page is display-only: it cannot send answers or save state, and Chat never opens the panel for it, though **Open canvas** still shows it there.
 Updates keep a canvas inline.
