@@ -34,6 +34,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -1118,6 +1119,46 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
             lifecycle_lock.release()
 
     assert not queued_signal.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_restart_replay_does_not_tell_the_active_turn_a_newer_message_arrived(tmp_path: Path) -> None:
+    """A restart's replay of an unanswered message, waiting behind another turn, is not news to that turn."""
+    bot = _bot(tmp_path)
+    response_envelope = _envelope()
+    response_target = response_envelope.target
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    # Another turn, such as a job follow-up, holds the conversation.
+    queued_signal.begin_response_turn()
+    await lifecycle_lock.acquire()
+    waiting_for_lock = asyncio.Event()
+    acquire_lock = lifecycle._acquire_response_turn_lock
+
+    async def acquire_after_notice_decision(lock: asyncio.Lock, reservation: object) -> None:
+        waiting_for_lock.set()
+        await acquire_lock(lock, reservation)
+
+    try:
+        with (
+            patch.object(ResponseRunner, "_run_locked_turn", new=AsyncMock(return_value=Owned())),
+            patch.object(lifecycle, "_acquire_response_turn_lock", new=acquire_after_notice_decision),
+            turn_dispatch_recovery_scope(active=True),
+        ):
+            assert (
+                lifecycle.reserve_waiting_human_message(target=response_target, response_envelope=response_envelope)
+                is None
+            )
+            task = asyncio.create_task(bot._response_runner.generate_response(_request(response_envelope)))
+            await asyncio.wait_for(waiting_for_lock.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            assert not queued_signal.has_pending_human_messages()
+            lifecycle_lock.release()
+            assert await task == Owned()
+    finally:
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
 
 @pytest.mark.asyncio

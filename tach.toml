@@ -161,6 +161,7 @@ path = "mindroom.dispatch_recovery_context"
 depends_on = []
 visibility = [
     "mindroom.journal_dispatch",
+    "mindroom.response_lifecycle",
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
     "mindroom.voice.visible_voice_echo",
@@ -3518,6 +3519,7 @@ path = "mindroom.response_lifecycle"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
+    "mindroom.dispatch_recovery_context",
     "mindroom.tool_jobs.control",
     "mindroom.mid_turn",
     "mindroom.ai_runtime",
