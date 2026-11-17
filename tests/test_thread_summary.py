@@ -834,8 +834,9 @@ class TestMaybeGenerateThreadSummary:
             ("Trip plan", "Trip plan (forked)"),
             ("Trip plan (forked)", "Trip plan (forked)"),
             (None, "Prompt title (forked)"),
+            ("A" * 300, "A" * 288 + "... (forked)"),
         ],
-        ids=["parent-title", "fork-of-a-fork", "untitled-parent"],
+        ids=["parent-title", "fork-of-a-fork", "untitled-parent", "longest-parent-title"],
     )
     async def test_a_forks_first_title_is_its_parents_title_marked_forked(
         self,

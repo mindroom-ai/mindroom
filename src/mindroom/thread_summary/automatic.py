@@ -21,6 +21,7 @@ from mindroom.thread_summary.notices import (
     summary_generated_at,
 )
 from mindroom.thread_summary.state import (
+    THREAD_SUMMARY_MAX_LENGTH,
     SummaryState,
     TruncatedThreadHistoryError,
     current_thread_summary,
@@ -64,7 +65,11 @@ def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thr
     """Return ``title`` marked once as a fork's when ``history`` roots a fork, so a fork of a fork stays "X (forked)"."""
     if fork_parent_thread_id(history, thread_id) is None:
         return title
-    return f"{normalize_thread_summary_text(title).removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
+    base = normalize_thread_summary_text(title).removesuffix(_FORKED_TITLE_SUFFIX)
+    # Truncate here, not in the notice writer, so a long title keeps its marker.
+    if len(base) + len(_FORKED_TITLE_SUFFIX) > THREAD_SUMMARY_MAX_LENGTH:
+        base = base[: THREAD_SUMMARY_MAX_LENGTH - len(_FORKED_TITLE_SUFFIX) - 3].rstrip() + "..."
+    return f"{base}{_FORKED_TITLE_SUFFIX}"
 
 
 async def _provisional_title(
