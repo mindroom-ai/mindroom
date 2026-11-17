@@ -774,7 +774,7 @@ Use `--allow-app` to save app choices at the same time.
 │ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Pairing ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                        TEXT  Short-lived code returned by !desktop setup.    │
+│ *  --code                        TEXT  Short-lived code returned by /desktop setup.    │
 │                                        [required]                                      │
 │ *  --controller-user-id          TEXT  Pinned cloud controller Matrix user. [required] │
 │ *  --controller-device-id        TEXT  Pinned cloud controller device. [required]      │
