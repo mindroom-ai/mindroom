@@ -158,11 +158,12 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
         # LEGACY_COMPAT: OpenRouter reasoning details stored as the pieces their stream sent.
         # Legacy format: an OpenRouter reply whose ``provider_data["reasoning_details"]`` holds one item per streamed
         # piece, so a reasoning text or summary spans many consecutive items of one type and index.
-        # Last legacy release: v2026.11.382, which stored the pieces as every release since v2026.10.499 did;
-        # replacement: the first release after it stores each detail whole (``ChatStream.finish``).
+        # Last legacy release: v2026.11.384, which stored the pieces as every streaming release before it did, the
+        # Agno-based ones included (Agno 3.0.9 extends the list per delta); replacement: the first release after it
+        # stores each detail whole (``ChatStream.finish``).
         # Handling: each request joins the pieces into whole details, as later releases store them; signatures and
         # encrypted details pass unchanged.
-        # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_382_stored_sends_its_reasoning_details_whole
+        # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_384_stored_sends_its_reasoning_details_whole
         formatted["reasoning_details"] = _joined_reasoning_details(reasoning_details)
     return formatted
 
