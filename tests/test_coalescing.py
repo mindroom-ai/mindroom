@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import gate as gate_module
@@ -29,8 +30,10 @@ from mindroom.coalescing.gate import (
     ReadyPendingEvent,
 )
 from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
+from mindroom.coalescing.policy import pending_events_sent_together, submission_marker
 from mindroom.commands.parsing import CommandType
 from mindroom.config.main import Config
+from mindroom.constants import SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
@@ -74,11 +77,20 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
         raise AssertionError(msg) from exc
 
 
-def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
-    """Build one plain Matrix text event."""
+def _text_event(
+    event_id: str,
+    body: str,
+    origin_server_ts: int,
+    *,
+    submission: object = None,
+) -> nio.RoomMessageText:
+    """Build one plain Matrix text event, carrying a composer submission marker when one is given."""
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if submission is not None:
+        content[SUBMISSION_CONTENT_KEY] = submission
     return nio.RoomMessageText.from_dict(
         {
-            "content": {"body": body, "msgtype": "m.text"},
+            "content": content,
             "event_id": event_id,
             "sender": "@user:localhost",
             "origin_server_ts": origin_server_ts,
@@ -88,17 +100,20 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
     )
 
 
-def _image_event(event_id: str, origin_server_ts: int) -> nio.RoomMessageImage:
-    """Build one plain Matrix image event."""
+def _image_event(event_id: str, origin_server_ts: int, *, submission: object = None) -> nio.RoomMessageImage:
+    """Build one plain Matrix image event, carrying a composer submission marker when one is given."""
+    content: dict[str, object] = {
+        "body": "photo.jpg",
+        "filename": "photo.jpg",
+        "info": {"mimetype": "image/jpeg"},
+        "msgtype": "m.image",
+        "url": "mxc://localhost/photo",
+    }
+    if submission is not None:
+        content[SUBMISSION_CONTENT_KEY] = submission
     return nio.RoomMessageImage.from_dict(
         {
-            "content": {
-                "body": "photo.jpg",
-                "filename": "photo.jpg",
-                "info": {"mimetype": "image/jpeg"},
-                "msgtype": "m.image",
-                "url": "mxc://localhost/photo",
-            },
+            "content": content,
             "event_id": event_id,
             "sender": "@user:localhost",
             "origin_server_ts": origin_server_ts,
@@ -117,10 +132,10 @@ def _pending(event: nio.RoomMessageText | nio.RoomMessageImage) -> PendingEvent:
     )
 
 
-def _image_pending(event_id: str, origin_server_ts: int) -> PendingEvent:
+def _image_pending(event_id: str, origin_server_ts: int, *, submission: object = None) -> PendingEvent:
     """Wrap one image event as pending media ingress."""
     return make_pending_event(
-        _image_event(event_id, origin_server_ts),
+        _image_event(event_id, origin_server_ts, submission=submission),
         nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=IMAGE_SOURCE_KIND,
     )
@@ -1581,6 +1596,186 @@ async def test_shutdown_does_not_wait_for_a_split_replys_missing_segments() -> N
         await gate.drain_all()
 
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost"]]
+
+
+def _open(submission_id: str = "upload-1") -> dict[str, object]:
+    return {"id": submission_id, "more": True}
+
+
+def _final(submission_id: str = "upload-1") -> dict[str, object]:
+    return {"id": submission_id, "more": False}
+
+
+@pytest.mark.asyncio
+async def test_open_submission_waits_past_the_debounce_for_its_threaded_caption() -> None:
+    """A room-root upload that says more is coming waits past the debounce for the caption threaded under it."""
+    gate, batches = _recording_gate(0.05)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$video:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$video:localhost", 1_000_000, submission=_open()))
+    await asyncio.sleep(0.15)
+    assert batches == []
+
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "what happens here?", 1_003_200, submission=_final())),
+    )
+
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+    assert len(batches) == 1
+    assert batches[0].coalescing_key.thread_id == "$video:localhost"
+    assert list(batches[0].handled_turn.source_event_ids) == ["$video:localhost", "$caption:localhost"]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", ["$thread:localhost", None])
+async def test_final_marked_media_dispatches_without_debounce(thread_id: str | None) -> None:
+    """The last event of a submission completes it, so an upload that ends one does not wait for the debounce."""
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    key = CoalescingKey("!room:localhost", thread_id, owner)
+
+    await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=_open()))
+    await _admit_ready(gate, key, _image_pending("$two:localhost", 1_000_400, submission=_final()))
+
+    await _wait_for(
+        lambda: (
+            [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost", "$two:localhost"]]
+        ),
+    )
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_open_submission_dispatches_what_arrived_at_its_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A submission whose last event never arrives holds only until the bound, then what came answers, logged."""
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    gate, batches = _recording_gate(60.0)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+
+    with capture_logs() as logs:
+        await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=_open()))
+        await _admit_ready(gate, key, _image_pending("$two:localhost", 1_000_400, submission=_open()))
+        await _wait_for(lambda: len(batches) == 1)
+
+    assert list(batches[0].handled_turn.source_event_ids) == ["$one:localhost", "$two:localhost"]
+    timed_out = [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+    assert len(timed_out) == 1
+    assert timed_out[0]["submission_id"] == "upload-1"
+    assert timed_out[0]["pending_count"] == 2
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_wait_for_an_open_submission() -> None:
+    """Draining for shutdown dispatches an open submission at once instead of waiting out its bound."""
+    gate, batches = _recording_gate(1.0)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+    await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=_open()))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert batches == []
+
+    async with asyncio.timeout(2):
+        await gate.drain_all()
+
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost"]]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "upload-1",
+        ["upload-1", True],
+        {"more": True},
+        {"id": "", "more": True},
+        {"id": 7, "more": True},
+        {"id": "upload-1", "more": "true"},
+        {"id": "upload-1", "more": 1},
+    ],
+)
+def test_malformed_submission_marker_is_no_marker(marker: object) -> None:
+    """Only a mapping with a non-empty string id and a bool ``more`` is a submission marker."""
+    assert submission_marker(_image_pending("$one:localhost", 1_000_000, submission=marker)) is None
+
+
+def test_submission_marker_reads_a_missing_more_as_final() -> None:
+    """A marker without ``more`` ends its submission."""
+    marked = _image_pending("$one:localhost", 1_000_000, submission={"id": "upload-1"})
+
+    assert submission_marker(marked) == ("upload-1", False)
+    assert submission_marker(_image_pending("$two:localhost", 1_000_000, submission=_open())) == ("upload-1", True)
+    assert submission_marker(_image_pending("$three:localhost", 1_000_000)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker",
+    ["upload-1", {"more": True}, {"id": "", "more": True}, {"id": "upload-1", "more": "yes"}],
+)
+async def test_malformed_submission_marker_is_ignored(marker: object) -> None:
+    """Media with a malformed marker waits the debounce window as unmarked media does, not the submission bound."""
+    gate, batches = _recording_gate(0.05)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=marker))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert batches == []
+
+    await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost"]])
+    await gate.drain_all()
+
+
+def test_events_of_one_submission_are_sent_together_despite_their_origin_gap() -> None:
+    """The room-level burst rule treats one submission's events as sent together, and nothing else beyond the window."""
+    first = _image_pending("$one:localhost", 1_000_000, submission=_open())
+    same = _image_pending("$two:localhost", 1_005_000, submission=_final())
+    other = _image_pending("$three:localhost", 1_005_000, submission=_final("upload-2"))
+    unmarked = _image_pending("$four:localhost", 1_005_000)
+
+    assert pending_events_sent_together(first, same, window_seconds=1.0)
+    assert not pending_events_sent_together(first, other, window_seconds=1.0)
+    assert not pending_events_sent_together(first, unmarked, window_seconds=1.0)
+
+
+@pytest.mark.asyncio
+async def test_submission_events_share_a_room_level_turn_despite_origin_gap() -> None:
+    """At room level, one submission's uploads share a turn even when sync lag spreads their send times."""
+    gate, batches = _recording_gate(0.05)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=_open()))
+    await asyncio.sleep(0.1)
+    await _admit_ready(gate, key, _image_pending("$two:localhost", 1_005_000, submission=_final()))
+
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$one:localhost", "$two:localhost"]]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_text_dispatches_immediately_while_the_senders_other_submission_is_open() -> None:
+    """An open submission holds only itself: the sender's plain text elsewhere still dispatches at once."""
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    upload_key = CoalescingKey("!room:localhost", "$upload-thread:localhost", owner)
+    text_key = CoalescingKey("!room:localhost", "$other-thread:localhost", owner)
+
+    await _admit_ready(gate, upload_key, _image_pending("$upload:localhost", 1_000_000, submission=_open()))
+    await _admit_ready(gate, text_key, _pending(_text_event("$text:localhost", "unrelated", 1_000_500)))
+
+    await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$text:localhost"]])
+    assert gate.has_pending_source_event("$upload:localhost")
+    await gate.drain_all()
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$text:localhost"],
+        ["$upload:localhost"],
+    ]
 
 
 @pytest.mark.asyncio

@@ -1234,7 +1234,7 @@
       "properties": {
         "debounce_ms": {
           "default": 1000,
-          "description": "Sliding window in milliseconds that a media-tailed live batch waits for more attachments or a trailing caption; batches ending in text dispatch immediately",
+          "description": "Sliding window in milliseconds that a live batch ending in unmarked media waits for more attachments or a trailing caption; batches ending in text dispatch immediately, and events marked as part of a composer submission wait for its last event instead",
           "minimum": 0,
           "title": "Debounce Ms",
           "type": "integer"
