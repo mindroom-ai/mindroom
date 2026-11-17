@@ -25,8 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-pytestmark = pytest.mark.asyncio
-
 _SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"
 
 
@@ -69,6 +67,7 @@ def _reranker(
     return JudgmentReranker(batch, gate=gate)
 
 
+@pytest.mark.asyncio
 async def test_one_request_for_all_candidates() -> None:
     """Every candidate is one predicate of a single request about the query."""
     seen: list[httpx.Request] = []
@@ -86,6 +85,7 @@ async def test_one_request_for_all_candidates() -> None:
     assert "False when: It is unrelated, or only shares a topic or words with the message." in instructions
 
 
+@pytest.mark.asyncio
 async def test_scores_follow_document_order() -> None:
     """Scores line up with the documents even when the provider answers in another order."""
 
@@ -97,12 +97,14 @@ async def test_scores_follow_document_order() -> None:
     assert scores == [0.1, 0.7, 0.4]
 
 
+@pytest.mark.asyncio
 async def test_refused_candidate_scores_zero() -> None:
     """A refused question scores 0.0 while the others keep their probabilities."""
     scores = await _reranker(_answers({"c0": 0.9, "c1": None, "c2": 0.6}), []).ascore("query", ["a", "b", "c"])
     assert scores == [0.9, 0.0, 0.6]
 
 
+@pytest.mark.asyncio
 async def test_secret_in_candidate_is_sent_redacted() -> None:
     """A credential in a candidate or the query never leaves; the redacted candidate is still judged."""
     seen: list[httpx.Request] = []
@@ -114,6 +116,7 @@ async def test_secret_in_candidate_is_sent_redacted() -> None:
     assert scores == [0.7, 0.3]
 
 
+@pytest.mark.asyncio
 async def test_candidates_past_the_byte_cap_score_zero() -> None:
     """Leading candidates that fit one request are judged; the rest score 0.0 and keep their order."""
     seen: list[httpx.Request] = []
@@ -127,12 +130,23 @@ async def test_candidates_past_the_byte_cap_score_zero() -> None:
     assert scores == [0.9] * judged + [0.0] * (len(documents) - judged)
 
 
+@pytest.mark.asyncio
 async def test_backend_failure_raises() -> None:
     """A failed batch raises, so retrieval falls back to the hybrid selection."""
     with pytest.raises(JudgmentError):
         await _reranker(None, []).ascore("query", ["a", "b"])
 
 
+@pytest.mark.asyncio
+async def test_blank_query_raises_without_a_request() -> None:
+    """A request that cannot be built for a reason other than its size raises instead of dropping candidates."""
+    seen: list[httpx.Request] = []
+    with pytest.raises(JudgmentError):
+        await _reranker(_answers({"c0": 0.9}), seen).ascore("   ", ["a"])
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_gate_caps_every_score() -> None:
     """With the gate, every candidate scores at most the gate question's probability, asked in the same request."""
     seen: list[httpx.Request] = []
@@ -144,6 +158,7 @@ async def test_gate_caps_every_score() -> None:
     assert scores == [0.2, 0.1]
 
 
+@pytest.mark.asyncio
 async def test_missing_credential_builds_no_reranker(tmp_path: Path) -> None:
     """Without an API key neither judgment provider builds a reranker, and a configured one fails to build."""
     paths = test_runtime_paths(tmp_path)

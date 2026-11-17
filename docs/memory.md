@@ -264,9 +264,9 @@ Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduli
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 With `rerank: true` and a [`reranker`](knowledge.md#reranking) configured, semantic searches fetch 20 hits and the reranker orders them.
-Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
+Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.8` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
-Reranking sends those 20 memory entries and the message to the reranker, which for `cohere` and `vertex_ai` is a hosted service, and a hosted reranker adds its response time to every reply.
+Reranking sends those 20 memory entries and the message to the reranker, which for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` is a hosted service, and a hosted reranker adds its response time to every reply.
 
 ```yaml
 agents:

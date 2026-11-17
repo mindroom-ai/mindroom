@@ -57,10 +57,10 @@ class JudgmentReranker:
         extra = [_GATE] if self.gate else []
         count = len(candidates)
         request = build_batch_request([*candidates, *extra], message, instructions="")
-        while count and not (request.complete and self.batch.fits(request)):
+        while count and request.incomplete_reason in {None, "essential_input_too_large"} and not self.batch.fits(request):
             count -= 1
             request = build_batch_request([*candidates[:count], *extra], message, instructions="")
-        if not count:
+        if not (count and request.complete):
             raise JudgmentError(failure="incomplete_state")
         result = await self.batch.evaluate(request)
         if result.failure is not None or result.decision is None:

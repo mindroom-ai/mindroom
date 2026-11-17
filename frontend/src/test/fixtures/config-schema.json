@@ -4774,6 +4774,29 @@
       "title": "RealtimeCallProfile",
       "type": "object"
     },
+    "RerankerConfig": {
+      "discriminator": {
+        "mapping": {
+          "cohere": "#/$defs/KnowledgeRerankerConfig",
+          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
+          "sentence_transformers": "#/$defs/KnowledgeRerankerConfig",
+          "typesafe": "#/$defs/TypeSafeJudgmentConfig",
+          "vertex_ai": "#/$defs/KnowledgeRerankerConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/KnowledgeRerankerConfig"
+        },
+        {
+          "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
+        }
+      ]
+    },
     "ResponderAccessConfig": {
       "additionalProperties": false,
       "description": "Authored conversation-access rules for one responder.",
@@ -6155,7 +6178,7 @@
     "reranker": {
       "anyOf": [
         {
-          "$ref": "#/$defs/KnowledgeRerankerConfig"
+          "$ref": "#/$defs/RerankerConfig"
         },
         {
           "type": "null"
