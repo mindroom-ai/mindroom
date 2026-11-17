@@ -25,7 +25,7 @@ _NEW_THREAD_SIZE_AFTER_FIRST_REPLY = 2
 
 @dataclass
 class _ThreadSummaryBaselines:
-    """Each thread's summarized count, summary-write lock, and prompt-title claim, shared by every bot in the process.
+    """Each thread's summarized count, summary-write lock, and prompt-title state, shared by every bot in the process.
 
     A count only rises, and the trusted notices in a thread's history restore it after a restart.
     """
@@ -36,6 +36,7 @@ class _ThreadSummaryBaselines:
         init=False,
     )
     _provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
+    _superseded_provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
 
     def claim_provisional_title(self, room_id: str, thread_id: str) -> bool:
         """Claim one thread's single prompt-only title attempt, so only the first responder in the process makes it."""
@@ -43,6 +44,14 @@ class _ThreadSummaryBaselines:
             return False
         self._provisional_titles.add((room_id, thread_id))
         return True
+
+    def supersede_provisional_title(self, room_id: str, thread_id: str) -> None:
+        """Mark one thread's reply as delivered, so a prompt-only title not yet sent is stale and must not be."""
+        self._superseded_provisional_titles.add((room_id, thread_id))
+
+    def provisional_title_superseded(self, room_id: str, thread_id: str) -> bool:
+        """Return whether a reply in one thread was delivered, which makes a prompt-only title stale."""
+        return (room_id, thread_id) in self._superseded_provisional_titles
 
     def lock(self, room_id: str, thread_id: str) -> asyncio.Lock:
         """Return the lock every summary write to one thread holds."""

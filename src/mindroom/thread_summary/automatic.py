@@ -384,8 +384,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     try:
         async with baselines.lock(room_id, thread_id):
             # A baseline means this process already summarized the thread, maybe
-            # before that notice reached any history read.
-            if baselines.count(room_id, thread_id) > 0:
+            # before that notice reached any history read. A prompt title only
+            # covers the wait for the first reply, so a delivered reply makes it stale.
+            if baselines.count(room_id, thread_id) > 0 or baselines.provisional_title_superseded(room_id, thread_id):
                 return
             # The claim stops this process's other bots. Another runtime's title,
             # or a pin from Chat, may not have reached this client's sync yet, so
@@ -443,6 +444,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             # Everything that made the thread eligible can change while the model
             # runs: another title or pin, a resolution, or a deleted or edited prompt.
             if await sole_untitled_prompt(history) is None:
+                return
+            # The reply can be delivered while the model runs; its post-reply pass titles the thread instead.
+            if baselines.provisional_title_superseded(room_id, thread_id):
                 return
             await send_thread_summary_notice(
                 client,
