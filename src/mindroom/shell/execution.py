@@ -773,9 +773,9 @@ def _schedule_process_tree_idle(pid: int) -> None:
     A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
     before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
     thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
-    Setting the policy before the command runs needs ``os.posix_spawn``'s ``setscheduler``, which asyncio's subprocesses
-    cannot pass, or a launcher process, which needs more code to keep the command's environment and how a program that
-    cannot start is reported; ``preexec_fn`` would turn off vfork.
+    Setting the policy before the command runs needs a launcher process, which needs more code to keep the command's
+    environment and how a program that cannot start is reported: glibc's ``posix_spawn`` refuses ``SCHED_IDLE``, and
+    ``preexec_fn`` would turn off vfork.
     """
     pending = [pid]
     while pending:
