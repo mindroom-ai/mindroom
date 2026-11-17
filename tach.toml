@@ -3780,6 +3780,7 @@ visibility = ["mindroom.memory", "mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.functions"
 depends_on = [
+    "mindroom.config.resolution",
     "mindroom.memory._backend",
     "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",

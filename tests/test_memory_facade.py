@@ -614,12 +614,12 @@ class TestMemoryFacade:
         assert "I previously calculated 2+2=4" in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio
-    async def test_per_turn_recall_uses_gap_selection(
+    async def test_mem0_per_turn_recall_keeps_top_three(
         self,
         mock_memory: AsyncMock,
         config: Config,
     ) -> None:
-        """The per-turn search over-fetches, then injects only the hits scored close to the best one."""
+        """Mem0 keeps the top-3 recall: the gap selection measured on semantic file memory does not apply."""
         mock_memory.search.return_value = {
             "results": [
                 {"id": "1", "memory": "The shed is painted green", "score": 0.90},
@@ -631,10 +631,10 @@ class TestMemoryFacade:
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "calculator", config)
 
-        assert mock_memory.search.call_args.kwargs["top_k"] == 20
+        assert mock_memory.search.call_args.kwargs["top_k"] == 3
         assert "The shed is painted green" in prompt_parts.transient_turn_context
         assert "The shed roof is copper" in prompt_parts.transient_turn_context
-        assert "Pixel eats salmon kibble" not in prompt_parts.transient_turn_context
+        assert "Pixel eats salmon kibble" in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio
     async def test_tool_search_limit_unchanged(self, mock_memory: AsyncMock, config: Config) -> None:

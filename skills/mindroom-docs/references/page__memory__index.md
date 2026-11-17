@@ -9,8 +9,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
-Before each reply, the `mem0` and `file` backends add up to five memories relevant to the message to the prompt: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing.
-`search_memories` returns up to its own `limit` instead.
+Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+File memory in `semantic` [search mode](#searching-file-memory) adds up to five instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing.
+`search_memories` returns up to its own `limit` in every mode.
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">

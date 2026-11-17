@@ -416,7 +416,8 @@ async def test_shipped_arm_recalls_entries_through_the_product_overlay(
 ) -> None:
     """The shipped arm indexes whole files, which the product overlay splits into entries and leaves the archive out of."""
     assert embedder is not None
-    [hits] = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-15", "salmon kibble for Pixel")])
+    # Every vector ties under the fake embedder, so only the Pixel entry may match a query word ("for" matches others).
+    [hits] = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-15", "salmon kibble Pixel")])
     assert hits
     assert hits[0]["memory"] == "- [id=m_20260110100000_bbbb2222] Pixel the cat eats salmon kibble twice a day."
     assert _sources(hits)[0] == "memory/2026-01-10.md"

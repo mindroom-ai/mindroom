@@ -18,6 +18,7 @@ import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import AgentMemorySearchConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
@@ -35,7 +36,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._file_backend import FileMemoryBackend
-from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.memory._shared import MemoryNotFoundError, MemorySearchOutcome
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
 from mindroom.token_counting import families
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.memory._shared import MemoryResult
     from tests.fakes.knowledge import RecordingRefreshScheduler
 
 
@@ -919,6 +921,82 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
     assert "semantic memory search failed (RuntimeError)" in prompt_parts.transient_turn_context
     assert "Keyword fallback memory" in prompt_parts.transient_turn_context
+
+
+def _record_search_limits(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the limit of every per-turn memory search, which still runs for real."""
+    limits: list[int] = []
+    search = memory_functions.search_agent_memories
+
+    async def recording_search(*args: object, limit: int, **kwargs: object) -> object:
+        limits.append(limit)
+        return await search(*args, limit=limit, **kwargs)
+
+    monkeypatch.setattr(memory_functions, "search_agent_memories", recording_search)
+    return limits
+
+
+@pytest.mark.asyncio
+async def test_keyword_recall_searches_three_and_injects_them_all(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyword file memory keeps the top-3 recall: the gap selection measured on semantic search does not apply."""
+    config.memory.search.mode = "keyword"
+    memories = ("garden shed roof copper", "garden shed roof", "garden shed", "garden")
+    for memory in memories:
+        await add_agent_memory(memory, "general", config)
+    limits = _record_search_limits(monkeypatch)
+
+    prompt_parts = await build_memory_prompt_parts("garden shed roof copper", "general", config)
+
+    assert limits == [3]
+    injected = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
+    assert [line for line in injected if line in memories] == list(memories[:3])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_mode", "agent_mode", "expected_limit", "expected"),
+    [
+        ("keyword", "semantic", 20, ["The shed is painted green", "The shed roof is copper"]),
+        (
+            "semantic",
+            "keyword",
+            3,
+            ["The shed is painted green", "The shed roof is copper", "Pixel eats salmon kibble"],
+        ),
+    ],
+)
+async def test_per_turn_recall_uses_gap_selection(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_mode: str,
+    agent_mode: str,
+    expected_limit: int,
+    expected: list[str],
+) -> None:
+    """Only an agent whose effective search mode is semantic over-fetches and keeps the hits close to the best one."""
+    config.memory.search.mode = global_mode
+    config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
+    hits: list[MemoryResult] = [
+        {"id": "1", "memory": "The shed is painted green", "score": 0.90},
+        {"id": "2", "memory": "The shed roof is copper", "score": 0.87},
+        {"id": "3", "memory": "Pixel eats salmon kibble", "score": 0.60},
+    ]
+    limits: list[int] = []
+
+    async def search(*_args: object, limit: int, **_kwargs: object) -> MemorySearchOutcome:
+        limits.append(limit)
+        return MemorySearchOutcome(results=hits[:limit])
+
+    monkeypatch.setattr(memory_functions, "search_agent_memories", search)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert limits == [expected_limit]
+    injected = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
+    assert [line for line in injected if line in {hit["memory"] for hit in hits}] == expected
 
 
 @pytest.mark.asyncio
