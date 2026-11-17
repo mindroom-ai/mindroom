@@ -1111,11 +1111,12 @@ class ResponseRunner:
 
         An attempt that takes over one a restart cut short, a replay or the retry of an
         edit's regeneration, first recovers the runs those attempts stored in ``history_scope``,
-        so its request continues from their own messages and the account only points
-        at them; a regeneration nothing cut short starts fresh. A turn restarts cut short
-        more than ``_NATIVE_RECOVERY_LIMIT`` times recovers none and drops those it recovered
-        before, in case continuing from them is what stops it, and its account lists the
-        recorded calls instead; an approval pause is no restart.
+        so its request continues from their own messages; a regeneration nothing cut short
+        starts fresh. The account lists the recorded calls either way: a recovered run is
+        history like any run, which the agent's limits, the request's budget or a compaction
+        may leave out. A turn restarts cut short more than ``_NATIVE_RECOVERY_LIMIT`` times
+        recovers none and drops those it recovered before, in case continuing from them is
+        what stops it; an approval pause is no restart.
         """
         handle = current_span()
         if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
@@ -1135,27 +1136,21 @@ class ResponseRunner:
             # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.
             continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: recovered}
             request = replace(request, matrix_run_metadata=continued)
-        return self._with_recorded_interrupted_attempt(request, handle, recorded, recovered=bool(recovered))
+        return self._with_recorded_interrupted_attempt(request, handle, recorded)
 
     def _with_recorded_interrupted_attempt(
         self,
         request: ResponseRequest,
         handle: SpanHandle,
         recorded: tuple[ToolTraceEntry, ...],
-        *,
-        recovered: bool = False,
     ) -> ResponseRequest:
-        """Tell a new attempt what its stopped attempts showed and which tool calls they made, from the reply's records.
-
-        ``recovered`` says history replays those attempts' own messages, so the account lists none of their calls.
-        """
+        """Tell a new attempt what its stopped attempts showed and which tool calls they made, from the reply's records."""
         unfinished = handle.resumed if handle.span.kind is rl.SpanKind.REPLAY else None
         model_prompt = interrupted_attempt_model_prompt(
             request.model_prompt if request.model_prompt is not None else request.prompt,
             span_kind=handle.span.kind,
             unfinished=unfinished,
             recorded=recorded,
-            recovered=recovered,
         )
         if model_prompt is None:
             return request
@@ -1164,7 +1159,6 @@ class ResponseRunner:
             response_event_id=existing_event_id(request),
             attempt_shown=unfinished is not None,
             recorded_tool_calls=len(recorded),
-            recovered=recovered,
         )
         return replace(request, model_prompt=model_prompt)
 

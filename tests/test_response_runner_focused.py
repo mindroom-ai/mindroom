@@ -1929,7 +1929,7 @@ async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_be
     attempts: int,
     natively: bool,
 ) -> None:
-    """A replay recovers its interrupted run and points at it; a third interruption goes back to the previews."""
+    """A replay recovers its interrupted run until a third interruption; its prompt lists the recorded calls either way."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     scope = runner.deps.state_writer.history_scope()
     storage = runner.deps.state_writer.create_storage(None)
@@ -1964,9 +1964,11 @@ async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_be
     assert stored is not None
     assert stored.status is (RunStatus.completed if natively else RunStatus.cancelled)
     assert [message.role for message in stored.messages] == ["user", "assistant", *(["tool"] if natively else [])]
+    # History may trim or fold the recovered run like any other, so the account never relies on it.
     account = html.unescape(replayed.model_prompt or "")
-    assert ("are in the conversation above" in account) is natively
-    assert ("The `counter` tool finished" in account) is not natively
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+    assert "their effects stand: do not call a finished tool with side effects again" in account
+    assert "conversation above" not in account
     # The turn's runs name the recovered run they continue.
     assert (replayed.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == (["run-1"] if natively else None)
 
@@ -2015,7 +2017,7 @@ async def test_a_regeneration_a_restart_cut_short_continues_from_its_recovered_r
     stored = storage.get_run("run-1")
     assert stored is not None
     assert stored.status is (RunStatus.completed if recovers else RunStatus.cancelled)
-    assert ("are in the conversation above" in html.unescape(regenerated.model_prompt or "")) is recovers
+    assert (regenerated.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == (["run-1"] if recovers else None)
 
 
 @pytest.mark.asyncio
