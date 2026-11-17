@@ -331,9 +331,9 @@ Messages in encrypted rooms are not readable: each shows as `[encrypted, not rea
 | Action | Does |
 |--------|------|
 | `send` | Sends `message`, the conversation's `attachments` (attachment IDs), or both into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none; `thread_id` sends into that thread, and `event_id` replies to that message |
-| `react` | Reacts to the message `event_id` in `room_id` with `emoji` |
+| `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
 | `edit` | Replaces the text of the owner's own message `event_id` in `room_id` with `message` |
-| `redact` | Deletes the owner's own message `event_id` in `room_id`, with `message` as the reason |
+| `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
 | `join`, `leave` | Joins `room_id`, a room ID or alias, or leaves it |
 | `invite` | Invites `user_id` into `room_id` |
 | `create_room` | Creates a private room called `name`, inviting `user_id` if given |

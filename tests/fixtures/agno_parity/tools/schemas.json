@@ -17889,7 +17889,7 @@
       },
       {
         "name": "matrix_user_write",
-        "description": "Act in Matrix as your owner, only when they ask for exactly that; they confirm each call.\nAgents never act on what you send this way: to talk to one, write as yourself.\n\nActions:\n- send: message and/or attachments (attachment IDs) to room_id, or to user_id in their DM (made if missing).\n  thread_id sends into that thread; event_id replies to that message.\n- react: emoji on event_id in room_id.\n- edit: Replace your owner's message event_id in room_id with message.\n- redact: Remove your owner's event event_id in room_id; message is the reason.\n- join: room_id, an ID or #alias. leave: room_id. invite: user_id into room_id.\n- create_room: A private room called name, inviting user_id if given.",
+        "description": "Act in Matrix as your owner, only when they ask for exactly that; they confirm each call.\nAgents never act on what you send this way: to talk to one, write as yourself.\n\nActions:\n- send: message and/or attachments (attachment IDs) to room_id, or to user_id in their DM (made if missing).\n  thread_id sends into that thread; event_id replies to that message.\n- react: emoji on event_id in room_id.\n- edit: Replace your owner's message event_id in room_id with message.\n- redact: Remove your owner's message or reaction event_id in room_id; message is the reason.\n- join: room_id, an ID or #alias. leave: room_id. invite: user_id into room_id.\n- create_room: A private room called name, inviting user_id if given.",
         "parameters": {
           "type": "object",
           "properties": {

@@ -273,7 +273,7 @@ class MatrixUserTools(Toolkit):
           thread_id sends into that thread; event_id replies to that message.
         - react: emoji on event_id in room_id.
         - edit: Replace your owner's message event_id in room_id with message.
-        - redact: Remove your owner's event event_id in room_id; message is the reason.
+        - redact: Remove your owner's message or reaction event_id in room_id; message is the reason.
         - join: room_id, an ID or #alias. leave: room_id. invite: user_id into room_id.
         - create_room: A private room called name, inviting user_id if given.
         """

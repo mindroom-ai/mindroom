@@ -58,6 +58,7 @@ CREATE_PATH = f"{CLIENT}/createRoom"
 THREAD_PATH = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
 ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
+REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
 
 
@@ -645,6 +646,83 @@ async def test_edit_and_redact_refuse_another_persons_event(
         f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
     )
     assert _changes(homeserver) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["redact", "edit"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        room_event("$own", "m.room.create", {"room_version": "11"}, sender=OWNER, state_key=""),
+        room_event("$own", "m.room.name", {"name": "Planning"}, sender=OWNER, state_key=""),
+        room_event("$own", "m.room.member", {"membership": "join"}, sender=OWNER, state_key=OWNER),
+    ],
+    ids=["create", "name", "member"],
+)
+async def test_a_room_setting_cannot_be_redacted_or_edited(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    action: str,
+    state: dict[str, object],
+) -> None:
+    """The owner sent the events that made and set up their rooms, but only their messages and reactions are offered."""
+    homeserver.answers[OWN_EVENT_PATH] = state
+    homeserver.answers[f"{ROOM_PATH}/redact/$own/*"] = {"event_id": "$redaction"}
+
+    result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message="Hello")
+
+    assert result == _error(
+        action,
+        f"Only messages and reactions can be changed this way, and $own is room state of type {state['type']}.",
+    )
+    assert _changes(homeserver) == []
+    assert len(homeserver.requests_to(OWN_EVENT_PATH)) == 1
+
+
+@pytest.mark.asyncio
+async def test_only_a_message_can_be_edited(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An edit replaces a message's text, so the owner's reaction is not edited, though it can be removed."""
+    reaction = {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$message", "key": "👍"}}
+    homeserver.answers[OWN_EVENT_PATH] = room_event("$own", "m.reaction", reaction, sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/redact/$own/*"] = {"event_id": "$redaction"}
+
+    edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message="Hello")
+    assert edited == _error("edit", "Only messages can be edited, and $own is of type m.reaction.")
+    assert _changes(homeserver) == []
+
+    redacted = await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id="$own")
+    assert redacted == _ok("redact", room_id=ROOM, event_id="$redaction")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("emoji", "refused"),
+    [("👍" * 9, True), ("👍 👍", True), ("👍" * 8, False)],
+    ids=["nine-characters", "a-space", "eight-characters"],
+)
+async def test_a_reaction_must_be_one_short_emoji(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    emoji: str,
+    *,
+    refused: bool,
+) -> None:
+    """A reaction acknowledges a message, as one the `react` tool sends does, so a sentence is never one."""
+    result = await _write(config, paths, homeserver, action="react", room_id=ROOM, event_id="$own", emoji=emoji)
+
+    reacted = [content["m.relates_to"]["key"] for content in _sent(homeserver, event_type="m.reaction")]
+    if refused:
+        assert result == _error("react", REACTION_KEY)
+        assert homeserver.requests == []
+    else:
+        assert result == _ok("react", room_id=ROOM, event_id="$reaction")
+        assert reacted == [emoji]
 
 
 @pytest.mark.asyncio

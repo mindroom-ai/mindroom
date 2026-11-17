@@ -34,6 +34,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     room_encrypted,
     room_needed,
 )
+from mindroom.custom_tools.react import reaction_key_error
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
@@ -79,10 +80,6 @@ _CONTACT_ROOM = "Nothing is written as your owner into a contact room."
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
-def _given(text: str | None) -> bool:
-    return text is not None and bool(text.strip())
-
-
 def _names_room(room_id: str | None, *, alias: bool) -> bool:
     return room_id is not None and room_id.startswith(("!", "#") if alias else "!")
 
@@ -107,7 +104,7 @@ def _command_problem(text: str | None) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class MatrixUserWrite:
-    """One write the model asked for, by its arguments."""
+    """One write the model asked for, by its arguments; one it left blank is None."""
 
     action: str
     room_id: str | None = None
@@ -121,12 +118,12 @@ class MatrixUserWrite:
     attachments: tuple[str, ...] = ()
     name: str | None = None
 
-    def problem(self) -> str | None:
+    def problem(self) -> str | None:  # noqa: PLR0911 - one return per action's own check
         """Return what the arguments lack, or why they are refused, without asking the homeserver anything."""
         if self.action == "send":
             return self._send_problem()
         if self.action == "create_room":
-            return _user_problem(self.user_id) if _given(self.name) else "create_room needs name."
+            return _user_problem(self.user_id) if self.name is not None else "create_room needs name."
         alias = self.action == "join"
         if not _names_room(self.room_id, alias=alias):
             return room_needed(self.action, alias=alias)
@@ -136,9 +133,12 @@ class MatrixUserWrite:
             "redact": {"event_id": self.event_id},
             "invite": {"user_id": self.user_id},
         }.get(self.action, {})
-        missing = next((name for name, value in needed.items() if not _given(value)), None)
+        missing = next((name for name, value in needed.items() if value is None), None)
         if missing is not None:
             return f"{self.action} needs {missing}."
+        if self.action == "react":
+            # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
+            return reaction_key_error(str(self.emoji).strip())
         if self.action == "edit":
             return _command_problem(self.message)
         return _user_problem(self.user_id) if self.action == "invite" else None
@@ -150,9 +150,9 @@ class MatrixUserWrite:
             return room_needed("send")
         if (problem := _user_problem(self.user_id)) is not None:
             return problem
-        if not _given(self.message) and not self.attachments:
+        if self.message is None and not self.attachments:
             return _NOTHING_TO_SEND
-        if self.event_id is not None and not _given(self.message):
+        if self.event_id is not None and self.message is None:
             return _REPLY_NEEDS_TEXT
         return _command_problem(self.message)
 
@@ -332,7 +332,7 @@ async def _send(
         msg = f"{_made_dm(room_id, str(write.user_id))}. {refused}"
         raise MatrixRequestError(msg) from None
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
-    if write.message is not None and write.message.strip():
+    if write.message is not None:
         content = format_message_with_mentions(
             turn.config,
             turn.runtime_paths,
@@ -387,11 +387,11 @@ async def _event_write(
     written: _Written,
     marker: dict[str, str],
 ) -> dict[str, object]:
-    """React to an event, or edit or redact one of the person's own."""
+    """React to an event, edit one of the person's own messages, or redact one of their own messages or reactions."""
     room_id, event_id = str(write.room_id), str(write.event_id)
     if write.action == "redact":
         # A redaction carries no text that encryption would protect.
-        await _require_own_event(client, room_id, event_id, actor.person_user_id)
+        await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=False)
         reason = (write.message or "").strip()
         written.content = {**({"reason": reason} if reason else {}), **marker}
         path = f"/rooms/{quote(room_id, safe='')}/redact/{quote(event_id, safe='')}/{uuid4().hex}"
@@ -410,7 +410,7 @@ async def _event_write(
             operation="matrix_user_react",
         )
     else:
-        await _require_own_event(client, room_id, event_id, actor.person_user_id)
+        await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text, extra_content=marker)
         # The marker on both layers: history keeps the edit's replacement content.
@@ -431,10 +431,29 @@ async def _event_write(
     return {"room_id": room_id, "event_id": written.event_ids[0]}
 
 
-async def _require_own_event(client: nio.AsyncClient, room_id: str, event_id: str, person: str) -> None:
-    sender = (await read_event(client, room_id, event_id)).get("sender")
+async def _require_changeable(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    person: str,
+    *,
+    edit: bool,
+) -> None:
+    """Refuse an event that is not the person's own message or reaction, or, for an edit, not their own message.
+
+    The events that made a room and set its name, topic, and members are state, many of them the person's own; the
+    toolkit offers to change none of them.
+    """
+    event = await read_event(client, room_id, event_id)
+    sender, event_type = event.get("sender"), event.get("type")
     if sender != person:
         msg = f"Only your owner's own events can be changed, and {event_id} was sent by {sender}."
+        raise MatrixRequestError(msg)
+    if "state_key" in event:
+        msg = f"Only messages and reactions can be changed this way, and {event_id} is room state of type {event_type}."
+        raise MatrixRequestError(msg)
+    if edit and event_type != "m.room.message":
+        msg = f"Only messages can be edited, and {event_id} is of type {event_type}."
         raise MatrixRequestError(msg)
 
 
