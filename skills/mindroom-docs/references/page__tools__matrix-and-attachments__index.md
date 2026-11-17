@@ -322,11 +322,11 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
-`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachments=None, name=None)` acts as the owner, and each call is approved by the owner on its card, or within an [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window they opened themselves, whatever the [approval rules](https://docs.mindroom.chat/tool-approval/) say, so the MCP gateway does not offer it.
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner, and each call is approved by the owner on its card, or within an [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window they opened themselves, whatever the [approval rules](https://docs.mindroom.chat/tool-approval/) say, so the MCP gateway does not offer it.
 
 | Action | Does |
 |--------|------|
-| `send` | Sends `message`, the conversation's `attachments` (attachment IDs), or both into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none; `thread_id` sends into that thread, and `event_id` replies to that message |
+| `send` | Sends one message into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
 | `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
 | `edit` | Replaces the text of the owner's own message `event_id` in `room_id` with `message` |
 | `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |

@@ -1,8 +1,9 @@
 """What the `matrix_user` toolkit writes as the person: a message or a file, reactions, edits, redactions, and membership.
 
-Each write makes at most one event, so none ends with only a part of it sent.
-Each event's content names the agent as its author before any send helper sees it, so the uploaded full text of a long
-message, which history reads instead of the event, says so too; the client marks every event again on the wire.
+Each write sends at most one message event or redaction, so none ends with only a part of it sent.
+Each message, file, reaction, edit, and redaction names the agent as its author in the content the send helpers are
+given, so the uploaded full text of a long message, which history reads instead of the event, says so too; the client
+marks each of them again on the wire. A join, leave, invitation, or new room carries no marker.
 Nothing is sent into an encrypted room, or one whose encryption could not be read: the client has no device, so the
 event would go out in plain text.
 """

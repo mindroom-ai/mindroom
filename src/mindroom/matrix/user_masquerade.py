@@ -2,7 +2,9 @@
 
 An application service may act as any user in its namespace by naming that user in each request's `user_id`
 parameter, so this client needs no login, device, or encryption keys of its own.
-Every event it sends is marked as the agent's, so MindRoom never treats it as the person's own message.
+Every message event and redaction it sends, which are the `send` and `redact` requests, is marked as the agent's, so
+MindRoom never treats it as the person's own message. No state event is marked: a membership, a new room, or room
+state it sets goes out as the person's own.
 """
 
 from __future__ import annotations
@@ -26,7 +28,8 @@ if TYPE_CHECKING:
 
 __all__ = ["create_user_masquerade_client", "user_appservice_token"]
 
-# The requests that create a room event: `send/<type>` and `redact/<event>`, each with or without a transaction ID.
+# The requests that send a message event or a redaction: `send/<type>` and `redact/<event>`, each with or without a
+# transaction ID.
 # Homeservers route a path with an empty segment too.
 # Matched at the end of the requested path, which begins with the homeserver URL's own path, if it has one.
 _EVENT_CREATING_PATH = re.compile(r"/_matrix/client/[^/]*/rooms/[^/]*/(?:send|redact)/[^/]*(?:/[^/]*)?\Z")
@@ -60,7 +63,7 @@ def _stamped_event_body(data: object, agent_user_id: str) -> str:
 
 
 class _UserMasqueradeClient(MindRoomAsyncClient):
-    """Name the person in every request and mark every event it sends as the agent's."""
+    """Name the person in every request and mark each message event and redaction it sends as the agent's."""
 
     def __init__(
         self,
@@ -120,7 +123,10 @@ def create_user_masquerade_client(
     person_user_id: str,
     agent_user_id: str,
 ) -> nio.AsyncClient:
-    """Return an HTTP-only client that acts as ``person_user_id`` and marks its events as ``agent_user_id``'s."""
+    """Return an HTTP-only client that acts as ``person_user_id`` and marks what it sends as ``agent_user_id``'s.
+
+    What it sends is each message event and redaction; state events carry no marker.
+    """
     client = _UserMasqueradeClient(
         runtime_matrix_homeserver(runtime_paths),
         runtime_paths,

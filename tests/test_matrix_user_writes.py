@@ -163,7 +163,7 @@ def config(paths: RuntimePaths) -> Config:
 
 @pytest.fixture
 def agent_id(config: Config, paths: RuntimePaths) -> str:
-    """The Matrix ID of Alice's personal agent, which marks every event it sends as hers."""
+    """The Matrix ID of Alice's personal agent, which marks each message event and redaction sent for her."""
     del config
     return current_entity_id(AGENT, paths).full_id
 
