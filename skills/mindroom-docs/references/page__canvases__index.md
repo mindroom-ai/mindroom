@@ -160,13 +160,14 @@ The room header's **Canvas** button lists the conversation's canvases, newest up
 ### Pages in the thread
 
 With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
-A page whose height follows its viewport, such as a `100vh` hero section, instead gets a window like a browser's (16:10 of its width, 568 to 1080 pixels) and scrolls inside it.
 Agents use it for mockups, diagrams, charts, and previews the user should see in the flow.
 An inline page is display-only: it cannot send answers or save state, and Chat never opens the panel for it, though **Open canvas** still shows it there.
 Updates keep a canvas inline.
 
 For an accurate preview of a website or app, the agent adds `raw=True`: Chat adds no styles or theme variables of its own, so browser defaults apply as in a normal tab.
 `width` (320 to 2560 pixels) renders the page at the viewport the design targets, such as 1440 for desktop or 390 for a phone, and scales it down to fit the conversation; it never scales up.
+A preview with `raw` or `width` is at most a browser window tall (16:10 of its width, 568 to 1080 pixels); taller content, such as a `100vh` hero section, scrolls inside it.
+Other inline pages grow with their content, so they must not use `vh` units.
 The panel shows raw pages too, at the panel's own width.
 `raw` and `width` belong to each update, so an update without them shows a themed page at reply width.
 
