@@ -12,7 +12,13 @@ import httpx
 import pytest
 
 from evals.memory_recall import judge, rerank_arms, run
-from evals.memory_recall.rerank_arms import RerankerSpec, measure_latency, rerank_turns, select_reranked
+from evals.memory_recall.rerank_arms import (
+    LatencySample,
+    RerankerSpec,
+    measure_latency,
+    rerank_turns,
+    select_reranked,
+)
 from evals.memory_recall.rerank_cache import CachedReranker, RerankCache
 from evals.memory_recall.run import latency_metrics, split_turns
 from evals.memory_recall.turns import write_turns
@@ -155,7 +161,7 @@ def test_split_is_seeded_and_disjoint() -> None:
 
 
 class _TimedReranker:
-    """Answers at once, after 50 ms for a query naming "slow", and raises for one naming "broken"; counts calls."""
+    """Answers at once, after 50 ms for a query naming "slow", raises for "broken", never for "stall"; counts calls."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -164,6 +170,8 @@ class _TimedReranker:
         self.calls += 1
         if "slow" in query:
             await asyncio.sleep(0.05)
+        if "stall" in query:
+            await asyncio.Event().wait()
         if "broken" in query:
             msg = "provider refused"
             raise RuntimeError(msg)
@@ -184,12 +192,14 @@ async def test_latency_mode_times_every_uncached_call_and_counts_fallbacks(monke
     candidates.insert(1, [])
     turns.insert(1, _turn("2026-01-15", "no candidates"))
 
-    calls = await measure_latency(timed, turns, candidates, count=4)
+    sample = await measure_latency(timed, turns, candidates, count=4)
 
     # One warm-up call, then every measured turn, a repeated query too.
     assert timed.calls == 5
-    assert [call.fallback for call in calls] == [False, False, True, True]
-    metrics = latency_metrics(calls)
+    assert sample.failure is None
+    assert [call.outcome for call in sample.calls] == ["ok", "ok", "ok", "error"]
+    assert [call.fallback for call in sample.calls] == [False, False, True, True]
+    metrics = latency_metrics(sample)
     assert metrics["latency_turns"] == 4
     assert metrics["latency_fallback_rate"] == 0.5
     assert metrics["latency_added_p95_ms"] == pytest.approx(20.0)
@@ -197,13 +207,58 @@ async def test_latency_mode_times_every_uncached_call_and_counts_fallbacks(monke
     assert metrics["latency_added_p50_ms"] < 20.0
 
 
+@pytest.mark.asyncio
+async def test_latency_mode_records_a_stalled_call_as_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call that never returns is stopped at the hard cap, counts as a timeout and fallback, and the run goes on."""
+    monkeypatch.setattr(rerank_arms, "DEADLINE_S", 0.005)
+    monkeypatch.setattr(rerank_arms, "CALL_CAP_S", 0.02)
+    queries = ["fast", "stall", "fast again"]
+
+    sample = await measure_latency(
+        _TimedReranker(),
+        [_turn("2026-01-15", query) for query in queries],
+        [_candidates(2) for _query in queries],
+        count=3,
+    )
+
+    assert sample.failure is None
+    assert [call.outcome for call in sample.calls] == ["ok", "timeout", "ok"]
+    assert sample.calls[1].seconds == 0.02
+    assert sample.calls[1].fallback
+    assert latency_metrics(sample)["latency_fallback_rate"] == pytest.approx(1 / 3)
+
+
+@pytest.mark.asyncio
+async def test_stalled_warm_up_fails_the_latency_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A warm-up that never returns ends the arm's latency measurement with a clear failure, not a hang."""
+    monkeypatch.setattr(rerank_arms, "CALL_CAP_S", 0.02)
+    timed = _TimedReranker()
+
+    sample = await measure_latency(
+        timed,
+        [_turn("2026-01-15", "stall"), _turn("2026-01-15", "fast")],
+        [_candidates(2), _candidates(2)],
+        count=2,
+    )
+
+    assert timed.calls == 1
+    assert sample.calls == []
+    assert sample.failure is not None
+    assert "warm-up" in sample.failure
+    metrics = latency_metrics(sample)
+    assert metrics["latency_failure"] == sample.failure
+    assert metrics["latency_added_p95_ms"] is None
+    assert metrics["latency_fallback_rate"] is None
+
+
 def test_latency_metrics_without_measurements_are_missing() -> None:
     """No measured call reports no latency and no fallback rate, never a zero."""
-    assert latency_metrics([]) == {
+    assert latency_metrics(LatencySample(calls=[], failure=None)) == {
         "latency_turns": 0,
         "latency_added_p50_ms": None,
         "latency_added_p95_ms": None,
         "latency_fallback_rate": None,
+        "latency_failure": None,
     }
 
 
@@ -271,13 +326,39 @@ async def test_threshold_sweep_reuses_scores(tmp_path: Path, monkeypatch: pytest
     assert splits["tuning"]["shipped"]["turns"] + splits["held_out"]["shipped"]["turns"] == len(turns)
     assert "Pixel" not in (out / "results.md").read_text()
 
-    # Latency mode calls the provider for every measured turn, uncached, and reports beside the quality rows.
-    await run.run_cli([*argv, "--latency-turns", "2"], transport=_judge_transport())
-    assert len(stub.requests) == len(turns) + 1 + 2
+
+@pytest.mark.asyncio
+async def test_latency_mode_samples_only_held_out_turns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Latency mode times uncached calls for held-out turns only, in order, and reports beside the quality rows."""
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
+    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
+    stub = _StubReranker()
+    spec = rerank_arms.RERANKERS["bge-reranker-v2-m3"]
+    monkeypatch.setitem(rerank_arms.RERANKERS, "bge-reranker-v2-m3", replace(spec, create=lambda _paths: stub))
+    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
+    queries = [f"garden shed colour {number}" for number in range(8)]
+    write_turns([_turn("2026-01-15", query) for query in queries], tmp_path / "turns.jsonl")
+    out = tmp_path / "out"
+
+    await run.run_cli(
+        [
+            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
+            *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
+            *("--arms", "A5", "--thresholds", "0.5", "--latency-turns", "100"),
+        ],
+        transport=_judge_transport(),
+    )
+
+    _tuning, held_out = split_turns(len(queries), seed=0)
+    # The quality pass scores every turn once; then a warm-up and one timed call per held-out turn follow.
+    timed = [query for query, _documents in stub.requests[len(queries) :]]
+    assert timed == [queries[held_out[0]], *(queries[index] for index in held_out)]
     latency = json.loads((out / "results.json").read_text())["latency"]
     assert set(latency) == {"A5"}
-    assert latency["A5"]["latency_turns"] == 2
+    assert latency["A5"]["latency_turns"] == len(held_out)
     assert latency["A5"]["latency_fallback_rate"] == 0.0
+    assert latency["A5"]["latency_failure"] is None
     assert "latency_added_p95_ms" in (out / "results.md").read_text()
 
 

@@ -5,17 +5,18 @@ a minimum reranker score), so the arm can switch to it once it exists. A turn wh
 hybrid selection, as live recall will.
 
 Quality and latency are measured apart. Quality (`rerank_turns`) reads cached scores and selects from every score a
-call returned, however long it took. Latency (`measure_latency`) times uncached calls one turn at a time against the
-live provider, and counts as a fallback each call that failed or passed the deadline live recall waits.
+call returned, however long it took. Latency (`measure_latency`) times uncached calls of held-out turns one at a time
+against the live provider, and counts as a fallback each call that failed or passed the deadline live recall waits.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.knowledge.rerank import create_reranker
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 
 #: Live recall falls back to the hybrid selection when its reranker takes longer than this.
 DEADLINE_S = 2.0
+#: Latency mode stops waiting for one call after this, records it as a timeout and moves on.
+CALL_CAP_S = 30.0
 _logger = logging.getLogger(__name__)
 
 
@@ -111,20 +114,29 @@ class TurnRerank:
 
 @dataclass(frozen=True)
 class LatencyCall:
-    """One uncached reranker call: its seconds, and whether it returned valid scores."""
+    """One uncached reranker call: its seconds (`CALL_CAP_S` for a timeout) and how it ended."""
 
     seconds: float
-    ok: bool
+    #: `ok` returned valid scores, `error` raised or returned invalid ones, `timeout` hit `CALL_CAP_S`.
+    outcome: Literal["ok", "error", "timeout"]
 
     @property
     def fallback(self) -> bool:
         """Whether live recall would have kept the hybrid selection: the call failed or passed the deadline."""
-        return not self.ok or self.seconds > DEADLINE_S
+        return self.outcome != "ok" or self.seconds > DEADLINE_S
 
     @property
     def added_seconds(self) -> float:
         """The wait the call adds to a live turn, which stops waiting at the deadline."""
         return min(self.seconds, DEADLINE_S)
+
+
+@dataclass(frozen=True)
+class LatencySample:
+    """One arm's timed calls, and why its measurement stopped early, if it did."""
+
+    calls: list[LatencyCall]
+    failure: str | None
 
 
 async def rerank_turns(
@@ -164,11 +176,14 @@ async def measure_latency(
     candidates: Sequence[Sequence[MemoryResult] | None],
     *,
     count: int,
-) -> list[LatencyCall]:
-    """Time the uncached reranker call of the first `count` turns that have candidates, one turn at a time.
+) -> LatencySample:
+    """Time the uncached reranker call of the first `count` given turns that have candidates, one turn at a time.
 
-    One untimed warm-up call first loads what a long-running process keeps loaded, such as a local model. A call is
-    not cancelled at the deadline, so a slow call cannot delay the next one; it counts as a fallback instead.
+    One untimed warm-up call first loads what a long-running process keeps loaded, such as a local model; a warm-up
+    that reaches `CALL_CAP_S` ends the measurement with a failure. A call is not cancelled at the deadline, so a slow
+    call does not leave work behind to delay the next one; it counts as a fallback instead. A call still running at
+    `CALL_CAP_S` is cancelled and recorded as a timeout. A local model's thread cannot be stopped, so the next call
+    may wait behind it.
     """
     requests = [
         (turn.query, [candidate.get("memory", "") for candidate in turn_candidates])
@@ -176,23 +191,32 @@ async def measure_latency(
         if turn_candidates
     ][:count]
     if not requests:
-        return []
+        return LatencySample(calls=[], failure=None)
     try:
-        await reranker.ascore(*requests[0])
+        async with asyncio.timeout(CALL_CAP_S):
+            await reranker.ascore(*requests[0])
+    except TimeoutError:
+        return LatencySample(calls=[], failure=f"warm-up call did not return within {CALL_CAP_S:g} s")
     except Exception as exc:  # the warm-up only loads; the timed call of this turn reports its outcome
         _logger.warning("Warm-up rerank call failed: %.300s", exc)
     calls: list[LatencyCall] = []
     for query, texts in requests:
         start = time.perf_counter()
         try:
-            checked_scores(await reranker.ascore(query, texts), len(texts))
+            async with asyncio.timeout(CALL_CAP_S):
+                scores = await reranker.ascore(query, texts)
+            checked_scores(scores, len(texts))
+        except TimeoutError:
+            _logger.warning("Timed rerank call did not return within %g s", CALL_CAP_S)
+            calls.append(LatencyCall(seconds=CALL_CAP_S, outcome="timeout"))
+            continue
         except Exception as exc:  # any failure: live recall keeps the hybrid selection
             _logger.warning("Timed rerank call failed: %.300s", exc)
-            ok = False
+            outcome = "error"
         else:
-            ok = True
-        calls.append(LatencyCall(seconds=time.perf_counter() - start, ok=ok))
-    return calls
+            outcome = "ok"
+        calls.append(LatencyCall(seconds=time.perf_counter() - start, outcome=outcome))
+    return LatencySample(calls=calls, failure=None)
 
 
 def select_reranked(

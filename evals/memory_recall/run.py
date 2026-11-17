@@ -32,7 +32,7 @@ from mindroom.token_counting.families import load_o200k
 
 from .arms import ARMS, replay
 from .judge import JudgeCache, Verdict, judge_hits
-from .rerank_arms import RERANKERS, LatencyCall, TurnRerank, measure_latency, rerank_turns, select_reranked
+from .rerank_arms import RERANKERS, LatencySample, TurnRerank, measure_latency, rerank_turns, select_reranked
 from .rerank_cache import CachedReranker, RerankCache
 from .turns import read_turns
 
@@ -64,7 +64,13 @@ _METRIC_COLUMNS = (
     "rerank_errors",
     "usd_per_turn_estimate",
 )
-_LATENCY_COLUMNS = ("latency_turns", "latency_added_p50_ms", "latency_added_p95_ms", "latency_fallback_rate")
+_LATENCY_COLUMNS = (
+    "latency_turns",
+    "latency_added_p50_ms",
+    "latency_added_p95_ms",
+    "latency_fallback_rate",
+    "latency_failure",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -98,7 +104,7 @@ def _parser() -> argparse.ArgumentParser:
         "--latency-turns",
         type=int,
         default=0,
-        help="Also time this many uncached reranker calls of each rerank arm, one turn at a time (default: none)",
+        help="Also time this many uncached reranker calls of each rerank arm, held-out turns only (default: none)",
     )
     return parser
 
@@ -132,7 +138,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     splits = {"all": list(range(len(turns))), "tuning": tuning, "held_out": held_out}
 
     results: dict[str, dict[str, dict[str, float]]] = {split: {} for split in splits}
-    latency: dict[str, dict[str, float | None]] = {}
+    latency: dict[str, dict[str, float | str | None]] = {}
     with JudgeCache(out / "judge.sqlite") as cache, RerankCache(out / "rerank.sqlite") as rerank_cache:
         async with httpx.AsyncClient(transport=transport) as client:
             for name in args.arms.split(","):
@@ -144,7 +150,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     runtime_paths=runtime_paths,
                     index_dir=index_dir,
                 )
-                rows, calls = await _arm_rows(
+                rows, sample = await _arm_rows(
                     name,
                     ARMS[name],
                     turns,
@@ -153,9 +159,10 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     rerank_cache=rerank_cache,
                     runtime_paths=runtime_paths,
                     latency_turns=args.latency_turns,
+                    held_out=held_out,
                 )
-                if calls is not None:
-                    latency[name] = latency_metrics(calls)
+                if sample is not None:
+                    latency[name] = latency_metrics(sample)
                 for row, selected, reranked in rows:
                     # A turn whose search failed is left out of every metric but `search_errors`.
                     hits = {index: turn_hits for index, turn_hits in enumerate(selected) if turn_hits is not None}
@@ -212,8 +219,9 @@ async def _arm_rows(
     rerank_cache: RerankCache,
     runtime_paths: RuntimePaths,
     latency_turns: int,
-) -> tuple[list[_Row], list[LatencyCall] | None]:
-    """Return the arm's rows and, for a rerank arm with `latency_turns`, its timed uncached calls.
+    held_out: Sequence[int],
+) -> tuple[list[_Row], LatencySample | None]:
+    """Return the arm's rows and, for a rerank arm with `latency_turns`, its timed uncached calls of held-out turns.
 
     The rows are the arm itself, or for a rerank arm one row per threshold, all from one scoring of the turns.
     """
@@ -229,7 +237,14 @@ async def _arm_rows(
         rubric_version=spec.rubric_version,
     )
     reranked = await rerank_turns(turns, replayed, reranker, spec)
-    calls = await measure_latency(inner, turns, replayed, count=latency_turns) if latency_turns else None
+    sample = None
+    if latency_turns:
+        sample = await measure_latency(
+            inner,
+            [turns[index] for index in held_out],
+            [replayed[index] for index in held_out],
+            count=latency_turns,
+        )
     rows: list[_Row] = [
         (
             f"{name}@{threshold:g}",
@@ -243,7 +258,7 @@ async def _arm_rows(
         )
         for threshold in thresholds
     ]
-    return rows, calls
+    return rows, sample
 
 
 def _count(text: str) -> int:
@@ -336,17 +351,19 @@ def rerank_metrics(reranked: Sequence[TurnRerank | None]) -> dict[str, float]:
     }
 
 
-def latency_metrics(calls: Sequence[LatencyCall]) -> dict[str, float | None]:
-    """Return the timed calls' count, the p50 and p95 wait (ms) they add to a turn, and their fallback share.
+def latency_metrics(sample: LatencySample) -> dict[str, float | str | None]:
+    """Return the timed calls' count, their p50 and p95 added wait (ms), fallback share, and any early failure.
 
     Without any timed call the latency and fallback values are None (missing), never 0.
     """
+    calls = sample.calls
     added = [call.added_seconds * 1000 for call in calls]
     return {
         "latency_turns": len(calls),
         "latency_added_p50_ms": _nearest_rank(added, 0.5) if added else None,
         "latency_added_p95_ms": _nearest_rank(added, 0.95) if added else None,
         "latency_fallback_rate": sum(call.fallback for call in calls) / len(calls) if calls else None,
+        "latency_failure": sample.failure,
     }
 
 
@@ -362,7 +379,7 @@ def _nearest_rank(values: Sequence[float], quantile: float) -> float:
     return ordered[max(math.ceil(quantile * len(ordered)), 1) - 1]
 
 
-def _markdown(results: Mapping[str, Mapping[str, float | None]], columns: Sequence[str]) -> str:
+def _markdown(results: Mapping[str, Mapping[str, float | str | None]], columns: Sequence[str]) -> str:
     """Return the metrics as a Markdown table, one row per arm; a missing value shows as `n/a`."""
     lines = [
         "| arm | " + " | ".join(columns) + " |",
@@ -374,7 +391,7 @@ def _markdown(results: Mapping[str, Mapping[str, float | None]], columns: Sequen
     return "\n".join(lines) + "\n"
 
 
-def _cell(value: float | None) -> str:
+def _cell(value: float | str | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.3f}" if isinstance(value, float) else str(value)

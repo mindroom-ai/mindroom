@@ -50,9 +50,12 @@ A turn whose reranker fails, or returns a wrong count or a non-finite score, kee
 Selection uses every score a call returned, however long it took, so the quality rows say nothing about latency.
 
 Latency is measured apart, with `--latency-turns N` (the gate uses 200): after one untimed warm-up call, each rerank
-arm calls its provider, uncached, for the first N turns that have candidates, one turn at a time.
+arm calls its provider, uncached, for the first N held-out turns that have candidates, one turn at a time, so every
+gate rule is checked on held-out turns.
 A call that fails or takes over 2 seconds (live recall's deadline) is a fallback, and adds 2 seconds to the turn.
 Calls are not cancelled at the deadline, so a slow call cannot delay the next one.
+A call still running after 30 seconds (`CALL_CAP_S`) is cancelled and recorded as a timeout, a fallback, and the
+measurement goes on; a warm-up still running then ends the arm's latency measurement with `latency_failure`.
 Run it against the live provider on a machine that is not busy with anything else.
 `openai_decisions` and `typesafe` are listed with their list prices but need the judgment reranker (unified-retrieval
 PR 4) before an arm can use them.
@@ -115,6 +118,7 @@ Latency table (`--latency-turns` only), per rerank arm:
 
 - `latency_turns`: calls timed.
 - `latency_added_p50_ms`, `latency_added_p95_ms`: the wait a call adds to a live turn, at most the 2-second deadline.
-- `latency_fallback_rate`: share of timed calls that failed or passed the deadline.
+- `latency_fallback_rate`: share of timed calls that failed, timed out or passed the deadline.
+- `latency_failure`: why the measurement stopped before timing any call (a stalled warm-up), else `n/a`.
 
 With no call timed, the percentiles and the fallback rate are `n/a` (JSON `null`), never 0.
