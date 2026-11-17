@@ -409,8 +409,8 @@ async def _event_write(
     else:
         await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
         text = str(write.message).strip()
-        new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text, extra_content=marker)
-        # The marker on both layers: history keeps the edit's replacement content.
+        new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
+        # ``extra_content`` puts the marker on both layers, as history keeps the edit's replacement content.
         written.content = build_edit_event_content(
             event_id=event_id,
             new_content=new_content,
