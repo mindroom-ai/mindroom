@@ -643,22 +643,14 @@ def _prepared_history_with_scheduled_limit(
     prepared_history: PreparedHistoryState,
     max_persisted_messages: int,
 ) -> PreparedHistoryState:
-    """Intersect persisted replay with the scheduled turn's remaining message budget.
-
-    The recovered runs the turn continues replay under any plan, so a plan without history keeps their form.
-    """
-    plan = prepared_history.replay_plan
+    """Intersect persisted replay with the scheduled turn's remaining message budget."""
     if max_persisted_messages <= 0:
         return replace(
             prepared_history,
-            replay_plan=ResolvedReplayPlan(
-                mode="disabled",
-                estimated_tokens=0,
-                add_history_to_context=False,
-                recovered_as_account=plan is not None and plan.recovered_as_account,
-            ),
+            replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
             replays_persisted_history=False,
         )
+    plan = prepared_history.replay_plan
     if plan is None or not plan.add_history_to_context or plan.mode == "disabled":
         return prepared_history
     if plan.num_history_messages is not None and plan.num_history_messages <= max_persisted_messages:
