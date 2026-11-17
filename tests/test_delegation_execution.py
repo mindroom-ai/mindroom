@@ -479,11 +479,16 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("feed", [True, False], ids=["feed", "no_feed"])
 async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_caller_s_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    feed: bool,
 ) -> None:
-    """The caller's progress names when the paused call was first announced, the start its feed row keeps."""
+    """The caller's progress names when the paused call was first announced, the start its feed row keeps.
+
+    Without a feed, as when live frames are off, the progress names the same first start.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
     identity = _leader_identity()
@@ -498,7 +503,7 @@ async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_ca
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: clock.now))
     snapshots: list[SubagentSnapshot] = []
-    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: snapshots.append)
+    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: snapshots.append if feed else None)
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
 
@@ -517,8 +522,7 @@ async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_ca
 
     assert isinstance(result, CompletedApprovalRun)
     starts = [item.started_at for snapshot in snapshots for item in snapshot.items if item.kind == "tool"]
-    assert starts
-    assert set(starts) == {100.0}
+    assert set(starts) == ({100.0} if feed else set())
     calling = [line for report in reports for line in report.splitlines() if line.startswith("Calling")]
     assert calling
     assert set(calling) == {"Calling write_report (started 00:01:40 UTC)"}

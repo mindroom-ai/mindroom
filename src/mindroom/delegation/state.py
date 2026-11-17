@@ -159,6 +159,18 @@ class DelegationChild:
     cost_usd: float | None = None
     # What the subagent turns whose results the turn received cost so far, across its pauses, None for none of known cost.
     subagents_cost_usd: float | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a child kept when its running tool calls started.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `tool_started_at`.
+    # Last legacy release: v2026.11.370; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as having no call started, so a call it resumes after a pause is
+    # reported as started when it is announced again, as those releases' progress named no start at all. It stays on
+    # the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
+    # tests/test_delegation_execution.py::test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_caller_s_progress.
+    # Unix seconds when each of the turn's tool calls that has not completed was first announced, across its pauses,
+    # by call id; the caller's progress and the feed's row name it.
+    tool_started_at: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:

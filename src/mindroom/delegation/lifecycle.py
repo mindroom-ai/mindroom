@@ -309,19 +309,15 @@ async def finish_child_turn(
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
 
 
-def _publish[T](delegation_id: str, update: Callable[[ActivityFeed], T]) -> T | None:
-    """Apply one update to a child's open feed, if any; a failure is logged and dropped, so it never reaches the child.
-
-    Return what the update returned, or None without a feed or after a failure.
-    """
+def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
+    """Apply one update to a child's open feed, if any; a failure is logged and dropped, so it never reaches the child."""
     feed = ActivityFeed.find(delegation_id)
     if feed is None:
-        return None
+        return
     try:
-        return update(feed)
+        update(feed)
     except Exception:
         logger.exception("Sub-agent activity update failed", delegation_id=delegation_id)
-        return None
 
 
 def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation) -> SubagentSink | None:
@@ -468,17 +464,18 @@ async def observe_child_event(event: RunEvent) -> None:
         _report_child_activity(observation, event.text)
         _publish(delegation_id, lambda feed: feed.text(event.text))
     elif isinstance(event, ToolStarted):
-        # The caller's progress names the start the feed's row keeps, the first announcement's for a resumed call, so
-        # a caller can tell how long the call has run.
-        now = time.time()
-        started_at = _publish(delegation_id, lambda feed: feed.tool_started(event, now=now))
-        started = datetime.fromtimestamp(now if started_at is None else started_at, UTC).strftime("%H:%M:%S")
+        # One start for the caller's progress and the feed's row, the first announcement's for a call that resumes
+        # after a pause, so a caller can tell how long the call has run.
+        started_at = observation.child.tool_started_at.setdefault(event.call.tool_call_id, time.time())
+        started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
         _report_child_activity(observation, f"\nCalling {event.call.tool_name} (started {started} UTC)\n")
+        _publish(delegation_id, lambda feed: feed.tool_started(event, now=started_at))
     elif isinstance(event, RunFinished):
         if not observation.owns(record := event.record):
             return
         observation.response = record
     elif isinstance(event, ToolCompleted):
+        observation.child.tool_started_at.pop(event.call.tool_call_id, None)
         _publish(delegation_id, lambda feed: feed.tool_completed(event))
     else:
         return

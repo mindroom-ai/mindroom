@@ -204,14 +204,10 @@ class _SubagentActivity:
             self.items_dropped += _cut_oldest_text(self._items, _CUT_TEXT_CHARACTERS + _REDACTION_MARGIN)
             self._hidden = None
 
-    def tool_started(self, event: ToolStarted, *, now: float) -> float:
-        """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start.
-
-        Return the row's start.
-        """
+    def tool_started(self, event: ToolStarted, *, now: float) -> None:
+        """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start."""
         _, entry = format_tool_started_event(event.call)
-        started_at = self._set_tool(event.call.tool_call_id, _public_entry(entry), "running", started_at=now)
-        return now if started_at is None else started_at
+        self._set_tool(event.call.tool_call_id, _public_entry(entry), "running", started_at=now)
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
@@ -225,16 +221,13 @@ class _SubagentActivity:
         state: Literal["running", "done", "error"],
         *,
         started_at: float | None,
-    ) -> float | None:
-        """Update the call's newest row, keeping its start, else append one; past the cap, drop the oldest tool row.
-
-        Return the row's start.
-        """
+    ) -> None:
+        """Update the call's newest row, keeping its start, else append one; past the cap, drop the oldest tool row."""
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
             if item.kind == "tool" and item.tool_call_id == tool_call_id:
                 self._items[index] = replace(item, tool=entry, state=state)
-                return item.started_at
+                return
         self._items.append(
             _SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state, started_at=started_at),
         )
@@ -242,7 +235,6 @@ class _SubagentActivity:
         if len(tools) > _MAX_TOOL_ITEMS:
             del self._items[tools[0]]
             self.items_dropped += 1
-        return started_at
 
     def set_status(self, status: _SubagentStatus, now: float, *, result: str | None = None) -> None:
         """Move to a status; terminal ones set `ended_at`, `running` clears it."""
@@ -341,11 +333,10 @@ class ActivityFeed:
         self._activity.add_text(text)
         self._mark()
 
-    def tool_started(self, event: ToolStarted, *, now: float) -> float:
-        """Add a running tool row started at ``now``; it goes out with the next window's snapshot. Return its start."""
-        started_at = self._activity.tool_started(event, now=now)
+    def tool_started(self, event: ToolStarted, *, now: float) -> None:
+        """Add a running tool row started at ``now``; it goes out with the next window's snapshot."""
+        self._activity.tool_started(event, now=now)
         self._mark()
-        return started_at
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish a tool row; it goes out with the next window's snapshot."""

@@ -660,6 +660,29 @@ async def test_a_childs_progress_names_when_its_tool_call_started(
 
 
 @pytest.mark.asyncio
+async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_anew(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """A provider may reuse a call id within a run; the later call names its own start, not the finished one's."""
+    clock = iter([100.0, 200.0])
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    assert [item.started_at for item in last.items if item.kind == "tool"] == [100.0]
+    calling = [line for line in reports[-1].splitlines() if line.startswith("Calling")]
+    assert calling == ["Calling add (started 00:01:40 UTC)", "Calling add (started 00:03:20 UTC)"]
+
+
+@pytest.mark.asyncio
 async def test_a_nested_child_names_its_parent_and_the_leader_as_root_caller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
