@@ -324,6 +324,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
             current_history_tokens=11,
             runs_before=1,
             compaction_lifecycle=lifecycle,
+            phase="pre_turn",
             compact=partial(
                 _compact_before_reply,
                 storage=storage,

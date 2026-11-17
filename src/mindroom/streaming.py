@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
@@ -2166,6 +2167,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     extra_content: Mapping[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    compactions: ReplyCompactions | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
@@ -2183,7 +2185,9 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
     stream continues below it instead of replacing it. ``placeholder_ready``
     resolves ``True`` once a reply that started without a placeholder may show one.
+    ``compactions`` records the reply's automatic compactions, which the stream does not show yet.
     """
+    del compactions  # Not shown by the stream yet; the caller's terminal writes carry the entries.
     sc = config.defaults.streaming
     streaming = streaming_cls(
         final_text_transform=final_text_transform,

@@ -3018,6 +3018,12 @@ visibility = [
     "mindroom.response_turn",
 ]
 
+# A reply's automatic compactions, recorded on the reply itself instead of a separate notice.
+[[modules]]
+path = "mindroom.history.reply_compactions"
+depends_on = []
+visibility = ["mindroom.response_runner"]
+
 [[modules]]
 path = "mindroom.history.turn_recorder"
 depends_on = [
@@ -3430,6 +3436,7 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.history.reply_compactions",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",

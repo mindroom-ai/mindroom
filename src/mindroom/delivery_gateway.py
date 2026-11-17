@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal.replies import Decide, PostCommitEffect
+    from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.history.types import (
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
@@ -492,6 +493,8 @@ class StreamingDeliveryRequest:
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
+    # The automatic compactions the reply runs, which its writes carry.
+    compactions: ReplyCompactions | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
@@ -1994,6 +1997,7 @@ class DeliveryGateway:
                 request.extra_content if request.extra_content is not None else {},
             ),
             tool_trace_collector=request.tool_trace_collector,
+            compactions=request.compactions,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             visible_progress_callback=request.visible_progress_callback,

@@ -1,0 +1,263 @@
+"""Tests for the per-reply compaction recorder and its lifecycle adapter."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
+import pytest
+
+from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
+from mindroom.history.types import (
+    CompactionLifecycleFailure,
+    CompactionLifecycleProgress,
+    CompactionLifecycleStart,
+    CompactionMode,
+    CompactionOutcome,
+)
+from tests.history_helpers import RecordingCompactionLifecycle
+
+if TYPE_CHECKING:
+    from mindroom.delivery_gateway import MatrixCompactionLifecycle
+
+
+def _start(mode: CompactionMode = "auto") -> CompactionLifecycleStart:
+    return CompactionLifecycleStart(
+        mode=mode,
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="haiku",
+        before_tokens=366_804,
+        history_budget_tokens=351_792,
+        runs_before=24,
+        phase="mid_turn",
+    )
+
+
+def _progress(entry_id: str | None, mode: CompactionMode = "auto") -> CompactionLifecycleProgress:
+    return CompactionLifecycleProgress(
+        mode=mode,
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="haiku",
+        before_tokens=366_804,
+        after_tokens=9_000,
+        history_budget_tokens=351_792,
+        runs_before=24,
+        compacted_run_count=9,
+        runs_remaining=15,
+        duration_ms=4_000,
+        notice_event_id=entry_id,
+    )
+
+
+def _outcome(entry_id: str | None, mode: CompactionMode = "auto") -> CompactionOutcome:
+    return CompactionOutcome(
+        mode=mode,
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary="summary",
+        summary_model="haiku",
+        before_tokens=366_804,
+        after_tokens=6_336,
+        window_tokens=400_000,
+        threshold_tokens=0,
+        runs_before=24,
+        runs_after=1,
+        compacted_run_count=24,
+        compacted_at="2026-11-17T00:00:00Z",
+        history_budget_tokens=351_792,
+        lifecycle_notice_event_id=entry_id,
+        duration_ms=8_400,
+    )
+
+
+def _failure(entry_id: str | None) -> CompactionLifecycleFailure:
+    return CompactionLifecycleFailure(
+        notice_event_id=entry_id,
+        mode="auto",
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="haiku-fallback",
+        status="timeout",
+        duration_ms=30_000,
+        failure_reason="Summary request timed out.",
+        history_budget_tokens=351_792,
+    )
+
+
+def _lifecycle(
+    recorder: ReplyCompactions,
+    notice: RecordingCompactionLifecycle | None = None,
+) -> ReplyCompactionLifecycle:
+    double = notice if notice is not None else RecordingCompactionLifecycle()
+    return ReplyCompactionLifecycle(recorder, cast("MatrixCompactionLifecycle", double))
+
+
+@pytest.mark.asyncio
+async def test_start_progress_success_updates_one_entry_in_place() -> None:
+    """One compaction stays one entry, edited by id from running to success."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+
+    entry_id = await lifecycle.start(_start())
+    assert entry_id is not None
+    await lifecycle.progress(_progress(entry_id))
+    running = recorder.content()
+    assert running is not None
+    assert running[0]["status"] == "running"
+    assert running[0]["runs_remaining"] == 15
+    assert running[0]["after_tokens"] == 9_000
+    await lifecycle.complete_success(_outcome(entry_id))
+
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert entry["id"] == entry_id
+    assert entry["status"] == "success"
+    assert entry["phase"] == "mid_turn"
+    assert entry["mode"] == "auto"
+    assert entry["after_tokens"] == 6_336
+    assert entry["compacted_run_count"] == 24
+    assert entry["duration_ms"] == 8_400
+    assert entry["before_tokens"] == 366_804
+    assert entry["history_budget_tokens"] == 351_792
+    assert entry["runs_before"] == 24
+    assert entry["summary_model"] == "haiku"
+    assert isinstance(entry["started_at"], int)
+    assert "runs_remaining" not in entry
+    assert "failure_reason" not in entry
+
+
+@pytest.mark.asyncio
+async def test_failure_sets_status_and_reason() -> None:
+    """A failed compaction ends in its failure status with the reason and without remaining runs."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+
+    entry_id = await lifecycle.start(_start())
+    await lifecycle.progress(_progress(entry_id))
+    await lifecycle.complete_failure(_failure(entry_id))
+
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert entry["status"] == "timeout"
+    assert entry["failure_reason"] == "Summary request timed out."
+    assert entry["summary_model"] == "haiku-fallback"
+    assert entry["duration_ms"] == 30_000
+    assert "runs_remaining" not in entry
+
+
+@pytest.mark.asyncio
+async def test_manual_goes_to_notice_and_routes_back() -> None:
+    """A requested compaction keeps its separate notice, and its later events reach that notice."""
+    recorder = ReplyCompactions()
+    notice = RecordingCompactionLifecycle(start_event_id="$notice")
+    lifecycle = _lifecycle(recorder, notice)
+
+    notice_id = await lifecycle.start(_start(mode="manual"))
+    assert notice_id == "$notice"
+    await lifecycle.progress(_progress(notice_id, mode="manual"))
+    await lifecycle.complete_success(_outcome(notice_id, mode="manual"))
+
+    assert [type(event) for event in notice.events] == [
+        CompactionLifecycleStart,
+        CompactionLifecycleProgress,
+        CompactionOutcome,
+    ]
+    assert recorder.content() is None
+
+
+def test_after_tool_read_once_at_start() -> None:
+    """The entry anchors at the tool count when it began, not at a later count."""
+    recorder = ReplyCompactions()
+    count = 2
+    recorder.bind(tool_count=lambda: count, changed=lambda: None)
+
+    entry_id = recorder.start(_start())
+    count = 5
+    recorder.update(entry_id, status="success", after_tokens=6_336)
+
+    content = recorder.content()
+    assert content is not None
+    assert content[0]["after_tool"] == 2
+
+
+def test_unbound_recorder_anchors_at_zero() -> None:
+    """Without a bound delivery, an entry anchors above every tool call."""
+    recorder = ReplyCompactions()
+    recorder.start(_start())
+
+    content = recorder.content()
+    assert content is not None
+    assert content[0]["after_tool"] == 0
+
+
+def test_unbind_stops_reading_the_delivery() -> None:
+    """An unbound recorder no longer reads or nudges the delivery it was bound to."""
+    recorder = ReplyCompactions()
+    calls: list[None] = []
+    recorder.bind(tool_count=lambda: 3, changed=lambda: calls.append(None))
+    recorder.unbind()
+
+    recorder.start(_start())
+
+    content = recorder.content()
+    assert content is not None
+    assert content[0]["after_tool"] == 0
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_changed_called_on_every_change() -> None:
+    """Every recorded change nudges the bound delivery and bumps the version."""
+    recorder = ReplyCompactions()
+    calls: list[None] = []
+    recorder.bind(tool_count=lambda: 0, changed=lambda: calls.append(None))
+    lifecycle = _lifecycle(recorder)
+    assert recorder.version == 0
+
+    entry_id = await lifecycle.start(_start())
+    await lifecycle.progress(_progress(entry_id))
+    await lifecycle.complete_success(_outcome(entry_id))
+
+    assert len(calls) == 3
+    assert recorder.version == 3
+
+
+def test_content_is_a_copy() -> None:
+    """Callers cannot change the recorded entries through what content() returns."""
+    recorder = ReplyCompactions()
+    assert recorder.content() is None
+    recorder.start(_start())
+
+    content = recorder.content()
+    assert content is not None
+    content[0]["status"] = "tampered"
+    content.clear()
+
+    again = recorder.content()
+    assert again is not None
+    assert again[0]["status"] == "running"
+
+
+def test_optional_keys_are_omitted_not_null() -> None:
+    """An entry without a budget leaves the key out rather than writing null."""
+    recorder = ReplyCompactions()
+    start = CompactionLifecycleStart(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="haiku",
+        before_tokens=1_000,
+        history_budget_tokens=None,
+        runs_before=3,
+    )
+    recorder.start(start)
+
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert "history_budget_tokens" not in entry
+    assert entry["phase"] == "pre_turn"
+    assert None not in entry.values()

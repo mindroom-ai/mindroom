@@ -22,6 +22,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
@@ -42,6 +43,7 @@ from mindroom.final_delivery import (
     Suppression,
     TurnProgress,
 )
+from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
@@ -157,7 +159,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import JournalEvent
     from mindroom.event_journal.approval_signals import ApprovalSignals
-    from mindroom.history.types import HistoryScope
+    from mindroom.history.types import CompactionLifecycle, HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -352,7 +354,7 @@ class _LockedTurn:
     # The entity's response stream for one generation, given the runtime the turn delivers with, the room's live
     # replies, its compaction notices, and what the turn writes back.
     stream: Callable[
-        [PreparedResponseRuntime, set[str], MatrixCompactionLifecycle | None, TurnSinks],
+        [PreparedResponseRuntime, set[str], CompactionLifecycle | None, TurnSinks],
         AsyncIterator[StreamInputChunk],
     ]
     post_response_deps: Callable[[], PostResponseEffectsDeps]
@@ -860,16 +862,20 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         request: ResponseRequest,
-    ) -> MatrixCompactionLifecycle | None:
-        """Build the ordered foreground compaction notice adapter for one response."""
+        compactions: ReplyCompactions,
+    ) -> CompactionLifecycle | None:
+        """Build the compaction lifecycle for one response: automatic ones on the reply, manual ones as notices."""
         if request.quiet or request.participation is not None:
             return None
         event_id, shows_placeholder = existing_event(request)
         reply_to_event_id = event_id if shows_placeholder else request.reply_to_event_id
-        return MatrixCompactionLifecycle(
-            delivery_gateway=self.deps.delivery_gateway,
-            target=target,
-            reply_to_event_id=reply_to_event_id,
+        return ReplyCompactionLifecycle(
+            compactions,
+            MatrixCompactionLifecycle(
+                delivery_gateway=self.deps.delivery_gateway,
+                target=target,
+                reply_to_event_id=reply_to_event_id,
+            ),
         )
 
     async def _has_queued_forced_compaction(
@@ -1012,7 +1018,7 @@ class ResponseRunner:
         active_event_ids: set[str],
         knowledge: AgentKnowledge | None,
         transient_enrichment_items: Sequence[EnrichmentItem],
-        compaction_lifecycle: MatrixCompactionLifecycle | None,
+        compaction_lifecycle: CompactionLifecycle | None,
     ) -> ResponseTurnContext:
         """Build every input of one agent response turn.
 
@@ -1753,7 +1759,7 @@ class ResponseRunner:
         def stream(
             _runtime: PreparedResponseRuntime,
             active_event_ids: set[str],
-            compaction_lifecycle: MatrixCompactionLifecycle | None,
+            compaction_lifecycle: CompactionLifecycle | None,
             sinks: TurnSinks,
         ) -> AsyncIterator[StreamInputChunk]:
             return team_response_stream(
@@ -1922,9 +1928,12 @@ class ResponseRunner:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
         request = turn.request
         active_event_ids = await self._active_response_event_ids(request.room_id)
+        # The automatic compactions this reply runs, which its writes carry.
+        compactions = ReplyCompactions()
         compaction_lifecycle = self._build_compaction_lifecycle(
             target=turn.runtime.tool_context.target,
             request=request,
+            compactions=compactions,
         )
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
@@ -1941,7 +1950,12 @@ class ResponseRunner:
         def final_extra_content() -> dict[str, Any] | None:
             # A turn that published no run metadata still names the run the record holds.
             fallback = ai_run_extra_content_from_metadata(recorder.run_metadata) or {}
-            return merge_response_extra_content({**fallback, **run_metadata_content} or None, request.attachment_ids)
+            entries = compactions.content()
+            compaction_content = {COMPACTIONS_CONTENT_KEY: entries} if entries is not None else {}
+            return merge_response_extra_content(
+                {**fallback, **run_metadata_content, **compaction_content} or None,
+                request.attachment_ids,
+            )
 
         # The turn's tool calls note how long they waited for a worker to start in the reply's timing.
         with bind_reply_pipeline_timing(request.pipeline_timing):
@@ -1952,6 +1966,7 @@ class ResponseRunner:
                     response_identity=response_identity,
                     run_metadata_content=run_metadata_content,
                     tool_trace=tool_trace,
+                    compactions=compactions,
                     final_extra_content=final_extra_content,
                     progress=progress,
                 )
@@ -1961,6 +1976,7 @@ class ResponseRunner:
                     response_stream,
                     response_identity=response_identity,
                     tool_trace=tool_trace,
+                    compactions=compactions,
                     final_extra_content=final_extra_content,
                     progress=progress,
                 )
@@ -1987,6 +2003,7 @@ class ResponseRunner:
         response_identity: ResponseIdentity,
         run_metadata_content: dict[str, Any],
         tool_trace: list[ToolTraceEntry],
+        compactions: ReplyCompactions,
         final_extra_content: Callable[[], dict[str, Any] | None],
         progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
@@ -2019,6 +2036,7 @@ class ResponseRunner:
                         # final edit snapshots extra_content, so the ai_run metadata lands on the wire.
                         extra_content=merge_response_extra_content(run_metadata_content, request.attachment_ids),
                         tool_trace_collector=tool_trace,
+                        compactions=compactions,
                         streaming_cls=turn.streaming_cls,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=progress.note_delivery_started,
@@ -2069,6 +2087,7 @@ class ResponseRunner:
         *,
         response_identity: ResponseIdentity,
         tool_trace: list[ToolTraceEntry],
+        compactions: ReplyCompactions,
         final_extra_content: Callable[[], dict[str, Any] | None],
         progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
@@ -2078,15 +2097,24 @@ class ResponseRunner:
         label = "Non-streaming" if turn.response_kind == "ai" else "Team non-streaming"
 
         async def collect() -> str:
-            body, collected_trace = await collect_streamed_response_content(
-                response_stream(),
-                # Hidden tool calls still separate the text around them, as a streamed reply shows it.
-                presentation=CollectedStreamPresentation(
-                    show_tool_calls=runtime.show_tool_calls,
-                    track_hidden_tools=True,
-                    replaces_text=turn.streaming_cls.replaces_text,
-                ),
+            # Hidden tool calls still separate the text around them, as a streamed reply shows it.
+            presentation = CollectedStreamPresentation(
+                show_tool_calls=runtime.show_tool_calls,
+                track_hidden_tools=True,
+                replaces_text=turn.streaming_cls.replaces_text,
             )
+            # A compaction anchors after the tools collected so far; the one final message carries the entries.
+            compactions.bind(
+                tool_count=lambda: len(presentation.tool_trace) if runtime.show_tool_calls else 0,
+                changed=lambda: None,
+            )
+            try:
+                body, collected_trace = await collect_streamed_response_content(
+                    response_stream(),
+                    presentation=presentation,
+                )
+            finally:
+                compactions.unbind()
             tool_trace.extend(collected_trace)
             return body
 
@@ -2342,7 +2370,7 @@ class ResponseRunner:
         async def stream(
             runtime: PreparedResponseRuntime,
             active_event_ids: set[str],
-            compaction_lifecycle: MatrixCompactionLifecycle | None,
+            compaction_lifecycle: CompactionLifecycle | None,
             sinks: TurnSinks,
         ) -> AsyncIterator[StreamInputChunk]:
             pipeline_timing = normalized_request.pipeline_timing

@@ -29,6 +29,7 @@ from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
+    COMPACTIONS_CONTENT_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -60,7 +61,7 @@ from mindroom.final_delivery import (
     outcome_label,
 )
 from mindroom.history.storage import with_force_compaction
-from mindroom.history.types import CompactionLifecycleStart, HistoryScope
+from mindroom.history.types import CompactionLifecycleStart, CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -2600,10 +2601,11 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """First-turn threaded replies should keep compaction notices and summaries in the resolved thread."""
 
+        # A requested compaction keeps its own notice; an automatic one is recorded on the reply instead.
         async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             await ctx.compaction_lifecycle.start(
                 CompactionLifecycleStart(
-                    mode="auto",
+                    mode="manual",
                     session_id="session-1",
                     scope="agent:test_agent",
                     summary_model="summary-model",
@@ -2714,6 +2716,115 @@ class TestAgentBot(AgentBotTestBase):
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
         assert compaction_notice_kwargs["reply_to_event_id"] == root_event_id
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
+
+    @pytest.mark.asyncio
+    async def test_auto_compaction_records_on_reply_without_notice(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An automatic compaction is recorded on the reply it ran for, and sends no separate notice."""
+
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+            lifecycle = ctx.compaction_lifecycle
+            entry_id = await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
+            await lifecycle.complete_success(
+                CompactionOutcome(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary="summary",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    after_tokens=4_000,
+                    window_tokens=200_000,
+                    threshold_tokens=0,
+                    runs_before=20,
+                    runs_after=1,
+                    compacted_run_count=20,
+                    compacted_at="2026-11-17T00:00:00Z",
+                    history_budget_tokens=100_000,
+                    lifecycle_notice_event_id=entry_id,
+                    duration_ms=1_200,
+                ),
+            )
+            return "ok"
+
+        sent_contents: list[dict[str, Any]] = []
+        deliver_sent = delivered_matrix_side_effect("$response")
+
+        async def record_send(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            content = kwargs.get("content", args[2] if len(args) > 2 else None)
+            if isinstance(content, dict):
+                sent_contents.append(content)
+            return await deliver_sent(*args, **kwargs)
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
+        response_envelope = _hook_envelope(source_event_id="$user_msg")
+
+        with (
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch(
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway._send_compaction_lifecycle_start",
+                new=AsyncMock(return_value="$notice"),
+            ) as mock_send_compaction_lifecycle_start,
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(response_envelope.source_event_id,),
+                        logical_source_event_ids=(response_envelope.source_event_id,),
+                    ),
+                    prompt="Hello",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=response_envelope,
+                ),
+            )
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+        mock_send_compaction_lifecycle_start.assert_not_awaited()
+        # The final answer edits the reply's placeholder; its new content carries the compaction.
+        final_content = sent_contents[-1]["m.new_content"]
+        assert final_content["body"] == "ok"
+        [entry] = final_content[COMPACTIONS_CONTENT_KEY]
+        assert entry["status"] == "success"
+        assert entry["phase"] == "pre_turn"
+        assert entry["mode"] == "auto"
+        assert entry["after_tool"] == 0
+        assert entry["after_tokens"] == 4_000
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_non_streaming_model_error_unsuccessful_for_post_effects(

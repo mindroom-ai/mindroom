@@ -1564,6 +1564,9 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
     kinds = [type(event).__name__ for event in lifecycle.events]
     assert kinds[0] == "CompactionLifecycleStart"
     assert "CompactionOutcome" in kinds
+    starts = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleStart)]
+    assert starts
+    assert all(start.phase == "mid_turn" for start in starts)
     # Two earlier runs and the running turn, however many exchanges the turn folded.
     outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
     assert outcome.compacted_run_count == 3

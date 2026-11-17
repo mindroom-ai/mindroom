@@ -18,6 +18,8 @@ COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 CompactionMode = Literal["auto", "manual"]
+# Where in a reply a compaction ran: before its first model request, or between two of them.
+CompactionPhase = Literal["pre_turn", "mid_turn"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
 CompactionLifecycleStatus = Literal["failed", "timeout"]
@@ -210,6 +212,7 @@ class CompactionLifecycleStart:
     history_budget_tokens: int | None
     runs_before: int
     threshold_tokens: int | None = None
+    phase: CompactionPhase = "pre_turn"
 
 
 @dataclass(frozen=True)
@@ -285,7 +288,7 @@ class CompactionLifecycle(Protocol):
     """Interface for ordered foreground compaction Matrix notice delivery."""
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
-        """Send the initial compaction notice and return its Matrix event id."""
+        """Report a compaction's start and return a handle its later events carry back, or ``None`` to get none."""
 
     async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""

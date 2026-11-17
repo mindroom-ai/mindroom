@@ -47,6 +47,7 @@ from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionLifecycleStatus,
     CompactionMode,
+    CompactionPhase,
     CompactionReplyOutcome,
     HistoryScope,
     HistoryScopeState,
@@ -275,6 +276,7 @@ async def prepare_scope_history(
                 config=config,
                 runtime_paths=runtime_paths,
             ),
+            phase="pre_turn",
         )
         outcome = compaction_result.outcome
         compaction_reply_outcome = compaction_result.reply_outcome
@@ -324,6 +326,7 @@ async def _run_scope_compaction_with_lifecycle(
     runs_before: int,
     compaction_lifecycle: CompactionLifecycle | None,
     compact: _ScopeCompactor,
+    phase: CompactionPhase,
 ) -> _ScopeCompactionLifecycleResult:
     lifecycle = compaction_lifecycle if runs_before else None
     compaction_start = time.monotonic()
@@ -337,6 +340,7 @@ async def _run_scope_compaction_with_lifecycle(
         history_budget_tokens=history_budget,
         runs_before=runs_before,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
+        phase=phase,
     )
     notice_event_id = await notify(lifecycle, "start", lambda lifecycle: lifecycle.start(start))
     # Later notices edit the start notice, so they are sent only when it was.
@@ -565,6 +569,7 @@ async def compact_scope_mid_turn(
         runs_before=len(basis.runs) + 1,
         compaction_lifecycle=compaction_lifecycle,
         compact=compact,
+        phase="mid_turn",
     )
     return result.outcome
 

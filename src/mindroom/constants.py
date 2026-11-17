@@ -1074,6 +1074,8 @@ MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
 # Session metadata key holding the database owner's history state: its force-compaction flag.
 MINDROOM_HISTORY_METADATA_KEY = "mindroom_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
+# The automatic history compactions a reply ran, in start order, recorded on the reply itself.
+COMPACTIONS_CONTENT_KEY = "io.mindroom.compactions"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
