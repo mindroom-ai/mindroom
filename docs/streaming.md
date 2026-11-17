@@ -133,6 +133,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
+| `**[Response interrupted: agent restarted to apply a config change]**` | A `config.yaml` edit restarted this agent (for example, its tools changed) while the response was being generated; MindRoom itself kept running, and the reply continues below the note once the agent is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 | `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |
