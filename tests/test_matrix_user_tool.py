@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
+from structlog.testing import capture_logs
 
-from mindroom.agents import build_agent_toolkit
+from mindroom.api.config_lifecycle import ApiSnapshot
+from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.matrix_user import MatrixUserTools
+from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import tool_placement
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.teams.members import resolve_exact_team_members
+from mindroom.tool_system.runtime_context import current_execution_identity, member_tool_scope, tool_runtime_context
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
@@ -94,10 +96,15 @@ def homeserver() -> FakeHomeserver:
     return FakeHomeserver({SYNC_PATH: sync_answer(join={ROOM: joined_room("Planning", unread=2)})})
 
 
-def _turn(config: Config, paths: RuntimePaths, requester_id: str = OWNER) -> AbstractContextManager[None]:
-    """Enter a chat turn with Alice's personal agent that ``requester_id`` started."""
+def _turn(
+    config: Config,
+    paths: RuntimePaths,
+    requester_id: str = OWNER,
+    agent_name: str = AGENT,
+) -> AbstractContextManager[None]:
+    """Enter a chat turn with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started."""
     context = make_test_tool_runtime_context(
-        agent_name=AGENT,
+        agent_name=agent_name,
         target=MessageTarget.resolve(ROOM, None, "$event"),
         requester_id=requester_id,
         client=MagicMock(),
@@ -109,22 +116,22 @@ def _turn(config: Config, paths: RuntimePaths, requester_id: str = OWNER) -> Abs
     return tool_runtime_context(context)
 
 
-def _toolkit(paths: RuntimePaths, agent_name: str = AGENT) -> MatrixUserTools:
-    """The toolkit as built for ``agent_name``, without a config of its own, so a turn's config decides."""
-    return MatrixUserTools(runtime_paths=paths, runtime_config=None, agent_name=agent_name)
+def _toolkit(config: Config, paths: RuntimePaths, agent_name: str = AGENT) -> MatrixUserTools:
+    """The toolkit as built for ``agent_name``."""
+    return MatrixUserTools(runtime_paths=paths, runtime_config=config, agent_name=agent_name)
 
 
 @pytest.mark.asyncio
 async def test_the_owner_reads_their_rooms(config: Config, paths: RuntimePaths, homeserver: FakeHomeserver) -> None:
     """The owner's turn reads the owner's rooms, as the owner, with the service's token, on a client closed after."""
     with _turn(config, paths), homeserver.serving_the_toolkit():
-        result = await _toolkit(paths).matrix_user_read(action="rooms")
+        result = await _toolkit(config, paths).matrix_user_read(action="rooms")
 
     assert json.loads(result) == {
         "status": "ok",
         "tool": "matrix_user",
         "action": "rooms",
-        "rooms": [f"{ROOM} | Planning | unread 2, mentions 0"],
+        "rooms": [f"{ROOM} | Planning | unread 2"],
         "left_out": 0,
     }
     [request] = homeserver.requests
@@ -152,7 +159,7 @@ async def test_a_refused_caller_gets_the_refusal_and_no_request_is_made(
 ) -> None:
     """Anyone but the owner, or a toolkit built for another agent, is refused before any request."""
     with _turn(config, paths, requester_id), homeserver.serving_the_toolkit():
-        result = await _toolkit(paths, agent_name).matrix_user_read(action="rooms")
+        result = await _toolkit(config, paths, agent_name).matrix_user_read(action="rooms")
 
     assert json.loads(result) == {"status": "error", "tool": "matrix_user", "action": "rooms", "message": message}
     assert homeserver.requests == []
@@ -182,7 +189,7 @@ async def test_without_a_token_the_tool_says_it_is_not_set_up(
     config = _config(paths)
 
     with _turn(config, paths), homeserver.serving_the_toolkit():
-        result = await _toolkit(paths).matrix_user_read(action="rooms")
+        result = await _toolkit(config, paths).matrix_user_read(action="rooms")
 
     assert json.loads(result) == {"status": "error", "tool": "matrix_user", "action": "rooms", "message": message}
     assert homeserver.requests == []
@@ -193,24 +200,73 @@ async def test_the_token_never_appears_in_a_result_or_an_error(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A transport error whose text holds the URL and the request's credentials says only that Matrix was unreachable."""
-    with _turn(config, paths), homeserver.serving_the_toolkit():
-        found = await _toolkit(paths).matrix_user_read(action="rooms")
-        homeserver.failure = lambda url, headers: aiohttp.ClientConnectionError(f"{url} {headers}")
-        failed = await _toolkit(paths).matrix_user_read(action="rooms")
+    """A refused connection says only that Matrix was unreachable, and no result or log line holds the token."""
+    refused = aiohttp.ClientConnectorError(
+        ConnectionKey("matrix.example.com", 443, True, True, None, None, None),
+        ConnectionRefusedError(111, "Connection refused"),
+    )
+    caplog.set_level(logging.DEBUG)
 
-    url = homeserver.requests[-1].url
+    with _turn(config, paths), homeserver.serving_the_toolkit(), capture_logs() as logs:
+        found = await _toolkit(config, paths).matrix_user_read(action="rooms")
+        homeserver.failure = refused
+        failed = await _toolkit(config, paths).matrix_user_read(action="rooms")
+
     assert json.loads(failed) == {
         "status": "error",
         "tool": "matrix_user",
         "action": "rooms",
         "message": "The Matrix homeserver could not be reached.",
     }
-    for result in (found, failed):
-        assert TOKEN not in result
-        assert url not in result
+    assert str(refused) not in failed
+    # The client logs the failure with its cause; that line too must not hold the token.
+    assert [entry["error_type"] for entry in logs if entry["event"] == "matrix_request_transport_failed"] == [
+        "ClientConnectorError",
+    ]
+    for text in (found, failed, caplog.text, *(str(entry) for entry in logs)):
+        assert TOKEN not in text
     assert homeserver.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timed_out",
+    [TimeoutError(), aiohttp.ConnectionTimeoutError("Connection timeout to host https://matrix.example.com")],
+    ids=["total", "connect"],
+)
+async def test_a_timeout_says_the_homeserver_took_too_long(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    timed_out: Exception,
+) -> None:
+    """A homeserver that does not answer in time is reported as slow, not as unreachable."""
+    homeserver.failure = timed_out
+
+    with _turn(config, paths), homeserver.serving_the_toolkit():
+        result = await _toolkit(config, paths).matrix_user_read(action="rooms")
+
+    assert json.loads(result) == {
+        "status": "error",
+        "tool": "matrix_user",
+        "action": "rooms",
+        "message": "The homeserver took too long to answer.",
+    }
+    assert homeserver.closed
+
+
+@pytest.mark.asyncio
+async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimePaths) -> None:
+    """Names reach the model as written, not as escapes that cost several tokens each."""
+    homeserver = FakeHomeserver({SYNC_PATH: sync_answer(join={ROOM: joined_room("Café ☕")})})
+
+    with _turn(config, paths), homeserver.serving_the_toolkit():
+        result = await _toolkit(config, paths).matrix_user_read(action="rooms")
+
+    assert f"{ROOM} | Café ☕" in result
+    assert json.loads(result)["rooms"] == [f"{ROOM} | Café ☕"]
 
 
 @pytest.mark.asyncio
@@ -234,7 +290,7 @@ async def test_each_action_names_the_arguments_it_is_missing(
 ) -> None:
     """An action without what it needs says what is missing and asks nothing of the homeserver."""
     with _turn(config, paths), homeserver.serving_the_toolkit():
-        result = await _toolkit(paths).matrix_user_read(**arguments)
+        result = await _toolkit(config, paths).matrix_user_read(**arguments)
 
     assert json.loads(result) == {
         "status": "error",
@@ -245,47 +301,66 @@ async def test_each_action_names_the_arguments_it_is_missing(
     assert homeserver.requests == []
 
 
-def test_the_function_takes_no_user_to_act_as(paths: RuntimePaths) -> None:
+def test_the_function_takes_no_user_to_act_as(config: Config, paths: RuntimePaths) -> None:
     """The model can name a room, a query and a limit, never a person to act as."""
-    function = toolkit_offers(_toolkit(paths), "matrix_user_read")
+    function = toolkit_offers(_toolkit(config, paths), "matrix_user_read")
 
     assert list(function.parameters["properties"]) == ["action", "room_id", "query", "limit"]
 
 
 @pytest.mark.asyncio
-async def test_a_toolkit_built_for_the_agent_reads_the_token_from_the_primary_environment(
+async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """The agent's own build gives the toolkit the primary's paths, whose environment holds the token, and its config.
+    """The MCP gateway builds the toolkit for the agent its call runs as, and the owner's call reads as the owner.
 
-    The owner's call through the MCP gateway has no chat turn, so the config the toolkit was built with decides.
+    The build gives it the primary's paths, whose environment holds the token, and its config, which decides, as the
+    call has no chat turn.
     """
-    registry = builtin_tool_registry()
-    toolkit = build_agent_toolkit(
-        "matrix_user",
-        agent_tools=resolve_agent_tools(config, AGENT, registry),
-        placement=tool_placement(paths, registry),
-        runtime_paths=paths,
-        execution_identity=None,
-    )
-    assert isinstance(toolkit, MatrixUserTools)
-    identity = build_tool_execution_identity(
-        channel="mcp",
-        agent_name=AGENT,
-        runtime_paths=paths,
-        requester_id=OWNER,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
 
-    with detached_tool_scope(identity), homeserver.serving_the_toolkit():
-        result = await toolkit.matrix_user_read(action="rooms")
+    with homeserver.serving_the_toolkit():
+        result = await gateway.invoke_tool(
+            resolve_connection_agent(owner, AGENT),
+            toolkit="matrix_user",
+            function="matrix_user_read",
+            arguments={"action": "rooms"},
+        )
 
-    assert json.loads(result)["rooms"] == [f"{ROOM} | Planning | unread 2, mentions 0"]
+    assert "error" not in result
+    assert json.loads(result["result"])["rooms"] == [f"{ROOM} | Planning | unread 2"]
     [request] = homeserver.requests
     assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+    assert request.query["user_id"] == [OWNER]
+
+
+@pytest.mark.asyncio
+async def test_a_team_runs_its_members_toolkit_as_that_member(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A team builds its member's toolkit for the member and runs the member's calls as the member.
+
+    The team's turn answers through another account; without the member's own name the call would be refused.
+    """
+    with _turn(config, paths, agent_name="team"), homeserver.serving_the_toolkit():
+        members = resolve_exact_team_members(
+            [AGENT],
+            config=config,
+            runtime_paths=paths,
+            execution_identity=current_execution_identity(),
+            refresh_scheduler=None,
+            active_model_names={AGENT: "default"},
+        )
+        build = members.build(AGENT, "default")
+        toolkit = next(toolkit for toolkit in build.spec.toolkits if toolkit.name == "matrix_user")
+        read = next(function for function in toolkit.functions if function.name == "matrix_user_read")
+        with member_tool_scope(AGENT, "default"):
+            result = await read.entrypoint(action="rooms")
+
+    assert json.loads(result)["rooms"] == [f"{ROOM} | Planning | unread 2"]
+    [request] = homeserver.requests
     assert request.query["user_id"] == [OWNER]

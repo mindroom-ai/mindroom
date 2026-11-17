@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Iterator
 
     import nio
 
@@ -49,8 +49,9 @@ def joined_room(
     mentions: int = 0,
     marked_unread: bool = False,
     timeline: tuple[dict[str, object], ...] = (),
+    heroes: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """Return a joined room of a `/sync` body."""
+    """Return a joined room of a `/sync` body, its summary naming ``heroes`` when given."""
     room: dict[str, object] = {
         "state": {"events": [state_event("m.room.name", {"name": name})] if name is not None else []},
         "timeline": {"events": list(timeline), "limited": True},
@@ -58,6 +59,8 @@ def joined_room(
     }
     if marked_unread:
         room["account_data"] = {"events": [{"type": "m.marked_unread", "content": {"unread": True}}]}
+    if heroes:
+        room["summary"] = {"m.heroes": list(heroes), "m.joined_member_count": len(heroes) + 1}
     return room
 
 
@@ -122,8 +125,8 @@ class FakeHomeserver:
     """
 
     answers: dict[str, Answer | list[Answer] | dict[str, object]] = field(default_factory=dict)
-    # Raises the error it returns for each request's URL and headers instead of answering, as a failed transport does.
-    failure: Callable[[str, dict[str, str]], Exception] | None = None
+    # Raised for each request instead of an answer, as a failed transport raises it.
+    failure: Exception | None = None
     requests: list[HomeserverRequest] = field(default_factory=list)
     closed: bool = False
 
@@ -161,7 +164,7 @@ class FakeHomeserver:
         body = json.loads(data) if isinstance(data, str) else None
         self.requests.append(HomeserverRequest(method, url, path, parse_qs(split.query), body, dict(headers)))
         if self.failure is not None:
-            raise self.failure(url, headers)
+            raise self.failure
         answer = self._answer(path)
         content = answer.body if isinstance(answer.body, bytes) else json.dumps(answer.body).encode()
         return _Response(answer.status, answer.headers, _Content(content))

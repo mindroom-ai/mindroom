@@ -320,10 +320,9 @@ It acts only for the agent's owner, in a chat with the agent or through the [MCP
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
 | `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
 
-The toolkit has no device or encryption keys, so messages in encrypted rooms are not readable.
+Messages in encrypted rooms are not readable.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
-The token can act as anyone in that namespace, so only MindRoom's primary runtime reads it: workers never receive it, and no tool result or error shows it.
 Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
 
 ```yaml

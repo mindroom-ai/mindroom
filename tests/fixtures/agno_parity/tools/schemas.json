@@ -17728,7 +17728,7 @@
     "functions": [
       {
         "name": "matrix_user_read",
-        "description": "Read Matrix as your owner: their own rooms and DMs, including those you are not in.\nActions:\n- rooms: Their rooms, unread first, then invitations, then the rest, one line each:\n  `<room_id> | <name> | unread <n>, mentions <m>[, marked unread]` or `<room_id> | <name> | invited by <user>`.\n  query keeps rooms whose name contains it. limit: default 50, at most 200.\n- room: room_id's name, topic, encryption, whether it is a DM, and up to limit (default 50) members.\n- people: query is a full Matrix ID for that profile, or a name to search the user directory\n  (limit: default 10, at most 50).",
+        "description": "Read Matrix as your owner: their own rooms and DMs, including those you are not in.\nActions:\n- rooms: Their rooms and invitations, unread first. query keeps rooms whose name contains it.\n  limit: default 50, at most 200.\n- room: room_id's name, topic, encryption, whether it is a DM, and up to limit (default 50) members.\n- people: query is a full Matrix ID for that profile, or a name to search the user directory\n  (limit: default 10, at most 50).",
         "parameters": {
           "type": "object",
           "properties": {

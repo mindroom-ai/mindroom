@@ -77,11 +77,11 @@ async def test_rooms_lists_unread_first_then_invitations_then_the_rest(
 
     assert result == {
         "rooms": [
-            "!flag:example.com | Billing | unread 0, mentions 0, marked unread",
+            "!flag:example.com | Billing | marked unread",
             "!busy:example.com | Team | unread 3, mentions 1",
             "!party:example.com | Party | invited by @bob:example.com",
-            "!quiet:example.com | archive | unread 0, mentions 0",
-            "!zeta:example.com | Zeta | unread 0, mentions 0",
+            "!quiet:example.com | archive",
+            "!zeta:example.com | Zeta",
         ],
         "left_out": 0,
     }
@@ -90,9 +90,33 @@ async def test_rooms_lists_unread_first_then_invitations_then_the_rest(
     assert request.query["timeout"] == ["0"]
     assert request.query["set_presence"] == ["offline"]
     assert request.query["user_id"] == [PERSON]
-    room_filter = _sync_filter(homeserver)["room"]
-    assert room_filter["state"]["types"] == ["m.room.name", "m.room.member"]
-    assert room_filter["timeline"]["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_sync_filter_asks_only_for_the_fields_it_reads(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Every event comes trimmed to what the room list reads, and the joined rooms' state is their names alone.
+
+    The newest event, whatever its type, can rename the room; an invitation's stripped state is not filtered.
+    """
+    homeserver.answers[SYNC_PATH] = sync_answer()
+
+    await read_rooms(client, query=None, limit=None)
+
+    sync_filter = _sync_filter(homeserver)
+    assert sync_filter["event_fields"] == [
+        "type",
+        "state_key",
+        "sender",
+        "content.name",
+        "content.is_direct",
+        "content.unread",
+    ]
+    room_filter = sync_filter["room"]
+    assert room_filter["state"] == {"types": ["m.room.name"], "lazy_load_members": True}
+    assert room_filter["timeline"] == {"limit": 1}
     assert room_filter["ephemeral"] == {"types": []}
     assert room_filter["account_data"] == {"types": ["m.marked_unread"]}
 
@@ -109,10 +133,57 @@ async def test_rooms_names_a_dm_by_the_other_person(client: nio.AsyncClient, hom
     result = await read_rooms(client, query=None, limit=None)
 
     assert result["rooms"] == [
-        "!dm:example.com | @bob:example.com | unread 1, mentions 0",
+        "!dm:example.com | @bob:example.com | unread 1",
         "!ask:example.com | @carol:example.com | invited by @carol:example.com",
-        "!group:example.com | (no name) | unread 0, mentions 0",
+        "!group:example.com | (no name)",
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_room_is_named_by_its_heroes(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A room with no name that is no direct chat is named by the members the homeserver picks, and found by them."""
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={
+            "!trio:example.com": joined_room(heroes=("@bob:example.com", "@carol:example.com")),
+            "!quiet:example.com": joined_room(),
+        },
+    )
+
+    every = await read_rooms(client, query=None, limit=None)
+    found = await read_rooms(client, query="carol", limit=None)
+
+    assert every["rooms"] == [
+        "!trio:example.com | @bob:example.com, @carol:example.com",
+        "!quiet:example.com | (no name)",
+    ]
+    assert found["rooms"] == ["!trio:example.com | @bob:example.com, @carol:example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_name_cannot_fake_a_column(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A `|` that whoever named a room, a person, or an account wrote becomes `¦`, so a line keeps its own columns."""
+    homeserver.answers.update(
+        {
+            SYNC_PATH: sync_answer(
+                join={ROOM: joined_room("Team | unread 99")},
+                invite={
+                    "!ask:example.com": invited_room(PERSON, "@x|y:example.com", "Ask | invited by @bob:example.com"),
+                },
+            ),
+            "/_matrix/client/v3/user_directory/search": {
+                "results": [{"user_id": "@bob:example.com", "display_name": "Bob | @admin:example.com"}],
+            },
+        },
+    )
+
+    rooms = await read_rooms(client, query=None, limit=None)
+    people = await read_people(client, "bob", limit=None)
+
+    assert rooms["rooms"] == [
+        "!ask:example.com | Ask ¦ invited by @bob:example.com | invited by @x¦y:example.com",
+        f"{ROOM} | Team ¦ unread 99",
+    ]
+    assert people["people"] == ["@bob:example.com | Bob ¦ @admin:example.com"]
 
 
 @pytest.mark.asyncio
@@ -133,10 +204,10 @@ async def test_rooms_filters_by_name(client: nio.AsyncClient, homeserver: FakeHo
 
     assert result == {
         "rooms": [
-            "!work:example.com | Teamwork | unread 2, mentions 0",
+            "!work:example.com | Teamwork | unread 2",
             "!steam:example.com | Steam room | invited by @bob:example.com",
-            "!dm:example.com | @teammate:example.com | unread 0, mentions 0",
-            "!team:example.com | Team | unread 0, mentions 0",
+            "!dm:example.com | @teammate:example.com",
+            "!team:example.com | Team",
         ],
         "left_out": 0,
     }
@@ -158,7 +229,7 @@ async def test_rooms_reports_how_many_it_left_out(
     result = await read_rooms(client, query=None, limit=limit)
 
     assert len(result["rooms"]) == shown
-    assert result["rooms"][0] == "!room000:example.com | Room 000 | unread 0, mentions 0"
+    assert result["rooms"][0] == "!room000:example.com | Room 000"
     assert result["left_out"] == 250 - shown
 
 
@@ -282,7 +353,7 @@ async def test_a_rate_limited_request_is_retried_at_most_twice(
     limited = matrix_error(429, "M_LIMIT_EXCEEDED", "Too many requests", retry_after_ms=1)
     homeserver.answers[SYNC_PATH] = [limited, Answer(sync_answer(join={ROOM: joined_room("Room")}))]
 
-    assert (await read_rooms(client, query=None, limit=None))["rooms"] == [f"{ROOM} | Room | unread 0, mentions 0"]
+    assert (await read_rooms(client, query=None, limit=None))["rooms"] == [f"{ROOM} | Room"]
 
     homeserver.answers[SYNC_PATH] = [limited]
     with pytest.raises(MatrixRequestError, match="429 M_LIMIT_EXCEEDED"):
@@ -315,7 +386,21 @@ async def test_a_rate_limit_longer_than_5_seconds_is_not_waited_out(
 @pytest.mark.asyncio
 async def test_an_answer_over_2_mib_is_refused(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
     """An answer is read up to 2 MiB and no further."""
-    homeserver.answers[SYNC_PATH] = Answer(b" " * (2 * 1024 * 1024) + b"{}")
+    homeserver.answers["/_matrix/client/v3/user_directory/search"] = Answer(b" " * (2 * 1024 * 1024) + b"{}")
 
     with pytest.raises(MatrixRequestError, match="larger than 2 MiB"):
+        await read_people(client, "bob", limit=None)
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_room_list_says_what_to_do(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A room list too large to read says how to reach one room instead."""
+    homeserver.answers[SYNC_PATH] = Answer(b" " * (2 * 1024 * 1024) + b"{}")
+
+    with pytest.raises(MatrixRequestError) as error:
         await read_rooms(client, query=None, limit=None)
+
+    assert str(error.value) == (
+        "This account has too many rooms to list at once. "
+        'Ask the person for the room\'s name or ID and use action "room".'
+    )

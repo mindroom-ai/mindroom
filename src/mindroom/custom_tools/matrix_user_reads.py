@@ -37,6 +37,12 @@ _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT = 10, 50
 _MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
 # The room list's groups, in the order it lists them.
 _UNREAD, _INVITED, _OTHER = range(3)
+# Every event field the room list reads. The homeserver trims each event of the joined rooms to these, so a long last
+# message costs a few bytes; `m.direct`'s content, keyed by people, is account data, which it does not trim.
+_ROOM_LIST_EVENT_FIELDS = ["type", "state_key", "sender", "content.name", "content.is_direct", "content.unread"]
+_TOO_MANY_ROOMS = (
+    'This account has too many rooms to list at once. Ask the person for the room\'s name or ID and use action "room".'
+)
 
 
 class MatrixRequestError(Exception):
@@ -46,6 +52,10 @@ class MatrixRequestError(Exception):
         super().__init__(message)
         self.status = status
         self.errcode = errcode
+
+
+class _AnswerTooLargeError(MatrixRequestError):
+    """An answer over 2 MiB."""
 
 
 async def matrix_json(
@@ -68,7 +78,7 @@ async def matrix_json(
             content = await collect_bounded_bytes(response.content.iter_chunked(65536), max_bytes=_MAX_ANSWER_BYTES)
         except ByteLimitExceededError:
             msg = "The homeserver's answer was larger than 2 MiB."
-            raise MatrixRequestError(msg) from None
+            raise _AnswerTooLargeError(msg) from None
         finally:
             response.release()
         answer = _json_object(content)
@@ -176,9 +186,20 @@ def _direct_partners(direct: dict[str, Any]) -> dict[str, str]:
     return partners
 
 
-def _person_line(user_id: str, display_name: object) -> str:
-    name = _text(display_name)
-    return f"{user_id} | {name}" if name else user_id
+def _line(*columns: str | None) -> str:
+    """Return one result line of ``columns``, leaving out None ones.
+
+    A ``|`` in a column, such as a room name that anyone inviting the person sets, becomes ``¦``, so it cannot fake
+    another column.
+    """
+    return " | ".join(column.replace("|", "¦") for column in columns if column is not None)
+
+
+def _heroes(room: dict[str, Any]) -> str | None:
+    """Return the members the homeserver picked to name a room without a name, comma-separated, if it sent any."""
+    heroes = _mapping(room.get("summary")).get("m.heroes")
+    names = [hero for hero in heroes if isinstance(hero, str)] if isinstance(heroes, list) else []
+    return ", ".join(names) or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,16 +208,17 @@ class _ListedRoom:
 
     group: int
     room_id: str
-    # The room's name, or for a direct chat without one the other person; None for any other room without one.
+    # The room's name, or for a room without one the other person of a direct chat or the homeserver's heroes.
     name: str | None
-    status: str
+    # Its unread counts or its invitation; None for a room with neither.
+    status: str | None
 
     def order(self) -> tuple[int, bool, str, str]:
         """Order by group, then by name, rooms without one last."""
         return self.group, self.name is None, (self.name or "").casefold(), self.room_id
 
     def line(self) -> str:
-        return f"{self.room_id} | {self.name or '(no name)'} | {self.status}"
+        return _line(self.room_id, self.name or "(no name)", self.status)
 
 
 def _rooms_filter() -> dict[str, object]:
@@ -206,11 +228,13 @@ def _rooms_filter() -> dict[str, object]:
     excluding a presence type nobody sends changes the request and not its answer.
     """
     return {
+        "event_fields": _ROOM_LIST_EVENT_FIELDS,
         "presence": {"types": [], "not_types": [f"mindroom.uncached.{uuid4().hex}"]},
         "account_data": {"types": ["m.direct"]},
         "room": {
-            # The person's own membership, which an invitation is, says who invited them.
-            "state": {"types": ["m.room.name", "m.room.member"], "lazy_load_members": True},
+            # Only the name: an invitation's stripped state, which says who sent it, is not subject to this filter.
+            # Synapse sends a room's summary, whose heroes name a room without a name, only when members are lazy-loaded.
+            "state": {"types": ["m.room.name"], "lazy_load_members": True},
             # A name changed among the newest events is in the timeline, not in the state before it.
             "timeline": {"limit": 1},
             "ephemeral": {"types": []},
@@ -224,11 +248,17 @@ def _joined_room(room_id: str, room: dict[str, Any], partners: dict[str, str]) -
     counts = _mapping(room.get("unread_notifications"))
     unread, mentions = _count(counts.get("notification_count")), _count(counts.get("highlight_count"))
     marked = _account_data(room.get("account_data"), "m.marked_unread").get("unread") is True
+    # Only what applies, so a quiet room costs no zero counts.
+    attention = [
+        *([f"unread {unread}"] if unread else []),
+        *([f"mentions {mentions}"] if mentions else []),
+        *(["marked unread"] if marked else []),
+    ]
     return _ListedRoom(
-        group=_UNREAD if unread or mentions or marked else _OTHER,
+        group=_UNREAD if attention else _OTHER,
         room_id=room_id,
-        name=_text(_content(_state_event(events, "m.room.name")).get("name")) or partners.get(room_id),
-        status=f"unread {unread}, mentions {mentions}" + (", marked unread" if marked else ""),
+        name=_text(_content(_state_event(events, "m.room.name")).get("name")) or partners.get(room_id) or _heroes(room),
+        status=", ".join(attention) or None,
     )
 
 
@@ -249,11 +279,15 @@ def _invited_room(room_id: str, room: dict[str, Any], person: str) -> _ListedRoo
 async def read_rooms(client: nio.AsyncClient, *, query: str | None, limit: int | None) -> dict[str, object]:
     """Return the person's rooms: unread first, then invitations, then the rest, each group by name.
 
-    A direct chat without a name is named by the other person. ``query`` keeps the rooms whose name contains it,
-    whatever its case; ``limit`` (default 50, at most 200) bounds the lines, and ``left_out`` counts the others.
+    A room without a name is named by the other person of a direct chat, else by the members the homeserver picks.
+    ``query`` keeps the rooms whose name contains it, whatever its case; ``limit`` (default 50, at most 200) bounds the
+    lines, and ``left_out`` counts the others.
     """
     parameters = {"timeout": 0, "set_presence": "offline", "filter": json.dumps(_rooms_filter())}
-    sync = await matrix_json(client, "GET", f"/sync?{urlencode(parameters)}")
+    try:
+        sync = await matrix_json(client, "GET", f"/sync?{urlencode(parameters)}")
+    except _AnswerTooLargeError:
+        raise MatrixRequestError(_TOO_MANY_ROOMS) from None
     partners = _direct_partners(_account_data(sync.get("account_data"), "m.direct"))
     rooms = _mapping(sync.get("rooms"))
     listed = [
@@ -283,7 +317,7 @@ async def read_room(client: nio.AsyncClient, room_id: str, *, limit: int | None)
     person = quote(client.user_id, safe="")
     direct = _mapping(await _optional_json(client, f"/user/{person}/account_data/m.direct"))
     members = [
-        _person_line(user_id, _mapping(member).get("display_name")) for user_id, member in sorted(joined.items())
+        _line(user_id, _text(_mapping(member).get("display_name"))) for user_id, member in sorted(joined.items())
     ]
     return {
         "room_id": room_id,
@@ -304,12 +338,12 @@ async def read_people(client: nio.AsyncClient, query: str, *, limit: int | None)
     query = query.strip()
     if _MATRIX_USER_ID.fullmatch(query):
         profile = await matrix_json(client, "GET", f"/profile/{quote(query, safe='')}")
-        return {"people": [_person_line(query, profile.get("displayname"))]}
+        return {"people": [_line(query, _text(profile.get("displayname")))]}
     count = _clamped(limit, _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT)
     found = await matrix_json(client, "POST", "/user_directory/search", {"search_term": query, "limit": count})
     results = found.get("results")
     people = [
-        _person_line(result["user_id"], result.get("display_name"))
+        _line(result["user_id"], _text(result.get("display_name")))
         for result in (results if isinstance(results, list) else [])
         if isinstance(result, dict) and isinstance(result.get("user_id"), str)
     ]
