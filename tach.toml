@@ -205,8 +205,8 @@ expose = [
 path = "mindroom.agent_cli.checkpoint"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.history.run_checkpoint",
     "mindroom.llm",
-    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -1228,6 +1228,7 @@ visibility = [
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
     "mindroom.history.request_messages",
+    "mindroom.history.run_checkpoint",
 ]
 
 [[modules]]
@@ -1375,6 +1376,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.participation_hook",
@@ -2967,6 +2969,7 @@ depends_on = [
 visibility = [
     "mindroom.history.storage",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.session_runs",
 ]
 
@@ -4936,7 +4939,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.constants",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.session_context",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -8357,6 +8360,7 @@ depends_on = [
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.session_context",
     "mindroom.history.types",
     "mindroom.llm",
@@ -9482,7 +9486,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.history.types", "mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.legacy_usage_totals", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.legacy_usage_totals", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.mid_turn_compaction", "mindroom.history.run_checkpoint", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
@@ -10051,6 +10055,24 @@ visibility = [
     "mindroom.ai",
     "mindroom.loop_hooks",
     "mindroom.teams",
+]
+
+[[modules]]
+path = "mindroom.history.run_checkpoint"
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.constants",
+    "mindroom.history.run_visibility",
+    "mindroom.llm",
+    "mindroom.session_storage.store",
+    "mindroom.session_storage.summary_rows",
+    "mindroom.usage.storage",
+]
+visibility = [
+    "mindroom.agent_cli.checkpoint",
+    "mindroom.conversation_state_writer",
+    "mindroom.delegation.recovery",
+    "mindroom.loop_hooks",
 ]
 
 [[modules]]

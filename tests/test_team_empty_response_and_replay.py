@@ -9,7 +9,9 @@ runtime seam (``tests/team_turn_helpers.py``).
 
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -18,14 +20,16 @@ import pytest
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
 from mindroom.budgets.pricing import format_cost_usd
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, recover_interrupted_turn
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.providers.identity import model_identity
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, build_matrix_run_metadata
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
@@ -280,6 +284,45 @@ async def test_a_crash_after_an_empty_team_attempt_leaves_nothing_the_next_promp
     assert text.endswith("Next answer.")
     assert [message for message in team.models["default"].requests[-1].messages if message.from_history] == []
     assert _team_run_ids(team) == ["run-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """The leader's checkpoint holds its finished delegation; recovery answers the one running, and both replay."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-1", "general", "Help"), delegate("call-2", "general", "Dig"), answer("Next answer.")],
+        general=[answer("Helped."), calls(tool_call("touch", "call-touch", label="dig", wait=True))],
+    )
+    turn = asyncio.create_task(team.respond(ctx=team.ctx(matrix_run_metadata=build_matrix_run_metadata(EVENT_ID, []))))
+    await asyncio.wait_for(probe.waiting.wait(), 10)
+    checkpoint, _members = team.stored_runs()
+    assert checkpoint.status is RunStatus.cancelled
+    assert [message.role for message in checkpoint.messages] == ["user", "assistant", "tool", "assistant"]
+    # A restart stops the turn, which stores no interrupted record for a turn its replay continues.
+    request_task_cancel(turn, process_shutdown=True)
+    with suppress(asyncio.CancelledError):
+        await turn
+
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
+    text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
+
+    assert text.endswith("Next answer.")
+    replayed = [message for message in team.models["default"].requests[-1].messages if message.from_history]
+    assert [(message.role, message.tool_call_id) for message in replayed] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("assistant", None),
+        ("tool", "call-2"),
+    ]
+    assert "Helped." in str(replayed[2].content)
+    assert replayed[4].content == INTERRUPTED_CALL_RESULT
 
 
 @pytest.mark.asyncio

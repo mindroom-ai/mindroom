@@ -52,6 +52,7 @@ from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    CONTINUED_RUNS_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -103,10 +104,12 @@ from mindroom.final_delivery import (
     TurnEnding,
     TurnProgress,
 )
-from mindroom.history.storage import new_scope_session
+from mindroom.history.run_checkpoint import save_run_checkpoint
+from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta
 from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
@@ -140,6 +143,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
+    build_matrix_run_metadata,
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
@@ -1916,6 +1920,166 @@ def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(t
     assert "Team Response" not in account
     assert "No team consensus" not in account
     assert "their effects stand: do not call a finished tool with side effects again" in account
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("attempts", "natively"), [(1, True), (2, True), (3, False)])
+async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_being_interrupted(
+    tmp_path: Path,
+    attempts: int,
+    natively: bool,
+) -> None:
+    """A replay recovers its interrupted run until a third interruption; its prompt lists the recorded calls either way."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    finished = ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1")
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=(finished,)),
+            restart_interruptions=AsyncMock(return_value=attempts),
+        ),
+    )
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        replayed = await runner._with_interrupted_attempt(
+            _plain_request(_target(), source_event_id="$source"),
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+
+    stored = storage.get_run("run-1")
+    assert stored is not None
+    assert stored.status is (RunStatus.completed if natively else RunStatus.cancelled)
+    assert [message.role for message in stored.messages] == ["user", "assistant", *(["tool"] if natively else [])]
+    # History may trim or fold the recovered run like any other, so the account never relies on it.
+    account = html.unescape(replayed.model_prompt or "")
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+    assert "their effects stand: do not call a finished tool with side effects again" in account
+    assert "conversation above" not in account
+    # The turn's runs name its earlier attempt, recovered or not, so the answer links it.
+    assert (replayed.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == ["run-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("restarts", "recovers"), [(1, True), (0, False)], ids=["retry", "new edit"])
+async def test_a_regeneration_a_restart_cut_short_continues_from_its_recovered_run_and_a_new_one_starts_fresh(
+    tmp_path: Path,
+    restarts: int,
+    recovers: bool,
+) -> None:
+    """The retry of an edit's regeneration recovers that edit's attempt; a regeneration nothing interrupted does not."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REGENERATION),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=()),
+            restart_interruptions=AsyncMock(return_value=restarts),
+        ),
+    )
+    request = replace(
+        _plain_request(_target(), source_event_id="$edit"),
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",)),
+    )
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        regenerated = await runner._with_interrupted_attempt(
+            request,
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+
+    stored = storage.get_run("run-1")
+    assert stored is not None
+    assert stored.status is (RunStatus.completed if recovers else RunStatus.cancelled)
+    assert (regenerated.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == (["run-1"] if recovers else None)
+
+
+@pytest.mark.asyncio
+async def test_redacting_a_replayed_reply_removes_the_recovered_attempt_it_continued(tmp_path: Path) -> None:
+    """The reply's message links the run that answered and the recovered runs it continued, so a redaction cuts both."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=()),
+            restart_interruptions=AsyncMock(return_value=1),
+        ),
+    )
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        replayed = await runner._with_interrupted_attempt(
+            _plain_request(_target(), source_event_id="$source"),
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+    # The replay's run stores the turn's metadata, and its delivered answer is linked to it.
+    session = storage.load_session("session-1")
+    assert session is not None
+    answer_run = RunRecord(
+        run_id="run-2",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        status=RunStatus.completed,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", content="answer")],
+        metadata=build_matrix_run_metadata("$source", [], extra_metadata=replayed.matrix_run_metadata),
+    )
+    assert storage.save_run(session, answer_run, record_usage=True) == "written"
+
+    await runner.deps.state_writer.apersist_response_event_id_in_session_run(
+        execution_identity=None,
+        scope=scope,
+        session_id="session-1",
+        run_id="run-2",
+        response_event_id="$reply",
+    )
+
+    async def redacted(event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    linked = storage.load_session("session-1")
+    assert linked is not None
+    assert await remove_history_of_redacted_events(storage, linked, redacted) == ["$reply"]
+    remaining = storage.load_session("session-1")
+    assert remaining is not None
+    assert remaining.runs == []
 
 
 @pytest.mark.asyncio
