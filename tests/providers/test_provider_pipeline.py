@@ -38,6 +38,7 @@ from mindroom.llm.provider import (
     ModelIdentity,
     ModelRequest,
     ReportedUsage,
+    StopReason,
     StreamProgress,
     TextDelta,
     ToolCallReady,
@@ -1237,14 +1238,16 @@ async def test_portable_tool_search_wraps_stored_arguments_as_an_object(stored: 
 # --- Safeguard refusal ----------------------------------------------------------------------------------------
 
 
-def _refusal(usage: MessageMetrics) -> TurnCompleted:
-    return TurnCompleted(message=Message(role="assistant", metrics=usage), stop_reason="refusal")
+def _refusal(usage: MessageMetrics, stop_reason: StopReason = "refusal") -> TurnCompleted:
+    return TurnCompleted(message=Message(role="assistant", metrics=usage), stop_reason=stop_reason)
 
 
 @pytest.mark.asyncio
-async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None:
+@pytest.mark.parametrize("stop_reason", ["refusal", "content_filter"])
+async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage(stop_reason: StopReason) -> None:
+    """A safety filter's stop is a refusal too: OpenRouter reports Claude's refusals as ``content_filter``."""
     usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
-    inner = _ScriptedProvider([[UsageReported(usage), _refusal(usage)]])
+    inner = _ScriptedProvider([[UsageReported(usage), _refusal(usage, stop_reason)]])
     events = WrappedProvider(inner, refusal_stream).stream(ModelRequest(messages=[_user()]))
 
     assert await anext(events) == UsageReported(usage)

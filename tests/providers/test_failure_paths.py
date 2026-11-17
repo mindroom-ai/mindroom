@@ -37,6 +37,7 @@ from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
+    ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
     RateLimited,
@@ -1618,7 +1619,7 @@ def _incomplete(reason: str, *, cut_off_call: bool) -> Reply:
     return _responses_stream(_response_text(_PARTIAL), *(call_events if cut_off_call else []), ended)
 
 
-# A response that ended incomplete ends the turn with its stop reason after one request.
+# A response that ended incomplete ends the turn with its stop reason after one request; the content filter refuses.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reason", "stop_reason"),
@@ -1632,7 +1633,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     stop_reason: str,
     tmp_path: Path,
 ) -> None:
-    """The output limit and the content filter end the reply with their stop reason, without a retry."""
+    """The output limit ends the reply with its stop reason and the content filter as a refusal, without a retry."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -1644,9 +1645,16 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
 
     with capture_logs() as logs:
-        turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+        if stop_reason == "content_filter":
+            with pytest.raises(ModelSafeguardRefusal) as refused:
+                await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+            output_tokens = refused.value.usage.tokens.output_tokens
+        else:
+            turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+            assert (turn.content, turn.stop_reason) == (_PARTIAL, stop_reason)
+            output_tokens = turn.usage.tokens.output_tokens
 
-    assert (turn.content, turn.stop_reason, turn.usage.tokens.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
+    assert (output_tokens, len(sent)) == (9, 1)
     # An attempt that stalls before its request goes out, as on a loaded machine, logs a line without usage.
     usage_lines = [entry for entry in logs if entry["event"] == "LLM usage" and entry["usage_available"]]
     assert [entry["stop_reason"] for entry in usage_lines] == [stop_reason]
