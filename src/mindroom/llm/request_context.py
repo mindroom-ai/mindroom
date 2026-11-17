@@ -29,7 +29,6 @@ __all__ = [
 
 type _JSONScalar = str | int | float | bool | None
 type JSONValue = _JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
-_JSON_SCALAR_TYPES = frozenset({str, int, float, bool, type(None)})
 
 _REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 _REQUEST_HEADERS: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
@@ -63,7 +62,7 @@ def json_safe(value: object) -> JSONValue:
     """
     # The request log converts every value of every request, so plain JSON values skip the checks for other types.
     value_type = type(value)
-    if value_type in _JSON_SCALAR_TYPES:
+    if value_type is str or value_type is int or value_type is float or value_type is bool or value is None:
         return cast("JSONValue", value)
     normalized: object = value
     if value_type is not dict and value_type is not list and not isinstance(value, type) and is_dataclass(value):

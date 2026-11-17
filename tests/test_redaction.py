@@ -1132,6 +1132,23 @@ def test_a_long_text_redaction_left_unchanged_is_not_scanned_again(monkeypatch: 
     assert redact_sensitive_text(kebab_name) == f"{prose}Install {REDACTED} first."
 
 
+def test_a_str_subclass_never_marks_a_text_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A text type that redefines comparison cannot vouch for a text redaction changes."""
+    _record_text_scans(monkeypatch, cache_size=8)
+
+    class EqualToAnything(str):
+        __slots__ = ()
+        __hash__ = str.__hash__
+
+        def __eq__(self, _other: object) -> bool:
+            return True
+
+    text = "ordinary words, nothing secret. " * 10 + "password=hunter2"
+    redact_sensitive_data(EqualToAnything(text))
+
+    assert "hunter2" not in str(redact_sensitive_data(text))
+
+
 def test_the_unchanged_text_cache_keeps_the_latest_texts(monkeypatch: pytest.MonkeyPatch) -> None:
     """A full cache forgets the text least recently seen, so a text seen again stays."""
     scanned = _record_text_scans(monkeypatch, cache_size=2)

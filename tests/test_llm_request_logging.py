@@ -40,7 +40,10 @@ def test_json_safe_gives_every_value_a_json_view() -> None:
     class Mode(StrEnum):
         FAST = "fast"
 
-    class Opaque:
+    class UnhashableType(type):
+        __hash__ = None
+
+    class Opaque(metaclass=UnhashableType):
         def __repr__(self) -> str:
             return "<opaque>"
 

@@ -797,7 +797,8 @@ def _redact_remembering_unchanged(value: str, *, max_length: int | None, prose: 
 
 def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
     try:
-        if len(value) < _UNCHANGED_TEXT_MIN_LENGTH:
+        # A str subclass can redefine comparison and encoding, so only exact text is remembered.
+        if len(value) < _UNCHANGED_TEXT_MIN_LENGTH or type(value) is not str:
             return _redact_sensitive_text(value, max_length=max_length, prose=prose)
         return _redact_remembering_unchanged(value, max_length=max_length, prose=prose)
     except Exception:
