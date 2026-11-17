@@ -114,6 +114,10 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 
 # --- Requests -------------------------------------------------------------------------------------------------
 
+# The field each type of OpenRouter ``reasoning_details`` item holds its text in; ``data`` and ``signature`` are
+# ciphertext.
+_REASONING_DETAIL_TEXT = {"reasoning.text": "text", "reasoning.summary": "summary"}
+
 
 def _message_content(message: Message) -> str | list[Any] | None:
     """Return the content a Chat message carries; a tool result always has one, as the API requires."""
@@ -151,8 +155,41 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:
-        formatted["reasoning_details"] = reasoning_details
+        # LEGACY_COMPAT: OpenRouter reasoning details stored as the pieces their stream sent.
+        # Legacy format: an OpenRouter reply whose ``provider_data["reasoning_details"]`` holds one item per streamed
+        # piece, so a reasoning text or summary spans many consecutive items of one type and index.
+        # Last legacy release: v2026.11.382, which stored the pieces as every release since v2026.10.499 did;
+        # replacement: the first release after it stores each detail whole (``ChatStream.finish``).
+        # Handling: each request joins the pieces into whole details, as later releases store them; signatures and
+        # encrypted details pass unchanged.
+        # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_382_stored_sends_its_reasoning_details_whole
+        formatted["reasoning_details"] = _joined_reasoning_details(reasoning_details)
     return formatted
+
+
+def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Join OpenRouter's streamed reasoning detail pieces into whole details, as its unstreamed replies hold them.
+
+    A stream sends a text or summary as consecutive pieces of one type and index, a text's signature in its last piece,
+    and an encrypted detail whole.
+    """
+    joined: list[dict[str, Any]] = []
+    for detail in details:
+        last = joined[-1] if joined else None
+        name = _REASONING_DETAIL_TEXT.get(detail.get("type"))
+        if (
+            name is None
+            or last is None
+            or (last.get("type"), last.get("index")) != (detail.get("type"), detail.get("index"))
+            or last.get("signature") is not None
+        ):
+            joined.append(dict(detail))
+            continue
+        last[name] = (last.get(name) or "") + (detail.get(name) or "")
+        for key, value in detail.items():
+            if last.get(key) is None:
+                last[key] = value
+    return joined
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
@@ -383,10 +420,6 @@ def chat_request_kwargs(
     return sdk_call_kwargs(params, "chat")
 
 
-# The text fields of an OpenRouter ``reasoning_details`` item; its ``data`` and ``signature`` are ciphertext.
-_REASONING_DETAIL_TEXT_FIELDS = ("text", "summary")
-
-
 def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts, *, static: bool) -> None:
     """Add what a Chat request body gives its model to ``parts``.
 
@@ -409,7 +442,7 @@ def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts:
         parts.text(formatted.get("reasoning_content"))
         details = formatted.get("reasoning_details") or ()
         for detail in details:
-            for name in _REASONING_DETAIL_TEXT_FIELDS:
+            for name in _REASONING_DETAIL_TEXT.values():
                 if isinstance(text := detail.get(name), str):
                     parts.text(text)
         if any(detail.get("data") for detail in details):
@@ -581,6 +614,8 @@ class ChatStream:
         self.parts.content = "".join(self._content) or None
         # An empty reasoning field means the model reasoned to nothing, which a route replaying reasoning sends back.
         self.parts.reasoning = "".join(self._reasoning) if self._reasoning else None
+        if details := self.parts.provider_data.get("reasoning_details"):
+            self.parts.provider_data["reasoning_details"] = _joined_reasoning_details(details)
         calls = [self._calls[index] for index in sorted(self._calls)]
         self.parts.tool_calls = _completed_tool_calls(calls)
         return events
