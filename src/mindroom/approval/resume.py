@@ -226,6 +226,8 @@ class ResumeRunner:
     model_name: str
     storage: RunStorage
     user_id: str | None
+    steering: bool = False
+    """Whether the resumed run owns its reply, as a top-level approval's does; a delegated child's does not."""
 
     @cached_property
     def _replay_plan(self) -> ResolvedReplayPlan:
@@ -243,6 +245,7 @@ class ResumeRunner:
                 replay_plan=self._replay_plan,
                 prompt_id=None,
             ),
+            steering=self.steering,
         )
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:

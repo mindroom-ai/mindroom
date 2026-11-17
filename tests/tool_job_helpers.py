@@ -143,6 +143,10 @@ class NewerMessageWaits:
         """Hold no Queue message."""
         return ()
 
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Steer of the reply's requester."""
+        return ()
+
 
 def tool_job_journal(storage_root: Path) -> EventJournalStore:
     """Open the event journal of one storage root, as one process does; another open is another process."""

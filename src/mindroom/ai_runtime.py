@@ -45,6 +45,8 @@ class _SupportsQueuedMessageState(Protocol):
 
     def queued_snapshot(self) -> tuple[QueuedMessage, ...]: ...
 
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]: ...
+
 
 @dataclass
 class _QueuedMessageNoticeContext:
@@ -181,60 +183,96 @@ def _ends_with_completed_tool_batch(
     return False
 
 
-async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> None:
+def _requester_steers(context: _QueuedMessageNoticeContext) -> bool:
+    return context.state is not None and bool(context.state.requester_steer_snapshot())
+
+
+async def _judge_queued_notice(
+    messages: list[Message],
+    *,
+    notice_text: str,
+    steering: bool = False,
+) -> bool | None:
+    """Judge the waiting messages after a completed batch; return True when the run ends at that batch.
+
+    A ``steering`` run owns its reply: the requester's Steer ends it unannounced and unjudged, and so does the judge's
+    "cannot wait" on the queue as it still waits, so the message runs next as its own turn. Any other wrap-up gets the
+    pause notice. Each look follows the awaited reactions and judgment, so an edited or removed message ends nothing
+    for the verdict on its old text, while a message appended meanwhile leaves the judged queue's verdict standing.
+    """
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None or context.state is None:
-        return
+        return None
     state = context.state
     gate = context.mid_turn_gate
     for message in state.queued_snapshot():
         await gate.acknowledge_queued(message)
+    if steering and _requester_steers(context):
+        gate.report_stop()
+        return True
     pending = state.interrupting_snapshot()
     if not pending:
-        return
+        return None
     if not context.notice_fired:
         outcome = await gate.decide(
             pending,
             current=lambda: not context.notice_fired and pending == state.interrupting_snapshot(),
         )
-        if outcome is MidTurnOutcome.WAIT:
-            return
+        steered = steering and _requester_steers(context)
+        if outcome is MidTurnOutcome.WAIT and not steered:
+            return None
         # The reply wraps up here, for a "cannot wait" and a pause alike, also when a newer message arrived during the
         # judgment, so a later verdict on a reply that kept waiting cannot leave a mark behind.
         gate.report_stop()
+        if steered or (
+            steering and outcome is MidTurnOutcome.CANNOT_WAIT and set(pending) <= set(state.interrupting_snapshot())
+        ):
+            return True
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
+    return None
 
 
-def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
+def queued_notice_after_tool_batch(notice_text: str, *, steering: bool = False) -> AfterToolBatchHook:
     """Return the loop hook that appends the queued-message notice after a tool batch when a newer message waits.
 
     Without a mid-turn judge the notice follows every batch while messages are queued; with one, the judge decides
     after each completed batch. Calls paused for approval or delegation leave the batch unresolved; the response that
-    resumes it judges the completed batch, reusing this turn's decision for an unchanged queue.
+    resumes it judges the completed batch, reusing this turn's decision for an unchanged queue. A ``steering`` run,
+    one that owns its reply, ends at a completed batch instead of being told to pause when its requester steers or the
+    judge says the queue cannot wait; a delegated child or a team member does not, so it leaves that to its owner.
     """
 
-    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> None:
-        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
+    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> bool | None:
         context = _queued_message_notice_context.get()
-        if context is None or context.mid_turn_gate is None:
-            return
-        if not _ends_with_completed_tool_batch(messages, context.response_turn_id, after_tool_batch=True):
-            return
-        await _judge_queued_notice(messages, notice_text=notice_text)
+        if context is None:
+            return None
+        completed = _ends_with_completed_tool_batch(messages, context.response_turn_id, after_tool_batch=True)
+        if completed and context.mid_turn_gate is not None:
+            return await _judge_queued_notice(messages, notice_text=notice_text, steering=steering)
+        if completed and steering and _requester_steers(context):
+            return True
+        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
+        return None
 
     return after_tool_batch
 
 
-def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
-    """Return the loop hook that notifies a resumed run of a queued message after its completed tool batch."""
+def queued_notice_on_resume_entry(notice_text: str, *, steering: bool = False) -> AfterToolBatchHook:
+    """Return the loop hook that notifies a resumed run of a queued message after its completed tool batch.
 
-    async def on_resume_entry(messages: list[Message], _results: Sequence[Message]) -> None:
+    A ``steering`` run ends at that batch for its requester's Steer or the judge's "cannot wait" instead.
+    """
+
+    async def on_resume_entry(messages: list[Message], _results: Sequence[Message]) -> bool | None:
         context = _queued_message_notice_context.get()
         if context is None or not _ends_with_completed_tool_batch(messages, context.response_turn_id):
-            return
+            return None
         if context.mid_turn_gate is not None:
-            await _judge_queued_notice(messages, notice_text=notice_text)
-        elif context.state is not None and context.state.has_interrupting_messages():
+            return await _judge_queued_notice(messages, notice_text=notice_text, steering=steering)
+        if steering and _requester_steers(context):
+            return True
+        if context.state is not None and context.state.has_interrupting_messages():
             _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
+        return None
 
     return on_resume_entry

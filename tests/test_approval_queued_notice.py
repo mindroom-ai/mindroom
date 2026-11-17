@@ -49,6 +49,9 @@ class _QueuedState:
     def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
         return ()
 
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
+
 
 def _tool_calls() -> list[dict[str, Any]]:
     return [tool_call("read_item", f"call-{item}", item=item) for item in (1, 2)]

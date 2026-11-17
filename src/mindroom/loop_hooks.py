@@ -80,11 +80,14 @@ def agent_loop_hooks(
     participation: ParticipationGate | None = None,
     skill_review_capture: SkillReviewCapture | None = None,
     queued_notices: bool = True,
+    steering: bool = False,
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
 
     The run compacts as its build's agent, and a top-level agent hears of its ended jobs. ``queued_notices`` is off
-    for a team member, whose leader owns the turn's notices; ``skill_review_capture`` records the run's final request.
+    for a team member, whose leader owns the turn's notices; ``steering`` is on for a run that owns its reply, which a
+    completed batch then ends for a steering message, and off for a delegated child, whose owner it leaves that to.
+    ``skill_review_capture`` records the run's final request.
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
@@ -101,6 +104,7 @@ def agent_loop_hooks(
         # own jobs too: the notice reaches only the member whose account posts an ad hoc team's replies.
         job_notices_for=jobs.name if jobs is not None and jobs.depth == 0 else None,
         queued_notices=queued_notices,
+        steering=steering,
         skill_review_capture=skill_review_capture,
     )
 
@@ -112,7 +116,8 @@ def leader_loop_hooks(
     """Return the hooks of one team leader's turn or resume, from the built team's model, history settings, and jobs.
 
     The leader compacts in the team's scope. It has no participation gate, deferred tools, job definitions, or
-    skill-review capture; it owns the turn's queued-message notices and hears of its team's ended jobs.
+    skill-review capture; it owns the turn's queued-message notices and its reply's steering, and hears of its
+    team's ended jobs.
     """
     jobs = built.leader_jobs
     return _loop_hooks(
@@ -126,6 +131,7 @@ def leader_loop_hooks(
         job_definitions=None,
         job_notices_for=jobs.name if jobs is not None else None,
         queued_notices=True,
+        steering=True,
         skill_review_capture=None,
     )
 
@@ -142,6 +148,7 @@ def _loop_hooks(
     job_definitions: JobActor | None,
     job_notices_for: str | None,
     queued_notices: bool,
+    steering: bool,
     skill_review_capture: SkillReviewCapture | None,
 ) -> LoopHooks:
     """Return the hooks of one run or resume, in the order the loop applies them before each request.
@@ -152,7 +159,8 @@ def _loop_hooks(
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
     it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
     live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices
-    follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended jobs of
+    follow every tool batch and a resume's entry when ``queued_notices`` is on, and a ``steering`` run ends at such a
+    batch for a message that steers it instead; the run hears of the ended jobs of
     ``job_notices_for`` after each batch; ``skill_review_capture`` records the run's final request.
     """
     before_request: list[BeforeRequestHook] = []
@@ -183,10 +191,12 @@ def _loop_hooks(
         rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
         tool_middleware=tool_middleware,
         after_tool_batch=(
-            *((ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else ()),
+            *((ai_runtime.queued_notice_after_tool_batch(notice_text, steering=steering),) if queued_notices else ()),
             *((job_notice_hook(job_notices_for),) if job_notices_for is not None else ()),
         ),
-        on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),) if queued_notices else (),
+        on_resume_entry=(
+            (ai_runtime.queued_notice_on_resume_entry(notice_text, steering=steering),) if queued_notices else ()
+        ),
         on_loop_end=(
             capture_final_request(skill_review_capture, model, model_name=turn.model_name)
             if skill_review_capture is not None

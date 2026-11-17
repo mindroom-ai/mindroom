@@ -429,6 +429,9 @@ class _StaticQueuedState:
     def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
         return ()
 
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
+
 
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     """Queued-message state should track distinct source events, not anonymous increments."""

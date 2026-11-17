@@ -29,6 +29,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.custom_tools.job import JobTools
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
@@ -66,6 +67,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     always_owned,
+    answer_of,
     job_actor,
     job_tool,
     lookup,
@@ -78,7 +80,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
@@ -91,6 +93,11 @@ _NOTICE = "WRAP UP NOW"
 _NOTICE_HOOKS = LoopHooks(
     after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
     on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
+)
+# The hooks of a run that owns its reply: a requester's Steer or a judge's "cannot wait" ends it at a completed batch.
+_STEERING_HOOKS = LoopHooks(
+    after_tool_batch=(queued_notice_after_tool_batch(_NOTICE, steering=True),),
+    on_resume_entry=(queued_notice_on_resume_entry(_NOTICE, steering=True),),
 )
 
 
@@ -116,6 +123,7 @@ async def _run_turn(
     model: ScriptedModel,
     *toolkits: AdaptedToolkit,
     persist: Callable[[RunRecord], Awaitable[None]] | None = None,
+    hooks: LoopHooks = _NOTICE_HOOKS,
 ) -> RunRecord:
     """Run one turn of "Do the task" on the owned loop with the queued-notice hooks a reply installs."""
     _, record = await collect(
@@ -123,7 +131,7 @@ async def _run_turn(
             spec(model, *toolkits),
             [Message(role="user", content="Do the task")],
             ctx=context(),
-            hooks=_NOTICE_HOOKS,
+            hooks=hooks,
             persist=persist,
             request_template=EMPTY_REQUEST,
         ),
@@ -136,18 +144,20 @@ async def _resume_turn(
     paused: RunRecord,
     *toolkits: AdaptedToolkit,
     external_results: Mapping[str, str],
+    approved: Sequence[ApprovalCall] = (),
+    hooks: LoopHooks = _NOTICE_HOOKS,
 ) -> RunRecord:
-    """Resume a paused turn with the results of its externally executed calls."""
+    """Resume a paused turn with the results of its externally executed calls and the approvals it waited for."""
     _, record = await collect(
         resume_agent(
             spec(model, *toolkits),
             paused,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
-            approved=(),
+            approved=approved,
             denied={},
             external_results=external_results,
             context=lambda run_id: context(run_id=run_id),
-            hooks=_NOTICE_HOOKS,
+            hooks=hooks,
             persist=None,
             request_template=EMPTY_REQUEST,
         ),
@@ -2536,3 +2546,205 @@ def test_binding_a_requester_latches_only_their_waiting_steers() -> None:
     queue.bind_active_requester(None)
     assert queue.requester_steer_snapshot() == ()
     assert QueuedHumanNoticeReservation(queue, "$mine").stopped_reply
+
+
+async def _steers_after_tool_batch(queue: _QueuedMessageState) -> tuple[bool | None, list[Message]]:
+    """Run a reply-owning run's after-batch hook over ``queue``; return whether it ends the run, and the messages."""
+    messages = _resumed_messages()
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        ended = await queued_notice_after_tool_batch(_NOTICE, steering=True)(messages, ())
+    return ended, messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judge", [False, True], ids=["no_judge", "judge"])
+async def test_requester_steer_returns_batch_stop_without_notice_or_queue_consumption(*, judge: bool) -> None:
+    """The requester's Steer ends an owning run once its batch's results are recorded, unannounced and unjudged.
+
+    The run stores its tool calls and results as any finished run does, its results keep their own outcomes, and the
+    Steer stays queued with its bypass for the reply that follows.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    if judge:
+        queue.mid_turn_gate = MidTurnGate(
+            active_text="Do the task",
+            evaluate=evaluate,
+            requester_id=_REQUESTER,
+            on_stop=queue.mark_stopped_reply,
+        )
+
+    def work() -> str:
+        """Do the work."""
+        queue.add_waiting_human_message(
+            "$steer",
+            text="Also print the date",
+            requester_id=_REQUESTER,
+            mode=MidTurnMode.STEER,
+        )
+        return "Completed action"
+
+    model = ScriptedModel([calls(tool_call("work", "work")), answer("Never requested")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        record = await _run_turn(model, toolkit(work), hooks=_STEERING_HOOKS)
+    assert record.status == RunStatus.completed
+    assert len(model.requests) == 1
+    assert not _has_notice(record.messages or ())
+    assert answer_of(record, "work").content == "Completed action"
+    assert [tool.tool_name for tool in record.tools or ()] == ["work"]
+    assert not any(message.stop_after_tool_call for message in record.messages or ())
+    assert not any(tool.stop_after_call for tool in record.tools or ())
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
+    assert QueuedHumanNoticeReservation(queue, "$steer").stopped_reply
+
+    # Each hook of an owning run, after a batch and at a resume's entry, ends it for the same reason.
+    ended, messages = await _steers_after_tool_batch(queue)
+    assert ended is True
+    assert not _has_notice(messages)
+    resumed = _resumed_messages()
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        assert await queued_notice_on_resume_entry(_NOTICE, steering=True)(resumed, ()) is True
+    assert not _has_notice(resumed)
+    assert judged == []
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
+
+
+_VERDICTS: dict[str, bool | None] = {
+    "cannot_wait": False,
+    "can_wait": True,
+    "no_answer": None,
+    "another_persons_steer": True,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "ends", "notice"),
+    [
+        ("cannot_wait", True, False),
+        ("can_wait", None, False),
+        ("no_answer", None, True),
+        ("error", None, True),
+        ("timeout", None, True),
+        ("unjudgeable", None, True),
+        ("edited", None, True),
+        ("deleted", None, False),
+        ("appended", True, False),
+        ("another_persons_steer", None, False),
+    ],
+)
+async def test_only_explicit_current_negative_verdict_ends_run(case: str, ends: bool | None, *, notice: bool) -> None:
+    """Only the judge's "cannot wait" on the queue as it still waits ends an owning run, without a notice.
+
+    A verdict on a message edited or removed during the judgment is obsolete, and a message appended meanwhile does
+    not cost the judged correction its count. Without a verdict, the run gets the pause notice and no bypass.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        if case == "error":
+            msg = "judgment backend unavailable"
+            raise RuntimeError(msg)
+        if case == "timeout":
+            raise TimeoutError
+        if case == "edited":
+            queue.update_waiting_human_message("$stop", text="Never mind, keep going", mentions_nobody=False)
+        elif case == "deleted":
+            queue.consume_waiting_human_message("$stop")
+        elif case == "appended":
+            queue.add_waiting_human_message("$bob", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+        return _VERDICTS.get(case, False)
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    sender, mode = (_OTHER, MidTurnMode.STEER) if case == "another_persons_steer" else (_REQUESTER, MidTurnMode.AUTO)
+    text = None if case == "unjudgeable" else "Stop, wrong file"
+    queue.add_waiting_human_message("$stop", text=text, requester_id=sender, mode=mode)
+    stop = QueuedHumanNoticeReservation(queue, "$stop")
+    ended, messages = await _steers_after_tool_batch(queue)
+    assert ended is ends
+    assert _has_notice(messages) is notice
+    assert len(judgments) == (0 if case == "unjudgeable" else 1)
+    assert stop.stopped_reply is (ends is True)
+    assert QueuedHumanNoticeReservation(queue, "$bob").stopped_reply is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause", ["delegation", "approval"])
+@pytest.mark.parametrize("reason", ["steer", "cannot_wait"])
+async def test_unresolved_batch_is_not_steered_before_resume(pause: str, reason: str) -> None:
+    """A batch waiting on a delegation's or an approval's result is not ended; its resume ends it once complete.
+
+    The owner stays paused with the message still queued, and the resumed batch ends the run before another request.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        return False
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+
+    def work() -> str:
+        """Do the work."""
+        mode = MidTurnMode.STEER if reason == "steer" else MidTurnMode.AUTO
+        queue.add_waiting_human_message("$new", text="Stop, wrong file", requester_id=_REQUESTER, mode=mode)
+        return "Completed action"
+
+    def child() -> str:
+        """Hand the subtask to a child, or run once approved."""
+        return "Child result"
+
+    held = external(child) if pause == "delegation" else gated(child)
+    model = ScriptedModel([calls(tool_call("work", "work"), tool_call("child", "child")), answer("Never requested")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        paused = await _run_turn(model, toolkit(work), held, hooks=_STEERING_HOOKS)
+        assert paused.status == RunStatus.paused
+        assert judgments == []
+        assert [message.event_id for message in queue.pending_message_snapshot()] == ["$new"]
+        approved = [
+            ApprovalCall(
+                tool_call_id="child",
+                tool_name="child",
+                invoking_agent="code",
+                expires_at_ns=2**62,
+                toolkit_name="gated",
+                arguments_digest=approval_arguments_digest({}),
+            ),
+        ]
+        record = await _resume_turn(
+            model,
+            paused,
+            toolkit(work),
+            held,
+            external_results={"child": "Child result"} if pause == "delegation" else {},
+            approved=approved if pause == "approval" else (),
+            hooks=_STEERING_HOOKS,
+        )
+    assert record.status == RunStatus.completed
+    assert len(model.requests) == 1
+    assert answer_of(record, "child").content == "Child result"
+    assert not _has_notice(record.messages or ())
+    assert len(judgments) == (1 if reason == "cannot_wait" else 0)
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$new"]
+    assert QueuedHumanNoticeReservation(queue, "$new").stopped_reply

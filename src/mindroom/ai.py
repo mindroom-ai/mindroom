@@ -507,6 +507,8 @@ def _agent_loop_hooks(
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
+        # A delegated child leaves its owner's reply to the owner to end.
+        steering=ctx.delegation_depth == 0,
     )
 
 

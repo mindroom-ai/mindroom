@@ -199,6 +199,7 @@ async def _continue_persisted_agent(
         model_name=model_name,
         storage=storage,
         user_id=continuation.requester_id,
+        steering=True,
     )
     native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(

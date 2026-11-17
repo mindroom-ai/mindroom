@@ -7,20 +7,30 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.ai import _compose_current_turn_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
+from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
+from mindroom.response_payload_preparation import (
+    STEER_CONTINUATION_LINE,
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    steered_follow_up_prompt,
+)
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import PreparedDispatch
+from tests.bot_helpers import _hook_plugin
 from tests.conftest import (
     unwrap_extracted_collaborator,
 )
@@ -283,3 +293,58 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
     assert result == Owned()
     assert len(prepare_calls) == 1
     assert lock_held_at_prepare == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_prompt", [None, "raw prompt\n\nThe attachment is a photo."], ids=["text", "attachment"])
+@pytest.mark.parametrize("stopped_reply", [True, False], ids=["marked", "unmarked"])
+async def test_carry_on_line_follows_only_marked_model_prompt_after_enrichment(
+    tmp_path: Path,
+    model_prompt: str | None,
+    *,
+    stopped_reply: bool,
+) -> None:
+    """A message that cut a reply short tells the model once, after its enrichment, only in the model's copy.
+
+    The person's raw prompt, the envelope body, and the memory input stay as the person wrote them; an unmarked
+    message (Queue, a Steer sent while nothing ran, an Auto message without a verdict) carries no line.
+    """
+    bot = _bot(tmp_path)
+
+    @hook(EVENT_MESSAGE_ENRICH)
+    async def add_note(ctx: MessageEnrichContext) -> None:
+        ctx.add_metadata("note", "Enriched note.")
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("note", [add_note])])
+    target = _target()
+    preparation = _preparation(target)
+    preparation = replace(preparation, dispatch=replace(preparation.dispatch, stopped_reply=stopped_reply))
+    request = _request(target, preparation, thread_history=ThreadHistoryResult([], is_full_history=True))
+    with patch.object(
+        bot._inbound_turn_normalizer,
+        "build_dispatch_payload_with_attachments",
+        new=AsyncMock(return_value=DispatchPayload(prompt="raw prompt", model_prompt=model_prompt)),
+    ):
+        result = await bot._request_payload_preparer.prepare(request)
+
+    assert result.model_prompt is not None
+    assert result.prompt == preparation.prompt == "raw prompt"
+    assert result.response_envelope.body == preparation.dispatch.envelope.body
+    assert "Enriched note." in result.model_prompt
+    assert ("The attachment is a photo." in result.model_prompt) is (model_prompt is not None)
+    assert result.model_prompt.count(STEER_CONTINUATION_LINE) == (1 if stopped_reply else 0)
+    memory_prompt, _history, model_prompt_text, _model_history = prepare_memory_and_model_context(
+        result.prompt,
+        [],
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+        timezone="UTC",
+        model_prompt=result.model_prompt,
+    )
+    assert memory_prompt == "raw prompt"
+    # The model reads the person's message once, then the line after its enrichment.
+    current = _compose_current_turn_prompt(raw_prompt=memory_prompt, model_prompt=model_prompt_text)
+    assert current.count("raw prompt") == 1
+    assert current.startswith("raw prompt\n\n")
+    assert current.endswith(STEER_CONTINUATION_LINE) is stopped_reply
+    assert steered_follow_up_prompt("Do X") == f"Do X\n\n{STEER_CONTINUATION_LINE}"

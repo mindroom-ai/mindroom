@@ -379,6 +379,9 @@ class _QueuedState:
     def queued_snapshot(self) -> tuple[object, ...]:
         return ()
 
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
+
 
 @pytest.mark.asyncio
 async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run(
