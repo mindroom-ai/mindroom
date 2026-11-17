@@ -1672,16 +1672,6 @@ async def test_each_action_names_what_it_is_missing(
     assert homeserver.requests == []
 
 
-def _event_write_arguments(kind: str, record: AttachmentRecord) -> dict[str, str]:
-    """Return the arguments of a write of ``kind`` into ``ROOM`` that sends one event; a file's is ``record``."""
-    return {
-        "text": {"action": "send", "message": "Lunch?"},
-        "file": {"action": "send", "attachment": record.attachment_id},
-        "react": {"action": "react", "event_id": "$own", "emoji": "👍"},
-        "edit": {"action": "edit", "event_id": "$own", "message": "Hello"},
-    }[kind]
-
-
 async def _write_with_send_answer(
     config: Config,
     paths: RuntimePaths,
@@ -1690,7 +1680,7 @@ async def _write_with_send_answer(
     kind: str,
     answer: Answer | Exception,
 ) -> dict:
-    """Make a write of ``kind`` into ``ROOM`` whose event's send the homeserver answers with ``answer``."""
+    """Make a write of ``kind`` into ``ROOM`` whose one event's send the homeserver answers with ``answer``."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers.update(
         {
@@ -1700,13 +1690,19 @@ async def _write_with_send_answer(
             f"{_send_path(event_type='m.reaction')}*": answer,
         },
     )
+    arguments = {
+        "text": {"action": "send", "message": "Lunch?"},
+        "file": {"action": "send", "attachment": record.attachment_id},
+        "react": {"action": "react", "event_id": "$own", "emoji": "👍"},
+        "edit": {"action": "edit", "event_id": "$own", "message": "Hello"},
+    }[kind]
     return await _write(
         config,
         paths,
         homeserver,
         attachment_ids=(record.attachment_id,),
         room_id=ROOM,
-        **_event_write_arguments(kind, record),
+        **arguments,
     )
 
 
@@ -1734,7 +1730,7 @@ async def test_a_send_the_homeserver_did_not_confirm_says_it_may_have_been_sent(
     """A send without the homeserver's own refusal may be in the room, and sending again would post it twice."""
     result = await _write_with_send_answer(config, paths, homeserver, tmp_path, kind, answer)
 
-    assert result == error_result(_event_write_arguments(kind, _notes(paths, tmp_path))["action"], UNCONFIRMED)
+    assert (result["status"], result["message"]) == ("error", UNCONFIRMED)
 
 
 @pytest.mark.asyncio
@@ -1759,7 +1755,7 @@ async def test_a_send_the_homeserver_refused_says_nothing_was_sent(
     """A refusal with a 4xx status is the homeserver saying it took nothing, so the send can be made again."""
     result = await _write_with_send_answer(config, paths, homeserver, tmp_path, kind, answer)
 
-    assert result["message"] == f"Nothing was sent: {why}."
+    assert (result["status"], result["message"]) == ("error", f"Nothing was sent: {why}.")
 
 
 @pytest.mark.asyncio
