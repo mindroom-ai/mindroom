@@ -29,6 +29,7 @@ from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
+    ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
     RateLimited,
@@ -251,10 +252,21 @@ async def test_chat_stream_places_calls_streamed_without_an_index_by_their_posit
 async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_reason: str, stop: str) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "cut"}, finish_reason=finish_reason)))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    turn = await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert turn.stop_reason == stop
     assert "finish_reason" not in (turn.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_chat_content_filter_stop_is_a_safeguard_refusal(tmp_path: Path) -> None:
+    """OpenRouter reports Claude's refusal as ``content_filter``; the reply must say so, not read as empty."""
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": ""}, finish_reason="content_filter")))
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert len(built.requests) == 1
 
 
 @pytest.mark.asyncio
