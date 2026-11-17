@@ -13095,7 +13095,7 @@ Messages in encrypted rooms are not readable: each shows as `[encrypted, not rea
 | `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
 | `edit` | Replaces the text of the owner's own message `event_id` in `room_id` with `message` |
 | `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
-| `join`, `leave` | Joins `room_id`, a room ID or alias, or leaves it |
+| `join`, `leave` | Joins or leaves `room_id` |
 | `invite` | Invites `user_id` into `room_id` |
 | `create_room` | Creates a private room called `name`, inviting `user_id` if given |
 

@@ -42,13 +42,20 @@ from tests.matrix_user_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.custom_tools.matrix_user import MatrixUserTools
 
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
+ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
+# An alias, and the room the homeserver's directory says it names.
+ALIAS = "#general:example.com"
+ALIASED_ROOM = "!general:example.com"
+DIRECTORY_PATH = f"/_matrix/client/v3/directory/room/{ALIAS}"
 
 
 @pytest.fixture
@@ -221,19 +228,12 @@ async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimeP
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        ({"action": "room"}, "room needs room_id, a room ID such as !abc:example.com."),
-        (
-            {"action": "room", "room_id": "#planning:example.com"},
-            "room needs room_id, a room ID such as !abc:example.com.",
-        ),
+        ({"action": "room"}, f"room {ROOM_NEEDED}"),
+        ({"action": "room", "room_id": " "}, f"room {ROOM_NEEDED}"),
         ({"action": "people"}, "people needs query: a name, or a full Matrix ID such as @alice:example.com."),
-        ({"action": "messages"}, "messages needs room_id, a room ID such as !abc:example.com."),
+        ({"action": "messages"}, f"messages {ROOM_NEEDED}"),
         ({"action": "search"}, "search needs query: the words to look for."),
         ({"action": "search", "query": " "}, "search needs query: the words to look for."),
-        (
-            {"action": "search", "query": "budget", "room_id": "#planning:example.com"},
-            "search's room_id is a room ID such as !abc:example.com; leave it out to search all your owner's rooms.",
-        ),
         ({"action": "download", "room_id": ROOM}, "download needs event_id: the ID of the message with the file."),
     ],
 )
@@ -291,6 +291,79 @@ async def test_a_blank_read_argument_is_left_out(
     assert with_blank == without
     first, second = homeserver.requests
     assert (second.method, second.url, second.body) == (first.method, first.url, first.body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "first_request"),
+    [("messages", "messages"), ("room", "joined_members"), ("mark_read", "messages")],
+)
+async def test_a_room_named_by_alias_is_resolved_for_reads(
+    config: Config,
+    paths: RuntimePaths,
+    action: str,
+    first_request: str,
+) -> None:
+    """The owner's client looks the alias up, and the read then asks about the room it names."""
+    room_path = f"/_matrix/client/v3/rooms/{ALIASED_ROOM}"
+    homeserver = FakeHomeserver(
+        {
+            DIRECTORY_PATH: {"room_id": ALIASED_ROOM, "servers": ["example.com"]},
+            f"{room_path}/messages": {"chunk": [room_event("$newest", "m.room.message", {"body": "Hi"})]},
+            f"{room_path}/joined_members": {"joined": {}},
+            f"{room_path}/read_markers": {},
+            f"/_matrix/client/v3/user/{OWNER}/rooms/{ALIASED_ROOM}/account_data/m.marked_unread": {},
+        },
+    )
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_read(action=action, room_id=ALIAS)
+
+    assert json.loads(result)["status"] == "ok"
+    lookup, first, *_ = homeserver.requests
+    assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
+    assert first.path == f"{room_path}/{first_request}"
+    assert all(ALIAS not in request.path for request in homeserver.requests[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda toolkit, room: toolkit.matrix_user_read(action="messages", room_id=room), id="read"),
+        pytest.param(
+            lambda toolkit, room: toolkit.matrix_user_write(action="send", room_id=room, message="Hi"),
+            id="write",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("room_id", "message", "requested"),
+    [
+        ("planning", "No room is known as planning.", []),
+        (
+            "#gone:example.com",
+            "Matrix answered M_NOT_FOUND: Not found",
+            ["/_matrix/client/v3/directory/room/#gone:example.com"],
+        ),
+    ],
+    ids=["no-such-name", "unknown-alias"],
+)
+async def test_an_unknown_room_reference_is_refused_before_anything_else(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    call: Callable[[MatrixUserTools, str], Awaitable[str]],
+    room_id: str,
+    message: str,
+    requested: list[str],
+) -> None:
+    """A name MindRoom does not know, or an alias the homeserver cannot resolve, stops the call before its action."""
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = json.loads(await call(owner_toolkit(config, paths), room_id))
+
+    assert (result["status"], result["message"]) == ("error", message)
+    assert homeserver.paths() == requested
 
 
 def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: RuntimePaths) -> None:

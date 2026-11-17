@@ -3,7 +3,7 @@
 Each read takes a client that acts as the person and returns its result's fields, with rooms, messages, and people as
 compact lines. Every request goes through ``matrix_json``, which reads an answer up to 2 MiB and retries a 429 at most
 twice, waiting at most 5 seconds each time, as matrix-mcp does; only a file's download, which is not JSON, goes through
-the capped media download instead.
+the capped media download instead, and an alias's lookup through the room resolver MindRoom's other Matrix tools use.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
+from mindroom.matrix.client_room_admin import resolve_room_reference
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
     download_media_bytes,
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+
+    from mindroom.constants import RuntimePaths
 
 __all__ = [
     "MATRIX_USER_ID",
@@ -56,6 +59,7 @@ __all__ = [
     "read_rooms",
     "request_failure",
     "room_encrypted",
+    "room_named",
     "room_needed",
     "search_messages",
 ]
@@ -177,11 +181,11 @@ def _rate_limit_wait(retry_after: str | None, answer: dict[str, Any] | None) -> 
     return _DEFAULT_RATE_LIMIT_WAIT_SECONDS
 
 
-def _refusal(status: int, answer: dict[str, Any]) -> MatrixRequestError:
+def _refusal(status: int | None, answer: dict[str, Any]) -> MatrixRequestError:
     errcode = answer.get("errcode") if isinstance(answer.get("errcode"), str) else None
     error = answer.get("error") if isinstance(answer.get("error"), str) else None
-    message = f"Matrix answered {status}" + (f" {errcode}" if errcode else "") + (f": {error}" if error else "")
-    return MatrixRequestError(message, status=status, errcode=errcode)
+    answered = "Matrix answered" + (f" {status}" if status else "") + (f" {errcode}" if errcode else "")
+    return MatrixRequestError(answered + (f": {error}" if error else ""), status=status, errcode=errcode)
 
 
 def request_failure(failed: MatrixRequestError | TimeoutError | aiohttp.ClientError) -> str:
@@ -195,10 +199,27 @@ def request_failure(failed: MatrixRequestError | TimeoutError | aiohttp.ClientEr
     return _TIMED_OUT if isinstance(failed, TimeoutError) else _UNREACHABLE
 
 
-def room_needed(action: str, *, alias: bool = False) -> str:
-    """Return what ``action`` says without the room it needs: a room ID, or when ``alias``, an alias too."""
-    aliased = " or an alias such as #abc:example.com" if alias else ""
-    return f"{action} needs room_id, a room ID such as !abc:example.com{aliased}."
+def room_needed(action: str) -> str:
+    """Return what ``action`` says without the room it needs."""
+    return f"{action} needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
+
+
+async def room_named(client: nio.AsyncClient, room: str, runtime_paths: RuntimePaths, *, join: bool = False) -> str:
+    """Return the ID of the room ``room`` names: its ID, an alias, or a configured room name.
+
+    Raises ``MatrixRequestError`` for a name of no room, and with the homeserver's answer to an alias it cannot resolve,
+    unless the room is one to ``join``: that alias is returned as it is, and the join's own answer says what came of it.
+    """
+    resolved = await resolve_room_reference(client, room, runtime_paths)
+    if isinstance(resolved, str):
+        return resolved
+    if resolved is None:
+        msg = f"No room is known as {room}."
+        raise MatrixRequestError(msg)
+    if join:
+        return room
+    # nio's error answer holds the errcode and the error, not the HTTP status.
+    raise _refusal(None, {"errcode": resolved.status_code, "error": resolved.message})
 
 
 async def optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:

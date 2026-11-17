@@ -56,6 +56,10 @@ UPLOAD_PATH = "/_matrix/media/v3/upload"
 DIRECT_PATH = f"{CLIENT}/user/{OWNER}/account_data/m.direct"
 CREATE_PATH = f"{CLIENT}/createRoom"
 THREAD_PATH = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
+# An alias, which the homeserver's directory resolves.
+ALIAS = "#planning:example.com"
+DIRECTORY_PATH = f"{CLIENT}/directory/room/{ALIAS}"
+ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
@@ -831,10 +835,10 @@ async def test_every_built_content_carries_the_marker_before_the_client_stamps_i
 @pytest.mark.asyncio
 async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths, homeserver: FakeHomeserver) -> None:
     """Membership changes in the owner's name: a room by ID or alias, an invitation, a new room."""
-    alias = "#planning:example.com"
     homeserver.answers.update(
         {
-            f"{CLIENT}/join/{alias}": {"room_id": ROOM},
+            DIRECTORY_PATH: {"room_id": ROOM, "servers": ["example.com"]},
+            f"{CLIENT}/join/{ROOM}": {"room_id": ROOM},
             f"{ROOM_PATH}/invite": {},
             f"{CLIENT}/rooms/{OTHER_ROOM}/leave": {},
             CREATE_PATH: {"room_id": "!trip:example.com"},
@@ -842,7 +846,7 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
     )
 
     results = [
-        await _write(config, paths, homeserver, action="join", room_id=alias),
+        await _write(config, paths, homeserver, action="join", room_id=ALIAS),
         await _write(config, paths, homeserver, action="invite", room_id=ROOM, user_id=BOB),
         await _write(config, paths, homeserver, action="leave", room_id=OTHER_ROOM),
         await _write(config, paths, homeserver, action="create_room", name="Trip", user_id=BOB),
@@ -855,12 +859,69 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
         _ok("create_room", room_id="!trip:example.com"),
     ]
     assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
-        ("POST", f"{CLIENT}/join/{alias}", {}),
+        ("GET", DIRECTORY_PATH, None),
+        ("POST", f"{CLIENT}/join/{ROOM}", {}),
         ("POST", f"{ROOM_PATH}/invite", {"user_id": BOB}),
         ("POST", f"{CLIENT}/rooms/{OTHER_ROOM}/leave", {}),
         ("POST", CREATE_PATH, {"name": "Trip", "preset": "private_chat", "invite": [BOB]}),
     ]
     assert all(request.query["user_id"] == [OWNER] for request in homeserver.requests)
+
+
+@pytest.mark.asyncio
+async def test_join_still_takes_an_alias_the_owner_is_not_in(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An alias the lookup cannot resolve goes to the homeserver as it is, whose join resolves it."""
+    alias = "#elsewhere:example.org"
+    homeserver.answers[f"{CLIENT}/join/{alias}"] = {"room_id": OTHER_ROOM}
+
+    result = await _write(config, paths, homeserver, action="join", room_id=alias)
+
+    assert result == _ok("join", room_id=OTHER_ROOM)
+    assert [(request.method, request.path) for request in homeserver.requests] == [
+        ("GET", f"{CLIENT}/directory/room/{alias}"),
+        ("POST", f"{CLIENT}/join/{alias}"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [{"action": "send", "message": "Hi"}, {"action": "react", "event_id": "$own", "emoji": "👍"}],
+    ids=["send", "react"],
+)
+async def test_a_room_named_by_alias_is_resolved_for_writes(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+) -> None:
+    """The room the alias names is the one checked, counted, guarded, written to, and reported."""
+    homeserver.answers.update(
+        {
+            DIRECTORY_PATH: {"room_id": OTHER_ROOM, "servers": ["example.com"]},
+            f"{_send_path(OTHER_ROOM)}*": {"event_id": "$sent"},
+            f"{_send_path(OTHER_ROOM, 'm.reaction')}*": {"event_id": "$sent"},
+        },
+    )
+    action = arguments["action"]
+
+    result = await _write(config, paths, homeserver, room_id=ALIAS, **arguments)
+    with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(OTHER_ROOM):
+        guarded = json.loads(await owner_toolkit(config, paths).matrix_user_write(room_id=ALIAS, **arguments))
+
+    assert result == _ok(action, room_id=OTHER_ROOM, event_id="$sent")
+    assert guarded == _error(action, "Nothing is written as your owner into a contact room.")
+    lookup, encryption, *_, sent, guarded_lookup = homeserver.requests
+    assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
+    assert (encryption.method, encryption.path) == ("GET", f"{CLIENT}/rooms/{OTHER_ROOM}/state/m.room.encryption")
+    assert sent.path.startswith(f"{CLIENT}/rooms/{OTHER_ROOM}/send/")
+    assert all(OTHER_ROOM in request.path for request in homeserver.requests[1:-1])
+    assert guarded_lookup.path == DIRECTORY_PATH
+    assert set(matrix_user_writes._RECENT_WRITES) == {("mind_alice", OWNER, OTHER_ROOM)}
 
 
 @pytest.mark.asyncio
@@ -1050,11 +1111,9 @@ async def test_a_blank_write_argument_is_left_out(
         ),
         ({"action": "react", "room_id": ROOM, "event_id": "$x"}, "react needs emoji."),
         ({"action": "edit", "room_id": ROOM, "message": "Hi"}, "edit needs event_id."),
-        ({"action": "redact", "event_id": "$x"}, "redact needs room_id, a room ID such as !abc:example.com."),
-        (
-            {"action": "join"},
-            "join needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com.",
-        ),
+        ({"action": "redact", "event_id": "$x"}, f"redact {ROOM_NEEDED}"),
+        ({"action": "join"}, f"join {ROOM_NEEDED}"),
+        ({"action": "leave", "room_id": " "}, f"leave {ROOM_NEEDED}"),
         ({"action": "invite", "room_id": ROOM}, "invite needs user_id."),
         ({"action": "create_room"}, "create_room needs name."),
     ],

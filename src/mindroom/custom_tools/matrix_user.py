@@ -24,6 +24,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     read_room,
     read_rooms,
     request_failure,
+    room_named,
     room_needed,
     search_messages,
 )
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
     type _Read = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
+    # A read of one room, given its ID.
+    type _RoomRead = Callable[[nio.AsyncClient, str], Awaitable[dict[str, object]]]
     type _Run = Callable[[nio.AsyncClient, MatrixUserActor], Awaitable[dict[str, object]]]
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
@@ -50,7 +53,6 @@ _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
 _ROOM_ACTIONS = frozenset({"room", "messages", "download", "mark_read"})
 _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
-_SEARCH_ROOM = "search's room_id is a room ID such as !abc:example.com; leave it out to search all your owner's rooms."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
 # The MCP gateway never offers the write function: a call without a chat turn has no card for the owner to confirm.
@@ -162,16 +164,16 @@ class MatrixUserTools(Toolkit):
     ) -> _Read | str:
         """Return the read ``action`` asks for, or which of its arguments is missing."""
         if action in _ROOM_ACTIONS:
-            if room_id is None or not room_id.startswith("!"):
+            if room_id is None:
                 return room_needed(action)
-            return self._room_read_for(
+            read = self._room_read_for(
                 action,
-                room_id,
                 event_id=event_id,
                 thread_id=thread_id,
                 page_token=page_token,
                 limit=limit,
             )
+            return read if isinstance(read, str) else self._in_room(room_id, read)
         if action == "rooms":
             return lambda client: read_rooms(client, query=query, limit=limit)
         if action == "people":
@@ -181,25 +183,26 @@ class MatrixUserTools(Toolkit):
         # The only action left: search.
         if query is None:
             return _SEARCH_QUERY_NEEDED
-        if room_id is not None and not room_id.startswith("!"):
-            return _SEARCH_ROOM
-        return lambda client: search_messages(client, query, room_id=room_id, page_token=page_token, limit=limit)
+
+        def search(client: nio.AsyncClient, room: str | None = None) -> Awaitable[dict[str, object]]:
+            return search_messages(client, query, room_id=room, page_token=page_token, limit=limit)
+
+        return search if room_id is None else self._in_room(room_id, search)
 
     def _room_read_for(
         self,
         action: str,
-        room_id: str,
         *,
         event_id: str | None,
         thread_id: str | None,
         page_token: str | None,
         limit: int | None,
-    ) -> _Read | str:
-        """Return the read of the room ``room_id`` that ``action`` asks for, or what it is missing."""
+    ) -> _RoomRead | str:
+        """Return the read of a room, given its ID, that ``action`` asks for, or what it is missing."""
         if action == "room":
-            return lambda client: read_room(client, room_id, limit=limit)
+            return lambda client, room_id: read_room(client, room_id, limit=limit)
         if action == "messages":
-            return lambda client: read_messages(
+            return lambda client, room_id: read_messages(
                 client,
                 room_id,
                 event_id=event_id,
@@ -208,14 +211,36 @@ class MatrixUserTools(Toolkit):
                 limit=limit,
             )
         if action == "mark_read":
-            return lambda client: mark_read(client, room_id, event_id=event_id)
+            return lambda client, room_id: mark_read(client, room_id, event_id=event_id)
         # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
         turn = get_tool_runtime_context()
         if turn is None:
             return _TURN_NEEDED
         if event_id is None:
             return _EVENT_NEEDED
-        return lambda client: self._download(client, turn, room_id, event_id)
+        return lambda client, room_id: self._download(client, turn, room_id, event_id)
+
+    def _in_room(self, room: str, read: _RoomRead) -> _Read:
+        """Return ``read`` of the room ``room`` names, which the client making it looks up first."""
+
+        async def in_room(client: nio.AsyncClient) -> dict[str, object]:
+            return await read(client, await room_named(client, room, self._runtime_paths))
+
+        return in_room
+
+    async def _write(
+        self,
+        client: nio.AsyncClient,
+        actor: MatrixUserActor,
+        turn: ToolRuntimeContext,
+        write: MatrixUserWrite,
+    ) -> dict[str, object]:
+        """Make ``write`` in the room its ``room_id`` names, which ``client`` looks up first."""
+        # create_room names no room.
+        if write.room_id is not None and write.action != "create_room":
+            room_id = await room_named(client, write.room_id, self._runtime_paths, join=write.action == "join")
+            write = replace(write, room_id=room_id)
+        return await write_as_person(client, actor, turn, write)
 
     async def matrix_user_read(
         self,
@@ -229,7 +254,7 @@ class MatrixUserTools(Toolkit):
     ) -> str:
         """Read Matrix as your owner: their own rooms and DMs, including those you are not in.
 
-        Actions:
+        Actions (room_id: ID, #alias, or configured room name):
         - rooms: Their rooms and invitations, unread first (limit: default 20). query keeps rooms whose name contains it.
         - messages: room_id's newest messages (limit: default 30); page_token continues into older ones.
           With thread_id: that thread's root and newest replies. With event_id: that message and those around it.
@@ -268,13 +293,13 @@ class MatrixUserTools(Toolkit):
 
         Agents never act on what you send this way: to talk to one, write as yourself.
 
-        Actions:
+        Actions (room_id: ID, #alias, or configured room name):
         - send: message and/or attachments (attachment IDs) to room_id, or to user_id in their DM (made if missing).
           thread_id sends into that thread; event_id replies to that message.
         - react: emoji on event_id in room_id.
         - edit: Replace your owner's message event_id in room_id with message.
         - redact: Remove your owner's message or reaction event_id in room_id; message is the reason.
-        - join: room_id, an ID or #alias. leave: room_id. invite: user_id into room_id.
+        - join, leave: room_id. invite: user_id into room_id.
         - create_room: A private room called name, inviting user_id if given.
         """
         write = MatrixUserWrite(
@@ -293,4 +318,4 @@ class MatrixUserTools(Toolkit):
             return self._payload("error", action=action, message=_WRITE_TURN_NEEDED)
         if (problem := write.problem()) is not None:
             return self._payload("error", action=action, message=problem)
-        return await self._as_owner(action, lambda client, actor: write_as_person(client, actor, turn, write))
+        return await self._as_owner(action, lambda client, actor: self._write(client, actor, turn, write))

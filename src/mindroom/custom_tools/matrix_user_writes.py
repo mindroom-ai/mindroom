@@ -80,10 +80,6 @@ _CONTACT_ROOM = "Nothing is written as your owner into a contact room."
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
-def _names_room(room_id: str | None, *, alias: bool) -> bool:
-    return room_id is not None and room_id.startswith(("!", "#") if alias else "!")
-
-
 def _user_problem(user_id: str | None) -> str | None:
     return None if user_id is None or MATRIX_USER_ID.fullmatch(user_id) else _NOT_A_USER_ID
 
@@ -124,9 +120,8 @@ class MatrixUserWrite:
             return self._send_problem()
         if self.action == "create_room":
             return _user_problem(self.user_id) if self.name is not None else "create_room needs name."
-        alias = self.action == "join"
-        if not _names_room(self.room_id, alias=alias):
-            return room_needed(self.action, alias=alias)
+        if self.room_id is None:
+            return room_needed(self.action)
         needed = {
             "react": {"event_id": self.event_id, "emoji": self.emoji},
             "edit": {"event_id": self.event_id, "message": self.message},
@@ -146,8 +141,6 @@ class MatrixUserWrite:
     def _send_problem(self) -> str | None:
         if (self.room_id is None) == (self.user_id is None):
             return _ONE_TARGET
-        if self.room_id is not None and not _names_room(self.room_id, alias=False):
-            return room_needed("send")
         if (problem := _user_problem(self.user_id)) is not None:
             return problem
         if self.message is None and not self.attachments:

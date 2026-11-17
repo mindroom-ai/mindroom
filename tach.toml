@@ -2561,7 +2561,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_user_reads"
-depends_on = ["mindroom.bounded_bytes", "mindroom.constants", "mindroom.matrix.visible_body"]
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.visible_body",
+]
 visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
 
 [[modules]]
@@ -4197,6 +4202,7 @@ visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.matrix_user_reads",
     "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
