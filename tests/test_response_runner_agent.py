@@ -29,6 +29,7 @@ from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
+    FORK_CONTENT_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -144,6 +145,7 @@ from tests.response_runner_helpers import (
 )
 from tests.test_event_journal_store import admit
 from tests.test_sandbox_proxy import _FakeResponse, _static_worker_manager_lease, _StreamsFromPost
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -435,6 +437,62 @@ class TestAgentBot(AgentBotTestBase):
         items = mock_ai.call_args.args[0].transient_enrichment_items
         (note,) = [item for item in items if item.key == "room_activity"]
         assert "- (thread $other): bob; 1 new message, last 1 min ago" in note.text.splitlines()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("forked", [True, False], ids=["fork", "plain-thread"])
+    async def test_a_fork_turn_is_told_which_thread_it_was_forked_from(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        forked: bool,
+    ) -> None:
+        """A fork's turn context names its parent thread and fork point, read from its root; a plain thread's has none."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        root_content: dict[str, object] = {"body": "carry on", "msgtype": "m.text"}
+        if forked:
+            root_content[FORK_CONTENT_KEY] = {"thread_id": "$parent", "event_id": "$fork-point"}
+        root = _visible_message(sender="@user:localhost", body="carry on", event_id="$fork", content=root_content)
+        # The locked turn re-reads its thread, so the journal serves the root the note is read from.
+        await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    thread_id="$fork",
+                    thread_history=[root],
+                    prompt="carry on",
+                    reply_to_event_id="$fork",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        reply_to_event_id="$fork",
+                        prompt="carry on",
+                    ),
+                ),
+            )
+
+        items = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "thread_fork"]
+        if not forked:
+            assert items == []
+            return
+        (note,) = items
+        assert note.text == config.render_prompt(
+            "THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_thread_id="$parent",
+            fork_point_event_id="$fork-point",
+        )
+        assert "thread $parent, forked after message $fork-point" in note.text
+        assert (note.cache_policy, note.persist, note.minimal_required) == ("stable", False, True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

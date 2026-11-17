@@ -46,7 +46,6 @@ from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.matrix.thread_forks import fork_roots
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.prompt_message_tags import render_msg_tag
@@ -275,26 +274,6 @@ def _context_message_from_visible_message(
     return Message(role="user", content=content, provider_data=media)
 
 
-@dataclass(frozen=True)
-class _ForkDividers:
-    """The note marking where each fork's own messages begin in a thread history, after its parent thread's.
-
-    A note sits right before its fork root, which a turn consumes, so the note is turn context its run stores once.
-    """
-
-    # Each fork root's place in the history, its event id and its note, oldest first.
-    notes: tuple[tuple[int, str, Message], ...]
-    # Every event's place in the history.
-    positions: Mapping[str, int]
-
-    def unseen(self, seen_event_ids: Collection[str]) -> _ForkDividers:
-        """Drop the notes of fork roots an earlier turn consumed, which stored them."""
-        return replace(self, notes=tuple(note for note in self.notes if note[1] not in seen_event_ids))
-
-
-_NO_FORK_DIVIDERS = _ForkDividers(notes=(), positions=MappingProxyType({}))
-
-
 def _context_messages_from_visible_messages(
     messages: Sequence[ResolvedVisibleMessage],
     *,
@@ -304,60 +283,29 @@ def _context_messages_from_visible_messages(
     missing_sender_label: str | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> tuple[Message, ...]:
-    """Convert visible Matrix context into provider-native message objects, each fork divider before its fork's own."""
+    """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
     context_messages: list[Message] = []
-    pending_dividers = list(fork_dividers.notes)
     for message in visible_messages:
-        # A divider goes before the first message from its fork root on, so filtering the parent's last cannot drop it.
-        position = fork_dividers.positions.get(message.event_id, -1)
-        while pending_dividers and pending_dividers[0][0] <= position:
-            context_messages.append(pending_dividers.pop(0)[2])
         # Strip before length capping so display-only markers do not consume the
         # model-context budget or leave marker-only turns behind.
         body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
         attachment_records = attachment_context.records_for(message) if attachment_context is not None else []
         capped_body = _cap_visible_message_body(body, max_message_length)
-        if capped_body or attachment_records:
-            context_messages.append(
-                _context_message_from_visible_message(
-                    replace_visible_message(message, body=capped_body),
-                    response_sender_id=response_sender_id,
-                    missing_sender_label=missing_sender_label,
-                    body=capped_body,
-                    attachment_records=attachment_records,
-                    member_display_names=member_display_names,
-                ),
-            )
-    # A fork root this context ends before, such as the current prompt, has its divider last.
-    context_messages.extend(note for _position, _root, note in pending_dividers)
+        if not capped_body and not attachment_records:
+            continue
+        context_messages.append(
+            _context_message_from_visible_message(
+                replace_visible_message(message, body=capped_body),
+                response_sender_id=response_sender_id,
+                missing_sender_label=missing_sender_label,
+                body=capped_body,
+                attachment_records=attachment_records,
+                member_display_names=member_display_names,
+            ),
+        )
     return tuple(context_messages)
-
-
-def _fork_dividers(thread_history: Sequence[ResolvedVisibleMessage] | None, config: Config) -> _ForkDividers:
-    """Return a fork's dividers between its parent threads' messages and its own, none for a plain thread."""
-    roots = fork_roots(thread_history or ())
-    if not roots or thread_history is None:
-        return _NO_FORK_DIVIDERS
-    return _ForkDividers(
-        notes=tuple(
-            (
-                position,
-                root_event_id,
-                thread_context_note(
-                    config.render_prompt(
-                        "THREAD_FORK_MARKER_TEMPLATE",
-                        parent_thread_id=parent_thread_id,
-                        fork_point_event_id=fork_point_event_id,
-                    ),
-                ),
-            )
-            for position, (root_event_id, parent_thread_id, fork_point_event_id) in roots.items()
-        ),
-        positions=MappingProxyType({message.event_id: position for position, message in enumerate(thread_history)}),
-    )
 
 
 def _messages_with_capped_context(
@@ -454,7 +402,6 @@ def _build_unseen_context_messages(
     config: Config,
     timezone: str,
     attachment_context: _ThreadAttachmentContext | None,
-    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
@@ -470,7 +417,6 @@ def _build_unseen_context_messages(
         response_sender_id=response_sender_id,
         attachment_context=attachment_context,
         member_display_names=member_display_names,
-        fork_dividers=fork_dividers.unseen(seen_event_ids),
     )
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
     if in_progress_event_ids:
@@ -517,7 +463,6 @@ def _build_thread_history_messages(
     static_token_budget: int | None,
     turn_tokens: Callable[[TurnMessages], int],
     attachment_context: _ThreadAttachmentContext | None,
-    fork_dividers: _ForkDividers = _NO_FORK_DIVIDERS,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
 
@@ -535,18 +480,16 @@ def _build_thread_history_messages(
             member_display_names=member_display_names,
         )
 
-    # A fork's divider renders even when none of its parent's messages are left to replay.
-    if not thread_history and not fork_dividers.notes:
+    if not thread_history:
         return with_context()
     context_messages = _context_messages_from_visible_messages(
-        thread_history or (),
+        thread_history,
         response_sender_id=response_sender_id,
         max_messages=max_messages,
         max_message_length=max_message_length,
         missing_sender_label=missing_sender_label,
         attachment_context=attachment_context,
         member_display_names=member_display_names,
-        fork_dividers=fork_dividers,
     )
     if static_token_budget is not None:
         return _messages_with_capped_context(
@@ -809,7 +752,6 @@ async def _prepare_execution_context_common(
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
-    fork_dividers = _fork_dividers(thread_history, config)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
         thread_history = _thread_history_with_scheduled_budget(
@@ -849,7 +791,6 @@ async def _prepare_execution_context_common(
             timezone=timezone,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
-            fork_dividers=fork_dividers,
         )
 
     provisional_messages, _ = turn_messages(seen_event_ids)
@@ -933,7 +874,6 @@ async def _prepare_execution_context_common(
             turn_tokens=turn_tokens,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
-            fork_dividers=fork_dividers,
         )
         fallback_context_tokens = await asyncio.to_thread(turn_tokens, final_messages)
         if prepared_history.replay_plan is not None:

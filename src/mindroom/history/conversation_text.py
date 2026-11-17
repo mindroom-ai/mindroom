@@ -26,8 +26,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 # The ``provider_data`` key marking a note MindRoom adds to a thread's context: that earlier messages were omitted, that
-# the agent's previous reply is still being delivered, that reply's unfinished text, or where a fork's parent thread
-# ends. The note is stored with its turn.
+# the agent's previous reply is still being delivered, or that reply's unfinished text. The note is stored with its turn.
 _THREAD_CONTEXT_NOTE_KEY = "mindroom_thread_context_note"
 
 

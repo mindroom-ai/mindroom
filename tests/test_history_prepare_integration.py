@@ -22,12 +22,7 @@ from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import (
-    FORK_CONTENT_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    STREAM_STATUS_KEY,
-    STREAM_STATUS_STREAMING,
-)
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
 from mindroom.history.conversation_text import utterances
 from mindroom.history.request_messages import TurnMessages
@@ -987,51 +982,6 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     with memory_path.open("a", encoding="utf-8") as memory_file:
         memory_file.write("Fact three.\n")
     assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
-
-
-@pytest.mark.asyncio
-async def test_a_fork_divider_reaches_each_later_request_once(tmp_path: Path, provider: _Provider) -> None:
-    """The fork's first run stores its divider; the next request replays it once, though the fork point still streams."""
-    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
-    persist_entity_accounts(config, runtime_paths, usernames={"test_agent": "bot"})
-    first_turn = [
-        make_visible_message(sender="@alice:localhost", body="question", event_id="$p"),
-        make_visible_message(
-            sender="@bot:localhost",
-            body="answer so far",
-            event_id="$p1",
-            thread_id="$p",
-            content={"body": "answer so far", STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
-        ),
-        make_visible_message(
-            sender="@alice:localhost",
-            body="carry on",
-            event_id="$f",
-            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$p", "event_id": "$p1"}},
-        ),
-    ]
-    second_turn = [
-        *first_turn,
-        make_visible_message(sender="@bot:localhost", body="ok", event_id="$f1", thread_id="$f"),
-        make_visible_message(sender="@alice:localhost", body="next", event_id="$f2", thread_id="$f"),
-    ]
-
-    with _no_memory():
-        for history in (first_turn, second_turn):
-            turn = make_turn_context(
-                "test_agent",
-                session_id="session-1",
-                reply_to_event_id=history[-1].event_id,
-                active_event_ids=frozenset({"$p1"}),
-            )
-            await ai_response(replace(turn, prompt=history[-1].body, thread_history=history), runtime_paths, config)
-
-    divider = config.render_prompt("THREAD_FORK_MARKER_TEMPLATE", parent_thread_id="$p", fork_point_event_id="$p1")
-    first_request, second_request = (_contents(_after_prompt(request.messages)) for request in provider.model.requests)
-    assert first_request.count(divider) == 1
-    assert second_request.count(divider) == 1
-    # The stored divider is the first turn's, still right before that turn's prompt, the fork root.
-    assert second_request[: len(first_request)] == first_request
 
 
 _SESSION_PREAMBLE = "[File memory entrypoint (agent)]\nStable MEMORY.md"

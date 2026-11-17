@@ -3367,6 +3367,7 @@ expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
+    "thread_fork_item",
     "with_matrix_message_target",
     "with_silent_schedule_delivery",
 ]

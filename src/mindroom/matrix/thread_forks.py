@@ -63,14 +63,10 @@ def fork_parent_thread_id(history: Sequence[ResolvedVisibleMessage], thread_id: 
     return None if reference is None else reference.thread_id
 
 
-def fork_roots(history: Sequence[ResolvedVisibleMessage]) -> dict[int, tuple[str, str, str]]:
-    """Map the place in a resolved history of each fork root it holds to that root, its parent thread and fork point."""
-    return {
-        position: (message.event_id, reference.thread_id, reference.event_id)
-        for position, message in enumerate(history)
-        if message.thread_id in (None, message.event_id)
-        and (reference := _thread_fork_reference(message.content)) is not None
-    }
+def fork_reference(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> tuple[str, str] | None:
+    """Return the parent thread and fork point a thread was forked from, read from its root in ``history``."""
+    reference = _root_reference(history, thread_id)
+    return None if reference is None else (reference.thread_id, reference.event_id)
 
 
 def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:
