@@ -50,7 +50,7 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.message_target import ResponseLifecycleKey
-from mindroom.mid_turn import MidTurnMode, QueuedMessage, message_text_for_judgment
+from mindroom.mid_turn import MidTurnMode, MidTurnOutcome, QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
@@ -304,8 +304,9 @@ class _QueuedMessageState:
             return pending == self.pending_message_snapshot()
 
         # A decision counts only for the queue it judged. A reply that does nothing but wait on jobs answers at once.
-        defers = await gate.defers(pending, current=still_queued, judge=not self.calls.only_waiting())
-        return not defers and still_queued()
+        # The wait ends for a "cannot wait" and a pause alike; only the reply's wrap-up publishes the judge's marks.
+        outcome = await gate.decide(pending, current=still_queued, judge=not self.calls.only_waiting())
+        return outcome is not MidTurnOutcome.WAIT and still_queued()
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()

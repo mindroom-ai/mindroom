@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message
 from mindroom.logging_config import get_logger
+from mindroom.mid_turn import MidTurnOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -186,13 +187,14 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
         return
     gate = context.mid_turn_gate
     if not context.notice_fired:
-        if await gate.defers(
+        outcome = await gate.decide(
             pending,
             current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
-        ):
+        )
+        if outcome is MidTurnOutcome.WAIT:
             return
-        # The reply wraps up here, also when a newer message arrived during the judgment, so a later verdict on a
-        # reply that kept waiting cannot leave a mark behind.
+        # The reply wraps up here, for a "cannot wait" and a pause alike, also when a newer message arrived during the
+        # judgment, so a later verdict on a reply that kept waiting cannot leave a mark behind.
         gate.report_stop()
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
 

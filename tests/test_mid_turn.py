@@ -35,7 +35,14 @@ from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
-from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode, QueuedMessage, mid_turn_mode
+from mindroom.mid_turn import (
+    MID_TURN_MODE_KEY,
+    MidTurnGate,
+    MidTurnMode,
+    MidTurnOutcome,
+    QueuedMessage,
+    mid_turn_mode,
+)
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
@@ -444,16 +451,16 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     state.add_waiting_human_message("$first", text="Use that file")
     first = state.pending_message_snapshot()
     gate.record_visible_response("I found the file. Now editing it.", ())
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert evidence[0] == (
         "<active_request>\nDo the task\n</active_request>\n"
         "<queued_message>\nUse that file\n</queued_message>\n"
         '<visible_response>\nI found the file.\n<tool name="read_file" input="path=a.py" output="ok"/>\n</visible_response>'
     )
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert len(evidence) == 1
     state.add_waiting_human_message("$second", text="Stop editing")
-    assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+    assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert evidence[1].endswith("<visible_response>\nI found the file. Now editing it.\n</visible_response>")
     assert "completed_tools" not in evidence[0]
 
@@ -481,7 +488,7 @@ async def test_visible_progress_keeps_untraced_markers_and_multiline_tool_output
         gate.record_visible_response(text, trace)
         state = _QueuedMessageState(mid_turn_gate=gate)
         state.add_waiting_human_message("$queued", text="Thanks")
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert example in evidence[0]
     assert "POSTGRES_USER: app" in evidence[1]
     assert "hunter2" not in evidence[1]
@@ -503,7 +510,7 @@ async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | 
     gate.visible_response_text = progress
     state = _QueuedMessageState(mid_turn_gate=gate)
     state.add_waiting_human_message("$queued", text="Thanks")
-    assert not await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+    assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 @pytest.mark.asyncio
@@ -518,12 +525,15 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
 
     gate = MidTurnGate(active_text="Install the dependencies", evaluate=evaluate)
     first = (QueuedMessage("$one", "Thanks"),)
-    assert await gate.defers(first, current=lambda: True)
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
-    assert not await gate.defers(
-        (*first, QueuedMessage("$two", "Use the other version")),
-        current=lambda: True,
+    assert (
+        await gate.decide(
+            (*first, QueuedMessage("$two", "Use the other version")),
+            current=lambda: True,
+        )
+        is MidTurnOutcome.CANNOT_WAIT
     )
     assert len(requests) == 2
     evidence = requests[0]["state"]["conversation"][0]["text"]
@@ -541,7 +551,7 @@ async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> 
         pytest.fail("Incomplete context must not reach inference")
 
     gate = MidTurnGate(active_text="Do the original task", evaluate=evaluate)
-    assert not await gate.defers((QueuedMessage("$one", text),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$one", text),), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 @pytest.mark.asyncio
@@ -553,7 +563,8 @@ async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
         return decision
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    assert not await gate.defers((QueuedMessage("$one", "Please change it"),), current=lambda: True)
+    outcome = await gate.decide((QueuedMessage("$one", "Please change it"),), current=lambda: True)
+    assert outcome is (MidTurnOutcome.CANNOT_WAIT if decision is False else MidTurnOutcome.PAUSE)
 
 
 @pytest.mark.asyncio
@@ -566,9 +577,12 @@ async def test_json_credentials_are_checked_before_evidence_encoding(*, active: 
 
     credential_text = '{"password": "fake_secret_for_test"}'
     gate = MidTurnGate(active_text=credential_text if active else "Do the task", evaluate=evaluate)
-    assert not await gate.defers(
-        (QueuedMessage("$new", "Thanks" if active else credential_text),),
-        current=lambda: True,
+    assert (
+        await gate.decide(
+            (QueuedMessage("$new", "Thanks" if active else credential_text),),
+            current=lambda: True,
+        )
+        is MidTurnOutcome.PAUSE
     )
 
 
@@ -583,7 +597,7 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
         raise AssertionError
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    task = asyncio.create_task(gate.defers((QueuedMessage("$one", "Thanks"),), current=lambda: True))
+    task = asyncio.create_task(gate.decide((QueuedMessage("$one", "Thanks"),), current=lambda: True))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -987,7 +1001,9 @@ async def test_interrupt_probability_preserves_continuation_threshold(
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
     gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
     assert gate is not None
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is finish
+    assert (
+        await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
+    ) is finish
 
 
 @pytest.mark.asyncio
@@ -1002,7 +1018,7 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
 
 
@@ -1157,10 +1173,10 @@ async def test_earlier_attachment_annotation_does_not_block_judgment() -> None:
         evaluate=evaluate,
         conversation_context=(JudgmentMessage("assistant", f"Saved the report {annotation}"),),
     )
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
     # The same annotation in a queued message still means an attachment the judge cannot open.
-    assert not await gate.defers((QueuedMessage("$newer", annotation),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$newer", annotation),), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 def _skip_reasons(logs: list[dict]) -> list[str]:
@@ -1190,7 +1206,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
     queued = "Is this still running? " + "q" * 3_000
     state.add_waiting_human_message("$queued", text=queued)
     with capture_logs() as logs:
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert _skip_reasons(logs) == []
     conversation = requests[0]["state"]["conversation"]
     evidence = conversation[-1]["text"]
@@ -1219,7 +1235,7 @@ async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: in
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert requests[0].body is not None
     assert len(requests[0].body) <= MAX_REQUEST_BYTES
     sent = [message["text"] for message in json.loads(requests[0].body)["state"]["conversation"][:-1]]
@@ -1243,7 +1259,7 @@ async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
         conversation_context=(JudgmentMessage("user", text),),
     )
     with capture_logs() as logs:
-        assert not await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+        assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.PAUSE
     assert _skip_reasons(logs) == ["history_unjudgeable"]
 
 
@@ -1267,7 +1283,7 @@ async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> N
     gate.record_visible_response(body if reply else "", ())
     state.add_waiting_human_message("$queued", text="Thanks")
     with cpu_budget(0.25):
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
 
 
@@ -1288,7 +1304,8 @@ async def test_only_conversation_that_reaches_the_judge_is_checked_for_credentia
         evaluate=evaluate,
         conversation_context=(*newer, credential) if newest else (credential, *newer),
     )
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is not newest
+    outcome = await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert outcome is (MidTurnOutcome.PAUSE if newest else MidTurnOutcome.WAIT)
     assert all(request.body is not None and b"fake_secret_for_test" not in request.body for request in requests)
 
 
@@ -1324,8 +1341,8 @@ async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> Non
     )
     pending = setup.get("pending", (QueuedMessage("$new", "Thanks"),))
     with capture_logs() as logs:
-        assert not await gate.defers(pending, current=lambda: True)
-        assert not await gate.defers(pending, current=lambda: True)
+        assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.PAUSE
+        assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.PAUSE
     assert _skip_reasons(logs) == [reason]
     assert "private input" not in str(logs)
 
@@ -1408,7 +1425,9 @@ async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
     judge = setup.get("judge", True)
     waits = queue == "others" and judge
     with capture_logs() as logs:
-        assert await gate.defers(tuple(pending), current=lambda: True, judge=judge) is waits
+        outcome = await gate.decide(tuple(pending), current=lambda: True, judge=judge)
+        # No explicit verdict is fabricated: a skipped or failed judgment never reads as one.
+        assert outcome is (MidTurnOutcome.WAIT if waits else MidTurnOutcome.PAUSE)
     skips = [log for log in logs if log["event"] == "Mid-turn judgment skipped"]
     assert [(log["reason"], log["outcome"]) for log in skips] == [(reason, "waits" if waits else "wraps_up")]
     assert "private input" not in str(logs)
@@ -1427,7 +1446,7 @@ async def test_the_judge_sees_who_sent_each_queued_message_by_role_only(requeste
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=requester)
     pending = (QueuedMessage("$mine", "Thanks", "", _REQUESTER), _between_people("$theirs"))
-    assert await gate.defers(pending, current=lambda: True)
+    assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.WAIT
     (body,) = bodies
     evidence = json.loads(body)["state"]["conversation"][0]["text"]
     if requester is None:
@@ -1450,11 +1469,138 @@ async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
     with capture_logs() as logs:
-        assert (
-            await gate.defers((_between_people("$stop", "Stop, that is the wrong file"),), current=lambda: True)
-            is verdict
+        assert await gate.decide((_between_people("$stop", "Stop, that is the wrong file"),), current=lambda: True) is (
+            MidTurnOutcome.WAIT if verdict else MidTurnOutcome.CANNOT_WAIT
         )
     assert _skip_reasons(logs) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "outcome"),
+    [
+        ("can_wait", MidTurnOutcome.WAIT),
+        ("cannot_wait", MidTurnOutcome.CANNOT_WAIT),
+        ("no_answer", MidTurnOutcome.PAUSE),
+        ("error", MidTurnOutcome.PAUSE),
+        ("timeout", MidTurnOutcome.PAUSE),
+        ("incomplete", MidTurnOutcome.PAUSE),
+        ("redacted", MidTurnOutcome.PAUSE),
+        ("unjudgeable", MidTurnOutcome.PAUSE),
+        ("skip", MidTurnOutcome.PAUSE),
+    ],
+)
+async def test_mid_turn_outcome_distinguishes_negative_from_no_answer_error_timeout_and_skip(
+    case: str,
+    outcome: MidTurnOutcome,
+) -> None:
+    """Only the judge's own "cannot wait" is one; a requester's message without a verdict pauses the reply."""
+    verdicts = {"can_wait": True, "cannot_wait": False, "no_answer": None}
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if case == "error":
+            msg = "private input"
+            raise RuntimeError(msg)
+        if case == "timeout":
+            raise TimeoutError
+        if case in verdicts:
+            return verdicts[case]
+        pytest.fail("A skipped judgment must not reach inference")
+
+    text = {"incomplete": None, "redacted": "api_key=sk-" + "x" * 48}.get(case, "Stop, wrong file")
+    message = QueuedMessage("$msg", text, None if case == "unjudgeable" else "", _REQUESTER, mentions_nobody=True)
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    with capture_logs() as logs:
+        assert await gate.decide((message,), current=lambda: True, judge=case != "skip") is outcome
+    assert "private input" not in str(logs)
+
+
+@pytest.mark.asyncio
+async def test_explicit_outcome_survives_cache_and_only_waiting_shortcut_does_not_fabricate_it() -> None:
+    """A cached "cannot wait" stays one, while a reply only waiting on jobs releases its wait without any verdict."""
+    verdicts = [False, True]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    stop = (QueuedMessage("$stop", "Stop, wrong file", "", _REQUESTER),)
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    assert verdicts == [True]
+    # The release asks no judge and is no verdict, and it leaves the verdict on the same queue as it was.
+    assert await gate.decide(stop, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    thanks = (QueuedMessage("$thanks", "Thanks", "", _REQUESTER),)
+    assert await gate.decide(thanks, current=lambda: True) is MidTurnOutcome.WAIT
+    assert verdicts == []
+    # A queue that could wait for the work that ran then is not let wait by a reply that only waits on jobs.
+    assert await gate.decide(thanks, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(thanks, current=lambda: True) is MidTurnOutcome.PAUSE
+    # Nor is a queue no judge ever read.
+    unread = (QueuedMessage("$unread", "Thanks again", "", _REQUESTER),)
+    assert await gate.decide(unread, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(unread, current=lambda: True) is MidTurnOutcome.PAUSE
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_a_queued_message_is_one_best_effort_attempt_per_event() -> None:
+    """A failed reaction costs no reply and is not retried, and each event is acknowledged at most once."""
+    attempts: list[str] = []
+
+    async def acknowledge(event_id: str) -> None:
+        attempts.append(event_id)
+        msg = "Matrix unavailable"
+        raise RuntimeError(msg)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        pytest.fail("Acknowledging asks no judge")
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    with capture_logs() as logs:
+        await gate.acknowledge_queued(QueuedMessage("$queued", "Later, please"))
+        await gate.acknowledge_queued(QueuedMessage("$queued", "Later, please, edited"))
+        await gate.acknowledge_queued(QueuedMessage("$other", "Also later"))
+    assert attempts == ["$queued", "$other"]
+    assert [log["event"] for log in logs] == ["mid_turn_reaction_failed"] * 2
+
+
+@pytest.mark.asyncio
+async def test_report_stop_preserves_as_read_one_sender_and_previously_deferred_rules() -> None:
+    """A "cannot wait" publishes, only at the wrap-up, the judged messages still waiting as read, none it let wait.
+
+    A message appended during the judgment, which the judge never read, and one edited after it, are not marked.
+    """
+    published: list[tuple[QueuedMessage, ...]] = []
+    queue = _QueuedMessageState()
+
+    def on_stop(judged: tuple[QueuedMessage, ...]) -> None:
+        published.append(judged)
+        queue.mark_stopped_reply(judged)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if len(queue.pending_message_snapshot()) == 1:
+            return True
+        queue.add_waiting_human_message("$appended", text="and the tests", requester_id=_REQUESTER)
+        return False
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER, on_stop=on_stop)
+    queue.mid_turn_gate = gate
+    queue.add_waiting_human_message("$waited", text="Thanks", requester_id=_REQUESTER)
+    assert await gate.decide(queue.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER)
+    queue.add_waiting_human_message("$edited", text="Use the other file", requester_id=_REQUESTER)
+    judged = queue.pending_message_snapshot()
+    assert await gate.decide(judged, current=lambda: judged == queue.pending_message_snapshot()) is (
+        MidTurnOutcome.CANNOT_WAIT
+    )
+    # A decision a job wait asks for publishes nothing.
+    assert published == []
+    queue.update_waiting_human_message("$edited", text="Never mind", mentions_nobody=False)
+    gate.report_stop()
+    (stopping,) = published
+    assert {message.event_id for message in stopping} == {"$stop", "$edited"}
+    assert queue.stopped_reply_event_ids == {"$stop"}
 
 
 async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
@@ -1749,7 +1895,7 @@ async def test_only_another_persons_untagged_waiting_message_gets_no_defer_react
         _between_people("$theirs"),
         QueuedMessage("$tagged", "Nice work", "", _OTHER),
     )
-    assert await gate.defers(pending, current=lambda: True)
+    assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.WAIT
     assert acknowledgements == (["$mine", "$tagged"] if requester is not None else ["$mine", "$theirs", "$tagged"])
 
 

@@ -1205,6 +1205,7 @@ visibility = [
 path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.llm",
+    "mindroom.mid_turn",
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
@@ -9542,6 +9543,7 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 path = "mindroom.mid_turn"
 depends_on = ["mindroom.judgment.state", "mindroom.tool_system.events"]
 visibility = [
+    "mindroom.ai_runtime",
     "mindroom.mid_turn_judgment",
     "mindroom.response_lifecycle",
     "mindroom.response_runner",
