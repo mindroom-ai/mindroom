@@ -10,7 +10,7 @@ The design is in `docs/baspowers/specs/2026-11-16-memory-recall-efficiency-desig
 | A0 | all of `memory/**/*.md` | stock 5,000 characters | top 3 | no |
 | A1 | without `memory/archive/**`, session dumps (`memory/YYYY-MM-DD-HHMM.md`), other agents' memory (`memory/agent_*/**`) | stock | top 3 | no |
 | A2 | as A1 | one per memory entry (at most 1,200 characters) | top 3 | no |
-| A3 | as A1 | per entry | `select_recall_hits`: score gap 0.05, at most 5, 800 tokens | no |
+| A3 | as A1 | per entry | `_RECALL_SELECTION`: score gap 0.05, at most 5, 800 tokens | no |
 | A4 | as A1 | per entry | as A3 | under 40 characters in a thread |
 | shipped | all of `memory/**/*.md`, which the shipped overlay filters with `memory.search.exclude: [memory/archive/**]`, as Bas's deployment sets it | the shipped overlay's entry chunks | as A3, over 20 hits | no |
 | shipped_default | as `shipped`, with the default `memory.search`, which excludes nothing | as `shipped` | as `shipped` | no |

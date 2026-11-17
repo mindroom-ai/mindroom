@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge.read_protocol import DISTANCE_KEY, SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.refresh_scheduler import runtime_refresh_scheduler
+from mindroom.knowledge.retrieval import hybrid_scores
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
@@ -83,12 +83,9 @@ def _memory_results_from_hits(
     *,
     scope_user_id: str,
 ) -> list[MemoryResult]:
-    # Hits arrive in hybrid rank order, which word matches can lift above closer vectors. Each score is the best cosine
-    # similarity at or below its rank, so scores stay on the cosine scale merged keyword matches rank against, and
-    # sorting by them keeps the hybrid order.
-    scores = list(accumulate((1.0 - hit.meta_data[DISTANCE_KEY] for hit in reversed(hits)), max))[::-1]
+    # Cosine-scale scores, which merged keyword matches rank against.
     results: list[MemoryResult] = []
-    for rank, (hit, score) in enumerate(zip(hits, scores, strict=True), start=1):
+    for rank, (hit, score) in enumerate(zip(hits, hybrid_scores(hits), strict=True), start=1):
         source_file = hit.meta_data.get(SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"

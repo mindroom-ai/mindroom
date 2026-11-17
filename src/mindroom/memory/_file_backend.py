@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.config.resolution import entity_timezone, memory_search
 from mindroom.embeddings.errors import classified_embedder_error
+from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -24,7 +25,7 @@ from mindroom.timing import timed
 from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
-from ._prompting import add_within_recall_budget, redact_memory_text, select_recall_hits
+from ._prompting import add_within_recall_budget, redact_memory_text
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -794,10 +795,18 @@ def _agent_keyword_results(scope: MemoryScope, query: str, limit: int) -> list[M
     return _keyword_results(scope, query, limit)
 
 
-# Semantic hits the per-turn recall fetches for `select_recall_hits` to choose from. The store fuses
+# Semantic hits the per-turn recall fetches for `_RECALL_SELECTION` to choose from. The store fuses
 # `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of a
 # three-hit search.
 _RECALL_SEARCH_LIMIT = 20
+#: The semantic hits one turn's recall injects: within 0.05 of the best hybrid score, at most 5, 800 o200k tokens.
+_RECALL_SELECTION = Selection(limit=5, token_budget=800, hybrid_score_gap=0.05)
+
+
+async def _retrieve_memories(query: str, results: Sequence[MemoryResult], selection: Selection) -> list[MemoryResult]:
+    """Return the ``results`` that ``selection`` keeps, judged by their memory text and score (0 when unscored)."""
+    candidates = [Candidate(result, result.get("memory", ""), result.get("score", 0.0)) for result in results]
+    return [candidate.item for candidate in await retrieve(query, candidates, selection)]
 
 
 @timed("system_prompt_assembly.memory_search.file.team_scope")
@@ -848,7 +857,7 @@ class FileMemoryBackend:
         to keyword matches and surfaces its classified cause in the outcome.
 
         ``recall`` is the per-turn recall. Its semantic hits are chosen by
-        ``select_recall_hits`` from a wider search and come first; the best
+        ``_RECALL_SELECTION`` from a wider search and come first; the best
         ``limit`` team keyword hits follow, since keyword and cosine scores
         are not comparable, each only if it fits the token budget the
         semantic hits left. Keyword matches, a fallback's included, rank as
@@ -895,15 +904,21 @@ class FileMemoryBackend:
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
                 )
-        selected = None if results is None or not recall else select_recall_hits(results)
+        semantic = results is not None
         if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
+        else:
+            results = await _retrieve_memories(query, results, _RECALL_SELECTION if recall else Selection(limit))
 
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
-        if selected is not None:
+        if semantic and recall:
             team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
             return MemorySearchOutcome(
-                results=add_within_recall_budget(selected, team_results[:limit]),
+                results=add_within_recall_budget(
+                    results,
+                    team_results[:limit],
+                    token_budget=cast("int", _RECALL_SELECTION.token_budget),
+                ),
                 degraded_reason=degraded_reason,
             )
         results.extend(team_results)

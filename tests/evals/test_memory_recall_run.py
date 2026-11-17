@@ -26,8 +26,7 @@ from mindroom.constants import resolve_runtime_paths, runtime_paths_with_storage
 from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.memory import _semantic_file_search, build_memory_prompt_parts
-from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
-from mindroom.memory._prompting import select_recall_hits
+from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT, _RECALL_SELECTION, _retrieve_memories
 from mindroom.memory._semantic_file_search import search_semantic_file_memories
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from tests.fakes.token_counter import fake_token_counter
@@ -424,7 +423,7 @@ async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shipped arm injects what the shipped per-turn recall does: its search, then `select_recall_hits`."""
+    """The shipped arm injects what the shipped per-turn recall does: its search, then `_RECALL_SELECTION`."""
     memory_dir = _ranked_notes(tmp_path, monkeypatch)
     queries = ["beacon", "lantern", "rank010"]
     replayed = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-25", query) for query in queries])
@@ -442,7 +441,7 @@ async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypa
             limit=_RECALL_SEARCH_LIMIT,
         )
         assert hits
-        assert hits == select_recall_hits(live), query
+        assert hits == await _retrieve_memories(query, live, _RECALL_SELECTION), query
 
 
 @pytest.mark.asyncio

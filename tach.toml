@@ -948,6 +948,7 @@ visibility = [
 [[modules]]
 path = "mindroom.knowledge.search"
 depends_on = [
+    "mindroom.knowledge.retrieval",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.tool_schema",
@@ -3841,6 +3842,7 @@ path = "mindroom.memory._file_backend"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.embeddings.errors",
+    "mindroom.knowledge.retrieval",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
@@ -3867,6 +3869,7 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.knowledge.file_memory_knowledge",
     "mindroom.knowledge.read_protocol",
+    "mindroom.knowledge.retrieval",
     "mindroom.memory._shared",
 ]
 visibility = ["mindroom.memory._file_backend"]
@@ -3890,7 +3893,7 @@ visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
-depends_on = ["mindroom.prompt_templates", "mindroom.tool_system.events"]
+depends_on = ["mindroom.knowledge.retrieval", "mindroom.prompt_templates", "mindroom.tool_system.events"]
 visibility = [
     "mindroom.memory",
     "mindroom.memory._file_backend",
@@ -6647,6 +6650,16 @@ depends_on = [
     "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.knowledge.utils"]
+
+[[modules]]
+path = "mindroom.knowledge.retrieval"
+depends_on = ["mindroom.knowledge.read_protocol"]
+visibility = [
+    "mindroom.knowledge.search",
+    "mindroom.memory._file_backend",
+    "mindroom.memory._prompting",
+    "mindroom.memory._semantic_file_search",
+]
 
 [[modules]]
 path = "mindroom.knowledge.watch"
