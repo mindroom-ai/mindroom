@@ -156,6 +156,65 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         assert "override" not in result
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "not_router",
+        "room_unavailable",
+        "not_joined",
+        "scope_check_error",
+        "thread_root_unavailable",
+        "thread_root_unreadable",
+        "not_thread_root",
+        "no_addressable_agent",
+    ],
+)
+@pytest.mark.parametrize("operation", ["set", "reset"])
+@pytest.mark.asyncio
+async def test_every_scope_denial_leaves_the_override_untouched(tmp_path: Path, reason: str, operation: str) -> None:
+    """Any scope that is not a granted picker scope rejects the command without setting or clearing an override."""
+    client, config, paths, index, router, _ = picker_setup(tmp_path)
+    config.models["other"] = ModelConfig(provider="openai", id="other-model")
+    set_thread_model_override(paths, thread_id="$root", model_name="default", entity_names=("helper",), config=config)
+    metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": operation}
+    if operation == "set":
+        metadata["model"] = "other"
+    event = root_event(
+        event_id="$command",
+        content={"body": f"!model {operation}", "msgtype": "m.text", "io.mindroom.model_selection": metadata},
+    )
+    results = []
+
+    async def record(text: str, *, extra_content: dict | None = None) -> None:
+        results.append((text, extra_content))
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=record,
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=index,
+    )
+    with patch(
+        "mindroom.commands.model_commands.validate_model_picker_scope",
+        new=AsyncMock(return_value=reason),
+    ):
+        await handle_command(
+            context=context,
+            room=client.rooms[ROOM],
+            event=event,
+            command=command_parser.parse(event.body),
+            requester_user_id=USER,
+        )
+    assert _helper_override(paths, config) == "default"
+    assert results[0][1]["io.mindroom.model_selection_result"]["status"] == "rejected"
+
+
 @pytest.mark.parametrize("wrong_target", ["runtime_user_id", "runtime_device_id"])
 @pytest.mark.asyncio
 async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_target: str) -> None:
