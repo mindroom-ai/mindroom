@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -289,6 +290,35 @@ def test_request_goes_to_github_with_the_users_token(
     assert "cookie" not in sent.headers
     assert sent.content == b""
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_credential_files_are_read_off_the_event_loop(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checking a connection reads the GitHub App's client file, which must not block the API's event loop."""
+    connect(paths, ALICE)
+    real = github_requests.oauth_credentials_usable
+    on_loop: list[bool] = []
+
+    def usable(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(github_requests, "oauth_credentials_usable", usable)
+
+    client.get("/api/github/status", headers=session(app, ALICE))
+    ask(client, session(app, ALICE))
+
+    assert on_loop
+    assert not any(on_loop)
 
 
 def test_a_write_sends_its_json_body(app: FastAPI, client: TestClient, paths: RuntimePaths, github: GitHubPeer) -> None:

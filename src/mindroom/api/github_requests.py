@@ -7,6 +7,7 @@ Logs carry the method, the path's kind, and GitHub's status, never the token, th
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -88,7 +89,7 @@ class GitHubRequest(BaseModel):
 def _path_kind(path: str) -> str | None:
     r"""Return how logs name ``path`` when a client may request it, else None.
 
-    A segment that decodes to `.` or `..`, or to anything holding `/`, `\\`, or a control character, is refused too,
+    A segment that decodes to `.` or `..`, or to anything holding `/`, `\`, or a control character, is refused too,
     so no server on the way can resolve the path outside the repository.
     """
     match = _PATH.fullmatch(path) if len(path) <= _MAX_PATH_LENGTH else None
@@ -140,7 +141,17 @@ async def _usable_credentials(context: OAuthCredentialContext | None) -> dict[st
     if context is None:
         return None
     credentials = (await load_oauth_credentials_status(context, create_store=False)).credentials
-    return credentials if oauth_credentials_usable(context.provider, context.runtime_paths, credentials) else None
+    return credentials if await _usable(context, credentials) else None
+
+
+async def _usable(context: OAuthCredentialContext, credentials: dict[str, Any] | None) -> bool:
+    """Check ``credentials`` against the GitHub App client, whose credential file is read in a thread."""
+    return bool(credentials) and await asyncio.to_thread(
+        oauth_credentials_usable,
+        context.provider,
+        context.runtime_paths,
+        credentials,
+    )
 
 
 async def _access_token(context: OAuthCredentialContext | None) -> str | None:
@@ -151,7 +162,7 @@ async def _access_token(context: OAuthCredentialContext | None) -> str | None:
         credentials = await refresh_oauth_credentials(context)
     except (OAuthCredentialUnreadableError, OAuthRefreshRejectedError):
         return None
-    if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
+    if not await _usable(context, credentials):
         return None
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     return token if isinstance(token, str) and token else None
