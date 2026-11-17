@@ -4456,9 +4456,9 @@ class TestStreamTransportStopsWithItsMembership:
     async def test_a_progressive_edit_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """The edit the fence invalidated must never leave this process.
 
-        Stopping is not failing. A failed non-terminal edit raises, and the
-        notice that failure produces would be one more direct write into the
-        same room the bot has left.
+        Stopping is not failing, and it is not trying either: a failed edit is
+        retried by the next one, and an edit that raises fails the stream,
+        whose notice would be one more direct write into the room the bot has left.
         """
         streaming = self._streaming(tmp_path, membership_is_current=False)
         streaming.event_id = "$visible"
