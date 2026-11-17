@@ -486,6 +486,38 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
+async def test_cancelled_request_logs_once_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task cancelled mid-request, as on shutdown, logs one drop, re-raises, and frees its slot."""
+    callback, client, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    started = asyncio.Event()
+
+    async def stalled(*_args: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    original = client.joined_members.return_value
+    client.joined_members.side_effect = stalled
+    with capture_logs() as logs:
+        task = asyncio.create_task(callback(request()))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["cancelled"]
+    assert len(logs) == 1
+    assert logs[0]["request_id"] == "request-1"
+    assert logs[0]["elapsed_ms"] >= 0
+    client.joined_members.side_effect = None
+    client.joined_members.return_value = original
+    await callback(request())
+    assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Finishing each request cannot bypass the per-user request window."""
     callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)

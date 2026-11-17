@@ -277,6 +277,12 @@ class _Receiver:
             _drop(event, request, dropped.reason, received)
         except TimeoutError:
             _drop(event, request, "timeout", received)
+        except asyncio.CancelledError:
+            # Shutdown or restart cancels the task mid-request. Only the awaited
+            # body can raise it: the outcome handlers never await, so no request
+            # logs twice.
+            _drop(event, request, "cancelled", received)
+            raise
         except Exception as exc:
             # Operational unavailability is a timeout to the client, never a
             # partial catalog or a provider/configuration error disclosure.
