@@ -1113,6 +1113,8 @@ async def test_a_reaction_must_be_one_short_emoji(
     refused: bool,
 ) -> None:
     """A reaction acknowledges a message, as one the `react` tool sends does, so a sentence is never one."""
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
+
     result = await _write(config, paths, homeserver, action="react", room_id=ROOM, event_id="$own", emoji=emoji)
 
     reacted = [content["m.relates_to"]["key"] for content in _sent(homeserver, event_type="m.reaction")]
@@ -1122,6 +1124,32 @@ async def test_a_reaction_must_be_one_short_emoji(
     else:
         assert result == ok_result("react", room_id=ROOM, event_id="$reaction")
         assert reacted == [emoji]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("held", "refusal"),
+    [
+        (None, "Matrix answered 404 M_NOT_FOUND: Not found"),
+        (text_message("$elsewhere", "Hi", room_id=OTHER_ROOM), "That event is in another room."),
+    ],
+    ids=["not-found", "another-room"],
+)
+async def test_react_refuses_an_event_the_room_does_not_hold(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    held: dict[str, object] | None,
+    refusal: str,
+) -> None:
+    """A reaction to an event the room does not hold would be sent and seen by nobody, so its target is read first."""
+    if held is not None:
+        homeserver.answers[f"{ROOM_PATH}/event/$elsewhere"] = held
+
+    result = await _write(config, paths, homeserver, action="react", room_id=ROOM, event_id="$elsewhere", emoji="👍")
+
+    assert result == error_result("react", refusal)
+    assert _changes(homeserver) == []
 
 
 @pytest.mark.asyncio
@@ -1296,6 +1324,7 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
     homeserver.answers.update(
         {
             DIRECTORY_PATH: {"room_id": OTHER_ROOM, "servers": ["example.com"]},
+            f"{CLIENT}/rooms/{OTHER_ROOM}/event/$own": text_message("$own", "Helo", sender=OWNER),
             f"{_send_path(OTHER_ROOM)}*": {"event_id": "$sent"},
             f"{_send_path(OTHER_ROOM, 'm.reaction')}*": {"event_id": "$sent"},
         },
@@ -1355,8 +1384,14 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
 ) -> None:
     """Twelve writes per 30 seconds into one room, a file being one write like any other; another room has its own count."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
-    homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
-    homeserver.answers[f"{_send_path(OTHER_ROOM, 'm.reaction')}*"] = {"event_id": "$elsewhere"}
+    homeserver.answers.update(
+        {
+            UPLOAD_PATH: {"content_uri": "mxc://example.com/notes"},
+            OWN_EVENT_PATH: text_message("$own", "Helo", sender=OWNER),
+            f"{CLIENT}/rooms/{OTHER_ROOM}/event/$own": text_message("$own", "Helo", sender=OWNER),
+            f"{_send_path(OTHER_ROOM, 'm.reaction')}*": {"event_id": "$elsewhere"},
+        },
+    )
     toolkit = owner_toolkit(config, paths)
 
     with owner_turn(config, paths, attachment_ids=(record.attachment_id,)), homeserver.serving_the_toolkit():
@@ -1428,6 +1463,8 @@ async def test_a_stray_attachment_on_react_counts_for_nothing(
     homeserver: FakeHomeserver,
 ) -> None:
     """Only send takes an attachment: one given to a reaction, even one the turn does not hold, is not looked at."""
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
+
     with capture_logs() as logs:
         result = await _write(
             config,

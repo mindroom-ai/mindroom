@@ -433,6 +433,9 @@ async def _event_write(
         return {"room_id": room_id, "event_id": redaction.get("event_id")}
     await _require_unencrypted(client, room_id)
     if write.action == "react":
+        # The homeserver takes a reaction to an event the room does not hold, such as one of another room, and nobody
+        # sees it, so the event is read in the room first, as the `react` tool reads it.
+        await read_event(client, room_id, event_id)
         written.content = {**build_reaction_content(event_id, str(write.emoji).strip()), **marker}
         outcome = await send_message_outcome(
             client,
