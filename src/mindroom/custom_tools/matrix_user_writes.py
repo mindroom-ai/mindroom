@@ -442,7 +442,13 @@ async def _event_write(
             operation="matrix_user_react",
         )
     else:
-        await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
+        named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
+        replaced = _replaced_event_id(named)
+        if replaced is not None:
+            # An earlier edit's result names its replacement event. Clients ignore a replacement of a replacement, so
+            # the message it replaced is the one to edit, if it too may be.
+            event_id = replaced
+            await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
         # ``extra_content`` puts the marker on both layers, as history keeps the edit's replacement content.
@@ -470,8 +476,8 @@ async def _require_changeable(
     person: str,
     *,
     edit: bool,
-) -> None:
-    """Refuse an event that is not the person's own message or reaction, or, for an edit, not their own message.
+) -> dict[str, Any]:
+    """Return the event, refusing one that is not the person's own message or reaction, or, for an edit, their message.
 
     The events that made a room and set its name, topic, and members are state, many of them the person's own; the
     toolkit offers to change none of them.
@@ -487,6 +493,17 @@ async def _require_changeable(
     if edit and event_type != "m.room.message":
         msg = f"Only messages can be edited, and {event_id} is of type {event_type}."
         raise MatrixRequestError(msg)
+    return event
+
+
+def _replaced_event_id(event: dict[str, Any]) -> str | None:
+    """Return the ID of the message that ``event`` replaces, when it is an edit's replacement event."""
+    content = event.get("content")
+    relation = content.get("m.relates_to") if isinstance(content, dict) else None
+    if not isinstance(relation, dict) or relation.get("rel_type") != "m.replace":
+        return None
+    replaced = relation.get("event_id")
+    return replaced if isinstance(replaced, str) else None
 
 
 async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: str) -> str:

@@ -41,6 +41,7 @@ from tests.matrix_user_helpers import (
     Answer,
     FakeHomeserver,
     HomeserverRequest,
+    edit_of,
     error_result,
     matrix_error,
     ok_result,
@@ -1055,6 +1056,46 @@ async def test_only_a_message_can_be_edited(
 
     redacted = await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id="$own")
     assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_an_edit_replaces_the_original_message(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An edit's result names its replacement event, and editing that again edits the message it replaced.
+
+    Clients ignore a replacement of a replacement, so sent as named it would change nothing anyone sees.
+    """
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "Hello", sender=OWNER)
+
+    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$edit", message="Hi all")
+
+    assert result == ok_result("edit", room_id=ROOM, event_id="$sent")
+    [edit] = _sent(homeserver)
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$own"}
+    assert edit["m.new_content"]["body"] == "Hi all"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_an_edit_checks_the_message_it_replaced(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """The message an edit names, through the owner's own replacement event, must be the owner's too."""
+    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$theirs", "Hello", sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/event/$theirs"] = text_message("$theirs", "Hi", sender=BOB)
+
+    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$edit", message="Hi all")
+
+    assert result == error_result(
+        "edit",
+        f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
+    )
+    assert _changes(homeserver) == []
 
 
 @pytest.mark.asyncio
