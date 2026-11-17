@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.path_globs import validate_safe_relative_pattern
@@ -54,6 +55,13 @@ class KnowledgeRerankerConfig(BaseModel):
         allow_inf_nan=False,
         description="Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
     )
+
+
+#: A judgment provider scores each candidate with its probability, and its ``threshold`` (default 0.8) is recall's.
+type RerankerConfig = Annotated[
+    KnowledgeRerankerConfig | TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig,
+    Field(discriminator="provider"),
+]
 
 
 class KnowledgeGitConfig(BaseModel):

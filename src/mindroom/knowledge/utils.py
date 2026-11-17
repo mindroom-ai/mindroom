@@ -32,7 +32,7 @@ from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.config.knowledge import KnowledgeRerankerConfig
+    from mindroom.config.knowledge import RerankerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -359,7 +359,7 @@ class _DeferredReranker:
     search order.
     """
 
-    config: KnowledgeRerankerConfig
+    config: RerankerConfig
     runtime_paths: RuntimePaths
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:

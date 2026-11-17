@@ -44,7 +44,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, RerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -408,7 +408,7 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    reranker: KnowledgeRerankerConfig | None = Field(
+    reranker: RerankerConfig | None = Field(
         default=None,
         description=(
             "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; "

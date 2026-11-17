@@ -1,4 +1,4 @@
-"""Rerank knowledge search hits with a Cohere-compatible rerank API, Vertex AI ranking, or a local cross-encoder."""
+"""Rerank search hits with a Cohere-compatible rerank API, Vertex AI ranking, a local cross-encoder, or a judgment backend."""
 
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
+from mindroom.judgment.rerank import create_judgment_reranker
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.knowledge import KnowledgeRerankerConfig
+    from mindroom.config.knowledge import RerankerConfig
     from mindroom.constants import RuntimePaths
 
 _COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
@@ -180,8 +182,14 @@ class _CrossEncoderReranker:
             return [float(score) for score in encoder.predict([(query, document) for document in documents])]
 
 
-def _create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+def _create_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker."""
+    if isinstance(config, TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig):
+        reranker = create_judgment_reranker(config, runtime_paths)
+        if reranker is None:
+            msg = f"The {config.provider} reranker has no API key"
+            raise RuntimeError(msg)
+        return reranker
     if config.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
         return _CrossEncoderReranker(model=config.model)
@@ -195,7 +203,7 @@ def _create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePath
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)
 
 
-async def build_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+async def build_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker on the reranker thread.
 
     Raises instead of starting a second build while one of the same config still runs, such as a first install.
