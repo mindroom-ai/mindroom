@@ -14,10 +14,10 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.failure_text import failure_text
 from mindroom.history.conversation_text import utterances
 from mindroom.history.replay import (
+    compactable_runs,
     current_summary_text,
     estimate_prompt_visible_history_tokens,
     estimate_summary_text_tokens,
-    scope_visible_runs,
 )
 from mindroom.history.storage import (
     FoldBasis,
@@ -340,11 +340,12 @@ async def compact_scope_history(
     whose summary exceeds it, as ``model``'s route sizes it, is stored. ``available_history_budget`` and
     ``before_tokens`` are the history's budget and size the notices show; ``before_tokens`` is also the size the
     ``compaction:before`` hook receives. ``progress`` receives the progress after each stored chunk that leaves runs
-    to replay, and ``complete`` the outcome after the last stored chunk.
+    to fold, and ``complete`` the outcome after the last stored chunk. The recovered runs the reply continues are
+    never folded (``compactable_runs``).
     """
     scope = owner_scope(session)
     history_settings = summarizer.history_settings
-    visible_runs = scope_visible_runs(session)
+    visible_runs = compactable_runs(session)
     if not visible_runs:
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
@@ -366,7 +367,7 @@ async def compact_scope_history(
     async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
         if hooks_registered:
             compacted_transcript.extend(_transcript(chunk.included_runs))
-        if progress is None or not scope_visible_runs(working_session):
+        if progress is None or not compactable_runs(working_session):
             return
         after_tokens = await asyncio.to_thread(
             estimate_prompt_visible_history_tokens,
@@ -437,7 +438,7 @@ async def compact_scope_history(
             window_tokens=replay_window_tokens or 0,
             threshold_tokens=threshold_tokens or 0,
             runs_before=len(visible_runs),
-            runs_after=len(scope_visible_runs(session)),
+            runs_after=len(compactable_runs(session)),
             compacted_run_count=rewrite_result.compacted_run_count,
             compacted_at=compacted_at,
             history_budget_tokens=available_history_budget,

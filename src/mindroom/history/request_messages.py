@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from itertools import dropwhile, islice, takewhile
+from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_recovered_run, replays_in_scope
+from mindroom.history.run_visibility import continued_from, replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
 from mindroom.llm.messages import is_queued_notice_message
 
@@ -69,7 +69,7 @@ def scope_history_messages(
     """
     replayed = [run for run in runs if replays_in_scope(run, scope)]
     # The recovered runs nothing follows are the turn this request continues, not earlier history: no limit trims them.
-    earlier = len(replayed) - sum(1 for _ in takewhile(is_recovered_run, reversed(replayed)))
+    earlier = continued_from(replayed)
     continued = replayable_messages(replayed[earlier:])
     replayed = replayed[:earlier]
     if num_history_runs is not None:

@@ -1388,6 +1388,38 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
 
 
 @pytest.mark.asyncio
+async def test_compaction_leaves_the_recovered_runs_the_next_request_continues_unfolded(tmp_path: Path) -> None:
+    """A recovered run nothing follows is the turn the reply continues, so a compaction before it folds only the rest."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    recovered = replace(_filler_run("run-2", words=200), metadata={"mindroom_recovered_run": True})
+    session = _session("session-1", runs=[_filler_run("run-1", words=200), recovered])
+    seed_session(storage, session)
+    model = summary_model("summary of run-1")
+
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=session,
+        state=HistoryScopeState(),
+        summarizer=_summarizer(model, 5_000),
+        available_history_budget=1,
+        max_summary_tokens=None,
+        before_tokens=2,
+        replay_window_tokens=16_000,
+        threshold_tokens=1,
+        progress=None,
+        complete=_reported,
+        model=ScriptedModel([]),
+    )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 1
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == ["run-2"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_branch(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
