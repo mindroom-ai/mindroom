@@ -498,8 +498,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             end on its own, such as a watcher or a test run that can hang. Start a
             server or anything else meant to keep running with
             ``nohup cmd > out.log 2>&1 &``, which keeps running after the command
-            ends; in the foreground it would keep the call running until its job is
-            cancelled.
+            ends; in the foreground it would hold the call until its timeout stops
+            it.
 
             With ``mindroom_output_path``, capture the complete supported output
             within the redirect byte limit instead of applying ``tail``; a stopped
