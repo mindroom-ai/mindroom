@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from http import HTTPStatus
+from itertools import groupby
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlencode
 from uuid import uuid4
@@ -64,7 +65,7 @@ _RATE_LIMIT_RETRIES = 2
 _MAX_RATE_LIMIT_WAIT_SECONDS = 5.0
 # The wait after a 429 that names none.
 _DEFAULT_RATE_LIMIT_WAIT_SECONDS = 1.0
-_ROOMS_LIMIT, _MAX_ROOMS_LIMIT = 50, 200
+_ROOMS_LIMIT, _MAX_ROOMS_LIMIT = 20, 200
 _MEMBERS_LIMIT, _MAX_MEMBERS_LIMIT = 50, 200
 _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT = 10, 50
 _MESSAGES_LIMIT, _MAX_MESSAGES_LIMIT = 30, 100
@@ -372,7 +373,7 @@ async def read_rooms(client: nio.AsyncClient, *, query: str | None, limit: int |
     """Return the person's rooms: unread first, then invitations, then the rest, each group by name.
 
     A room without a name is named by the other person of a direct chat, else by the members the homeserver picks.
-    ``query`` keeps the rooms whose name contains it, whatever its case; ``limit`` (default 50, at most 200) bounds the
+    ``query`` keeps the rooms whose name contains it, whatever its case; ``limit`` (default 20, at most 200) bounds the
     lines, and ``left_out`` counts the others.
     """
     parameters = {"timeout": 0, "set_presence": "offline", "filter": json.dumps(_rooms_filter())}
@@ -596,7 +597,8 @@ def _message_columns(
 def _message_lines(events: list[dict[str, Any]], *, thread_page: bool = False) -> list[str]:
     """Return a line for each message among ``events``, in their order, with the edits and reactions among them.
 
-    On a ``thread_page``, a page of one thread, a reply does not name its thread.
+    A run of messages that cannot be read is one line that counts them. On a ``thread_page``, a page of one thread, a
+    reply does not name its thread.
     """
     events = [event for event in events if not _redacted(event)]
     edits: dict[str, list[dict[str, Any]]] = {}
@@ -610,18 +612,24 @@ def _message_lines(events: list[dict[str, Any]], *, thread_page: bool = False) -
             edits.setdefault(target, []).append(event)
         elif relation.get("rel_type") == _REACTION and isinstance(key, str) and isinstance(sender, str):
             reactions.setdefault(target, {}).setdefault(key, set()).add(sender)
-    return [
-        _line(
-            *_message_columns(
-                event,
-                edits.get(event["event_id"], []),
-                reactions.get(event["event_id"], {}),
-                thread_page=thread_page,
-            ),
+    lines: list[str] = []
+    for unreadable, run in groupby((event for event in events if _is_message(event)), key=_encrypted):
+        messages = list(run)
+        if unreadable and len(messages) > 1:
+            lines.append(f"[{len(messages)} encrypted messages, not readable]")
+            continue
+        lines.extend(
+            _line(
+                *_message_columns(
+                    message,
+                    edits.get(message["event_id"], []),
+                    reactions.get(message["event_id"], {}),
+                    thread_page=thread_page,
+                ),
+            )
+            for message in messages
         )
-        for event in events
-        if _is_message(event)
-    ]
+    return lines
 
 
 def _messages_page(lines: list[str], next_page_token: object = None) -> dict[str, object]:

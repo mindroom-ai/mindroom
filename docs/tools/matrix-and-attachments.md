@@ -316,7 +316,7 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 
 | Action | Returns |
 |--------|---------|
-| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 50, at most 200) caps the lines, with `left_out` counting the rest |
+| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 20, at most 200) caps the lines, with `left_out` counting the rest |
 | `messages` | The newest messages of the room `room_id` names, oldest first, one line each with its latest edit applied and its file, reactions, and thread replies noted, and texts over 2000 characters cut; `limit` defaults to 30 (at most 100) and counts reactions and edits too, so a page can show fewer lines, and `page_token`, the previous result's `next_page_token`, continues into older messages; with `thread_id`, that thread's root and newest replies; with `event_id`, that message and up to half of `limit` messages on each side |
 | `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
@@ -324,7 +324,7 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 | `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
 | `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
-Messages in encrypted rooms are not readable: they show as `[encrypted, not readable]`, and search does not find them.
+Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
 `matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachments=None, name=None)` acts as the owner, and each call is approved by the owner on its card, or within an [`!auto_approve`](../tool-approval.md#auto-approve-everything) window they opened themselves, whatever the [approval rules](../tool-approval.md) say, so the MCP gateway does not offer it.
 

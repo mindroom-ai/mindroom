@@ -230,15 +230,12 @@ class MatrixUserTools(Toolkit):
         """Read Matrix as your owner: their own rooms and DMs, including those you are not in.
 
         Actions:
-        - rooms: Their rooms and invitations, unread first. query keeps rooms whose name contains it.
-          limit: default 50, at most 200.
-        - messages: room_id's newest messages (limit: default 30, at most 100); page_token continues into older ones.
+        - rooms: Their rooms and invitations, unread first (limit: default 20). query keeps rooms whose name contains it.
+        - messages: room_id's newest messages (limit: default 30); page_token continues into older ones.
           With thread_id: that thread's root and newest replies. With event_id: that message and those around it.
-        - search: Messages containing query, in all their rooms or in room_id (limit: default 10, at most 50);
-          page_token continues.
-        - room: room_id's name, topic, encryption, whether it is a DM, and up to limit (default 50) members.
-        - people: query is a full Matrix ID for that profile, or a name to search the user directory
-          (limit: default 10, at most 50).
+        - search: Messages containing query, in all their rooms or in room_id; page_token continues.
+        - room: room_id's name, topic, encryption, whether it is a DM, and up to limit members.
+        - people: query is a full Matrix ID for that profile, or a name to search the user directory.
         - download: The file of message event_id in room_id, as an attachment ID for your other tools.
         - mark_read: Mark room_id read for them, up to event_id or its newest message.
         """

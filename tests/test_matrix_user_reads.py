@@ -239,14 +239,14 @@ async def test_rooms_filters_by_name(client: nio.AsyncClient, homeserver: FakeHo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("limit", "shown"), [(2, 2), (None, 50), (500, 200), (0, 1)])
+@pytest.mark.parametrize(("limit", "shown"), [(2, 2), (None, 20), (500, 200), (0, 1)])
 async def test_rooms_reports_how_many_it_left_out(
     client: nio.AsyncClient,
     homeserver: FakeHomeserver,
     limit: int | None,
     shown: int,
 ) -> None:
-    """At most ``limit`` rooms are listed, 50 unless asked, never more than 200, and the result says how many are not."""
+    """At most ``limit`` rooms are listed, 20 unless asked, never more than 200, and the result says how many are not."""
     homeserver.answers[SYNC_PATH] = sync_answer(
         join={f"!room{number:03}:example.com": joined_room(f"Room {number:03}") for number in range(250)},
     )
@@ -587,6 +587,40 @@ async def test_an_encrypted_event_is_reported_not_dropped(client: nio.AsyncClien
     result = await _messages(client)
 
     assert result["messages"] == [message_line("$secret", "[encrypted, not readable]")]
+
+
+@pytest.mark.asyncio
+async def test_a_run_of_encrypted_messages_is_one_line(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """Messages that cannot be read, one after another, are one line that counts them; a single one keeps its line.
+
+    An edit among them is no message of its own, so it does not break the run.
+    """
+    encrypted = {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA", "session_id": "s", "device_id": "D"}
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            room_event("$e4", "m.room.encrypted", encrypted, minute=6),
+            text_message("$back", "Back in the clear", minute=5),
+            room_event("$e3", "m.room.encrypted", encrypted, minute=4),
+            room_event(
+                "$e2_edit",
+                "m.room.encrypted",
+                {**encrypted, "m.relates_to": {"rel_type": "m.replace", "event_id": "$e2"}},
+                minute=3,
+            ),
+            room_event("$e2", "m.room.encrypted", encrypted, minute=2),
+            room_event("$e1", "m.room.encrypted", encrypted, minute=1),
+            text_message("$hi", "Hello"),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$hi", "Hello"),
+        "[3 encrypted messages, not readable]",
+        message_line("$back", "Back in the clear", minute=5),
+        message_line("$e4", "[encrypted, not readable]", minute=6),
+    ]
 
 
 @pytest.mark.asyncio
