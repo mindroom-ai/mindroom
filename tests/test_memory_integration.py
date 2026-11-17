@@ -213,7 +213,7 @@ class TestMemoryIntegration:
             mock_memory.search.assert_called_with(
                 "What is A?",
                 filters={"user_id": "agent_general"},
-                top_k=3,
+                top_k=20,
                 threshold=pytest.approx(1 / 2.8),
             )
 

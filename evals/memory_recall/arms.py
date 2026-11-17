@@ -2,7 +2,9 @@
 
 Each arm turns the agent's memory directory into a corpus (dropping excluded files, optionally one file per entry),
 indexes it with MindRoom's own knowledge indexer and the configured embedder, and searches it with the file-memory
-overlay and hybrid search the per-turn recall uses. Hits that may have been written after a turn are dropped before
+overlay and hybrid search the per-turn recall uses. The `shipped` arm indexes the whole directory through the shipped
+overlay, which leaves files out and splits entries itself; the other arms index through the overlay as it was before,
+with fixed 5,000-character chunks and no excludes. Hits that may have been written after a turn are dropped before
 selection, so a note written from that very turn cannot leak its answer.
 """
 
@@ -15,7 +17,7 @@ import logging
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
@@ -25,11 +27,12 @@ from mindroom.constants import runtime_paths_with_storage_root
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.memory_entries import _ENTRY_START_RE, _HEADING_RE, split_memory_entries
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
-from mindroom.memory._prompting import is_short_follow_up, select_recall_hits
+from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._semantic_file_search import _memory_results_from_hits
-from mindroom.memory.entries import _ENTRY_START_RE, _HEADING_RE, split_memory_entries
+from mindroom.memory.functions import _PER_TURN_SEARCH_LIMIT
 from mindroom.path_globs import matches_root_glob
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
@@ -38,10 +41,11 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.file_memory_knowledge import _FileMemoryKnowledgeResolution
+    from mindroom.knowledge.memory_entries import _MemoryEntry
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.memory._shared import MemoryResult
-    from mindroom.memory.entries import MemoryEntry
 
     from .turns import Turn
 
@@ -63,6 +67,8 @@ class Arm:
     selection: Literal["top3", "gap"]
     #: Inject nothing for a short reply in an existing thread.
     skip_short: bool
+    #: Index through the shipped overlay and search as the shipped per-turn recall does.
+    shipped: bool = False
 
 
 # Archived copies, raw session dumps (`YYYY-MM-DD-HHMM.md`) and other agents' memory.
@@ -77,6 +83,7 @@ ARMS: dict[str, Arm] = {
     "A2": Arm("A2", exclude=_EXCLUDES, entry_chunks=True, selection="top3", skip_short=False),
     "A3": Arm("A3", exclude=_EXCLUDES, entry_chunks=True, selection="gap", skip_short=False),
     "A4": Arm("A4", exclude=_EXCLUDES, entry_chunks=True, selection="gap", skip_short=True),
+    "shipped": Arm("shipped", exclude=(), entry_chunks=False, selection="gap", skip_short=False, shipped=True),
 }
 
 # The most hits that keep live recall's ranking: the store fuses `max(limit * 2, 50)` candidates per ranking, 50 for
@@ -88,8 +95,12 @@ _SEARCH_CONCURRENCY = 4
 # Waits before each retry of a failed search: four attempts ride out an embedder swapping models or under load.
 _SEARCH_RETRY_DELAYS_S = (2.0, 5.0, 15.0)
 _SCOPE_USER_ID = "memory_recall_eval"
-# The stock file-memory search over `memory/**/*.md`, semantic.
+# The shipped file-memory search over `memory/**/*.md`, semantic.
 _SEARCH_CONFIG = MemorySearchConfig(mode="semantic")
+# The file-memory search before excludes, whose overlay the arms other than `shipped` index through.
+_STOCK_SEARCH_CONFIG = MemorySearchConfig(mode="semantic", exclude=[])
+# A reply in a thread shorter than this skips recall in A4.
+_SHORT_FOLLOW_UP_CHARS = 40
 _ENTRIES_SUFFIX = ".entries"
 _UNDATED = "undated"
 _TIME_LABEL = "%Y%m%dT%H%M%SZ"
@@ -118,7 +129,14 @@ async def replay(
     corpus = _build_corpus(memory_dir, arm, first_added)
     if not corpus:
         return [[] for _turn in turns]
-    knowledge = await _indexed_knowledge(corpus, config=config, runtime_paths=runtime_paths, index_dir=index_dir)
+    knowledge = await _indexed_knowledge(
+        corpus,
+        config=config,
+        runtime_paths=runtime_paths,
+        index_dir=index_dir,
+        shipped=arm.shipped,
+    )
+    limit = _PER_TURN_SEARCH_LIMIT if arm.shipped else _OVER_FETCH
     hit_times = _HitTimes(corpus, entry_chunks=arm.entry_chunks, first_added=first_added)
     semaphore = asyncio.Semaphore(_SEARCH_CONCURRENCY)
 
@@ -126,7 +144,7 @@ async def replay(
         if arm.skip_short and is_short_follow_up(turn.query, in_thread=_in_thread(turn.session_id)):
             return []
         async with semaphore:
-            hits = await _search_with_retries(knowledge, turn.query)
+            hits = await _search_with_retries(knowledge, turn.query, limit)
         if hits is None:
             return None
         kept = [hit for hit in hits if not any(_written_after(written, turn.ts) for written in hit_times(hit))]
@@ -138,13 +156,18 @@ async def replay(
     return list(await asyncio.gather(*(recall(turn) for turn in turns)))
 
 
-async def _search_with_retries(knowledge: AgentKnowledge, query: str) -> list[SearchHit] | None:
+def is_short_follow_up(message: str, *, in_thread: bool) -> bool:
+    """Return whether `message` is a short reply inside an existing thread, where A4 skips recall."""
+    return in_thread and len(message.strip()) < _SHORT_FOLLOW_UP_CHARS
+
+
+async def _search_with_retries(knowledge: AgentKnowledge, query: str, limit: int) -> list[SearchHit] | None:
     """Search `query`, retrying a failure after each delay in `_SEARCH_RETRY_DELAYS_S`; None when every attempt failed."""
     for attempt, delay in enumerate((0.0, *_SEARCH_RETRY_DELAYS_S), start=1):
         if delay:
             await asyncio.sleep(delay)
         try:
-            return await knowledge.asearch(query, _OVER_FETCH)
+            return await knowledge.asearch(query, limit)
         except Exception as exc:  # embedder HTTP errors, timeouts: all worth another attempt
             error = f"{type(exc).__name__}: {exc}"
             _logger.warning("Replay search attempt %d failed: %.300s", attempt, error)
@@ -219,14 +242,14 @@ def _written_entries(
     text: str,
     relative: PurePosixPath,
     first_added: _FirstAdded,
-) -> list[tuple[MemoryEntry, _Written]]:
+) -> list[tuple[_MemoryEntry, _Written]]:
     """Split a memory file into its entries, each with when it was written.
 
     That is the UTC time of an `m_YYYYMMDDhhmmss_` id, else the entry's day (from the file name), else the file's
     first commit. A later piece of an over-long entry, which starts at no entry or heading boundary, takes its
     entry's time.
     """
-    entries: list[tuple[MemoryEntry, _Written]] = []
+    entries: list[tuple[_MemoryEntry, _Written]] = []
     for index, entry in enumerate(split_memory_entries(text, file_name=relative.name)):
         if index and not (_ENTRY_START_RE.match(entry.text) or _HEADING_RE.match(entry.text)):
             written = entries[-1][1]
@@ -322,9 +345,10 @@ async def _indexed_knowledge(
     config: Config,
     runtime_paths: RuntimePaths,
     index_dir: Path,
+    shipped: bool,
 ) -> AgentKnowledge:
     """Return a search handle over `corpus`, indexing it first unless `index_dir` already holds its index."""
-    home = index_dir / _corpus_hash(corpus, config)
+    home = index_dir / _corpus_hash(corpus, config, shipped=shipped)
     root = home / "corpus"
     arm_paths = runtime_paths_with_storage_root(runtime_paths, home / "storage")
     ready = (home / _READY_MARKER).exists()
@@ -336,12 +360,7 @@ async def _indexed_knowledge(
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-    file_memory = resolve_file_memory_knowledge(
-        scope_user_id=_SCOPE_USER_ID,
-        root=root,
-        config=config,
-        search_config=_SEARCH_CONFIG,
-    )
+    file_memory = _file_memory(root, config, shipped=shipped)
     if not ready:
         # The refresh child's path (`refresh_runner._knowledge_manager`), run in this process.
         binding = resolve_knowledge_binding(
@@ -376,9 +395,33 @@ async def _indexed_knowledge(
     return access.knowledge
 
 
-def _corpus_hash(corpus: dict[str, bytes], config: Config) -> str:
-    """Return a key for the corpus's index: its files and the embedder that indexes them."""
+def _file_memory(root: Path, config: Config, *, shipped: bool) -> _FileMemoryKnowledgeResolution:
+    """Return the shipped file-memory overlay of `root`, or the one before excludes and entry chunks."""
+    if shipped:
+        return resolve_file_memory_knowledge(
+            scope_user_id=_SCOPE_USER_ID,
+            root=root,
+            config=config,
+            search_config=_SEARCH_CONFIG,
+        )
+    file_memory = resolve_file_memory_knowledge(
+        scope_user_id=_SCOPE_USER_ID,
+        root=root,
+        config=config,
+        search_config=_STOCK_SEARCH_CONFIG,
+    )
+    stock = file_memory.config.knowledge_bases[file_memory.base_id].model_copy(update={"chunk_strategy": "fixed"})
+    return replace(
+        file_memory, config=file_memory.config.with_runtime_knowledge_base_overlay(file_memory.base_id, stock)
+    )
+
+
+def _corpus_hash(corpus: dict[str, bytes], config: Config, *, shipped: bool) -> str:
+    """Return a key for the corpus's index: its files, the overlay that indexes them, and its embedder."""
     digest = hashlib.sha256(config.memory.embedder.model_dump_json().encode())
+    if shipped:
+        # Only the shipped overlay changes the key, so the other arms keep the indexes they cached before it existed.
+        digest.update(b"shipped overlay")
     for relative in sorted(corpus):
         digest.update(json.dumps([relative, hashlib.sha256(corpus[relative]).hexdigest()]).encode())
     return digest.hexdigest()[:16]

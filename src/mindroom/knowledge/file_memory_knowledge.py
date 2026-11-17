@@ -77,6 +77,8 @@ def resolve_file_memory_knowledge(
         chunk_overlap=_CHUNK_OVERLAP,
         include_extensions=[".md"],
         include_patterns=_memory_include_patterns(search_config),
+        exclude_patterns=search_config.exclude,
+        chunk_strategy="memory_entries",
     )
     return _FileMemoryKnowledgeResolution(
         base_id=base_id,

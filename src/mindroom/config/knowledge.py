@@ -149,6 +149,13 @@ class KnowledgeBaseConfig(BaseModel):
         ),
         json_schema_extra=dashboard_hint(reference="model"),
     )
+    chunk_strategy: Literal["fixed", "memory_entries"] = Field(
+        default="fixed",
+        description=(
+            "How text-like files are split into chunks: fixed splits at chunk_size characters, "
+            "memory_entries makes each memory entry or Markdown section its own chunk of at most 1,200 characters"
+        ),
+    )
     include_extensions: list[str] | None = Field(
         default=None,
         description="Optional file extensions to index instead of the default text-like set, for example ['.md', '.py']",

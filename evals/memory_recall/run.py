@@ -1,7 +1,7 @@
 """Replay logged turns through each recall arm, judge the hits, and write aggregate metrics.
 
     python -m evals.memory_recall.run --turns T.jsonl --memory-dir D --config ~/.mindroom-chat/config.yaml
-        --arms A0,A1,A2,A3,A4 --out DIR [--key-env ENV] [--limit N]
+        --arms A0,A1,A2,A3,A4,shipped --out DIR [--key-env ENV] [--limit N]
 
 Writes `DIR/results.json` and `DIR/results.md` (numbers only, never memory text), caches each arm's index under
 `DIR/index/` and the judge's verdicts in `DIR/judge.sqlite`.

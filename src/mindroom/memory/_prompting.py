@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
-_SHORT_FOLLOW_UP_CHARS = 40
 # Absorbs float rounding, so a hit exactly ``relative_gap`` below the top hit is kept.
 _SCORE_GAP_TOLERANCE = 1e-9
 
@@ -76,11 +75,6 @@ def select_recall_hits(
             break
         selected.append(result)
     return selected
-
-
-def is_short_follow_up(message: str, *, in_thread: bool) -> bool:
-    """Return whether ``message`` is a short reply inside an existing thread, where recall can be skipped."""
-    return in_thread and len(message.strip()) < _SHORT_FOLLOW_UP_CHARS
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

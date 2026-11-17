@@ -1,10 +1,10 @@
-"""Tests for choosing which recall hits to inject and when to skip recall."""
+"""Tests for choosing which recall hits to inject."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.memory._prompting import is_short_follow_up, select_recall_hits
+from mindroom.memory._prompting import select_recall_hits
 from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
@@ -71,12 +71,3 @@ def test_selection_treats_a_missing_score_as_zero() -> None:
 def test_selection_empty_input_returns_empty() -> None:
     """No results select nothing."""
     assert select_recall_hits([]) == []
-
-
-def test_short_follow_up() -> None:
-    """Only a short message inside an existing thread counts as a follow-up."""
-    assert is_short_follow_up("ok", in_thread=True) is True
-    assert is_short_follow_up("  sounds good, go ahead  ", in_thread=True) is True
-    assert is_short_follow_up("ok", in_thread=False) is False
-    assert is_short_follow_up("x" * 40, in_thread=True) is False
-    assert is_short_follow_up(" " * 10 + "x" * 39 + " " * 10, in_thread=True) is True

@@ -14,7 +14,7 @@ from mindroom.timing import timed
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
-from ._prompting import format_memories_as_context
+from ._prompting import format_memories_as_context, select_recall_hits
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
 if TYPE_CHECKING:
@@ -31,6 +31,10 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
+
+# Hits the per-turn search fetches for `select_recall_hits` to choose from. The store fuses `max(limit * 2, 50)`
+# candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of a three-hit search.
+_PER_TURN_SEARCH_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -281,9 +285,11 @@ async def build_memory_prompt_parts(
         agent_name,
         config,
         runtime_paths,
+        limit=_PER_TURN_SEARCH_LIMIT,
         execution_identity=execution_identity,
     )
-    agent_memories = search_outcome.results
+    # Off the event loop: the first selection loads the token encoder, which may download its vocabulary.
+    agent_memories = await asyncio.to_thread(select_recall_hits, search_outcome.results)
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 

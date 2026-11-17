@@ -23,7 +23,10 @@ from evals.memory_recall.turns import Turn, write_turns
 from mindroom.config.main import load_config
 from mindroom.config.memory import MemorySearchConfig
 from mindroom.constants import resolve_runtime_paths, runtime_paths_with_storage_root
+from mindroom.memory import _semantic_file_search
+from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._semantic_file_search import search_semantic_file_memories
+from mindroom.memory.functions import _PER_TURN_SEARCH_LIMIT
 from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
@@ -322,21 +325,33 @@ async def test_date_only_entry_counts_from_the_turn_day(
     assert not any(source.startswith("memory/2026-01-25.md") for source in sources)
 
 
-@pytest.mark.asyncio
-async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Over more than 50 chunks, A0's top 3 are the hits the live per-turn search (limit 3) returns.
-
-    The three `beacon` matches rank 55-57 by vector. Live recall fuses the top 50 of each ranking, so they count by
-    keyword alone and only the first ties into the top 3; a wider fusion would add their vector ranks and put all three
-    on top. The `lantern` matches rank 48-50 and top the fusion, with closer vectors right below them, which only the
-    three hits live recall converts leave out of their scores.
-    """
+def _ranked_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Write 120 one-line notes that `_RankedEmbedder` ranks by number, a few with keywords, and return their directory."""
     install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _RankedEmbedder())
     memory_dir = tmp_path / "workspace" / "memory"
     memory_dir.mkdir(parents=True)
     for number in range(120):
         keyword = " beacon" if number in {54, 55, 56} else " lantern" if number in {47, 48, 49} else ""
         (memory_dir / f"note-{number:03d}.md").write_text(f"rank{number:03d}{keyword}\n")
+    return memory_dir
+
+
+@pytest.mark.asyncio
+async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over more than 50 chunks, A0's top 3 are the hits the per-turn search (limit 3) returned before A3 shipped.
+
+    The three `beacon` matches rank 55-57 by vector. That recall fused the top 50 of each ranking, so they count by
+    keyword alone and only the first ties into the top 3; a wider fusion would add their vector ranks and put all three
+    on top. The `lantern` matches rank 48-50 and top the fusion, with closer vectors right below them, which only the
+    three hits that recall converted leave out of their scores.
+    """
+    memory_dir = _ranked_notes(tmp_path, monkeypatch)
+    # The live search, through the overlay as it was then.
+    monkeypatch.setattr(
+        _semantic_file_search,
+        "resolve_file_memory_knowledge",
+        lambda *, root, config, **_kwargs: arms._file_memory(root, config, shipped=False),
+    )
 
     queries = {
         "beacon": ["memory/note-000.md", "memory/note-054.md", "memory/note-001.md"],
@@ -361,6 +376,29 @@ async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: p
 
 
 @pytest.mark.asyncio
+async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped arm injects what the shipped per-turn recall does: its search, then `select_recall_hits`."""
+    memory_dir = _ranked_notes(tmp_path, monkeypatch)
+    queries = ["beacon", "lantern", "rank010"]
+    replayed = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-25", query) for query in queries])
+
+    config, runtime_paths = _load(tmp_path)
+    [home] = [path.parent for path in (tmp_path / "out" / "index").glob("*/ready")]
+    for query, hits in zip(queries, replayed, strict=True):
+        live = await search_semantic_file_memories(
+            query,
+            scope_user_id=arms._SCOPE_USER_ID,
+            root=home / "corpus",
+            config=config,
+            runtime_paths=runtime_paths_with_storage_root(runtime_paths, home / "storage"),
+            search_config=MemorySearchConfig(mode="semantic"),
+            limit=_PER_TURN_SEARCH_LIMIT,
+        )
+        assert hits
+        assert hits == select_recall_hits(live), query
+
+
+@pytest.mark.asyncio
 async def test_entry_arm_recalls_single_entries(tmp_path: Path, memory_dir: Path, embedder: _CountingEmbedder) -> None:
     """With entry chunks, a hit is one note entry, not the whole daily file."""
     assert embedder is not None
@@ -368,6 +406,30 @@ async def test_entry_arm_recalls_single_entries(tmp_path: Path, memory_dir: Path
     assert hits[0]["memory"].startswith("- [id=m_20260110100000_bbbb2222]")
     assert "garden shed" not in hits[0]["memory"]
     assert _sources(hits)[0] == "memory/2026-01-10.md.entries/20260110T100000Z__2.md"
+
+
+@pytest.mark.asyncio
+async def test_shipped_arm_recalls_entries_through_the_product_overlay(
+    tmp_path: Path,
+    memory_dir: Path,
+    embedder: _CountingEmbedder,
+) -> None:
+    """The shipped arm indexes whole files, which the product overlay splits into entries and leaves the archive out of."""
+    assert embedder is not None
+    [hits] = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-15", "salmon kibble for Pixel")])
+    assert hits
+    assert hits[0]["memory"] == "- [id=m_20260110100000_bbbb2222] Pixel the cat eats salmon kibble twice a day."
+    assert _sources(hits)[0] == "memory/2026-01-10.md"
+    assert not any(source.startswith("memory/archive/") for source in _sources(hits))
+
+
+def test_short_follow_up() -> None:
+    """Only a short message inside an existing thread counts as a follow-up."""
+    assert arms.is_short_follow_up("ok", in_thread=True) is True
+    assert arms.is_short_follow_up("  sounds good, go ahead  ", in_thread=True) is True
+    assert arms.is_short_follow_up("ok", in_thread=False) is False
+    assert arms.is_short_follow_up("x" * 40, in_thread=True) is False
+    assert arms.is_short_follow_up(" " * 10 + "x" * 39 + " " * 10, in_thread=True) is True
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,12 @@ if TYPE_CHECKING:
 # Handling: Keep absence empty, which is the identity of indexes whose chunks were indexed as read.
 # Coverage: tests/test_knowledge_indexing_config.py::test_chroma_era_metadata_rebuilds_in_the_owned_store.
 
+# LEGACY_COMPAT: Knowledge metadata without the chunk strategy.
+# Legacy format: Knowledge-index metadata omitted chunk_strategy; every index then held fixed-size chunks.
+# Last legacy release: v2026.11.366; replacement: unreleased, which persists the chunk strategy.
+# Handling: Keep absence empty, the identity of fixed-size chunks, so only a base chunked another way rebuilds.
+# Coverage: tests/test_file_memory_knowledge.py::test_chunk_strategy_change_rebuilds_index.
+
 
 def normalize_legacy_indexing_settings(
     settings: Mapping[str, str],
@@ -70,6 +76,7 @@ def normalize_legacy_indexing_settings(
     normalized.setdefault("require_content_before_publish", "")
     normalized.setdefault("vector_store", "")
     normalized.setdefault("chunk_context_model", "")
+    normalized.setdefault("chunk_strategy", "")
     return normalized
 
 

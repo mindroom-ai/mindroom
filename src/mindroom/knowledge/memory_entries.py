@@ -23,23 +23,23 @@ _FILE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 @dataclass(frozen=True)
-class MemoryEntry:
+class _MemoryEntry:
     """One recall unit of a memory file and the day it was written, when known."""
 
     text: str
     date: date | None
 
 
-def split_memory_entries(text: str, *, file_name: str, max_chars: int = 1200) -> list[MemoryEntry]:
+def split_memory_entries(text: str, *, file_name: str, max_chars: int = 1200) -> list[_MemoryEntry]:
     """Split one memory file's text into entries of at most ``max_chars`` characters; blank entries are dropped."""
     file_date = _file_date(file_name)
-    entries: list[MemoryEntry] = []
+    entries: list[_MemoryEntry] = []
     for section in _sections(text):
         body = section.strip()
         if not _has_content(body):
             continue
         entry_date = _id_date(body) or file_date
-        entries.extend(MemoryEntry(text=piece, date=entry_date) for piece in _pieces(body, max_chars))
+        entries.extend(_MemoryEntry(text=piece, date=entry_date) for piece in _pieces(body, max_chars))
     return entries
 
 

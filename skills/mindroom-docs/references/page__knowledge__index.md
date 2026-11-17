@@ -79,6 +79,7 @@ knowledge_bases:
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
 | `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most 1,200 characters, as semantic file memory does; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -103,7 +104,7 @@ A folder holding a file or folder name that is not valid UTF-8 may not be watche
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
-Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, `chunk_strategy`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 A reindex requested while a refresh of the base runs starts once that refresh finishes.
 Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
@@ -112,7 +113,7 @@ Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 42
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, `chunk_context_model`, or `chunk_strategy` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host

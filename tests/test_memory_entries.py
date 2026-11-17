@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from mindroom.memory.entries import MemoryEntry, split_memory_entries
+from mindroom.knowledge.memory_entries import _MemoryEntry, split_memory_entries
 
 
 def test_splits_daily_note_on_id_entries() -> None:
@@ -19,12 +19,12 @@ def test_splits_daily_note_on_id_entries() -> None:
     entries = split_memory_entries(text, file_name="2026-11-10.md")
 
     assert entries == [
-        MemoryEntry(text="- [id=m_20261109111659_x] Bas prefers functional code.", date=date(2026, 11, 9)),
-        MemoryEntry(
+        _MemoryEntry(text="- [id=m_20261109111659_x] Bas prefers functional code.", date=date(2026, 11, 9)),
+        _MemoryEntry(
             text="- [id=m_20261109111700_y] The lab service may be restarted.\n  It runs from /srv/mindroom.",
             date=date(2026, 11, 9),
         ),
-        MemoryEntry(text="- [id=m_20261109111701_z] Use trash, not rm.", date=date(2026, 11, 9)),
+        _MemoryEntry(text="- [id=m_20261109111701_z] Use trash, not rm.", date=date(2026, 11, 9)),
     ]
 
 
@@ -33,8 +33,8 @@ def test_auto_flush_entries_without_id_take_the_file_date() -> None:
     text = "- [auto_flush:!room:$a] First fact.\n[auto_flush:!room:$b] Second fact.\n"
 
     assert split_memory_entries(text, file_name="memory/2026-03-26.md") == [
-        MemoryEntry(text="- [auto_flush:!room:$a] First fact.", date=date(2026, 3, 26)),
-        MemoryEntry(text="[auto_flush:!room:$b] Second fact.", date=date(2026, 3, 26)),
+        _MemoryEntry(text="- [auto_flush:!room:$a] First fact.", date=date(2026, 3, 26)),
+        _MemoryEntry(text="[auto_flush:!room:$b] Second fact.", date=date(2026, 3, 26)),
     ]
     assert [entry.date for entry in split_memory_entries(text, file_name="notes.md")] == [None, None]
 
@@ -47,8 +47,8 @@ def test_splits_topic_file_on_headings() -> None:
     undated = split_memory_entries(text, file_name="lessons.md")
 
     assert dated == [
-        MemoryEntry(text="## A\nFirst section.", date=date(2026, 2, 19)),
-        MemoryEntry(text="## B\nSecond section.\n#### not a split\nstill B.", date=date(2026, 2, 19)),
+        _MemoryEntry(text="## A\nFirst section.", date=date(2026, 2, 19)),
+        _MemoryEntry(text="## B\nSecond section.\n#### not a split\nstill B.", date=date(2026, 2, 19)),
     ]
     assert [entry.text for entry in undated] == [entry.text for entry in dated]
     assert [entry.date for entry in undated] == [None, None]
@@ -71,7 +71,7 @@ def test_invalid_id_date_falls_back_to_file_date() -> None:
     """An id whose digits are not a calendar date is dated like an entry without an id."""
     entries = split_memory_entries("- [id=m_20261399111659_x] Odd id.\n", file_name="2026-11-10.md")
 
-    assert entries == [MemoryEntry(text="- [id=m_20261399111659_x] Odd id.", date=date(2026, 11, 10))]
+    assert entries == [_MemoryEntry(text="- [id=m_20261399111659_x] Odd id.", date=date(2026, 11, 10))]
 
 
 def test_long_entry_split_at_whitespace() -> None:

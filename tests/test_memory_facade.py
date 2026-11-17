@@ -614,6 +614,43 @@ class TestMemoryFacade:
         assert "I previously calculated 2+2=4" in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio
+    async def test_per_turn_recall_uses_gap_selection(
+        self,
+        mock_memory: AsyncMock,
+        config: Config,
+    ) -> None:
+        """The per-turn search over-fetches, then injects only the hits scored close to the best one."""
+        mock_memory.search.return_value = {
+            "results": [
+                {"id": "1", "memory": "The shed is painted green", "score": 0.90},
+                {"id": "2", "memory": "The shed roof is copper", "score": 0.87},
+                {"id": "3", "memory": "Pixel eats salmon kibble", "score": 0.60},
+            ],
+        }
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "calculator", config)
+
+        assert mock_memory.search.call_args.kwargs["top_k"] == 20
+        assert "The shed is painted green" in prompt_parts.transient_turn_context
+        assert "The shed roof is copper" in prompt_parts.transient_turn_context
+        assert "Pixel eats salmon kibble" not in prompt_parts.transient_turn_context
+
+    @pytest.mark.asyncio
+    async def test_tool_search_limit_unchanged(self, mock_memory: AsyncMock, config: Config) -> None:
+        """A search with its own limit, such as the `search_memories` tool's, returns every hit up to that limit."""
+        mock_results = [
+            {"id": str(index), "memory": f"memory {index}", "score": 0.9 - index * 0.1} for index in range(6)
+        ]
+        mock_memory.search.return_value = {"results": mock_results}
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            results = await search_agent_memories("memory", "calculator", config, limit=5)
+
+        assert mock_memory.search.call_args.kwargs["top_k"] == 5
+        assert results == mock_results[:5]
+
+    @pytest.mark.asyncio
     async def test_build_memory_prompt_parts_no_memories(
         self,
         mock_memory: AsyncMock,
