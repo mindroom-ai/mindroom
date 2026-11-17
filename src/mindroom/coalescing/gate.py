@@ -15,6 +15,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
+from mindroom.mid_turn import MID_TURN_MODE_KEY
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -299,9 +300,14 @@ class CoalescingGate:
                     continue
                 content = dict(new_content)
                 # The edit's new content carries no relation; the message stays where it was posted.
-                relation = event.source.get("content", {}).get("m.relates_to")
+                original_content = event.source.get("content", {})
+                relation = original_content.get("m.relates_to")
                 if relation is not None:
                     content["m.relates_to"] = relation
+                # The message keeps the mid-turn mode it was sent with, so an edit cannot steer or queue it anew.
+                content.pop(MID_TURN_MODE_KEY, None)
+                if MID_TURN_MODE_KEY in original_content:
+                    content[MID_TURN_MODE_KEY] = original_content[MID_TURN_MODE_KEY]
                 pending_event.event = replace(
                     event,
                     body=body,

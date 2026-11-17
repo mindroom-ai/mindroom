@@ -118,7 +118,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import MidTurnGate, QueuedMessage
+from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
@@ -8313,12 +8313,13 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
-        finish = await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
+        outcome = await gate.decide((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
     if failure not in {None, "oversized", "media"}:
-        assert not finish
+        # Context the judge cannot see whole skips judgment, which is never an explicit verdict.
+        assert outcome is MidTurnOutcome.PAUSE
         assert payloads == []
     else:
-        assert finish
+        assert outcome is MidTurnOutcome.WAIT
         conversation = payloads[0]["state"]["conversation"]
         evidence = conversation[-1]["text"]
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
@@ -8375,7 +8376,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner.approvals._run_claimed_approval_lifecycle(continuation, target=target)
-        assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+        assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert build_lifecycle.call_args.args[0].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
@@ -8408,9 +8409,9 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         ),
     ):
         await runner._prepare_request_after_lock(request)
-        assert (
-            await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True) is finish
-        )
+        outcome = await gate.decide((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
+        # An empty history that proves nothing skips the judge, so no explicit verdict reads as one.
+        assert outcome is (MidTurnOutcome.WAIT if finish else MidTurnOutcome.PAUSE)
     assert len(evaluated) == int(finish)
 
 

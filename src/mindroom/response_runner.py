@@ -15,6 +15,7 @@ from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -33,6 +34,9 @@ from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
     Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
     FinalDeliveryOutcome,
     Suppressed,
     Suppression,
@@ -43,6 +47,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.mid_turn import MidTurnMode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -490,6 +495,7 @@ class ResponseRunner:
         response_envelope: MessageEnvelope,
         mentions_nobody: bool = False,
         transcript: str | None = None,
+        mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self.lifecycle_coordinator.reserve_waiting_human_message(
@@ -497,6 +503,7 @@ class ResponseRunner:
             response_envelope=response_envelope,
             mentions_nobody=mentions_nobody,
             transcript=transcript,
+            mode=mode,
         )
 
     async def reserve_response_lifecycle(
@@ -1939,7 +1946,7 @@ class ResponseRunner:
         # The turn's tool calls note how long they waited for a worker to start in the reply's timing.
         with bind_reply_pipeline_timing(request.pipeline_timing):
             if use_streaming:
-                return await self._deliver_streamed(
+                outcome = await self._deliver_streamed(
                     turn,
                     response_stream,
                     response_identity=response_identity,
@@ -1948,14 +1955,29 @@ class ResponseRunner:
                     final_extra_content=final_extra_content,
                     progress=progress,
                 )
-            return await self._deliver_collected(
-                turn,
-                response_stream,
-                response_identity=response_identity,
-                tool_trace=tool_trace,
-                final_extra_content=final_extra_content,
-                progress=progress,
+            else:
+                outcome = await self._deliver_collected(
+                    turn,
+                    response_stream,
+                    response_identity=response_identity,
+                    tool_trace=tool_trace,
+                    final_extra_content=final_extra_content,
+                    progress=progress,
+                )
+        if (
+            outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+            and not outcome.is_visible_response
+            and recorder.outcome == "completed"
+            and reply_ended_for_follow_up()
+        ):
+            # A waiting message ended the run after calls it showed nothing of: the run is complete and stored, and
+            # the message carries on as its own reply, so this one's placeholder goes without a failure note.
+            return FinalDeliveryOutcome(
+                ending=Completed(),
+                tool_trace=outcome.tool_trace,
+                extra_content=outcome.extra_content,
             )
+        return outcome
 
     async def _deliver_streamed(
         self,

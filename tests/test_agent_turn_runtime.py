@@ -370,11 +370,17 @@ class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[object, ...]:
+    def interrupting_snapshot(self) -> tuple[object, ...]:
         return ("$pending",) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
 
 
 @pytest.mark.asyncio

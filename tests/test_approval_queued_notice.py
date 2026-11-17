@@ -40,11 +40,17 @@ _NOTICE = "Pause tool use and summarize before handling the newer message."
 class _QueuedState:
     pending: bool = False
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
 
 
 def _tool_calls() -> list[dict[str, Any]]:

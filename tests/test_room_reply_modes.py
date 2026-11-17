@@ -36,7 +36,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.mid_turn import MidTurnGate
+from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode
 from mindroom.response_runner import ResponseRunner
 from mindroom.room_reply_modes import (
     _store_path,
@@ -1009,6 +1009,52 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
         assert running.has_pending_human_messages() is ("general" in edited_mentions)
         assert await _shows_waiting(bot, "$follow-up")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("renewed", [False, True], ids=["notice-updated", "notice-renewed"])
+async def test_edit_keeps_original_queued_mode_when_notice_is_renewed(tmp_path: Path, *, renewed: bool) -> None:
+    """A waiting message keeps the mode it was sent with, whatever mode key its sender's edits carry.
+
+    An edit without the key keeps the original key on the queued content, so a notice the edit reserves anew (for a
+    message first sent to research) is Queue as well; an edit that names another mode does not change it either.
+    """
+    research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
+        mentions = ("research",) if renewed else ()
+        message = _in_thread(paths, "$follow-up", "look at this", *mentions, **{MID_TURN_MODE_KEY: "queue"})
+        await bot._turn_ingress.handle_text_event(room, message)
+        await _queued(bot, "$follow-up")
+        if renewed:
+            assert running.pending_message_snapshot() == ()
+        else:
+            assert [(item.event_id, item.mode) for item in running.pending_message_snapshot()] == [
+                ("$follow-up", MidTurnMode.QUEUE),
+            ]
+
+        keys = (
+            requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER),
+            active_follow_up_coalescing_key(ROOM_ID, THREAD_ID),
+        )
+        for edit_id, edited_mode in (("$edit", None), ("$steer-edit", "steer")):
+            new_content: dict[str, object] = {"body": "look at this", "msgtype": "m.text"}
+            if edited_mode is not None:
+                new_content[MID_TURN_MODE_KEY] = edited_mode
+            edit = {
+                "m.new_content": new_content,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+            }
+            await bot._turn_ingress.handle_text_event(room, _text_message(paths, edit_id, "* look at this", **edit))
+            (pending,) = [
+                pending
+                for key in keys
+                for pending in bot._coalescing_gate.queued_pending_events(key)
+                if pending.event.event_id == "$follow-up"
+            ]
+            assert pending.event.source["content"][MID_TURN_MODE_KEY] == "queue"
+            assert [(item.event_id, item.mode) for item in running.pending_message_snapshot()] == [
+                ("$follow-up", MidTurnMode.QUEUE),
+            ]
 
 
 @pytest.mark.asyncio
