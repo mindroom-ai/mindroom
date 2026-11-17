@@ -16,6 +16,9 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -445,10 +448,14 @@ class VisibleVoiceEchoLifecycle:
                     target=request.target,
                     response_text=_VOICE_TRANSCRIPTION_PLACEHOLDER,
                     skip_mentions=True,
-                    extra_content=self._extra_content(
-                        requester_user_id=request.requester_user_id,
-                        normalized_source=request.raw_source,
-                    ),
+                    # Clients show the conversation as working until the transcript edit completes it.
+                    extra_content={
+                        **self._extra_content(
+                            requester_user_id=request.requester_user_id,
+                            normalized_source=request.raw_source,
+                        ),
+                        STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+                    },
                 ),
             )
             if event_id is not None:
@@ -486,10 +493,13 @@ class VisibleVoiceEchoLifecycle:
                 return tracked.event_id
 
             event_id = placeholder_event_id or (None if tracked is None else tracked.event_id)
-            extra_content = self._extra_content(
-                requester_user_id=request.requester_user_id,
-                normalized_source=normalized_event.source,
-            )
+            extra_content = {
+                **self._extra_content(
+                    requester_user_id=request.requester_user_id,
+                    normalized_source=normalized_event.source,
+                ),
+                STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+            }
             if event_id is None:
                 event_id = await self._recover_visible_echo_event_id(request)
                 if event_id is not None:
