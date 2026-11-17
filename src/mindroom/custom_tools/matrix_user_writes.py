@@ -190,19 +190,30 @@ async def write_as_person(
     """Make ``write`` as the person ``client`` acts as, marked as ``actor``'s agent's, and log one audit line for it.
 
     ``write`` has no ``problem``. Raises ``MatrixRequestError`` with what the model reads for a refusal or a failed
-    request; a transport failure propagates as aiohttp raised it.
+    request; a transport failure propagates as aiohttp raised it. However the write ends, its line is logged: one that
+    was cancelled, or failed as no request does, may have sent something, so it is logged as interrupted, with the
+    failure's type alone, and raised again.
     """
     written = _Written(room_id=write.room_id)
     try:
         fields = await _write(client, actor, turn, write, written)
     except REQUEST_FAILURES as error:
-        _audit(actor, write, written, error=request_failure(error))
+        _audit(actor, write, written, "error", request_failure(error))
         raise
-    _audit(actor, write, written)
+    except BaseException as error:
+        _audit(actor, write, written, "interrupted", type(error).__name__)
+        raise
+    _audit(actor, write, written, "ok")
     return fields
 
 
-def _audit(actor: MatrixUserActor, write: MatrixUserWrite, written: _Written, *, error: str | None = None) -> None:
+def _audit(
+    actor: MatrixUserActor,
+    write: MatrixUserWrite,
+    written: _Written,
+    status: str,
+    error: str | None = None,
+) -> None:
     content = written.content or {}
     logger.warning(
         "matrix_user_write_audit",
@@ -210,7 +221,7 @@ def _audit(actor: MatrixUserActor, write: MatrixUserWrite, written: _Written, *,
         person=actor.person_user_id,
         room_id=written.room_id,
         action=write.action,
-        status="ok" if error is None else "error",
+        status=status,
         event_id=written.event_id,
         content_keys=sorted(content),
         content_bytes=len(json.dumps(content).encode()) if content else 0,

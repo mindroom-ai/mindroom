@@ -1436,6 +1436,55 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
     assert all("secret plan" not in str(entry) for entry in logs)
 
 
+@dataclass
+class _HangingHomeserver(FakeHomeserver):
+    """A homeserver that never answers a send into ``NEW_DM``, and says when one has arrived."""
+
+    send_arrived: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        if unquote(urlsplit(url).path).startswith(_send_path(NEW_DM)):
+            self.send_arrived.set()
+            await asyncio.Event().wait()
+        return await super().request(method, url, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_write_cancelled_midway_leaves_its_audit_line(config: Config, paths: RuntimePaths) -> None:
+    """A write stopped after it made a DM, while its message was going out, is logged as interrupted, with the room."""
+    homeserver = _HangingHomeserver({DIRECT_PATH: {}, CREATE_PATH: {"room_id": NEW_DM}})
+
+    with capture_logs() as logs:
+        writing = asyncio.create_task(
+            _write(config, paths, homeserver, action="send", user_id=BOB, message="The secret plan"),
+        )
+        await homeserver.send_arrived.wait()
+        writing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writing
+
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["error"]) == ("interrupted", "CancelledError")
+    assert (audit["action"], audit["room_id"], audit["invited"], audit["event_id"]) == ("send", NEW_DM, BOB, None)
+    assert all("secret plan" not in str(entry) for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_a_write_that_fails_unexpectedly_leaves_its_audit_line(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A failure that is no failed request is raised as it is, after the write is logged as interrupted."""
+    homeserver.answers[f"{ROOM_PATH}/invite"] = RuntimeError("The connection pool is closed")
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="connection pool"):
+        await _write(config, paths, homeserver, action="invite", room_id=ROOM, user_id=BOB)
+
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["error"], audit["invited"]) == ("interrupted", "RuntimeError", BOB)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
