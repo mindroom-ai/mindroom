@@ -162,8 +162,9 @@ __all__ = ["AgentBot", "create_bot_for_entity"]
 # Matrix long-poll timeout. Every sync response, even an empty one, commits the
 # durable store, so a short poll costs idle agents disk syncs on the event loop.
 # nio sends each sync run's first poll with timeout 0, and stop, restart, and
-# reload cancel a pending poll, so neither readiness nor shutdown waits for a
-# full one.
+# reload cancel a pending poll, so readiness and shutdown normally skip the
+# wait. Behind a proxy that keeps a cancelled request open, a reloaded Sliding
+# Sync connection on Tuwunel can still wait out its previous poll.
 _SYNC_TIMEOUT_MS = 30_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
