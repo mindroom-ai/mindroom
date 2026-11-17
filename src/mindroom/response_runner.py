@@ -172,7 +172,7 @@ if TYPE_CHECKING:
     )
 
 
-# How many interruptions of one turn its replay still continues from the interrupted attempts' own messages after.
+# How many restarts may cut one turn short before its replay stops continuing from the stopped attempts' own messages.
 _NATIVE_RECOVERY_LIMIT = 2
 
 
@@ -1110,9 +1110,9 @@ class ResponseRunner:
 
         A replay first recovers the runs its stopped attempts stored in ``history_scope``,
         so its request continues from their own messages and the account only points
-        at them. A turn interrupted more than ``_NATIVE_RECOVERY_LIMIT`` times recovers none
-        and drops those it recovered before, in case continuing from them is what stops it,
-        and its account lists the recorded calls instead.
+        at them. A turn restarts cut short more than ``_NATIVE_RECOVERY_LIMIT`` times recovers
+        none and drops those it recovered before, in case continuing from them is what stops
+        it, and its account lists the recorded calls instead; an approval pause is no restart.
         """
         handle = current_span()
         if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
@@ -1120,7 +1120,7 @@ class ResponseRunner:
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         recovered = False
         if handle.span.kind is rl.SpanKind.REPLAY and history_scope is not None:
-            attempts = len(await handle.runtime.interrupted_spans(handle))
+            attempts = await handle.runtime.restart_interruptions(handle)
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,

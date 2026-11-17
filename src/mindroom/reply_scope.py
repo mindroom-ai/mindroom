@@ -208,6 +208,10 @@ _INTERRUPTED_OUTCOMES = frozenset(
 )
 
 
+# The interrupted outcomes a restart causes: the process died, or it shut down and released the reply.
+_RESTART_OUTCOMES = frozenset({rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED})
+
+
 def _entry_json(entry: ToolTraceEntry) -> str:
     """Return one tool call as the reply records store it, with whether it failed."""
     (encoded,) = serialize_tool_trace((entry,), include_internal=True)
@@ -329,13 +333,13 @@ class ReplyRuntime:
         stored = await self.store.replies.tool_calls(span_ids)
         return tuple(deserialize_tool_trace([json.loads(entry) for entry in stored]))
 
-    async def interrupted_spans(self, handle: SpanHandle) -> tuple[str, ...]:
+    async def _interrupted(self, handle: SpanHandle) -> list[rl.Span]:
         """Return the attempts this span takes over, oldest first: the latest spans that left its turn unanswered.
 
         A regeneration redoes its edit's turn, so it takes over only the earlier attempts of the same edit.
         """
         regeneration = handle.span.kind is rl.SpanKind.REGENERATION
-        interrupted: list[str] = []
+        interrupted: list[rl.Span] = []
         for span in reversed(await self.store.replies.spans(handle.reply_id)):
             if span.span_id == handle.span_id:
                 continue
@@ -343,12 +347,19 @@ class ReplyRuntime:
                 regeneration and span.delivery_id != handle.span.delivery_id
             ):
                 break
-            interrupted.append(span.span_id)
-        return tuple(reversed(interrupted))
+            interrupted.append(span)
+        return interrupted[::-1]
 
     async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
-        """Return the tool calls of the attempts this span takes over (``interrupted_spans``)."""
-        return await self._span_tool_calls(await self.interrupted_spans(handle))
+        """Return the tool calls of the attempts this span takes over (``_interrupted``)."""
+        return await self._span_tool_calls(tuple(span.span_id for span in await self._interrupted(handle)))
+
+    async def restart_interruptions(self, handle: SpanHandle) -> int:
+        """Return how many of the attempts this span takes over a restart cut short.
+
+        An attempt that paused for an approval, or that a newer one superseded, ended on its own.
+        """
+        return sum(span.outcome in _RESTART_OUTCOMES for span in await self._interrupted(handle))
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""

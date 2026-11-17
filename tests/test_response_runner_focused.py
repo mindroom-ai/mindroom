@@ -1947,7 +1947,7 @@ async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_be
         resumed=None,
         runtime=SimpleNamespace(
             interrupted_tool_calls=AsyncMock(return_value=(finished,)),
-            interrupted_spans=AsyncMock(return_value=tuple(f"span-{index}" for index in range(attempts))),
+            restart_interruptions=AsyncMock(return_value=attempts),
         ),
     )
 
