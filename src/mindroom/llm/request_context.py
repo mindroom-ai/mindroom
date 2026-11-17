@@ -60,18 +60,21 @@ def json_safe(value: object) -> JSONValue:
     Dataclasses become dicts, bytes become base64 text as the provider SDKs send media, and other unknown values
     become their ``repr``.
     """
-    normalized: object = value
-    if not isinstance(normalized, type) and is_dataclass(normalized):
-        normalized = asdict(normalized)
-    if isinstance(normalized, bytes):
-        return base64.b64encode(normalized).decode("ascii")
-    if isinstance(normalized, dict):
-        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", normalized).items()}
-    if isinstance(normalized, list | tuple | set | frozenset):
-        return [json_safe(item) for item in cast("Any", normalized)]
-    if isinstance(normalized, str | int | float | bool) or normalized is None:
-        return normalized
-    return repr(normalized)
+    # The request log converts every value of every request, so plain JSON values skip the checks for other types.
+    value_type = type(value)
+    if value_type is str or value_type is int or value_type is float or value_type is bool or value is None:
+        return cast("JSONValue", value)
+    if value_type is not dict and value_type is not list and not isinstance(value, type) and is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", value).items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [json_safe(item) for item in cast("Any", value)]
+    if isinstance(value, str | int | float | bool):
+        return value
+    return repr(value)
 
 
 def current_llm_request_log_context() -> dict[str, JSONValue]:

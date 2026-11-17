@@ -28,7 +28,7 @@ from mindroom.agent_loop.run import resumed_record
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES, MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, CUT_OFF_TEXT_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
@@ -1170,7 +1170,11 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     settled = messages[-1]
     assert [message.role for message in messages] == ["system", "user", "assistant"]
     assert (settled.content, settled.metrics) == (None, usage(50, 2))
-    assert settled.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
+    # The text the cut-off response streamed is kept beside the message, which stays without content.
+    assert settled.provider_data == {
+        CUT_OFF_TEXT_KEY: "Par",
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert (
         record.metrics.tokens.input_tokens,
@@ -1233,7 +1237,11 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert messages[-1].metrics == usage(50, 2)
     # Kept or cut off, the usage reads as one request only when it was one; only a kept answer records its request.
     [request] = model.requests
-    identity = {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]} if ending == "completes" else {}
+    identity = (
+        {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]}
+        if ending == "completes"
+        else {CUT_OFF_TEXT_KEY: "done"}
+    )
     assert messages[-1].provider_data == {
         **(marker or {}),
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
@@ -1272,12 +1280,12 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
     assert record.metrics.tokens.input_tokens == 7
 
 
-async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> None:
+async def test_a_cut_off_request_without_usage_or_text_leaves_no_message_behind() -> None:
     async def fail() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[TextDelta("Par"), Await(fail)]])
+    model = ScriptedModel([[ReasoningEvent("Hmm"), Await(fail)]])
     messages = _prompt()
 
     with pytest.raises(RateLimited):
@@ -1286,7 +1294,29 @@ async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> Non
     assert [message.role for message in messages] == ["system", "user"]
 
 
-async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_leaves_no_message_behind() -> None:
+async def test_a_cut_off_request_without_usage_keeps_the_text_it_streamed_and_counts_nothing() -> None:
+    async def fail() -> None:
+        msg = "slow down"
+        raise RateLimited(msg, provider="Synthetic")
+
+    model = ScriptedModel([[TextDelta("Par"), TextDelta("tial"), Await(fail)]])
+    messages = _prompt()
+    record = _record()
+
+    with pytest.raises(RateLimited):
+        await _run(spec(model), messages, record=record)
+
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    # No request sends the message, which has no content; a run its user stopped is recovered with the text.
+    assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
+    assert messages[-1].provider_data == {
+        CUT_OFF_TEXT_KEY: "Partial",
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
+    assert (record.metrics, record.content) == (RunMetrics(), None)
+
+
+async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_counts_nothing() -> None:
     draining = asyncio.Event()
 
     async def wait_to_be_cancelled() -> None:
@@ -1307,7 +1337,10 @@ async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_le
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert [message.role for message in messages] == ["system", "user"]
+    # Only the text the turn streamed is kept, on a message without content or usage.
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
+    assert (messages[-1].provider_data or {})[CUT_OFF_TEXT_KEY] == "done"
     assert record.metrics == RunMetrics()
 
 

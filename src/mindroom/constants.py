@@ -1043,6 +1043,9 @@ SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 # On a thread-move copy, which is skip-marked: the user IDs its original counted as mentioning earlier in its thread,
 # which the copy keeps counting while waking nobody.
 COPIED_MENTIONS_KEY = "io.mindroom.copied_mentions"
+# On each event of one composer submission with attachments: {"id": <per submission>, "more": <bool>}, where
+# ``more`` says the client sends another event of that submission without the person doing anything.
+SUBMISSION_CONTENT_KEY = "io.mindroom.submission"
 # On a forked thread's root: the parent thread and the last parent message the fork includes.
 FORK_CONTENT_KEY = "io.mindroom.fork"
 # Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.
