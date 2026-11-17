@@ -75,7 +75,7 @@ class LoopState:
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
     paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a
     hook may replace for the rest of the run (mid-turn compaction turning the provider's compaction off after it
-    compacted as text).
+    compacted as text); ``resumed`` says the loop continues a paused run, whose stored row a resume owns.
     """
 
     messages: list[Message]
@@ -85,6 +85,7 @@ class LoopState:
     record: AnyRunRecord
     request_index: int
     request_template: ModelRequest
+    resumed: bool = False
 
     def request(self, messages: Sequence[Message] | None = None) -> ModelRequest:
         """Return the request the loop sends with ``messages``, the live messages unless given."""
@@ -206,6 +207,7 @@ async def run_model_loop(
         record=record,
         request_index=0,
         request_template=request_template,
+        resumed=resumed is not None,
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
     # A resume continues its run, so the calls that run already made count toward its limit; the refusals that never

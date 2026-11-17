@@ -2,9 +2,8 @@
 
 The loop hands each tool batch to ``BatchCheckpoint.capture`` before it runs any call, so a Bash call can save the
 run with this turn's part of the exact provider history that requested it, ending in that unanswered call, before its
-shell or any CLI call inside it does anything; the store keeps no replayed history copy. The saved run is marked
-cancelled: if the process dies before the run's own terminal record replaces it, history skips it, as every later turn
-would otherwise send a tool call without its result.
+shell or any CLI call inside it does anything; the store keeps no replayed history copy. The saved run is a
+checkpoint (``save_run_checkpoint``), which history skips until the run's own terminal record, or recovery, replaces it.
 """
 
 from __future__ import annotations
@@ -15,8 +14,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import tool_result_message
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.session_storage.store import write_with_session_state
+from mindroom.history.run_checkpoint import save_run_checkpoint
+from mindroom.llm.runs import RunRecord, ToolExecution
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -133,16 +132,8 @@ class BatchCheckpoint:
             batch.persisted = True
 
     async def _save(self, run: RunRecord) -> None:
-        run.status = RunStatus.cancelled
-        catalog = self.catalog
-        store = catalog.store
+        store = self.catalog.store
         if store is None:
             msg = "CLI history requires persisted session storage"
             raise RuntimeError(msg)
-        session = catalog.session
-        # The run and the session state its Bash calls ran with commit together, failures propagate unchanged.
-        await write_with_session_state(
-            store,
-            session,
-            lambda opened, state: opened.save_run(session, run, record_usage=False, state=state),
-        )
+        await save_run_checkpoint(store, self.catalog.session, run)
