@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
+import pytest_asyncio
 
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.approval import manager as approval_manager
@@ -199,7 +200,7 @@ class _Conversation:
             await self.runtime.shutdown()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def conversation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
