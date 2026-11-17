@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from itertools import takewhile
 from typing import TYPE_CHECKING
 
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
 
@@ -27,15 +24,6 @@ def is_model_history_visible_run(run: AnyRunRecord) -> bool:
 def is_recovered_run(run: AnyRunRecord) -> bool:
     """Return whether recovery finished ``run``, which was cut short and did not complete on its own."""
     return bool((run.metadata or {}).get(RECOVERED_RUN_KEY))
-
-
-def continued_from(replayed: Sequence[AnyRunRecord]) -> int:
-    """Return where, in a scope's replayed runs, the recovered runs nothing follows start.
-
-    Those runs are the turn the next request continues, not earlier history: no replay limit trims them and no
-    compaction before that request folds them. Once the turn's answer follows them they are history like any run.
-    """
-    return len(replayed) - sum(1 for _ in takewhile(is_recovered_run, reversed(replayed)))
 
 
 def run_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:

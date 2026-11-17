@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.history.request_messages import request_layout, scope_history_messages
-from mindroom.history.run_visibility import continued_from, replays_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import (
     HistoryPolicy,
@@ -103,12 +103,6 @@ def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:
     """Return the model-history-visible runs of the scope owning ``session``, in stored order."""
     scope = owner_scope(session)
     return [run for run in session.runs if replays_in_scope(run, scope)]
-
-
-def compactable_runs(session: ConversationSession) -> list[AnyRunRecord]:
-    """Return the runs a compaction of the scope owning ``session`` may fold: all but those the next request continues."""
-    visible = scope_visible_runs(session)
-    return visible[: continued_from(visible)]
 
 
 def current_summary_text(session: ConversationSession) -> str | None:
