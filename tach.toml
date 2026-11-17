@@ -1340,6 +1340,7 @@ depends_on = [
     "mindroom.delegation.execution",
     "mindroom.history.session_context",
     "mindroom.llm",
+    "mindroom.reply_scope",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.consumption",
@@ -8162,6 +8163,7 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
@@ -10102,6 +10104,7 @@ visibility = [
     "mindroom.agent_cli.checkpoint",
     "mindroom.conversation_state_writer",
     "mindroom.delegation.recovery",
+    "mindroom.history.conversation_text",
     "mindroom.loop_hooks",
     "mindroom.response_turn",
 ]

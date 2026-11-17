@@ -4,7 +4,8 @@ A run stores its terminal record once, when it ends. Its hooks also save it at e
 cancelled row, which history never replays, so a process that dies keeps the run's work through the last boundary.
 Recovery turns such a row, or the cancelled row a stop or an orderly shutdown left, into a finished turn that holds the
 stored messages as the run sent them. Later requests replay them unchanged, so they extend the interrupted run's
-requests and a provider's prompt cache still matches them.
+requests and a provider's prompt cache still matches them. A run a restart cut short is recovered once it called a
+tool, since its replay sends the prompt again; a run its user stopped, once a response of it had begun.
 """
 
 from __future__ import annotations
