@@ -489,16 +489,6 @@ def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any
     return None if chunk.usage is None else chunk.usage.model_dump()
 
 
-def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
-    """Merge one delta's provider data: lists extend, everything else is replaced."""
-    for key, value in update.items():
-        existing = target.get(key)
-        if isinstance(existing, list) and isinstance(value, list):
-            existing.extend(value)
-        else:
-            target[key] = value
-
-
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Store each call under the id its later requests send, so its result and approval receipt name that id.
 
@@ -564,7 +554,7 @@ class ChatStream:
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
         if content is None:
             return []
-        _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
+        self.parts.provider_data.update(_reply_metadata(chunk))
         if content:
             # OpenRouter's reasoning chunks carry an empty content, which is no output.
             self._output_at = time.monotonic()
@@ -578,7 +568,7 @@ class ChatStream:
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
         if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
-            _merge_provider_data(self.parts.provider_data, {"reasoning_details": list(details)})
+            self.parts.provider_data.setdefault("reasoning_details", []).extend(details)
         reasoning = _reasoning_field(fields)
         if not isinstance(reasoning, str):
             return []
