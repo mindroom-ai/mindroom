@@ -620,7 +620,7 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
 async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp_path: Path) -> None:
     """Reasoning details v2026.11.385 stored as their streamed pieces are sent whole, the stored pieces kept.
 
-    Pieces join within one type and index up to a text's signature; encrypted details stay apart.
+    Pieces join within one type, index, and id up to a text's signature; encrypted details stay apart.
     """
     claude = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
     summary = {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 0}
@@ -640,6 +640,11 @@ async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp
             {**summary, "summary": " ahead."},
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain"},
+            {**summary, "id": "rs_1", "summary": " ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
         ],
         "Two indexes and types.": [
             {**text, "index": 0, "text": "Rain"},
@@ -670,6 +675,10 @@ async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp
             {**summary, "summary": "**Rain** ahead."},
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
         ],
         "Two indexes and types.": [
             {**text, "index": 0, "text": "Rain ahead."},

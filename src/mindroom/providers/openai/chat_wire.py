@@ -171,8 +171,8 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
 def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Join OpenRouter's streamed reasoning detail pieces into whole details, as its unstreamed replies hold them.
 
-    A stream sends a text or summary as consecutive pieces of one type and index, a text's signature in its last piece,
-    and an encrypted detail whole.
+    A stream sends a text or summary as consecutive pieces of one type, index, and id, a text's signature in its last
+    piece, and an encrypted detail whole.
     """
     joined: list[dict[str, Any]] = []
     for detail in details:
@@ -181,7 +181,7 @@ def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict
         if (
             name is None
             or last is None
-            or (last.get("type"), last.get("index")) != (detail.get("type"), detail.get("index"))
+            or any(last.get(key) != detail.get(key) for key in ("type", "index", "id"))
             or last.get("signature") is not None
         ):
             joined.append(dict(detail))
