@@ -12,7 +12,7 @@ from aiohttp.client_reqrep import ConnectionKey
 from structlog.testing import capture_logs
 
 from mindroom.api.config_lifecycle import ApiSnapshot
-from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
+from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.attachments.storage import load_attachment
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.teams.members import resolve_exact_team_members
@@ -72,6 +72,13 @@ def paths(tmp_path: Path) -> RuntimePaths:
 def config(paths: RuntimePaths) -> Config:
     """The config with Alice's personal agent."""
     return owner_config(paths)
+
+
+@pytest.fixture
+def gateway_agent(config: Config, paths: RuntimePaths) -> AgentToolContext:
+    """Alice's personal agent as the MCP gateway resolves it for her call."""
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
+    return resolve_connection_agent(owner, AGENT)
 
 
 @pytest.fixture
@@ -486,18 +493,14 @@ async def test_the_write_function_takes_no_user_to_act_as(
 
 @pytest.mark.asyncio
 async def test_the_gateway_offers_the_read_function_only(
-    config: Config,
-    paths: RuntimePaths,
+    gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
 ) -> None:
     """A write asks the owner on a card, which an MCP client cannot show, so the gateway neither lists nor runs it."""
-    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
-    agent = resolve_connection_agent(owner, AGENT)
-
     with homeserver.serving_the_toolkit():
-        found = await gateway.search_tools(agent, toolkit="matrix_user")
+        found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
         refused = await gateway.invoke_tool(
-            agent,
+            gateway_agent,
             toolkit="matrix_user",
             function="matrix_user_write",
             arguments={"action": "leave", "room_id": ROOM},
@@ -580,8 +583,7 @@ async def test_a_downloaded_file_is_an_attachment_of_the_turn(
     ids=["nothing-missing", "no-event", "no-room"],
 )
 async def test_download_without_a_turn_is_refused_before_any_request(
-    config: Config,
-    paths: RuntimePaths,
+    gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
     arguments: dict[str, str],
     message: str,
@@ -590,11 +592,9 @@ async def test_download_without_a_turn_is_refused_before_any_request(
 
     It says so before it names a missing event, and only after a missing room.
     """
-    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
-
     with homeserver.serving_the_toolkit():
         result = await gateway.invoke_tool(
-            resolve_connection_agent(owner, AGENT),
+            gateway_agent,
             toolkit="matrix_user",
             function="matrix_user_read",
             arguments={"action": "download", **arguments},
@@ -607,8 +607,7 @@ async def test_download_without_a_turn_is_refused_before_any_request(
 
 @pytest.mark.asyncio
 async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
-    config: Config,
-    paths: RuntimePaths,
+    gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
 ) -> None:
     """The MCP gateway builds the toolkit for the agent its call runs as, and the owner's call reads as the owner.
@@ -616,11 +615,9 @@ async def test_the_owners_mcp_gateway_call_reads_as_the_owner(
     The build gives it the primary's paths, whose environment holds the token, and its config, which decides, as the
     call has no chat turn.
     """
-    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
-
     with homeserver.serving_the_toolkit():
         result = await gateway.invoke_tool(
-            resolve_connection_agent(owner, AGENT),
+            gateway_agent,
             toolkit="matrix_user",
             function="matrix_user_read",
             arguments={"action": "rooms"},
