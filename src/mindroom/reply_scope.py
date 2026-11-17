@@ -311,8 +311,6 @@ class ReplyRuntime:
     reply_stopped: Callable[[str], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
-    # Whether the instance whose replies this one took over was replaced to apply a config change.
-    took_over_config_change: bool = field(default=False, init=False)
     # Sources whose claim waited until the reply could be claimed, by reply.
     _waiting_claims: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
         default_factory=dict,
@@ -504,7 +502,6 @@ class ReplyRuntime:
         sources are still pending, and the notes this owes are delivered by the
         outbox recovery after each room syncs.
         """
-        self.took_over_config_change = replaced_for_config_change(await self.store.replies.active_generation())
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
@@ -597,7 +594,12 @@ class ReplyRuntime:
             assert transition.reply is not None, "only a reply with earlier writes defers a claim"
             await self._wait_to_claim(transition.reply.reply_id, room_id, pending)
             return ClaimRefused.DEFERRED
-        return _handle_for(self, transition.reply, transition.claimed, empty)
+        claimed = transition.claimed
+        # A replay's note names why the span it continues stopped: the one claimed before it.
+        spans = await self.store.replies.spans(claimed.reply_id) if claimed.kind is rl.SpanKind.REPLAY else ()
+        stopped = [span.bot_generation for span in spans if span.span_id != claimed.span_id]
+        config_change = bool(stopped) and replaced_for_config_change(stopped[-1])
+        return _handle_for(self, transition.reply, claimed, empty, config_change=config_change)
 
     async def _new_request(
         self,
@@ -733,7 +735,14 @@ def _new_id() -> str:
     return uuid4().hex
 
 
-def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Presentation) -> SpanHandle:
+def _handle_for(
+    runtime: ReplyRuntime,
+    reply: rl.Reply,
+    span: rl.Span,
+    empty: Presentation,
+    *,
+    config_change: bool = False,
+) -> SpanHandle:
     """Build the handle a claimed span runs with, from the records alone."""
     canonical = decode_presentation(reply.presentation)
     shown = decode_presentation(reply.possibly_shown) if reply.possibly_shown is not None else canonical
@@ -743,7 +752,7 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
     if span.kind is rl.SpanKind.APPROVAL_RESUME:
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=continued_by(canonical, span.span_id))
     # A replay continues below what the stopped attempt may have shown: its work, then the restart note.
-    restarted = after_restart(shown, config_change=runtime.took_over_config_change)
+    restarted = after_restart(shown, config_change=config_change)
     work = restarted.segments[0] if restarted.segments else None
     base = restarted if work is not None else replace(empty, segments=())
     resumed = (

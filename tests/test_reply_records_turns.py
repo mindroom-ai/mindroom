@@ -42,7 +42,7 @@ from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import CONFIG_RELOAD_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -1758,11 +1758,11 @@ async def _restarted_after_partial(
     tmp_path: Path,
     shown_text: str | None = "Partial",
     *,
-    config_reload: bool = False,
+    replaced_by: RuntimeShutdownIntent | None = None,
 ) -> tuple[AgentBot, asyncio.Task[SourceFate]]:
     """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over.
 
-    A ``config_reload`` stops it as a config reload replaces one agent; otherwise the process stops with it.
+    ``replaced_by`` stops it as that in-process replacement does; otherwise the process stops with it.
     """
     old = await _streaming_bot(tmp_path)
     response = await _blocked_stream(old, shown_text)
@@ -1772,8 +1772,8 @@ async def _restarted_after_partial(
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(shown(), timeout=5)
-    if config_reload:
-        await old.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    if replaced_by is not None:
+        await old.stop(shutdown_intent=replaced_by)
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
@@ -1814,9 +1814,8 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
             await response
 
 
-async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_config_change(tmp_path: Path) -> None:
-    """A config reload replaces only the agent, so its successor's note says so rather than blaming a service restart."""
-    restarted, response = await _restarted_after_partial(tmp_path, config_reload=True)
+async def _replayed_body(bot: AgentBot, response: asyncio.Task[SourceFate]) -> str:
+    """Replay the turn ``response`` left pending on ``bot``; return the body it ended with."""
 
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "The complete report."
@@ -1827,16 +1826,72 @@ async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_confi
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
-            await unwrap_extracted_collaborator(restarted._response_runner).generate_response(
-                _plain_request(_target()),
-            )
-
-        note = CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE
-        assert _sent_bodies(restarted)[-1] == f"Partial\n\n{note}\n\nThe complete report."
+            await unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target()))
+        return _sent_bodies(bot)[-1]
     finally:
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
+
+
+@pytest.mark.parametrize(
+    ("replaced_by", "note"),
+    [
+        (CONFIG_RELOAD_SHUTDOWN, CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE),
+        # A replacement no config edit caused, as an MCP catalog refresh's, says what it always said.
+        (SYNC_RESTART_SHUTDOWN, RESTART_INTERRUPTED_RESPONSE_NOTE),
+    ],
+    ids=["config_reload", "other_replacement"],
+)
+async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_config_change(
+    tmp_path: Path,
+    replaced_by: RuntimeShutdownIntent,
+    note: str,
+) -> None:
+    """A config reload replaces only the agent, so its successor's note says so rather than blaming a service restart."""
+    restarted, response = await _restarted_after_partial(tmp_path, replaced_by=replaced_by)
+
+    assert await _replayed_body(restarted, response) == f"Partial\n\n{note}\n\nThe complete report."
+
+
+async def test_a_config_reload_does_not_rename_what_an_earlier_restart_stopped(tmp_path: Path) -> None:
+    """The note names the stop of the span a replay continues, not of the instance that owned the reply last."""
+    owner, response = await _restarted_after_partial(tmp_path)
+    # The instance that took over after the restart is replaced before it replays the reply.
+    await owner.stop(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
+    replacement = _bot(tmp_path)
+    unique_room_send_responses(replacement.client)
+    await replacement._take_over_replies()
+
+    body = await _replayed_body(replacement, response)
+
+    assert body == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+
+
+async def test_a_retried_start_keeps_naming_the_config_change(tmp_path: Path) -> None:
+    """A replacement whose start runs again still names the config reload that stopped the reply."""
+    restarted, response = await _restarted_after_partial(tmp_path, replaced_by=CONFIG_RELOAD_SHUTDOWN)
+    await restarted._take_over_replies()
+
+    body = await _replayed_body(restarted, response)
+
+    assert body == f"Partial\n\n{CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+
+
+@pytest.mark.parametrize("config_reload", [False, True], ids=["restart", "config_reload"])
+async def test_an_owed_restart_note_names_why_its_own_span_stopped(tmp_path: Path, config_reload: bool) -> None:
+    """A restart note owed for a reply names a config change only when a config reload replaced that span's instance."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    if config_reload:
+        bot._reply_runtime.retire_for_config_change()
+    await _owe(bot, answered.reply_id, owed_write=rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART))
+
+    await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    note = CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE if config_reload else RESTART_INTERRUPTED_RESPONSE_NOTE
+    assert _sent_bodies(bot)[-1] == f"An answer.\n\n{note}"
 
 
 async def _stopped_in_a_tool(bot: AgentBot, *, runs: bool = True) -> asyncio.Task[SourceFate]:
