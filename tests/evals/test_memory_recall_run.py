@@ -63,6 +63,8 @@ METRIC_KEYS = {
     "abstained_turns",
     "judge_errors",
     "search_errors",
+    "rerank_errors",
+    "usd_per_turn_estimate",
 }
 THREAD = "!room:example.org:$thread-root"
 ROOM = "!room:example.org"
@@ -220,7 +222,7 @@ async def test_run_smoke_on_fixture(
         transport=_judge_transport(),
     )
 
-    results = json.loads((out / "results.json").read_text())
+    results = json.loads((out / "results.json").read_text())["splits"]["all"]
     assert set(results) == {"A0", "A1", "A2", "A3", "A4"}
     for metrics in results.values():
         assert set(metrics) == METRIC_KEYS
@@ -678,7 +680,7 @@ async def test_search_failing_every_attempt_counts_as_search_error(
         ],
         transport=_judge_transport(),
     )
-    results = json.loads((tmp_path / "out" / "results.json").read_text())
+    results = json.loads((tmp_path / "out" / "results.json").read_text())["splits"]["all"]
     for metrics in results.values():
         assert metrics["search_errors"] == 1
         assert metrics["turns"] == 1

@@ -75,6 +75,8 @@ class Arm:
     shipped: bool = False
     #: The shipped overlay's `memory.search.exclude`; None keeps the product default.
     search_exclude: tuple[str, ...] | None = None
+    #: A `rerank_arms.RERANKERS` name: replay returns every candidate, which `rerank_arms.select_reranked` selects from.
+    reranker: str | None = None
 
 
 # Archived copies, raw session dumps (`YYYY-MM-DD-HHMM.md`) and other agents' memory.
@@ -106,6 +108,17 @@ ARMS: dict[str, Arm] = {
         selection="gap",
         skip_short=False,
         shipped=True,
+    ),
+    # The `shipped` candidates, reranked by a local cross-encoder.
+    "A5": Arm(
+        "A5",
+        exclude=(),
+        entry_chunks=False,
+        selection="gap",
+        skip_short=False,
+        shipped=True,
+        search_exclude=("memory/archive/**",),
+        reranker="bge-reranker-v2-m3",
     ),
 }
 
@@ -181,11 +194,10 @@ async def replay(
         if arm.selection == "top3":
             # Converted after the cut, as live recall converts its three hits, so the scores match too.
             return _memory_results_from_hits(kept[:_TOP_K], scope_user_id=_SCOPE_USER_ID)
-        return await _retrieve_memories(
-            turn.query,
-            _memory_results_from_hits(kept, scope_user_id=_SCOPE_USER_ID),
-            _RECALL_SELECTION,
-        )
+        candidates = _memory_results_from_hits(kept, scope_user_id=_SCOPE_USER_ID)
+        if arm.reranker is not None:
+            return candidates
+        return await _retrieve_memories(turn.query, candidates, _RECALL_SELECTION)
 
     return list(await asyncio.gather(*(recall(turn) for turn in turns)))
 
