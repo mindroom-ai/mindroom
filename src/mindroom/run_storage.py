@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.delegation.cost import with_received_subagent_cost
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
@@ -133,8 +132,6 @@ def persist_into[R: AnyRunRecord](
     )
 
     async def persist(record: AnyRunRecord) -> None:
-        # A resume of the run after a pause goes on from what its turn received so far.
-        record.metadata = with_received_subagent_cost(record.metadata)
         if terminal is not None:
             terminal.keep(record)
         if store_persist is not None:

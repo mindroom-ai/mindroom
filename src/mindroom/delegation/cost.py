@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 
 @dataclass
@@ -50,16 +50,18 @@ def received_subagent_cost_usd() -> float | None:
     return None if cost is None else cost.usd
 
 
-def with_received_subagent_cost(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the metadata a run's record stores: ``metadata``, with what its turn received so far, if anything.
+def subagent_cost_metadata(stored: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return the metadata entry a run's save stores of what its turn received so far, empty for nothing received.
 
-    A turn that resumes the run after a pause goes on from it (``resumed_subagent_cost``).
+    With nothing received in this context, as in recovery's saves, it keeps the cost the ``stored`` metadata holds. A
+    turn that resumes the run after a pause goes on from it (``resumed_subagent_cost``).
     """
     usd = received_subagent_cost_usd()
-    return metadata if usd is None else {**(metadata or {}), SUBAGENT_COST_RUN_METADATA_KEY: usd}
+    usd = (stored or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) if usd is None else usd
+    return {} if usd is None else {SUBAGENT_COST_RUN_METADATA_KEY: usd}
 
 
 def resumed_subagent_cost(metadata: dict[str, Any] | None) -> SubagentCost:
     """Return the holder of a turn that resumes a stored run, starting from what the run's turn had received."""
     stored = (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY)
-    return SubagentCost(stored if isinstance(stored, float) else None)
+    return SubagentCost(float(stored) if isinstance(stored, int | float) and not isinstance(stored, bool) else None)

@@ -19,7 +19,8 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
-from mindroom.constants import AI_RUN_METADATA_KEY, subagent_sessions_dir
+from mindroom.constants import AI_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY, subagent_sessions_dir
+from mindroom.delegation.cost import resumed_subagent_cost
 from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -360,18 +361,24 @@ async def test_recovery_keeps_the_cost_a_settled_subagent_saved(conversation: _C
 
 
 # Where a reply pauses for an approval: on a call its subagent makes (``child_tool``), on its own call after its subagent
-# ended (``own_tool``), or on its ``run_subagent`` call itself (``delegation``), which a default config runs as a job.
-type _Pause = Literal["child_tool", "own_tool", "delegation"]
+# ended (``own_tool``), on its ``run_subagent`` call itself (``delegation``), which a default config runs as a job, or on
+# a call of the subagent it ran beside one that ended in the same step (``sibling_tool``).
+type _Pause = Literal["child_tool", "own_tool", "delegation", "sibling_tool"]
 _DEFERRED_ADD = {"calculator": {"defer": True}}
 
 
 def _approval_config(pause: _Pause) -> Config:
-    """The leader delegates to ``mid``; the call ``pause`` names asks for approval."""
+    """The leader delegates to ``mid``, and to ``leaf`` beside it for ``sibling_tool``; the call ``pause`` names asks for approval."""
     config = _config(jobs=pause == "delegation", mid_tools=[])
     config.agents["leader"] = AgentConfig(
         display_name="Leader",
         tools=[_DEFERRED_ADD] if pause == "own_tool" else [],
-        delegate_to=["mid"],
+        delegate_to=["mid", "leaf"] if pause == "sibling_tool" else ["mid"],
+    )
+    config.agents["leaf"] = AgentConfig(
+        display_name="Leaf",
+        model="cheap",
+        tools=[_DEFERRED_ADD] if pause == "sibling_tool" else [],
     )
     config.agents["mid"] = AgentConfig(
         display_name="Mid",
@@ -393,6 +400,8 @@ def _approval_config(pause: _Pause) -> Config:
         # The leader's three requests, two before its pause; mid's one.
         ("own_tool", "0.0159", _CHILD_USD),
         ("delegation", _LEADER_USD, _CHILD_USD),
+        # mid's request, which ended before the pause; leaf's request that paused and the one after it.
+        ("sibling_tool", _LEADER_USD, 3 * _CHILD_USD),
     ],
 )
 async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
@@ -411,15 +420,23 @@ async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
         pin_background_tool_jobs(config, paths)
         runtime = await tool_job_runtime(paths.storage_root)
         register_background_runtime(paths, runtime)
-    delegate = calls(tool_call("run_subagent", "delegate", agent_name="mid", task="Work"), metrics=_LEADER_REQUEST)
+    sibling = [tool_call("run_subagent", "sibling", agent_name="leaf", task="Work")] if pause == "sibling_tool" else []
+    delegate = calls(
+        tool_call("run_subagent", "delegate", agent_name="mid", task="Work"),
+        *sibling,
+        metrics=_LEADER_REQUEST,
+    )
     own_add = calls(_deferred_call("own-add", "add", a=2, b=3), metrics=_LEADER_REQUEST)
     leader = [delegate, *([own_add] if pause == "own_tool" else []), answer("Done", _LEADER_REQUEST)]
     child_add = calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)
     mid = [*([child_add] if pause == "child_tool" else []), answer("Mid answer", _CHILD_REQUEST)]
+    leaf = [child_add, answer("Leaf answer", _CHILD_REQUEST)]
+    cheap = model_identity(config.models["cheap"])
     ScriptedAgents(
         {
             "leader": ScriptedModel(leader, identity=model_identity(config.models["default"])),
-            "mid": ScriptedModel(mid, identity=model_identity(config.models["cheap"])),
+            "mid": ScriptedModel(mid, identity=cheap),
+            "leaf": ScriptedModel(leaf, identity=cheap),
         },
     ).install(monkeypatch)
     options = {"config": config, "runtime_paths": paths, "identity": _IDENTITY}
@@ -428,7 +445,7 @@ async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
         assert isinstance(paused, PausedAttempt), paused
         approvals = approval_calls_for(
             paused,
-            default_agent="mid" if pause == "child_tool" else "leader",
+            default_agent={"child_tool": "mid", "sibling_tool": "leaf"}.get(pause, "leader"),
             toolkit_names={"add": "calculator", "run_subagent": "delegate"},
         )
         resumed = await resume(
@@ -613,3 +630,9 @@ def test_a_child_snapshot_keeps_its_cost_and_one_saved_without_it_reads_as_unkno
     del snapshot["cost_usd"], snapshot["subagents_cost_usd"]
     legacy = DelegationChild.from_dict(snapshot)
     assert (legacy.cost_usd, legacy.subagents_cost_usd) == (None, None)
+
+
+@pytest.mark.parametrize(("stored", "usd"), [(0.25, 0.25), (1, 1.0), (True, None), ("0.25", None)])
+def test_a_resumed_turn_goes_on_from_the_stored_cost_of_any_number(stored: object, usd: float | None) -> None:
+    """A stored cost reads back as a number however JSON spelled it; anything else reads as unknown."""
+    assert resumed_subagent_cost({SUBAGENT_COST_RUN_METADATA_KEY: stored}).usd == usd

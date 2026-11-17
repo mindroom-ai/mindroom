@@ -17,7 +17,7 @@ from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_dec
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import child_snapshot, delegation_job, delegation_outcome
-from mindroom.delegation.cost import receive_subagent_cost
+from mindroom.delegation.cost import receive_subagent_cost, subagent_cost_metadata
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
@@ -225,7 +225,9 @@ async def persist_delegation_state(
     that ends. Any other run, such as a minimal-mode turn's checkpoint or a continued run, or a paused run the store
     holds as final, gets only its delegation key. ``session`` then holds the run as stored.
     """
-    changes = {DELEGATION_STATE_KEY: state.to_dict()}
+    # A run that gets only its delegation key, such as a minimal-mode checkpoint an approval recovery resumes, bypasses
+    # the save that stores what its turn's subagents cost, so the key carries it too.
+    changes = {DELEGATION_STATE_KEY: state.to_dict(), **subagent_cost_metadata()}
     response.metadata = {**(response.metadata or {}), **changes}
     if store is None:
         msg = "Durable delegation requires persisted session storage"
