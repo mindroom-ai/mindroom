@@ -155,7 +155,7 @@ async def _write_thread_to_targets(
     changed_accumulator_ids: set[int],
     index_entries: dict[int, list[WrittenIndexEntry]],
 ) -> dict[Path, WrittenIndexEntry] | None:
-    """Fetch one thread once and write it to each target; return their index entries if all took it and its summary lasts."""
+    """Fetch one thread once and write it to each target; return the index entries it got if its summary lasts."""
     try:
         payload, summary_lasts = await _fetch_thread_payload(
             reader,
@@ -190,7 +190,7 @@ async def _write_thread_to_targets(
             changed_accumulator_ids.add(id(accumulator))
         else:
             accumulator.threads_unchanged += 1
-    return entries if summary_lasts and len(entries) == len(accumulators) else None
+    return entries if summary_lasts else None
 
 
 async def _export_unless_unchanged(
@@ -232,8 +232,6 @@ async def _export_unless_unchanged(
     # The fingerprint was taken before the read, so a change during the read shows on the next pass.
     if (entries := await write()) is not None:
         exported[key] = _ExportedThread(fingerprint, entries)
-    else:
-        exported.pop(key, None)
 
 
 def _finish_room_exports_blocking(

@@ -1681,3 +1681,18 @@ async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_me
             _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
 
     fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_room_whose_thread_files_cannot_be_listed_is_exported_as_on_a_first_pass(tmp_path: Path) -> None:
+    """When the room's export files cannot be listed, every thread is read and written as if nothing was remembered."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    source = _remembering_source({}, AsyncMock(return_value=1))
+    await _remembering_pass(config, output_dir, source)
+
+    with patch("mindroom.thread_export.execution.thread_file_identities", side_effect=RuntimeError("unsafe room")):
+        stats, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+    assert (stats.threads_exported, stats.failures) == (1, 0)
