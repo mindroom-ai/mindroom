@@ -68,7 +68,7 @@ class MemorySearchConfig(BaseModel):
         description="Root-relative glob patterns included in file-memory semantic search",
     )
     exclude: _MemorySearchExcludes = Field(
-        default_factory=lambda: ["memory/archive/**"],
+        default_factory=list,
         description="Root-relative glob patterns left out of file-memory semantic search after include filtering",
     )
     include_entrypoint: bool = Field(

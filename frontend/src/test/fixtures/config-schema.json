@@ -3859,9 +3859,7 @@
             "include": [
               "memory/**/*.md"
             ],
-            "exclude": [
-              "memory/archive/**"
-            ],
+            "exclude": [],
             "include_entrypoint": false
           },
           "description": "Search behavior for file-backed memory"
@@ -3923,9 +3921,7 @@
           "type": "array"
         },
         "exclude": {
-          "default": [
-            "memory/archive/**"
-          ],
+          "default": [],
           "description": "Root-relative glob patterns left out of file-memory semantic search after include filtering",
           "items": {
             "type": "string"
@@ -6067,9 +6063,7 @@
           "max_entrypoint_tokens": 50000
         },
         "search": {
-          "exclude": [
-            "memory/archive/**"
-          ],
+          "exclude": [],
           "include": [
             "memory/**/*.md"
           ],

@@ -2,12 +2,12 @@
 
 Each arm turns the agent's memory directory into a corpus (dropping excluded files, optionally one file per entry),
 indexes it with MindRoom's own knowledge indexer and the configured embedder, and searches it with the file-memory
-overlay and hybrid search the per-turn recall uses. The `shipped` arm indexes the whole directory through the shipped
+overlay and hybrid search the per-turn recall uses. The `shipped` arms index the whole directory through the shipped
 overlay, which leaves files out and splits entries itself; the other arms index through the overlay as it was before,
 with fixed 5,000-character chunks and no excludes. Hits that may have been written after a turn are dropped before
 selection, so a note written from that very turn cannot leak its answer.
 
-The `shipped` arm measures the agent's own semantic hits, the part of the shipped per-turn recall that
+The `shipped` arms measure the agent's own semantic hits, the part of the shipped per-turn recall that
 `select_recall_hits` chooses. The file backend appends team keyword hits after them, and its keyword fallback for a
 cold index keeps the top 3; neither is replayed, since the benchmarked agents have no team memory.
 """
@@ -74,6 +74,8 @@ class Arm:
     skip_short: bool
     #: Index through the shipped overlay and search as the shipped per-turn recall does.
     shipped: bool = False
+    #: The shipped overlay's `memory.search.exclude`; None keeps the product default.
+    search_exclude: tuple[str, ...] | None = None
 
 
 # Archived copies, raw session dumps (`YYYY-MM-DD-HHMM.md`) and other agents' memory.
@@ -88,7 +90,24 @@ ARMS: dict[str, Arm] = {
     "A2": Arm("A2", exclude=_EXCLUDES, entry_chunks=True, selection="top3", skip_short=False),
     "A3": Arm("A3", exclude=_EXCLUDES, entry_chunks=True, selection="gap", skip_short=False),
     "A4": Arm("A4", exclude=_EXCLUDES, entry_chunks=True, selection="gap", skip_short=True),
-    "shipped": Arm("shipped", exclude=(), entry_chunks=False, selection="gap", skip_short=False, shipped=True),
+    # What Bas's deployment runs: the product defaults with the archive excluded.
+    "shipped": Arm(
+        "shipped",
+        exclude=(),
+        entry_chunks=False,
+        selection="gap",
+        skip_short=False,
+        shipped=True,
+        search_exclude=("memory/archive/**",),
+    ),
+    "shipped_default": Arm(
+        "shipped_default",
+        exclude=(),
+        entry_chunks=False,
+        selection="gap",
+        skip_short=False,
+        shipped=True,
+    ),
 }
 
 # The most hits that keep live recall's ranking: the store fuses `max(limit * 2, 50)` candidates per ranking, 50 for
@@ -100,8 +119,6 @@ _SEARCH_CONCURRENCY = 4
 # Waits before each retry of a failed search: four attempts ride out an embedder swapping models or under load.
 _SEARCH_RETRY_DELAYS_S = (2.0, 5.0, 15.0)
 _SCOPE_USER_ID = "memory_recall_eval"
-# The shipped file-memory search over `memory/**/*.md`, semantic.
-_SEARCH_CONFIG = MemorySearchConfig(mode="semantic")
 # The file-memory search before excludes, whose overlay the arms other than `shipped` index through.
 _STOCK_SEARCH_CONFIG = MemorySearchConfig(mode="semantic", exclude=[])
 # A reply in a thread shorter than this skips recall in A4.
@@ -146,7 +163,7 @@ async def replay(
         config=config,
         runtime_paths=runtime_paths,
         index_dir=index_dir,
-        shipped=arm.shipped,
+        arm=arm,
     )
     limit = _RECALL_SEARCH_LIMIT if arm.shipped else _OVER_FETCH
     # Loaded up front: until it is, selection estimates o200k tokens instead of counting them.
@@ -371,10 +388,10 @@ async def _indexed_knowledge(
     config: Config,
     runtime_paths: RuntimePaths,
     index_dir: Path,
-    shipped: bool,
+    arm: Arm,
 ) -> AgentKnowledge:
     """Return a search handle over `corpus`, indexing it first unless `index_dir` already holds its index."""
-    home = index_dir / _corpus_hash(corpus, config, shipped=shipped)
+    home = index_dir / _corpus_hash(corpus, config, arm)
     root = home / "corpus"
     arm_paths = runtime_paths_with_storage_root(runtime_paths, home / "storage")
     ready = (home / _READY_MARKER).exists()
@@ -386,7 +403,7 @@ async def _indexed_knowledge(
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-    file_memory = _file_memory(root, config, shipped=shipped)
+    file_memory = _file_memory(root, config, arm)
     if not ready:
         # The refresh child's path (`refresh_runner._knowledge_manager`), run in this process.
         binding = resolve_knowledge_binding(
@@ -421,14 +438,18 @@ async def _indexed_knowledge(
     return access.knowledge
 
 
-def _file_memory(root: Path, config: Config, *, shipped: bool) -> _FileMemoryKnowledgeResolution:
-    """Return the shipped file-memory overlay of `root`, or the one before excludes and entry chunks."""
-    if shipped:
+def _file_memory(root: Path, config: Config, arm: Arm) -> _FileMemoryKnowledgeResolution:
+    """Return the shipped file-memory overlay of `root` for `arm`, or the one before excludes and entry chunks."""
+    if arm.shipped:
+        # The shipped semantic file-memory search over `memory/**/*.md`, with the arm's excludes.
+        search_config = MemorySearchConfig(mode="semantic")
+        if arm.search_exclude is not None:
+            search_config = search_config.model_copy(update={"exclude": list(arm.search_exclude)})
         return resolve_file_memory_knowledge(
             scope_user_id=_SCOPE_USER_ID,
             root=root,
             config=config,
-            search_config=_SEARCH_CONFIG,
+            search_config=search_config,
         )
     file_memory = resolve_file_memory_knowledge(
         scope_user_id=_SCOPE_USER_ID,
@@ -445,12 +466,12 @@ def _file_memory(root: Path, config: Config, *, shipped: bool) -> _FileMemoryKno
     )
 
 
-def _corpus_hash(corpus: dict[str, bytes], config: Config, *, shipped: bool) -> str:
+def _corpus_hash(corpus: dict[str, bytes], config: Config, arm: Arm) -> str:
     """Return a key for the corpus's index: its files, the overlay that indexes them, and its embedder."""
     digest = hashlib.sha256(config.memory.embedder.model_dump_json().encode())
-    if shipped:
+    if arm.shipped:
         # Only the shipped overlay changes the key, so the other arms keep the indexes they cached before it existed.
-        overlay = _file_memory(Path(), config, shipped=True)
+        overlay = _file_memory(Path(), config, arm)
         digest.update(b"shipped overlay")
         digest.update(overlay.config.knowledge_bases[overlay.base_id].model_dump_json(exclude={"path"}).encode())
     for relative in sorted(corpus):

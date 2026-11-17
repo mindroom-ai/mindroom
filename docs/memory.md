@@ -249,7 +249,7 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 |---|---|---|
 | `mode` | `keyword` | `keyword` or `semantic` |
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
-| `exclude` | `[memory/archive/**]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`; `[]` indexes all of it |
+| `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.

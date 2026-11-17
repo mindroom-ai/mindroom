@@ -25,7 +25,7 @@ _CHUNK_OVERLAP = 0
 _MEMORY_KNOWLEDGE_PREFIX = "file_memory"
 _FILE_MEMORY_DESCRIPTION = (
     "Configured file memory for this agent. "
-    "Read-only semantic search over configured Markdown paths (default: memory/**/*.md, without memory/archive/**)."
+    "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
 )
 
 

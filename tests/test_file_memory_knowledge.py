@@ -205,13 +205,17 @@ def test_private_agent_resolver_fails_closed_and_scopes_requesters(tmp_path: Pat
     assert alice.base_id != bob.base_id
 
 
-def _semantic_overlay(tmp_path: Path, agent: AgentConfig | None = None) -> tuple[Config, str, Path]:
+def _semantic_overlay(
+    tmp_path: Path,
+    agent: AgentConfig | None = None,
+    search: dict[str, object] | None = None,
+) -> tuple[Config, str, Path]:
     """Return the effective config, base ID, and root of one semantic file-memory agent's overlay."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"alpha": agent or AgentConfig(display_name="Alpha")},
-            memory={"backend": "file", "search": {"mode": "semantic"}},
+            memory={"backend": "file", "search": {"mode": "semantic", **(search or {})}},
         ),
         runtime_paths,
     )
@@ -226,27 +230,40 @@ def _semantic_overlay(tmp_path: Path, agent: AgentConfig | None = None) -> tuple
     return resolution.config, resolution.base_id, resolution.root
 
 
-def test_overlay_excludes_archive(tmp_path: Path) -> None:
-    """Archived memory stays out of the semantic index by default, and an agent can index it again."""
+def _indexed_files(
+    tmp_path: Path,
+    agent: AgentConfig | None = None,
+    search: dict[str, object] | None = None,
+) -> list[str]:
+    """Return the memory files one semantic file-memory overlay indexes, of a note and an archived note."""
     for relative in ("memory/notes.md", "memory/archive/2026-01-01.md"):
-        target = tmp_path / "default" / "root" / relative
+        target = tmp_path / "root" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("- [id=m_20260101000000_aaaa1111] A note.\n")
-    config, base_id, root = _semantic_overlay(tmp_path / "default")
-    assert [path.relative_to(root).as_posix() for path in list_knowledge_files(config, base_id, root)] == [
-        "memory/notes.md",
-    ]
+    config, base_id, root = _semantic_overlay(tmp_path, agent, search)
+    return [path.relative_to(root).as_posix() for path in list_knowledge_files(config, base_id, root)]
 
-    archive = tmp_path / "override" / "root" / "memory" / "archive" / "2026-01-01.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("- [id=m_20260101000000_aaaa1111] A note.\n")
-    config, base_id, root = _semantic_overlay(
+
+def test_overlay_indexes_archive_by_default(tmp_path: Path) -> None:
+    """Nothing is excluded by default, so archived memory is indexed too."""
+    assert memory_search(Config(), "alpha").exclude == []
+    assert _indexed_files(tmp_path) == ["memory/archive/2026-01-01.md", "memory/notes.md"]
+
+
+def test_overlay_excludes_configured_patterns(tmp_path: Path) -> None:
+    """A configured exclude leaves archived memory out, and an agent can index it again."""
+    archive_excluded = {"exclude": ["memory/archive/**"]}
+
+    assert _indexed_files(tmp_path / "global", search=archive_excluded) == ["memory/notes.md"]
+    assert _indexed_files(
+        tmp_path / "agent",
+        AgentConfig(display_name="Alpha", memory_search=archive_excluded),
+    ) == ["memory/notes.md"]
+    assert _indexed_files(
         tmp_path / "override",
         AgentConfig(display_name="Alpha", memory_search={"exclude": []}),
-    )
-    assert [path.relative_to(root).as_posix() for path in list_knowledge_files(config, base_id, root)] == [
-        "memory/archive/2026-01-01.md",
-    ]
+        archive_excluded,
+    ) == ["memory/archive/2026-01-01.md", "memory/notes.md"]
 
 
 def test_overlay_uses_memory_entry_chunks(tmp_path: Path) -> None:

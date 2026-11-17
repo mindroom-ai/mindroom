@@ -397,7 +397,7 @@ async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(
         _semantic_file_search,
         "resolve_file_memory_knowledge",
-        lambda *, root, config, **_kwargs: arms._file_memory(root, config, shipped=False),
+        lambda *, root, config, **_kwargs: arms._file_memory(root, config, ARMS["A0"]),
     )
 
     queries = {
@@ -438,7 +438,7 @@ async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypa
             root=home / "corpus",
             config=config,
             runtime_paths=runtime_paths_with_storage_root(runtime_paths, home / "storage"),
-            search_config=MemorySearchConfig(mode="semantic"),
+            search_config=MemorySearchConfig(mode="semantic", exclude=["memory/archive/**"]),
             limit=_RECALL_SEARCH_LIMIT,
         )
         assert hits
@@ -526,6 +526,18 @@ async def test_shipped_arm_recalls_entries_through_the_product_overlay(
     assert hits[0]["memory"] == "- [id=m_20260110100000_bbbb2222] Pixel the cat eats salmon kibble twice a day."
     assert _sources(hits)[0] == "memory/2026-01-10.md"
     assert not any(source.startswith("memory/archive/") for source in _sources(hits))
+
+
+@pytest.mark.asyncio
+async def test_shipped_default_arm_indexes_the_archive(
+    tmp_path: Path,
+    memory_dir: Path,
+    embedder: _CountingEmbedder,
+) -> None:
+    """With the product's default `memory.search`, which excludes nothing, the archived copy of a note is recalled too."""
+    assert embedder is not None
+    [hits] = await _replay(tmp_path, memory_dir, "shipped_default", [_turn("2026-01-15", "salmon kibble Pixel")])
+    assert "memory/archive/2026-01-10.md" in _sources(hits)
 
 
 def test_short_follow_up() -> None:

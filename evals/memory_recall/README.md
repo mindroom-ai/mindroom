@@ -12,15 +12,16 @@ The design is in `docs/baspowers/specs/2026-11-16-memory-recall-efficiency-desig
 | A2 | as A1 | one per memory entry (at most 1,200 characters) | top 3 | no |
 | A3 | as A1 | per entry | `select_recall_hits`: score gap 0.05, at most 5, 800 tokens | no |
 | A4 | as A1 | per entry | as A3 | under 40 characters in a thread |
-| shipped | all of `memory/**/*.md`, which the shipped overlay filters with `memory.search.exclude` (`memory/archive/**`) | the shipped overlay's entry chunks | as A3, over 20 hits | no |
+| shipped | all of `memory/**/*.md`, which the shipped overlay filters with `memory.search.exclude: [memory/archive/**]`, as Bas's deployment sets it | the shipped overlay's entry chunks | as A3, over 20 hits | no |
+| shipped_default | as `shipped`, with the default `memory.search`, which excludes nothing | as `shipped` | as `shipped` | no |
 
 Every arm indexes its corpus with MindRoom's own knowledge indexer (`KnowledgeManager.reindex_all`) and the embedder in
 `memory.embedder`, and searches it through the file-memory overlay with hybrid search.
-A0 to A4 use the overlay as it was before A3 shipped (fixed 5,000-character chunks, no excludes); `shipped` uses the
-current one, so it measures the agent's own semantic hits in the shipped per-turn recall (team keyword hits and the
-cold-index keyword fallback are not replayed).
+A0 to A4 use the overlay as it was before A3 shipped (fixed 5,000-character chunks, no excludes); `shipped` and
+`shipped_default` use the current one, so they measure the agent's own semantic hits in the shipped per-turn recall
+(team keyword hits and the cold-index keyword fallback are not replayed).
 A0 to A4 over-fetch 25 hits per query, the most that keep that recall's ranking: the store fuses `max(limit * 2, 50)`
-candidates per ranking, and it asked for 3. `shipped` asks for the 20 the shipped recall does.
+candidates per ranking, and it asked for 3. `shipped` and `shipped_default` ask for the 20 the shipped recall does.
 At most 4 searches run at once, since query embeddings share the local embedder with live agents.
 A failed search (an embedder error such as HTTP 500 while it swaps models) is retried after 2, 5 and 15 seconds.
 Hits that may have been written after the turn are dropped before selection:
@@ -45,7 +46,7 @@ uv run python -m evals.memory_recall.run \
   --turns /tmp/recall/turns.jsonl \
   --memory-dir ~/.mindroom-chat/mindroom_data/agents/<agent>/workspace/memory \
   --config ~/.mindroom-chat/config.yaml \
-  --arms A0,A1,A2,A3,A4,shipped \
+  --arms A0,A1,A2,A3,A4,shipped,shipped_default \
   --out /tmp/recall/out \
   --key-env OPENROUTER_API_KEY   # judge key; --limit N replays only the first N turns
 ```
