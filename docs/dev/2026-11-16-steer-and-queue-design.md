@@ -34,14 +34,14 @@ Read from the source on 2026-11-16 (Codex `~/repos/external/codex`, Claude Code 
    The reply then continues with its next model call. No pause notice is added for a steered message.
    The appended message carries a `provider_data` marker (`mindroom_steered_message`, holding the event ID) so history readers, compaction, and request identity treat it as the person's message and do not drop it as a notice.
 4. **A steered message is consumed.**
-   Once appended, the event becomes a source of the running reply: it is removed from the per-reply queue (`_pending_messages`) and from the coalescing gate's follow-up backlog, so it never runs as its own turn, and the turn store records it as answered by this reply, so a restart does not answer it again.
-   An edit of a message already steered is not applied to the running reply; it is handled like an edit of an answered message.
+   Once appended, the event becomes a source of the running reply: it is removed from the per-reply queue (`_pending_messages`) and from the coalescing gate's follow-up backlog, so it never runs as its own turn, and the turn store records it as answered by the new reply below it (decision 8), so a restart does not answer it again.
+   An edit of a message already steered is handled like an edit of any answered message: it stops and regenerates the reply that answers it, which is the new reply below it.
 5. **Who can steer.**
    Only the person the running reply answers (its requester) can steer it, because a steer changes a task someone else started.
    A Steer message from anyone else is handled as Auto.
 6. **What cannot be steered falls back.**
-   A message with an attachment, a voice message whose transcript is not ready, a reply in `thread_mode: room`, and a reply by a team are not steered in this version; a Steer message there is handled as Auto.
-   If the reply has already finished, a Steer message runs as its own turn, answered without the participation check, as a message the judge stopped a reply for is today (#4046).
+   A message with an attachment, a voice message whose transcript is not ready, a reply in `thread_mode: room`, a reply by a team, a reply that does not stream, a run resumed after an approval, a delegated subagent's loop, and a reply still waiting on a participation decision are not steered in this version; a Steer message there is handled as Auto.
+   If the reply finished after the message was queued, a Steer message runs as its own turn, answered without the participation check, as a message the judge stopped a reply for is today (#4046). A Steer message that arrives when no reply is running is an ordinary message.
    If the model ends the reply in the same model call in which a steer arrived (no further tool batch), the message likewise runs as its own turn; looping the same reply, as Codex does, is left for later.
 7. **Auto** is today's behavior with one change: with a judge configured, "cannot wait" steers the message (when it can be steered under 5 and 6) instead of sending the pause notice.
    Without a judge, Auto keeps today's pause notice.
@@ -50,7 +50,8 @@ Read from the source on 2026-11-16 (Codex `~/repos/external/codex`, Claude Code 
 8. **A steer ends the current reply message and starts a new one below the person's message.**
    This is part of Steer itself, not a later polish: the thread must read in order, so the agent's continuation is never streamed into a message above the steering text.
    When a steer is appended, the reply finishes its current Matrix event as it stands (its text so far, its tool trace, `stream_status: completed`) and continues the same run in a new event, sent after the person's message, as a normal reply in the thread.
-   The reply's current event ID moves to the new event, so the 🛑 Stop reaction, approval cards, progress edits and visible-response reconciliation all follow the newest event; earlier events of the run are kept on the reply record for recovery.
+   Each event is its own reply record, because one reply has one event: the new event is a reply whose source is the steering message, and the run's current reply moves to it, so the 🛑 Stop reaction, approval cards, progress edits and visible-response reconciliation all follow the newest event. Earlier events stay terminal `completed` replies, and a restart continues only the newest.
+   The old event skips the final-response transform and after-response hooks, and a steered message does not run `message:received` hooks, because it never becomes a turn of its own.
    This is the first time one run spans several events for a reason other than segmenting long content (`matrix/segmented_messages.py`).
 9. **MindRoom Chat: hold Send for a menu, set the default in settings.**
    - Holding the Send button (500 ms; touch and mouse, through a pointer-based variant of `lib/hooks/useLongPress.ts`) while an agent is replying in the thread opens a small menu above it: Steer, Queue, Auto, each with a one-line hint. Picking one sends the message with that mode.
