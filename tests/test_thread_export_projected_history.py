@@ -894,22 +894,20 @@ async def test_a_rejoin_after_a_cold_export_exports_what_changed_while_away(
 ) -> None:
     """A workspace pass after a rejoin walks the thread again, even one the previous pass exported cold.
 
-    A rejoin removes the thread's rows and its hydration marker, which is also how the thread looked before the
-    cold pass, so a fingerprint taken then must not vouch for it now.
+    The cold pass read the thread with no hydration marker. A rejoin removes the marker again, and sync can deliver
+    the same rows back, so the thread looks as it did when the cold pass read it, and only a walk shows what changed.
     """
     homeserver = FakeHomeserver()
+    root = raw(ROOT, "root", ts=100)
     first = raw("$a:example.org", "first", ts=200, thread_id=ROOT)
-    serve_thread(homeserver, raw(ROOT, "root", ts=100), [first])
+    serve_thread(homeserver, root, [first])
     exported: ExportedThreads = {}
 
     assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first"]
     await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
     await admit_room_membership(router, ROOM, "join")
-    serve_thread(
-        homeserver,
-        raw(ROOT, "root", ts=100),
-        [first, raw("$b:example.org", "second", ts=300, thread_id=ROOT)],
-    )
+    await admit_live(router, [root, first])
+    serve_thread(homeserver, root, [first, raw("$b:example.org", "second", ts=300, thread_id=ROOT)])
 
     assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first", "second"]
 

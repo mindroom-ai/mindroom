@@ -1534,9 +1534,10 @@ _REMEMBERED_HISTORY = (
 _MARKER = (1, 1, 1, None)
 
 
-def _journal_answer() -> AsyncMock:
-    """Return the journal's fingerprint of the remembered thread: a standing marker and its one unedited row."""
-    return AsyncMock(return_value=(_MARKER, frozenset({(_REMEMBERED_THREAD, _REMEMBERED_THREAD, None)})))
+def _journal_answer(*event_ids: str) -> AsyncMock:
+    """Return the journal's fingerprint of the remembered thread: a standing marker and these unedited rows."""
+    rows = frozenset((event_id, event_id, None) for event_id in (_REMEMBERED_THREAD, *event_ids))
+    return AsyncMock(return_value=(_MARKER, rows))
 
 
 def _remembering_source(
@@ -1659,7 +1660,8 @@ async def test_a_thread_titled_by_a_person_is_read_on_every_pass(tmp_path: Path)
         },
         thread_id=_REMEMBERED_THREAD,
     )
-    source = _remembering_source({}, _journal_answer())
+    # The journal holds exactly the rows the export reads, so only the person's title keeps the thread from a skip.
+    source = _remembering_source({}, _journal_answer("$pin:localhost"))
 
     with patch("mindroom.thread_export.execution.human_summary_authorizer", return_value=lambda _sender: True):
         await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
