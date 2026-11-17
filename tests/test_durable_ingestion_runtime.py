@@ -38,6 +38,7 @@ from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.bot_helpers import make_matrix_client_mock
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, start_call_manager
+from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
@@ -206,7 +207,7 @@ async def _syncing(
         return b"{}"
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     sync = asyncio.create_task(bot.sync_forever())
     try:
         yield memberships
@@ -223,7 +224,7 @@ async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> N
         return await frames.get()
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     runner = asyncio.create_task(session.run())
     completed = False
 
@@ -611,7 +612,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
             )
         recovery_attempted = asyncio.Event()
         release_recovery = asyncio.Event()
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
 
         async def recover_projection() -> bool:
             recovery_attempted.set()
@@ -785,7 +786,7 @@ async def test_startup_cleanup_leaves_room_before_first_membership_observation(
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         session._transport.request = request
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         runner = asyncio.create_task(session.run())
         try:
             await asyncio.wait_for(first_poll.wait(), timeout=2)
@@ -810,7 +811,7 @@ async def _retain_membership_before_admission(bot: AgentBot, retained: str) -> N
             frame["rooms"]["leave"] = frame["rooms"].pop("join")
             frame["next_batch"] = "departed"
         session._transport.request = AsyncMock(return_value=json.dumps(frame).encode())
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         runner = asyncio.create_task(session.run())
         try:
             await asyncio.wait_for(session.wait_for_work(), timeout=2)
@@ -849,7 +850,7 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         session._transport.request = request
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         orchestrator = cast("ReadyRuntime", bot.orchestrator)
         monkeypatch.setattr(
             orchestrator._approval_recovery,
@@ -1116,7 +1117,7 @@ async def _sliding_bot_syncing(
         client = bot.client
         assert client is not None
         session._transport.request = request
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         sync = asyncio.create_task(bot.sync_forever())
         try:
             await asyncio.wait_for(synced.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
