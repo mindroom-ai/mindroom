@@ -5,78 +5,70 @@ It spans the backend (`mindroom`) and MindRoom Chat (`mindroom-chat`).
 
 ## Goal
 
-Bas wants the control Codex and Claude Code give: while the agent works, a message either steers the running reply, which reads it and carries on, or waits for the reply to finish.
+Bas wants the control Codex and Claude Code give: while the agent works, a message either steers the work, which reads it and carries on, or waits for the reply to finish.
 Today neither happens on request.
 A message that arrives during a reply is always queued; after each completed tool batch the reply either continues (the judge let the message wait) or gets `QUEUED_MESSAGE_NOTICE_TEXT`, which tells the model to summarize and stop without showing it the message, after which the message runs as its own turn.
-That pause is not steering: the running reply never reads the new text.
 
-Success: from the chat, a person picks Steer, Queue or Auto per message (holding Send) or by default (a chat setting), and Steer behaves like Codex: the text reaches the model before its next model call in the same reply, the reply carries on, and the continuation appears below the person's message.
+Success: from the chat, a person picks Steer, Queue or Auto per message (holding Send) or by default (a chat setting).
+Steer reads like Bas described it: the agent stops its current message, and a new reply appears below the person's message, in which the agent carries on with its task, taking the message into account.
 
 ## Prior art
 
 Read from the source on 2026-11-16 (Codex `~/repos/external/codex`, Claude Code 2.1.325 binary strings); the full table is in the `developing-mindroom-backend` skill's `references/mid-turn-messages.md`.
 
-- Codex: Enter steers and Tab queues (`tui/src/keymap.rs`). A steer is drained at the top of every sampling-loop pass and recorded as a user message before the next model call (`core/src/session/turn.rs`). If the model finished as the steer arrived, the task loops again (`core/src/tasks/regular.rs`). With no active turn the steer becomes a new turn; a turn that cannot take steers (review, compaction) gets it at the end.
+- Codex: Enter steers and Tab queues (`tui/src/keymap.rs`). A steer is drained at the top of every sampling-loop pass and recorded as a user message before the next model call (`core/src/session/turn.rs`). If the model finished as the steer arrived, the task loops again. With no active turn the steer becomes a new turn.
 - Claude Code: Enter while working queues the message for "its next tool round", which is steering; there is no separate queue mode.
 - Neither has a summarize-and-stop step.
+
+What the model reads is the same in all three: its own tool calls and results, then the person's new message, then it carries on.
+Codex keeps one turn; MindRoom starts a new one at that point (decision 3), because in a chat the continuation must be a new message below the person's, and a MindRoom turn is exactly one reply message with its own Stop, approvals and recovery.
 
 ## Decisions
 
 1. **The mode travels on the message.**
    MindRoom Chat adds `io.mindroom.mid_turn` to the content of an outgoing text message: `"steer"`, `"queue"` or `"auto"`.
-   A message without the key, such as one from Element, keeps today's behavior, so no other client changes.
-   The backend reads the key at ingress from the event content and carries it on the queued entry (`QueuedMessage`) as `mode`.
-   An unknown value counts as absent.
+   A message without the key, such as one from Element, is Auto, so no other client changes.
+   The backend reads the key at ingress from the event content and carries it on the queued entry (`QueuedMessage`) as `mode`; an unknown value counts as Auto.
 2. **Queue** lets the message wait without asking the judge, adds the agent's `defer_reaction` if it has one, and runs it as its own turn once the reply ends, as a message the judge let wait does today.
-3. **Steer** puts the message into the running reply.
-   After the current tool batch completes, at the point where the pause notice is appended today (`ai_runtime.py` `queued_notice_after_tool_batch` and `queued_notice_on_resume_entry`), the loop appends one user message:
-   `The user sent a new message while you were working:` followed by the message text, attributed to its sender as other thread messages are.
-   The reply then continues with its next model call. No pause notice is added for a steered message.
-   The appended message carries a `provider_data` marker (`mindroom_steered_message`, holding the event ID) so history readers, compaction, and request identity treat it as the person's message and do not drop it as a notice.
-4. **A steered message is consumed.**
-   Once appended, the event becomes a source of the running reply: it is removed from the per-reply queue (`_pending_messages`) and from the coalescing gate's follow-up backlog, so it never runs as its own turn, and the turn store records it as answered by the new reply below it (decision 8), so a restart does not answer it again.
-   An edit of a message already steered is handled like an edit of any answered message: it stops and regenerates the reply that answers it, which is the new reply below it.
-5. **Who can steer.**
-   Only the person the running reply answers (its requester) can steer it, because a steer changes a task someone else started.
+   It does not release a tool call waiting to move to the background.
+3. **Steer ends the running reply after its current tool batch, and the steered message continues the work as a new reply.**
+   - The running reply's after-batch hook (`ai_runtime.py` `queued_notice_after_tool_batch` and `queued_notice_on_resume_entry`), finding a Steer message queued, ends the run once that batch's results are recorded, through the existing stop-after-tool-call path (`agent_loop/model_loop.py` `_batch_stops_run`). No pause notice and no further model call: the model writes no summary.
+   - The reply's Matrix message finishes as it stands (its text so far and its tool trace, `stream_status: completed`), and the run is stored with its tool calls and results like any finished run.
+   - The queued message then runs as its own turn, as queued messages already do once the reply ends, answered without the participation check, as a message the judge stopped a reply for is today (#4046). Its reply is a normal reply below the person's message, with its own Stop, approvals and recovery.
+   - That turn's prompt opens the new message with one line saying the agent's previous reply was cut short by this message after its last tool calls, and to carry on with the task, taking the message into account. The previous run's tool calls and results reach it through ordinary history replay.
+   - A Steer message releases a tool call waiting to move to the background, as a "cannot wait" verdict does today, so a long wait does not hold the steer back.
+4. **Who can steer.**
+   Only the person the running reply answers (its requester) can end it, because a steer changes a task someone else started.
    A Steer message from anyone else is handled as Auto.
-6. **What cannot be steered falls back.**
-   A message with an attachment, a voice message whose transcript is not ready, a reply in `thread_mode: room`, a reply by a team, a reply that does not stream, a run resumed after an approval, a delegated subagent's loop, and a reply still waiting on a participation decision are not steered in this version; a Steer message there is handled as Auto.
-   If the reply finished after the message was queued, a Steer message runs as its own turn, answered without the participation check, as a message the judge stopped a reply for is today (#4046). A Steer message that arrives when no reply is running is an ordinary message.
-   If the model ends the reply in the same model call in which a steer arrived (no further tool batch), the message likewise runs as its own turn; looping the same reply, as Codex does, is left for later.
-7. **Auto** is today's behavior with one change: with a judge configured, "cannot wait" steers the message (when it can be steered under 5 and 6) instead of sending the pause notice.
-   Without a judge, Auto keeps today's pause notice.
-   A message without the key is Auto.
-   The pause notice stays only as Auto's fallback; whether to retire it is decided after Steer has been used for a while.
-8. **A steer ends the current reply message and starts a new one below the person's message.**
-   This is part of Steer itself, not a later polish: the thread must read in order, so the agent's continuation is never streamed into a message above the steering text.
-   When a steer is appended, the reply finishes its current Matrix event as it stands (its text so far, its tool trace, `stream_status: completed`) and continues the same run in a new event, sent after the person's message, as a normal reply in the thread.
-   Each event is its own reply record, because one reply has one event: the new event is a reply whose source is the steering message, and the run's current reply moves to it, so the 🛑 Stop reaction, approval cards, progress edits and visible-response reconciliation all follow the newest event. Earlier events stay terminal `completed` replies, and a restart continues only the newest.
-   The old event skips the final-response transform and after-response hooks, and a steered message does not run `message:received` hooks, because it never becomes a turn of its own.
-   This is the first time one run spans several events for a reason other than segmenting long content (`matrix/segmented_messages.py`).
-9. **MindRoom Chat: hold Send for a menu, set the default in settings.**
+5. **Fallbacks.**
+   If the reply ends before another tool batch completes (the model was writing its final text), the Steer message simply runs next as its own turn, like a queued one, still without the participation check and still with the carry-on line.
+   A Steer message that arrives when no reply is running is an ordinary message.
+6. **Auto** is today's behavior with one change: with a judge configured, an explicit "cannot wait" verdict steers (decision 3) instead of sending the pause notice.
+   A skipped, failed or timed-out judgment still sends the pause notice, and without a judge Auto keeps the pause notice.
+   Whether to retire the pause notice entirely is decided after Steer has been used for a while.
+7. **MindRoom Chat: hold Send for a menu, set the default in settings.**
    - Holding the Send button (500 ms; touch and mouse, through a pointer-based variant of `lib/hooks/useLongPress.ts`) while an agent is replying in the thread opens a small menu above it: Steer, Queue, Auto, each with a one-line hint. Picking one sends the message with that mode.
    - A tap or Enter sends with the default from a new setting on the Chats page, "When an agent is replying, Send" (Steer, Queue or Auto; default Steer, as in Codex and Claude Code). The setting roams with the account, which needs `roamingSettings.ts` to accept this enum.
-   - When no agent is replying in the thread, holding Send does nothing special and the message carries the default mode, which only matters if a reply starts before it is read.
+   - When no agent is replying in the thread, holding Send does nothing special and the message carries the default mode.
    - Keyboard shortcuts for the other modes and a "Steer now" action on a queued message are left for later.
-10. **Docs.** `docs/configuration/threads.md` "Mid-Turn Coalescing" gains a "Steer, Queue and Auto" section describing the key, the three modes, who can steer, and the fallbacks; `docs/configuration/agents.md` is unchanged because no config key is added.
+8. **Docs.** `docs/configuration/threads.md` "Mid-Turn Coalescing" gains a "Steer, Queue and Auto" section describing the key, the three modes, who can steer, and the fallbacks; no config key is added.
 
 ## Rejected
 
-- **Steer as a forced pause.** Cheaper (the `judge=False` path exists), but the reply never reads the message, which is the problem Bas wants solved.
-- **A per-agent default mode in `config.yaml`.** Not needed while the client always sends the key; Element keeps today's behavior.
-- **Letting anyone steer.** In a shared thread one person could redirect another's task; Auto already lets the judge decide for them.
-- **Keeping the continuation in the original event, even as a first step.** It puts the reply's continuation above the person's message, so the thread reads out of order (Bas, 2026-11-16).
+- **Steer inside one run, as Codex does (the first version of this design).** Injecting the text into the running loop and moving the run to a new Matrix event made one run span several replies. A pre-flight review (Sol, 2026-11-16) found two critical and eight important problems in that plan: approvals resumed against the old reply's sources, a steered message's turn claim could be stranded, several steers broke journal settlement, history indexes missed the steered text, and Stop at the hand-off had no defined outcome. Ending the run at the batch and answering the message as its own turn gives the person the same thread and the model the same context, with none of that machinery.
+- **Steer as a forced pause.** The reply would spend a model call on a summary, and the person's message would arrive as an unexplained new task.
+- **A per-agent default mode in `config.yaml`.** Not needed while the client always sends the key; other clients get Auto.
+- **Letting anyone steer.** In a shared thread one person could cut short another's task; Auto already lets the judge decide for them.
 
 ## Delivery
 
 Two pull requests:
 
-1. Backend: the `io.mindroom.mid_turn` key, Queue, Steer (injection, consumption, and the new reply message below the steering text), Auto's judge steering, docs (decisions 1-8, 10). Steer never ships without the message split.
-2. MindRoom Chat: the hold menu, the setting, and the key on outgoing messages (decision 9).
+1. Backend: the key, Queue, Steer, Auto's judge steering, docs (decisions 1-6, 8).
+2. MindRoom Chat: the hold menu, the setting, and the key on outgoing messages (decision 7).
 
 ## Testing
 
-- Backend unit tests next to `tests/test_mid_turn*.py` and the queued-notice tests: each mode with and without a judge; a steer appended after a batch and consumed (no follow-up turn); steer by a non-requester, with an attachment, from a team, in room mode, and after the reply ended; edit of a steered message; history replay and compaction keep the steered message once; restart does not answer a steered message again.
-- Event split: the Stop reaction, an approval and recovery address the new event; the old event ends `completed` with its tool trace.
+- Backend unit tests next to `tests/test_mid_turn*.py` and the queued-notice tests: each mode with and without a judge; a Steer message ends the run after the batch with no further model request and no notice; the follow-up turn skips the participation check, carries the carry-on line, and its request contains the previous run's tool calls; Steer by a non-requester; Steer while the model writes its final text; Queue never asks the judge and does not release a waiting call; Auto's explicit "cannot wait" steers while a failed judgment pauses.
 - Live test on `mindroom-lab.service` from the worktree: a long shell task steered with "also print the date", queued with "thanks", and Auto with a judge.
 - Chat: unit tests for the long-press menu, the content key, and the setting; a Playwright spec that holds Send while a stubbed reply streams; screenshots in the pull request.
