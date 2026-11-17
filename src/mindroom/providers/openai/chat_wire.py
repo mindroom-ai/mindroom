@@ -9,6 +9,7 @@ one finished turn.
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -505,6 +506,9 @@ class ChatStream:
     _reasoning: list[str] = field(default_factory=list)
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     _think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
+    # When the call was sent or last sent text. OpenRouter sends a call's reasoning in one burst once the model has
+    # finished it, so its reasoning carries this as the thought's start; other routes stream reasoning as it is written.
+    _output_at: float = field(default_factory=time.monotonic)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
@@ -527,6 +531,9 @@ class ChatStream:
         if content is None:
             return []
         _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
+        if content:
+            # OpenRouter's reasoning chunks carry an empty content, which is no output.
+            self._output_at = time.monotonic()
         return self._add_text(self._think.add(content))
 
     def _add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[StreamEvent]:
@@ -542,7 +549,8 @@ class ChatStream:
         if not isinstance(reasoning, str):
             return []
         self._reasoning.append(reasoning)
-        return [ReasoningDelta(reasoning)] if reasoning else []
+        started_at = self._output_at if self.wire.route == "openrouter" else None
+        return [ReasoningDelta(reasoning, started_at=started_at)] if reasoning else []
 
     def _add_call_delta(self, call: Any, position: int) -> None:  # noqa: ANN401 - SDK tool-call delta model
         """Fold one call delta into the call at its index; a server that sends no index places it by its position."""

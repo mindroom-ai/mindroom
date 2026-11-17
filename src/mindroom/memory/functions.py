@@ -87,8 +87,12 @@ async def search_agent_memories(
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
     editable: bool = False,
+    recall: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept."""
+    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept.
+
+    ``recall`` marks the per-turn recall, which semantic file memory narrows by score gap and token budget.
+    """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
@@ -98,6 +102,7 @@ async def search_agent_memories(
         limit=limit,
         execution_identity=execution_identity,
         editable=editable,
+        recall=recall,
     )
 
 
@@ -282,6 +287,7 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        recall=True,
     )
     agent_memories = search_outcome.results
     if agent_memories:

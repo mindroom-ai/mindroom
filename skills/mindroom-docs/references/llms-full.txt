@@ -1782,7 +1782,7 @@ agents:
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
-| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
+| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `exclude`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
@@ -3229,7 +3229,7 @@ agents:
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+It decides a message cannot wait when it stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
@@ -3264,6 +3264,33 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+### Steer, Queue and Auto
+
+A client chooses what a message does when it arrives during a reply by adding `io.mindroom.mid_turn` to its content, with the value `steer`, `queue`, or `auto`.
+A message without the key or with an unknown value is `auto`, so Element and other clients behave as described above.
+There is no config setting for this; the mode travels on each message.
+
+```json
+{"msgtype": "m.text", "body": "Also print the date.", "io.mindroom.mid_turn": "steer"}
+```
+
+**Steer** redirects the running reply, but only from the person that reply answers; a Steer from anyone else is handled as Auto.
+The reply ends after its current tool batch, with no wrap-up notice and no summary, and its message stays in the thread as completed with its text and tool calls so far.
+The steering message then gets its own new reply below it, which is answered without a participation check and told to carry on with the task, taking the message into account.
+The earlier tool calls and results reach it through normal [history](https://docs.mindroom.chat/configuration/history/), so your configured history limits apply to what it sees.
+That follow-up extends the cut-off reply's last model request, so provider prompt caching still applies.
+A Steer that arrives while the agent is writing its final text simply becomes the next turn, still carrying on the task, and a Steer while the agent is idle is an ordinary message.
+A Steer also releases a tool call waiting to move to the background at once; see [When a call becomes a job](https://docs.mindroom.chat/tools/agent-orchestration/#when-a-call-becomes-a-job).
+A steered reply that showed nothing, because it wrote no text and its tool calls are hidden, has its placeholder removed with no failure note.
+The exception is a steered reply resuming after a [tool approval](https://docs.mindroom.chat/tool-approval/), which ends with the usual "Tool approval continuation completed" text.
+
+**Queue** never interrupts: the message is not judged, sends no wrap-up notice, and does not move a waiting tool call to the background.
+It gets the agent's `defer_reaction`, if set, and is answered as its own turn after the reply finishes.
+
+**Auto** lets the mid-turn judge decide, as described above.
+When the judge explicitly says a message cannot wait, which includes a TypeSafe or OpenAI Decisions probability below `threshold`, the reply ends at the batch and the message continues the task in a new reply, exactly as for Steer, instead of getting the wrap-up notice.
+A skipped, failed, or timed-out judgment, or an agent with no `mid_turn` judge, still sends the wrap-up notice.
 
 ## Activity in Other Threads
 
@@ -3476,6 +3503,10 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
+
+Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
+`search_memories` returns up to its own `limit` in every mode.
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -3709,12 +3740,14 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 |---|---|---|
 | `mode` | `keyword` | `keyword` or `semantic` |
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
+| `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
 Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
 
-In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
+In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
+Each memory entry (a `- [id=...]` line, or a Markdown section up to `###`) is indexed and returned on its own, split at 1,200 characters; a `#` line inside a fenced code block is code, not a new section.
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
 Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
@@ -3931,6 +3964,7 @@ knowledge_bases:
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
 | `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most `chunk_size` characters, as semantic file memory does at 1,200; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -3955,7 +3989,7 @@ A folder holding a file or folder name that is not valid UTF-8 may not be watche
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
-Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, `chunk_strategy`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 A reindex requested while a refresh of the base runs starts once that refresh finishes.
 Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
@@ -3964,7 +3998,7 @@ Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 42
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, `chunk_context_model`, or `chunk_strategy` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host
@@ -15670,7 +15704,7 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 ### Seeing and cancelling jobs
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
-A call the reply still waits for joins the bar once it has run for 10 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
+A call the reply still waits for joins the bar once it has run for 5 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 The bar lists only the newest of an agent's running jobs in a room that fit in 27,000 bytes of room state.
 That is about 110 jobs with typical names.
@@ -15717,7 +15751,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls, each as a line such as `Calling run_shell_command (started 14:03:27 UTC)`, so you can tell how long a call has been running.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.

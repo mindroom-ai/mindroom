@@ -779,6 +779,125 @@ async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:
     assert batches == [["c1"]]
 
 
+async def test_after_batch_stop_records_all_results_and_makes_no_next_request() -> None:
+    """A batch hook that returns True ends the loop normally once the whole batch has its real results.
+
+    The calls finish in reverse order; the loop still waits for both, stores them in call order with their own
+    outcomes, sends no further request, and runs no batch hook after the one that ended it.
+    """
+    started = {"c1": asyncio.Event(), "c2": asyncio.Event()}
+    release = {"c1": asyncio.Event(), "c2": asyncio.Event()}
+    second_finished = asyncio.Event()
+    finished: list[str] = []
+
+    async def first(label: str) -> str:
+        """Answer once released.
+
+        Args:
+            label: Its label.
+
+        """
+        started["c1"].set()
+        await asyncio.wait_for(release["c1"].wait(), timeout=5)
+        finished.append("c1")
+        return f"first {label}"
+
+    async def second(label: str) -> str:
+        """Answer once released.
+
+        Args:
+            label: Its label.
+
+        """
+        started["c2"].set()
+        await asyncio.wait_for(release["c2"].wait(), timeout=5)
+        finished.append("c2")
+        second_finished.set()
+        return f"second {label}"
+
+    async def release_in_reverse() -> None:
+        await asyncio.wait_for(asyncio.gather(started["c1"].wait(), started["c2"].wait()), timeout=5)
+        release["c2"].set()
+        await asyncio.wait_for(second_finished.wait(), timeout=5)
+        release["c1"].set()
+
+    hook_calls: list[tuple[str, list[str | None]]] = []
+
+    async def observe(_messages: list[Message], results: Sequence[Message]) -> None:
+        hook_calls.append(("observe", [result.tool_call_id for result in results]))
+
+    async def stop(messages: list[Message], results: Sequence[Message]) -> bool:
+        hook_calls.append(("stop", [result.tool_call_id for result in results]))
+        # The batch's real results are already on the live messages when the hook decides.
+        assert messages[-2:] == list(results)
+        return True
+
+    async def later(_messages: list[Message], results: Sequence[Message]) -> None:
+        hook_calls.append(("later", [result.tool_call_id for result in results]))
+
+    model = ScriptedModel(
+        [
+            calls(tool_call("first", "c1", label="a"), tool_call("second", "c2", label="b"), metrics=usage(1, 1)),
+            answer("never sent"),
+        ],
+    )
+    messages = _prompt()
+
+    releaser = asyncio.create_task(release_in_reverse())
+    events, record = await _run(
+        spec(model, toolkit(first, second)),
+        messages,
+        hooks=LoopHooks(after_tool_batch=(observe, stop, later)),
+    )
+    await releaser
+
+    assert finished == ["c2", "c1"]
+    assert events[-1] == LoopEnded(paused=False)
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c2", "c1"]
+    assert len(model.requests) == 1
+    assert hook_calls == [("observe", ["c1", "c2"]), ("stop", ["c1", "c2"])]
+    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool"]
+    tool_messages = messages[3:]
+    assert [(m.tool_call_id, m.content, m.tool_call_error, m.stop_after_tool_call) for m in tool_messages] == [
+        ("c1", "first a", False, False),
+        ("c2", "second b", False, False),
+    ]
+    assert record.tools is not None
+    assert [(t.tool_call_id, t.result, t.is_error, t.stop_after_call) for t in record.tools] == [
+        ("c1", "first a", False, False),
+        ("c2", "second b", False, False),
+    ]
+    assert record.requirements == []
+    assert record.content is None
+
+
+async def test_after_batch_stop_leaves_a_paused_batch_paused_with_its_requirement_pending() -> None:
+    """A hook that ends the loop after a batch that paused does not settle the call that waits for a decision."""
+
+    async def stop(*_hook_arguments: object) -> bool:
+        return True
+
+    model = ScriptedModel(
+        [calls(tool_call("echo", "c1", text="fine"), tool_call("add", "c2", a=6, b=7), metrics=usage(1, 1))],
+    )
+
+    events, record = await _run(
+        spec(model, toolkit(echo), gated(add)),
+        _prompt(),
+        hooks=LoopHooks(after_tool_batch=(stop,)),
+    )
+
+    assert events[-1] == LoopEnded(paused=True)
+    assert len(model.requests) == 1
+    [requirement] = record.requirements
+    assert (requirement.tool_execution.tool_call_id, requirement.is_resolved()) == ("c2", False)
+    assert record.tools is not None
+    assert [(t.tool_call_id, t.result, t.stop_after_call) for t in record.tools] == [
+        ("c1", "fine", False),
+        ("c2", None, False),
+    ]
+
+
 async def test_tool_media_reach_the_model_on_a_follow_up_user_message() -> None:
     def picture(label: str) -> ToolResult:
         """Return a picture.

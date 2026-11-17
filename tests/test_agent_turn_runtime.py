@@ -370,11 +370,17 @@ class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[object, ...]:
+    def interrupting_snapshot(self) -> tuple[object, ...]:
         return ("$pending",) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
 
 
 @pytest.mark.asyncio
@@ -1544,7 +1550,8 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 ) -> None:
     """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
-    The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
+    The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
+    wired. A reply with a job actor projects its job definitions before participation.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
@@ -1563,7 +1570,9 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "participation_hook",
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
+        "checkpoint_hooks",
     ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None
     # This agent offers no scheduler, so its calls run without the live-function binding step.

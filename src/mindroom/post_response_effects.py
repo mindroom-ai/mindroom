@@ -10,6 +10,7 @@ from mindroom.background_tasks import create_background_task
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
+from mindroom.thread_summary import schedule
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.schedule import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
@@ -217,6 +218,24 @@ def _delivered_body(final_delivery_outcome: FinalDeliveryOutcome) -> str:
     return strip_visible_tool_markers(body) if final_delivery_outcome.tool_trace else body
 
 
+def _mark_delivered_thread(
+    final_delivery_outcome: FinalDeliveryOutcome,
+    outcome: ResponseOutcome,
+) -> tuple[str, str] | None:
+    """Return the room and thread a completed answer was delivered to, marking its prompt-only title stale."""
+    target = outcome.response_target
+    if (
+        not outcome.run_succeeded
+        or not final_delivery_outcome.completed
+        or final_delivery_outcome.final_visible_event_id is None
+        or target is None
+        or target.resolved_thread_id is None
+    ):
+        return None
+    schedule.THREAD_SUMMARY_BASELINES.supersede_provisional_title(target.room_id, target.resolved_thread_id)
+    return target.room_id, target.resolved_thread_id
+
+
 async def apply_post_response_effects(
     final_delivery_outcome: FinalDeliveryOutcome,
     outcome: ResponseOutcome,
@@ -224,6 +243,8 @@ async def apply_post_response_effects(
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
     response_event_id = final_delivery_outcome.final_visible_event_id
+    # Before any await, so a prompt title still generating sees the answer is out.
+    delivered_thread = _mark_delivered_thread(final_delivery_outcome, outcome)
     _notify_response_finished(final_delivery_outcome, outcome, deps)
     if (
         response_event_id is not None
@@ -285,26 +306,17 @@ async def apply_post_response_effects(
                 run_id=outcome.response_run_id,
             )
 
-    target = outcome.response_target
     if (
-        outcome.run_succeeded
-        and final_delivery_outcome.completed
+        delivered_thread is not None
         and response_event_id is not None
-        and target is not None
-        and target.resolved_thread_id is not None
         and (
             deps.should_queue_thread_summary is None
-            or deps.should_queue_thread_summary(
-                target.room_id,
-                target.resolved_thread_id,
-                outcome.thread_summary_message_count_hint,
-            )
+            or deps.should_queue_thread_summary(*delivered_thread, outcome.thread_summary_message_count_hint)
         )
         and deps.queue_thread_summary is not None
     ):
         deps.queue_thread_summary(
-            target.room_id,
-            target.resolved_thread_id,
+            *delivered_thread,
             outcome.thread_summary_entity_name,
             # Nothing has echoed this event back yet, so the projection the
             # summary reads stops one message before the answer it is being

@@ -704,6 +704,8 @@ class TurnStore:
 
         History derived from redacted events goes first, so a loaded run holding a
         redacted event still retires a legacy summary before the edit removes that run.
+        The runs the edit's own regeneration stored stay: a retry of it, after a restart
+        cut it short, commits the edit again and then recovers them.
         """
         target = turn_record.conversation_target
         scope = turn_record.history_scope
@@ -722,6 +724,8 @@ class TurnStore:
             target.session_id,
             scope,
             turn_record.indexed_event_ids,
+            # A run that read every revision the turn now holds is an attempt of this edit's own regeneration.
+            frozenset(revision_id for _, revision_id in (turn_record.source_event_revisions or {}).values()),
         )
         if removed_any:
             self.deps.state_writer.deps.logger.info(
@@ -785,11 +789,16 @@ def _remove_runs_for_sources(
     session_id: str,
     scope: HistoryScope,
     source_event_ids: tuple[str, ...],
+    keeping: frozenset[str],
 ) -> bool:
-    """Remove what answered each source and everything after it; return whether anything went."""
+    """Remove what answered each source and everything after it; return whether anything went.
+
+    The removal starts at no run that read every revision of ``keeping`` (``remove_runs_answering``).
+    """
     removed_any = False
     for source_event_id in source_event_ids:
-        removed_any = remove_runs_answering(storage, session_id, scope, source_event_id) or removed_any
+        removed = remove_runs_answering(storage, session_id, scope, source_event_id, keeping=keeping)
+        removed_any = removed or removed_any
     return removed_any
 
 

@@ -43,6 +43,7 @@ from mindroom.dispatch_source import (
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
+from mindroom.mid_turn import MID_TURN_MODE_KEY
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -3038,6 +3039,41 @@ async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> No
         new_content={"msgtype": "m.text", "body": "too late"},
         for_another_participant=None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_mode", [None, "queue"])
+@pytest.mark.parametrize("edited_mode", [None, "steer"])
+async def test_an_edit_of_a_queued_message_keeps_its_original_mid_turn_mode(
+    original_mode: str | None,
+    edited_mode: str | None,
+) -> None:
+    """A queued message answers with the mode it was sent with; an edit's mode key, or its lack, changes nothing."""
+    gate = CoalescingGate(dispatch_turn=AsyncMock(), debounce_seconds=lambda: 60.0, is_shutting_down=lambda: False)
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    key = requester_coalescing_key(room.room_id, None, "@user:localhost")
+    original = _text_event("$queued:localhost", "what is 2+2?", 1_774_019_700_000)
+    if original_mode is not None:
+        original.source["content"][MID_TURN_MODE_KEY] = original_mode
+    await _admit_ready(gate, key, make_pending_event(original, room, source_kind=MESSAGE_SOURCE_KIND))
+    edited: dict[str, object] = {"msgtype": "m.text", "body": "what is 3+3?"}
+    if edited_mode is not None:
+        edited[MID_TURN_MODE_KEY] = edited_mode
+
+    assert gate.apply_pending_edit(
+        room_id=room.room_id,
+        source_event_id="$queued:localhost",
+        sender="@user:localhost",
+        body="what is 3+3?",
+        new_content=edited,
+        for_another_participant=None,
+    )
+    (pending,) = gate.queued_pending_events(key)
+    content = pending.event.source["content"]
+    assert content["body"] == "what is 3+3?"
+    assert content.get(MID_TURN_MODE_KEY) == original_mode
+    assert edited.get(MID_TURN_MODE_KEY) == edited_mode
+    await gate.drain_all()
 
 
 def test_batch_facts_take_latest_evidence_priority_modality_and_deepest_hook_chain() -> None:

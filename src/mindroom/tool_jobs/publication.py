@@ -31,7 +31,7 @@ _FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
 # Most calls end within seconds, and each write is a state event clients keep, so a running job its call still waits for
 # shows only once it has run this long; the worker's periodic pass lists it then. A job waiting on a person or a cancel,
 # one its call left running in the background, and one already listed show at once.
-_LISTED_AFTER = timedelta(seconds=10)
+_LISTED_AFTER = timedelta(seconds=5)
 _EMPTY: dict[str, object] = {"jobs": [], "total": 0}
 
 

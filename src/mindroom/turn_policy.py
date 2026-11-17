@@ -81,7 +81,7 @@ class PreparedDispatch:
     correlation_id: str
     envelope: MessageEnvelope
     current_prompt_is_structured: bool = False
-    # Whether the mid-turn judge said the running response cannot wait for this turn's message.
+    # Whether this turn's message cut the running response short: its requester's Steer or the judge's "cannot wait".
     stopped_reply: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     scheduled_model: str | None = None
@@ -814,7 +814,7 @@ class TurnPolicy:
             return None
         if not self._is_participating_thread_agent(dispatch.context) or self.deps.matrix_id not in available_responders:
             return ResponseAction(kind="skip")
-        # The agent stopped its running response for this message, so it answers it.
+        # The agent stopped its running response for this message, so it answers it and carries on.
         return ResponseAction(kind="individual", participation=None if dispatch.stopped_reply else participation)
 
     async def _resolve_response_action(  # noqa: PLR0911

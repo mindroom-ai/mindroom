@@ -506,9 +506,13 @@ def _agent_loop_hooks(
             prompt_id=prepared.turn.prompt.id,
             lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
+            # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
+            checkpoints=not ctx.inline_tools,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
+        # A delegated child leaves its owner's reply to the owner to end.
+        steering=ctx.delegation_depth == 0,
     )
 
 

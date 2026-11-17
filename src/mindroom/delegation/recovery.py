@@ -26,6 +26,7 @@ from mindroom.delegation.state import (
     child_scope,
 )
 from mindroom.delegation.storage import delegation_storage_config
+from mindroom.history.run_checkpoint import is_recovered_run, recover_interrupted_run
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
@@ -171,24 +172,30 @@ async def interrupt_child(
             return
     config = delegation_storage_config(config, child.storage_bindings)
     response = await read_child_run(child, config, runtime_paths)
-    if response is not None and response.status == RunStatus.completed:
+    # A run recovery already finished did not complete: only its handle is left to settle.
+    recovered = response is not None and is_recovered_run(response)
+    if response is not None and response.status == RunStatus.completed and not recovered:
         await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
         return
-    if response is not None:
+    if response is not None and not recovered:
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        # The run keeps what the child wrote; why it stopped is its error, which is what it hands over.
-        response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
-        response.error = reason
-        for tool in response.tools or ():
-            if tool.is_paused:
-                tool.result = reason
-                tool.is_error = True
-            tool.requires_confirmation = False
-            tool.external_execution_required = False
 
         def persist(storage: ConversationStore) -> None:
-            # The run exists; this rewrites its row without touching the usage ledger, through a stand-in session.
+            # The run exists; this rewrites its row through a stand-in session.
             stand_in = new_scope_session(session_id=child.session_id, scope=child_scope(child))
+            # A run a restart or a stop cut short keeps its work as a turn the child's follow-ups replay.
+            if recover_interrupted_run(storage, stand_in, response):
+                return
+            # Any other run keeps what the child wrote without replaying; why it stopped is its error, which is what
+            # it hands over, and the usage ledger stays as it is.
+            response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
+            response.error = reason
+            for tool in response.tools or ():
+                if tool.is_paused:
+                    tool.result = reason
+                    tool.is_error = True
+                tool.requires_confirmation = False
+                tool.external_execution_required = False
             storage.save_run(stand_in, response, record_usage=False)
 
         # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.

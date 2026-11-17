@@ -284,7 +284,7 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 ### Seeing and cancelling jobs
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
-A call the reply still waits for joins the bar once it has run for 10 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
+A call the reply still waits for joins the bar once it has run for 5 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 The bar lists only the newest of an agent's running jobs in a room that fit in 27,000 bytes of room state.
 That is about 110 jobs with typical names.
@@ -331,7 +331,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls, each as a line such as `Calling run_shell_command (started 14:03:27 UTC)`, so you can tell how long a call has been running.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.

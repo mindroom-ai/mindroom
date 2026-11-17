@@ -904,7 +904,8 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
 ) -> None:
     """The leader loop gets the approval receipt hook and mid-turn compaction before each request, and the notices.
 
-    No approval receipt is bound around a fresh turn, so none of its requests carries one.
+    The leader's checkpoint follows them and also runs before each tool batch. No approval receipt is bound around a
+    fresh turn, so none of its requests carries one.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
@@ -931,7 +932,9 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == [
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
+        "checkpoint_hooks",
     ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["scope"].kind == "team"]

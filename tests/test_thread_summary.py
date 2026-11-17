@@ -26,12 +26,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY, resolve_runtime_paths
 from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.thread_summary import automatic
@@ -920,6 +923,84 @@ class TestMaybeGenerateThreadSummary:
 
         assert len(model.requests) == 1
         assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_is_dropped_once_the_first_reply_is_delivered(self) -> None:
+        """A reply delivered while the prompt title generates makes that title stale, so only the post-reply one is sent.
+
+        The answer counts as delivered before its post-response effects reach the summary queue, so a slow effect
+        cannot let the stale title through. A delivery before the prompt pass starts skips its model call entirely.
+        """
+        config = _mock_config(first_threshold=2)
+        run_linked = asyncio.Event()
+        queue_thread_summary = MagicMock()
+        effects: list[asyncio.Task[None]] = []
+
+        async def persist_response_event_id(_run_id: str, _event_id: str) -> None:
+            await run_linked.wait()
+
+        async def deliver_reply() -> None:
+            effects.append(
+                asyncio.create_task(
+                    apply_post_response_effects(
+                        FinalDeliveryOutcome(
+                            ending=Completed(),
+                            event_id="$reply",
+                            is_visible_response=True,
+                            final_visible_body="Here is your trip",
+                        ),
+                        ResponseOutcome(
+                            response_run_id="run1",
+                            response_target=MessageTarget.resolve(
+                                room_id=_ROOM,
+                                thread_id=_THREAD,
+                                reply_to_event_id="$event0",
+                            ),
+                        ),
+                        PostResponseEffectsDeps(
+                            logger=MagicMock(),
+                            persist_response_event_id=persist_response_event_id,
+                            queue_thread_summary=queue_thread_summary,
+                        ),
+                    ),
+                ),
+            )
+            await asyncio.sleep(0)
+
+        model = self._summarizer(Await(deliver_reply), _title("Trip answer"))
+        self._history(_make_thread_history(1))
+        await self._provisional(config=config)
+
+        assert len(model.requests) == 1
+        assert not _sent_summaries(self.client)
+        queue_thread_summary.assert_not_called()
+
+        run_linked.set()
+        await effects[0]
+        (_room, _thread, _entity, delivered) = queue_thread_summary.call_args.args
+        await _summary_pass(self.client, config, self.rp, self.conversation_reader, delivered_response=delivered)
+
+        assert len(model.requests) == 2
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Trip answer"
+        assert sent["message_count"] == 2
+
+        other_thread = "$thread2"
+        self.baselines.supersede_provisional_title(_ROOM, other_thread)
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            other_thread,
+            config,
+            self.rp,
+            prompt_event_id="$event0",
+            prompt="Plan a trip",
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        assert len(model.requests) == 2
+        assert len(_sent_summaries(self.client)) == 1
 
     async def test_provisional_title_skips_thread_resolved_during_generation(self) -> None:
         """Resolution lives in room state, so a thread resolved while the model ran must not get the title."""
