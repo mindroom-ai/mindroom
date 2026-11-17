@@ -44,6 +44,9 @@ _ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 _ATTEMPTS = 3
 _RETRY_DELAY_S = 2.0
 _TIMEOUT_S = 180
+# DeepSeek V4.1 Flash reasons before it answers, and the reasoning counts against max_tokens: on real turns with 3 hits
+# it used up to ~3,700 reasoning tokens, and 1,500 left some replies empty. Unused budget costs nothing.
+_MAX_TOKENS = 12_000
 _MAX_QUERY_CHARS = 5000
 _MAX_HIT_CHARS = 6000
 # A whole reply wrapped in one ```json (or bare ```) fence.
@@ -139,7 +142,7 @@ async def _request_verdicts(
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "response_format": {"type": "json_object"},
-        "max_tokens": 1500,
+        "max_tokens": _MAX_TOKENS,
     }
     error = ""
     for attempt in range(_ATTEMPTS):
@@ -153,7 +156,7 @@ async def _request_verdicts(
                 timeout=_TIMEOUT_S,
             )
             response.raise_for_status()
-            verdicts = _parse(response.json()["choices"][0]["message"]["content"] or "")
+            verdicts = _parse(_content(response.json()))
         except Exception as exc:  # any failure (HTTP, transport, missing choices, bad JSON) is retried
             error = f"{type(exc).__name__}: {exc}"
             continue
@@ -162,6 +165,16 @@ async def _request_verdicts(
         error = f"{len(verdicts)} verdicts for {len(hits)} hits"
     _logger.warning("Judge failed after %d attempts: %.300s", _ATTEMPTS, error)
     return None
+
+
+def _content(payload: dict[str, Any]) -> str:
+    """Return the reply text of a chat completion; raise ValueError when the reply was cut off at max_tokens."""
+    choice = payload["choices"][0]
+    if choice.get("finish_reason") == "length":
+        details = (payload.get("usage") or {}).get("completion_tokens_details") or {}
+        msg = f"reply cut off at max_tokens={_MAX_TOKENS} ({details.get('reasoning_tokens', '?')} reasoning tokens)"
+        raise ValueError(msg)
+    return choice["message"]["content"] or ""
 
 
 def _parse(content: str) -> list[Verdict]:

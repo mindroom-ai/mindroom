@@ -70,7 +70,7 @@ async def test_parses_relevance_0_1_2(tmp_path: Path) -> None:
     assert body["model"] == MODEL
     assert body["temperature"] == 0
     assert body["response_format"] == {"type": "json_object"}
-    assert body["max_tokens"] == 1500
+    assert body["max_tokens"] == 12_000
     prompt = body["messages"][0]["content"]
     assert body["messages"][0]["role"] == "user"
     assert QUERY in prompt
@@ -145,6 +145,51 @@ async def test_bad_response_retries_then_none(tmp_path: Path, respond: Callable[
 
     assert verdicts == [None, None]
     assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_reply_cut_off_at_max_tokens_retries_then_none(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A reply that hit max_tokens (reasoning used the budget, content empty) fails every attempt with a clear error."""
+
+    def cut_off(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                "usage": {"completion_tokens": 12_000, "completion_tokens_details": {"reasoning_tokens": 12_000}},
+            },
+        )
+
+    client, requests = _client(cut_off)
+    async with client:
+        with JudgeCache(tmp_path / "cache.sqlite") as cache:
+            verdicts = await _judge(HITS, cache, client)
+            assert all(cache.get(cache_key(MODEL, QUERY, hit)) is None for hit in HITS)
+
+    assert verdicts == [None, None]
+    assert len(requests) == 3
+    assert "cut off at max_tokens=12000 (12000 reasoning tokens)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_complete_json_cut_off_at_max_tokens_is_rejected(tmp_path: Path) -> None:
+    """finish_reason "length" fails the attempt even when the truncated content happens to parse."""
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json={"choices": [{"finish_reason": "length", "message": {"content": _verdicts(0, 0)}}]},
+            ),
+            httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": _verdicts(1, 2)}}]}),
+        ],
+    )
+    client, requests = _client(lambda _request: next(responses))
+    async with client:
+        with JudgeCache(tmp_path / "cache.sqlite") as cache:
+            verdicts = await _judge(HITS, cache, client)
+
+    assert verdicts == [Verdict(1, "r1"), Verdict(2, "r2")]
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize(
