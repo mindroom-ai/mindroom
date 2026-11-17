@@ -6416,9 +6416,15 @@ depends_on = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.corpus_signature",
     "mindroom.knowledge.index_retry",
+    "mindroom.knowledge.memory_entries",
     "mindroom.knowledge.readers",
 ]
 visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.memory_entries"
+depends_on = ["mindroom.knowledge.chunking", "mindroom.knowledge.readers"]
+visibility = ["mindroom.knowledge.file_indexer"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"

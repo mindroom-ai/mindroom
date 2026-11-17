@@ -663,6 +663,22 @@
           "description": "Per-agent included memory-search glob patterns",
           "title": "Include"
         },
+        "exclude": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent excluded memory-search glob patterns",
+          "title": "Exclude"
+        },
         "include_entrypoint": {
           "anyOf": [
             {
@@ -2710,6 +2726,16 @@
             "reference": "model"
           }
         },
+        "chunk_strategy": {
+          "default": "fixed",
+          "description": "How text-like files are split into chunks: fixed splits at chunk_size characters, memory_entries makes each memory entry or Markdown section its own chunk of at most chunk_size characters",
+          "enum": [
+            "fixed",
+            "memory_entries"
+          ],
+          "title": "Chunk Strategy",
+          "type": "string"
+        },
         "include_extensions": {
           "anyOf": [
             {
@@ -3833,6 +3859,7 @@
             "include": [
               "memory/**/*.md"
             ],
+            "exclude": [],
             "include_entrypoint": false
           },
           "description": "Search behavior for file-backed memory"
@@ -3891,6 +3918,15 @@
             "type": "string"
           },
           "title": "Include",
+          "type": "array"
+        },
+        "exclude": {
+          "default": [],
+          "description": "Root-relative glob patterns left out of file-memory semantic search after include filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
           "type": "array"
         },
         "include_entrypoint": {
@@ -6027,6 +6063,7 @@
           "max_entrypoint_tokens": 50000
         },
         "search": {
+          "exclude": [],
           "include": [
             "memory/**/*.md"
           ],

@@ -101,6 +101,8 @@ class IndexingSettings:
     vector_store: str = ""
     #: Model that writes each chunk's context before indexing; "" when chunks are indexed as read.
     chunk_context_model: str = ""
+    #: How text files are split into chunks; "" for fixed-size chunks.
+    chunk_strategy: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -133,6 +135,7 @@ class IndexingSettings:
             "require_content_before_publish",
             "vector_store",
             "chunk_context_model",
+            "chunk_strategy",
         }
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
@@ -167,6 +170,7 @@ class IndexingSettings:
             require_content_before_publish=settings["require_content_before_publish"],
             vector_store=settings["vector_store"],
             chunk_context_model=settings["chunk_context_model"],
+            chunk_strategy=settings["chunk_strategy"],
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -197,6 +201,7 @@ class IndexingSettings:
             "require_content_before_publish": self.require_content_before_publish,
             "vector_store": self.vector_store,
             "chunk_context_model": self.chunk_context_model,
+            "chunk_strategy": self.chunk_strategy,
         }
 
     def _query_compatibility_key(self) -> _QueryCompatibilityKey:
@@ -312,6 +317,7 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         extra_extensions = _filter_settings_key(base_config.extra_extensions)
         vector_store = _VECTOR_STORE_FORMAT
         chunk_context_model = base_config.chunk_context_model or ""
+        chunk_strategy = "" if base_config.chunk_strategy == "fixed" else base_config.chunk_strategy
     else:
         embedder_provider = ""
         embedder_model = ""
@@ -324,6 +330,7 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         extra_extensions = ""
         vector_store = ""
         chunk_context_model = ""
+        chunk_strategy = ""
     return IndexingSettings(
         base_id=base_id,
         storage_root=str(storage_path.resolve()),
@@ -350,4 +357,5 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         require_content_before_publish="True" if base_config.require_content_before_publish else "",
         vector_store=vector_store,
         chunk_context_model=chunk_context_model,
+        chunk_strategy=chunk_strategy,
     )

@@ -45,7 +45,13 @@ def _validate_memory_search_includes(value: list[str]) -> list[str]:
     return normalized
 
 
+def _validate_memory_search_excludes(value: list[str]) -> list[str]:
+    """Validate exclude patterns stay inside the memory root."""
+    return [validate_safe_relative_pattern(pattern, field_name="memory.search.exclude") for pattern in value]
+
+
 _MemorySearchIncludes = Annotated[list[str], AfterValidator(_validate_memory_search_includes)]
+_MemorySearchExcludes = Annotated[list[str], AfterValidator(_validate_memory_search_excludes)]
 
 
 class MemorySearchConfig(BaseModel):
@@ -60,6 +66,10 @@ class MemorySearchConfig(BaseModel):
     include: _MemorySearchIncludes = Field(
         default_factory=lambda: ["memory/**/*.md"],
         description="Root-relative glob patterns included in file-memory semantic search",
+    )
+    exclude: _MemorySearchExcludes = Field(
+        default_factory=list,
+        description="Root-relative glob patterns left out of file-memory semantic search after include filtering",
     )
     include_entrypoint: bool = Field(
         default=False,
@@ -76,6 +86,10 @@ class AgentMemorySearchConfig(BaseModel):
     include: _MemorySearchIncludes | None = Field(
         default=None,
         description="Per-agent included memory-search glob patterns",
+    )
+    exclude: _MemorySearchExcludes | None = Field(
+        default=None,
+        description="Per-agent excluded memory-search glob patterns",
     )
     include_entrypoint: bool | None = Field(default=None, description="Per-agent MEMORY.md indexing override")
 
