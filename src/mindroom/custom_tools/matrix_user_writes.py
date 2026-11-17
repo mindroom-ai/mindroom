@@ -316,10 +316,7 @@ async def _send(
     if write.room_id is not None:
         room_id, made = write.room_id, False
     else:
-        room_id, made = await _direct_room(client, actor.person_user_id, str(write.user_id))
-    written.room_id = room_id
-    if made:
-        written.invited = write.user_id
+        room_id, made = await _direct_room(client, actor.person_user_id, str(write.user_id), written)
     try:
         await _require_unencrypted(client, room_id)
     except MatrixRequestError as refused:
@@ -466,12 +463,13 @@ def _made_dm(room_id: str, them: str) -> str:
     return f"Made the DM {room_id} with {them}"
 
 
-async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple[str, bool]:
+async def _direct_room(client: nio.AsyncClient, person: str, them: str, written: _Written) -> tuple[str, bool]:
     """Return the person's DM with ``them``, and whether it was made now, as one is when they have none.
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
     two of them; one made earlier that could not be added there comes first. A room made now is added there.
     Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
+    ``written`` names the room, and whom a room made now invited, before it is recorded, which may fail.
     """
     async with _DIRECT_ROOM_LOCKS.setdefault(person, asyncio.Lock()):
         direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
@@ -482,6 +480,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
         candidates = [*([unrecorded] if unrecorded is not None and unrecorded not in listed else []), *reversed(listed)]
         for room_id in candidates:
             if await _only_the_two(client, room_id, person, them):
+                written.room_id = room_id
                 if room_id not in listed:
                     await _record_direct_room(client, direct_path, person, them, room_id)
                 return room_id, False
@@ -492,6 +491,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
             {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]},
         )
         room_id = _created_room(created)
+        written.room_id, written.invited = room_id, them
         _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
         await _record_direct_room(client, direct_path, person, them, room_id)
         return room_id, True

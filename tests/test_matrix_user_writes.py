@@ -1221,6 +1221,36 @@ async def test_the_audit_line_names_whom_a_write_invited(
 
 
 @pytest.mark.asyncio
+async def test_the_audit_line_of_an_unrecorded_dm_names_its_room(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A DM made but not recorded is logged with its room and whom it invited; reused later, with its room alone."""
+    unavailable = matrix_error(500, "M_UNKNOWN", "Database unavailable")
+    no_direct = matrix_error(404, "M_NOT_FOUND", "No m.direct")
+    homeserver.answers.update(
+        {
+            # Each send reads `m.direct`, then fails to read it again before recording.
+            DIRECT_PATH: [no_direct, unavailable, no_direct, unavailable],
+            CREATE_PATH: {"room_id": NEW_DM},
+            _members_path(NEW_DM): _members(alice="join", bob="invite"),
+        },
+    )
+
+    with capture_logs() as logs:
+        made = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+        reused = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    assert made["status"] == reused["status"] == "error"
+    first, second = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (first["room_id"], first["invited"]) == (NEW_DM, BOB)
+    assert second["room_id"] == NEW_DM
+    assert "invited" not in second
+    assert len(homeserver.requests_to(CREATE_PATH)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "blank"),
     [
