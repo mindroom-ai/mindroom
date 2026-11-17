@@ -21,6 +21,7 @@ owns the turn. The collectors and callbacks a turn reports to cross via
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
@@ -38,6 +39,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
@@ -55,7 +57,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
@@ -452,6 +454,9 @@ class TurnSinks:
     persist_interrupted: bool = True
     # The event the turn's Matrix reply shows, which an interrupted record names.
     response_event_id: Callable[[], str | None] | None = None
+    # Collects what the subagent turns whose results the turn receives cost, which its run metadata reports; a turn
+    # whose caller passes none keeps its own, and a delegated child's is the one its settlement reads.
+    subagent_cost: SubagentCost | None = None
 
 
 @dataclass(frozen=True)
@@ -1120,8 +1125,15 @@ async def stream_response_turn[ChunkT](
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
+    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
+
+    @contextmanager
+    def bind() -> Iterator[None]:
+        with lifetime.bind(), receiving_subagent_cost(subagent_cost):
+            yield
+
     stream = context_bound_async_stream(
-        context_factory=lifetime.bind,
+        context_factory=bind,
         stream_factory=lambda: _stream_response_turn(
             ctx,
             adapter,

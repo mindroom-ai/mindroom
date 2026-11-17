@@ -32,6 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.cost import subagent_cost_metadata
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
@@ -529,6 +530,7 @@ class _StoredRow(NamedTuple):
     status: str
     seq: int
     created_at: int
+    metadata: str | None
 
 
 def _mirror(session: ConversationSession, saved: _Saved) -> None:
@@ -812,7 +814,7 @@ def _write_run(
     rows = {
         row[0]: _StoredRow(*row[1:])
         for row in connection.execute(
-            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+            f"SELECT run_id, parent_run_id, status, seq, created_at, metadata FROM {quote_identifier(names.log_runs)} "  # noqa: S608
             "WHERE session_id = ? AND run_id IN (?, ?)",
             (session_id, run_id, parent_run_id),
         )
@@ -831,6 +833,9 @@ def _write_run(
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
+    # Every save of a run, however it is handed over, stores what its turn's subagents cost so far.
+    if cost := subagent_cost_metadata(decoded_mapping(stored.metadata) if stored is not None else None):
+        data = {**data, "metadata": {**(data.get("metadata") or {}), **cost}}
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
