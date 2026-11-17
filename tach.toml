@@ -2577,7 +2577,6 @@ depends_on = [
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.matrix_user_reads",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.guarded_rooms",
 ]
 visibility = ["mindroom.custom_tools.matrix_user"]
 
@@ -4098,7 +4097,6 @@ path = "mindroom.matrix.guarded_rooms"
 depends_on = []
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
-    "mindroom.custom_tools.matrix_user_writes",
     "mindroom.ingress_validation",
     "mindroom.matrix.client_delivery",
     "mindroom.response_runner",

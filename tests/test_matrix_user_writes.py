@@ -19,7 +19,6 @@ from mindroom.attachments.storage import register_local_attachment
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
 from mindroom.entity_resolution import current_entity_id
-from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, ResponsePausedForApproval
@@ -89,7 +88,6 @@ DM_NOT_LISTED = (
     f"Made the DM {NEW_DM} with {BOB}, but could not list it as a DM ({DM_NOT_LISTED_WHY}). "
     f"To send there again, use room_id {NEW_DM}."
 )
-CONTACT_ROOM_REFUSED = "Nothing is written as your owner into a contact room."
 UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
@@ -1344,7 +1342,7 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
     homeserver: FakeHomeserver,
     arguments: dict[str, str],
 ) -> None:
-    """The room the alias names is the one checked, counted, guarded, written to, and reported."""
+    """The room the alias names is the one checked, counted, written to, and reported."""
     homeserver.answers.update(
         {
             DIRECTORY_PATH: {"room_id": OTHER_ROOM, "servers": ["example.com"]},
@@ -1356,17 +1354,13 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
     action = arguments["action"]
 
     result = await _write(config, paths, homeserver, room_id=ALIAS, **arguments)
-    with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(OTHER_ROOM):
-        guarded = json.loads(await owner_toolkit(config, paths).matrix_user_write(room_id=ALIAS, **arguments))
 
     assert result == ok_result(action, room_id=OTHER_ROOM, event_id="$sent")
-    assert guarded == error_result(action, CONTACT_ROOM_REFUSED)
-    lookup, encryption, *_, sent, guarded_lookup = homeserver.requests
+    lookup, encryption, *_, sent = homeserver.requests
     assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
     assert (encryption.method, encryption.path) == ("GET", f"{CLIENT}/rooms/{OTHER_ROOM}/state/m.room.encryption")
     assert sent.path.startswith(f"{CLIENT}/rooms/{OTHER_ROOM}/send/")
-    assert all(OTHER_ROOM in request.path for request in homeserver.requests[1:-1])
-    assert guarded_lookup.path == DIRECTORY_PATH
+    assert all(OTHER_ROOM in request.path for request in homeserver.requests[1:])
     assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, OTHER_ROOM)}
 
 
@@ -1383,20 +1377,6 @@ async def test_a_created_room_has_no_managed_power_levels(
 
     [created] = homeserver.requests
     assert created.body == {"name": "Trip", "preset": "private_chat"}
-
-
-@pytest.mark.asyncio
-async def test_a_contact_room_is_refused_before_any_request(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A room the turn guards, as a contact turn guards its contact room, takes nothing written as the owner."""
-    with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(ROOM):
-        result = await owner_toolkit(config, paths).matrix_user_write(action="send", room_id=ROOM, message="Hi")
-
-    assert json.loads(result) == error_result("send", CONTACT_ROOM_REFUSED)
-    assert homeserver.requests == []
 
 
 @pytest.mark.asyncio

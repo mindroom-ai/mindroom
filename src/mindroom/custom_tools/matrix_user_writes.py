@@ -46,7 +46,6 @@ from mindroom.matrix.client_delivery import (
     send_file_message_outcome,
     send_message_outcome,
 )
-from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 
@@ -80,7 +79,6 @@ _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
 _COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 _ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
-_CONTACT_ROOM = "Nothing is written as your owner into a contact room."
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 # The send failures that prove nothing was sent: each is known before the event is requested, or, for one too large,
 # may also be the homeserver's refusal of it.
@@ -240,8 +238,6 @@ async def _write(
 ) -> dict[str, object]:
     if write.user_id == actor.person_user_id:
         raise MatrixRequestError(_NOT_THE_OWNER)
-    if write.room_id is not None and send_refused(write.room_id):
-        raise MatrixRequestError(_CONTACT_ROOM)
     file = None if write.attachment is None else _turn_file(turn, write.attachment)
     limited = check_rate_limit(
         lock=_RATE_LIMIT_LOCK,
