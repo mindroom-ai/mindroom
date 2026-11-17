@@ -20,19 +20,21 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, resolve_runtime_paths
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.run_checkpoint import (
     INTERRUPTED_CALL_RESULT,
     is_recovered_run,
+    link_response_event,
     recover_interrupted_run,
     recover_interrupted_turn,
 )
+from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.request_identity import request_prefixes
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.reply_turn.enrichment import interrupted_attempt_model_prompt
@@ -44,11 +46,12 @@ from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, runtime_paths_for
 from tests.delegation_helpers import ScriptedAgents, _runtime_paths, native_delegation_config, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.history_helpers import compact_runs
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import PROBE_TOOL, ProbeTools, registered_probe_tools, stored_runs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Collection, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.llm.provider import ModelRequest
@@ -497,3 +500,60 @@ async def test_a_recovered_run_counts_the_usage_its_checkpoints_left_out(
     assert recorded() == [30]
     assert _recover(crashed)
     assert recorded() == [30]
+
+
+def _stored_attempt(run_id: str, status: RunStatus, continued: Sequence[str] = ()) -> RunRecord:
+    """Return an attempt at ``_EVENT``'s turn as its run stores it: cut short after a call, or finished."""
+    call = tool_call("read_file", f"{run_id}-read", path="private.txt")
+    work = [
+        Message(role="assistant", tool_calls=[call]),
+        Message(role="tool", tool_call_id=call["id"], tool_name="read_file", content="PRIVATE_RESULT"),
+    ]
+    answered = [Message(role="assistant", content="Finished")]
+    return RunRecord(
+        run_id=run_id,
+        agent_id="general",
+        session_id=_SESSION,
+        status=status,
+        metadata=build_matrix_run_metadata(_EVENT, [], extra_metadata={CONTINUED_RUNS_METADATA_KEY: list(continued)}),
+        messages=[Message(role="user", content="Read it"), *(work if status is RunStatus.cancelled else answered)],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_attempt_stored", [True, False], ids=["second attempt stored", "second attempt lost"])
+@pytest.mark.parametrize("natively", [True, False], ids=["recovered again", "past the recovery limit"])
+async def test_redacting_a_reply_removes_the_recovered_attempt_a_compaction_folded(
+    tmp_path: Path,
+    second_attempt_stored: bool,
+    natively: bool,
+) -> None:
+    """A recovered attempt a later attempt's compaction folded is still linked to the reply that finishes the turn."""
+    config = _config(tmp_path)
+    store = _store(config)
+    session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
+    store.save_run(session, _stored_attempt("attempt-1", RunStatus.cancelled), record_usage=False)
+    assert _recover(config) == ["attempt-1"]
+    # The second attempt's compaction folds the first before it is cut short too, with or without a checkpoint.
+    session = store.load_session(_SESSION)
+    assert session is not None
+    compact_runs(store, session, ["attempt-1"], "The first attempt read PRIVATE_RESULT")
+    if second_attempt_stored:
+        store.save_run(session, _stored_attempt("attempt-2", RunStatus.cancelled, ["attempt-1"]), record_usage=False)
+
+    continued = _recover(config, natively=natively)
+
+    assert continued == ["attempt-1", *(["attempt-2"] if second_attempt_stored and natively else [])]
+    session = store.load_session(_SESSION)
+    assert session is not None
+    store.save_run(session, _stored_attempt("final", RunStatus.completed, continued), record_usage=False)
+    link_response_event(store, _SESSION, "final", "$reply")
+
+    async def redacted(event_ids: Collection[str]) -> dict[str, None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    assert await remove_history_of_redacted_events(store, session, redacted) == ["$reply"]
+    after = store.load_session(_SESSION)
+    assert after is not None
+    assert after.summary is None
+    assert "PRIVATE_RESULT" not in str([run.messages for run in after.runs if run.status is RunStatus.completed])

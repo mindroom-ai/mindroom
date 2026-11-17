@@ -169,23 +169,26 @@ def recover_interrupted_turn(
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
-    attempt starts from the conversation before the turn.
+    attempt starts from the conversation before the turn. A recovered run a compaction folded stays in the scope's
+    summary either way and is returned, so the turn's answer links it too (``link_response_event``).
     """
     session = store.load_session(session_id)
     if session is None:
         return []
+    loaded = {run.run_id for run in session.runs}
     recovered: list[str] = []
-    for run in session.runs:
+    # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
+    for run in store.list_runs(session_id):
         if run.parent_run_id is not None or not run_in_scope(run, scope):
             continue
         if not source_event_ids(run.metadata).intersection(event_ids):
             continue
-        if not natively:
-            if is_recovered_run(run) and is_model_history_visible_run(run):
-                store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
-        elif recover_interrupted_run(store, session, run) or (
-            is_recovered_run(run) and is_model_history_visible_run(run)
-        ):
+        earlier = is_recovered_run(run) and is_model_history_visible_run(run)
+        if natively and (earlier or recover_interrupted_run(store, session, run)):
+            recovered.append(run.run_id)
+        elif earlier and run.run_id in loaded:
+            store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
+        elif earlier:
             recovered.append(run.run_id)
     return recovered
 
