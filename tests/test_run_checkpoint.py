@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.history.conversation_text import utterances
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_checkpoint import (
     INTERRUPTED_CALL_RESULT,
@@ -820,6 +821,29 @@ async def test_a_reply_stopped_mid_response_before_it_called_a_tool_is_stored_as
     assert replayed[: len(sent)] == sent
     assert request_prefixes(model, following)[: len(last_sent.messages) + 1] == request_prefixes(model, last_sent)
     assert f"Let me look\\n\\n{STOPPED_BY_USER_NOTE}" in replayed[len(sent)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown", ["", "Let me look"], ids=["mid call", "mid response"])
+async def test_the_note_a_stopped_run_ends_with_is_not_what_its_agent_said(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shown: str,
+) -> None:
+    """Readers of what was said keep the text a stopped response showed and leave out the note MindRoom added."""
+    config = _config(tmp_path)
+    streaming = asyncio.Event()
+    if shown:
+        await _stop(config, monkeypatch, _text_only_turns(streaming), reached=streaming)
+    else:
+        await _stop(config, monkeypatch, _crashing_turns())
+
+    run = _only_run(config)
+    assert STOPPED_BY_USER_NOTE in str(run.messages[-1].content)
+    replies = [(said.kind, said.unredacted) for said in utterances(run)]
+    assert replies == [("said", "Do the work"), *([("reply", shown)] if shown else [])]
+    # A reviewer of how the agent worked reads that its user stopped it.
+    assert STOPPED_BY_USER_NOTE in utterances(run, agent_work=True)[-1].unredacted
 
 
 @pytest.mark.asyncio
