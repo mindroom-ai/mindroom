@@ -1109,25 +1109,27 @@ class ResponseRunner:
         answer below it, and every tool call it made, shown or not. The same
         account goes into the new attempt's prompt, where later turns keep it.
 
-        A replay first recovers the runs its stopped attempts stored in ``history_scope``,
+        An attempt that takes over one a restart cut short, a replay or the retry of an
+        edit's regeneration, first recovers the runs those attempts stored in ``history_scope``,
         so its request continues from their own messages and the account only points
-        at them. A turn restarts cut short more than ``_NATIVE_RECOVERY_LIMIT`` times recovers
-        none and drops those it recovered before, in case continuing from them is what stops
-        it, and its account lists the recorded calls instead; an approval pause is no restart.
+        at them; a regeneration nothing cut short starts fresh. A turn restarts cut short
+        more than ``_NATIVE_RECOVERY_LIMIT`` times recovers none and drops those it recovered
+        before, in case continuing from them is what stops it, and its account lists the
+        recorded calls instead; an approval pause is no restart.
         """
         handle = current_span()
         if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
+        restarts = await handle.runtime.restart_interruptions(handle)
         recovered: list[str] = []
-        if handle.span.kind is rl.SpanKind.REPLAY and history_scope is not None:
-            attempts = await handle.runtime.restart_interruptions(handle)
+        if restarts and history_scope is not None:
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,
                 session_id=session_id,
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
-                natively=attempts <= _NATIVE_RECOVERY_LIMIT,
+                natively=restarts <= _NATIVE_RECOVERY_LIMIT,
             )
         if recovered:
             # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.

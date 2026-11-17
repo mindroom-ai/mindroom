@@ -1972,6 +1972,53 @@ async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_be
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("restarts", "recovers"), [(1, True), (0, False)], ids=["retry", "new edit"])
+async def test_a_regeneration_a_restart_cut_short_continues_from_its_recovered_run_and_a_new_one_starts_fresh(
+    tmp_path: Path,
+    restarts: int,
+    recovers: bool,
+) -> None:
+    """The retry of an edit's regeneration recovers that edit's attempt; a regeneration nothing interrupted does not."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REGENERATION),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=()),
+            restart_interruptions=AsyncMock(return_value=restarts),
+        ),
+    )
+    request = replace(
+        _plain_request(_target(), source_event_id="$edit"),
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",)),
+    )
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        regenerated = await runner._with_interrupted_attempt(
+            request,
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+
+    stored = storage.get_run("run-1")
+    assert stored is not None
+    assert stored.status is (RunStatus.completed if recovers else RunStatus.cancelled)
+    assert ("are in the conversation above" in html.unescape(regenerated.model_prompt or "")) is recovers
+
+
+@pytest.mark.asyncio
 async def test_redacting_a_replayed_reply_removes_the_recovered_attempt_it_continued(tmp_path: Path) -> None:
     """The reply's message links the run that answered and the recovered runs it continued, so a redaction cuts both."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

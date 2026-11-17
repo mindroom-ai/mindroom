@@ -252,6 +252,7 @@ def cut_at_event(
     event_id: str,
     match: Literal["answered", "any"],
     session: ConversationSession | None = None,
+    keeping: Collection[str] = (),
 ) -> bool:
     """Delete the earliest element of the scope's log that holds ``event_id`` and everything after it.
 
@@ -259,12 +260,13 @@ def cut_at_event(
     event through its stored metadata unless the latest barrier retired it, and a fold's row through its provenance, so
     the fold's summary is cut even once its run's row is gone. Returns whether any element held the event.
     ``session``, when given, is the loaded session whose log is cut, named by ``session_id``; it then holds the runs
-    and summary a load returns.
+    and summary a load returns. No cut starts at an element that read every event of ``keeping``, when it names any.
     """
     names = storage.names
     with storage.log_transaction(session_id, session=session) as connection:
         basis = read_redaction_basis(connection, names, session_id=session_id, scope_key=scope_key)
-        holder = _first_holder(basis.holders, {event_id}, match)
+        holders = [holder for holder in basis.holders if not (keeping and holder[2].issuperset(keeping))]
+        holder = _first_holder(holders, {event_id}, match)
         if holder is None:
             return False
         _cut(connection, names, session_id, basis.rows, basis.runs, holder)
