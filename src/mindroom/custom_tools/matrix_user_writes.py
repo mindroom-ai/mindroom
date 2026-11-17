@@ -20,6 +20,7 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from mindroom.attachments.storage import filter_attachments_for_context, load_attachment
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools.attachments import resolve_context_attachment_record
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -256,8 +257,23 @@ async def _write(
     return {"room_id": room_id}
 
 
+def _conversation_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord | None:
+    """Return the file stored under ``attachment_id`` for the turn's own room and thread, if it is still on disk.
+
+    A confirmed write runs in a context built anew, which holds the attachments of the owner's message and none that an
+    earlier call of the run added, such as a download, which stores its file for exactly this conversation.
+    """
+    if turn.storage_path is None:
+        return None
+    stored = load_attachment(turn.storage_path, attachment_id)
+    if stored is None or not stored.local_path.is_file():
+        return None
+    ours, _ = filter_attachments_for_context([stored], room_id=turn.room_id, thread_id=turn.resolved_thread_id)
+    return stored if ours else None
+
+
 def _turn_files(turn: ToolRuntimeContext, attachment_ids: tuple[str, ...]) -> list[AttachmentRecord]:
-    """Return the stored files of the turn that ``attachment_ids`` name, refusing any it does not hold.
+    """Return the stored files that ``attachment_ids`` name, refusing any the turn and its conversation do not hold.
 
     A file goes out with its name as its text, which whoever sent the file chose, so a name that would read as a
     command is refused too.
@@ -265,6 +281,8 @@ def _turn_files(turn: ToolRuntimeContext, attachment_ids: tuple[str, ...]) -> li
     files: list[AttachmentRecord] = []
     for attachment_id in attachment_ids:
         record = resolve_context_attachment_record(turn, attachment_id)
+        if isinstance(record, str):
+            record = _conversation_file(turn, attachment_id) or record
         if isinstance(record, str):
             raise MatrixRequestError(record)
         if (problem := _command_problem(record.filename)) is not None:

@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlsplit
 
@@ -14,6 +14,7 @@ import aiohttp
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.ai import ai_response
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
@@ -21,7 +22,16 @@ from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, register_tool_runtime_media_attachment
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, ResponsePausedForApproval
+from mindroom.tool_system.runtime_context import (
+    get_tool_runtime_context,
+    register_tool_runtime_media_attachment,
+    tool_runtime_context,
+)
+from tests.approval_continuation_helpers import approval_continuation, decided_calls
+from tests.conftest import install_model_providers, make_turn_context
+from tests.delegation_helpers import approval_calls_for, approval_executor
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.matrix_user_helpers import (
     AGENT,
     OWNER,
@@ -50,6 +60,8 @@ if TYPE_CHECKING:
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.response_turn import PausedAttempt
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 BOB = "@bob:example.com"
 CAROL = "@carol:example.com"
@@ -122,11 +134,11 @@ def _direct_changes(homeserver: FakeHomeserver) -> list[HomeserverRequest]:
     return [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
 
 
-def _notes(paths: RuntimePaths, tmp_path: Path, **fields: str) -> AttachmentRecord:
-    """Write `notes.txt` and register it as a file of ``ROOM`` with ``fields``, as an attachment of a turn is."""
+def _notes(paths: RuntimePaths, tmp_path: Path, room_id: str = ROOM, **fields: str) -> AttachmentRecord:
+    """Write `notes.txt` and register it as a file of ``room_id`` with ``fields``, as an attachment of a turn is."""
     notes = tmp_path / "notes.txt"
     notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", room_id=ROOM, **fields)
+    record = register_local_attachment(paths.storage_root, notes, kind="file", room_id=room_id, **fields)
     assert record is not None
     return record
 
@@ -341,6 +353,28 @@ async def test_an_attachment_the_turn_does_not_hold_is_refused_before_any_reques
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_for",
+    [{"room_id": OTHER_ROOM}, {"thread_id": "$elsewhere"}],
+    ids=["another-room", "another-thread"],
+)
+async def test_a_file_stored_for_another_conversation_is_refused_before_any_request(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    stored_for: dict[str, str],
+) -> None:
+    """A stored file the turn does not hold is sent only when it was stored for the turn's own room and thread."""
+    record = _notes(paths, tmp_path, **stored_for)
+
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachments=[record.attachment_id])
+
+    assert result == error_result("send", f"Attachment ID is not available in this context: {record.attachment_id}")
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
 async def test_an_ephemeral_attachment_is_named_as_such(
     config: Config,
     paths: RuntimePaths,
@@ -407,14 +441,91 @@ async def test_a_command_like_file_name_is_refused(
     assert homeserver.requests == []
 
 
+def _new_turn(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
+    """Return the context of a turn of Alice's with her agent in ``ROOM``, built anew: it holds no attachments."""
+    with owner_turn(config, paths):
+        turn = get_tool_runtime_context()
+    assert turn is not None
+    return turn
+
+
+async def _run_until_a_write_waits(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    monkeypatch: pytest.MonkeyPatch,
+    model: ScriptedModel,
+) -> PausedAttempt:
+    """Run a reply of Alice's agent to her with ``model`` until a write it calls waits for her to confirm it."""
+    install_model_providers(monkeypatch, {"default": model})
+    # Without background tool jobs, the call that waits pauses the reply.
+    config.background_tool_jobs.enabled = False
+    turn = _new_turn(config, paths)
+    identity = turn.execution_identity
+    reply = replace(
+        make_turn_context(AGENT, session_id=identity.session_id, room_id=ROOM, requester_id=OWNER),
+        prompt="Send the notes to the planning room.",
+        execution_identity=identity,
+        supports_native_tool_approval=True,
+    )
+    with (
+        tool_runtime_context(turn),
+        homeserver.serving_the_toolkit(),
+        pytest.raises(ResponsePausedForApproval) as waiting,
+    ):
+        await ai_response(reply, paths, config)
+    return waiting.value.paused
+
+
+async def _confirm(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    paused: PausedAttempt,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Confirm the write ``paused`` waits for and continue its run, as the approval runner does once Alice confirms.
+
+    The run continues in a context built anew for the same room, thread, and requester, which holds only the
+    attachments of Alice's own message, here none, and nothing an earlier call of the run added to its context.
+    """
+    turn = _new_turn(config, paths)
+    identity = turn.execution_identity
+    waiting = approval_calls_for(paused, default_agent=AGENT, toolkit_names={"matrix_user_write": "matrix_user"})
+    continuation = approval_continuation(
+        run_id=paused.run_id,
+        session_id=paused.session_id,
+        entity_name=AGENT,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=OWNER,
+        state="claimed",
+        calls=decided_calls(waiting, {call.tool_call_id: True for call in waiting}),
+        runtime_model_name=paused.runtime_model_name,
+    )
+    with homeserver.serving_the_toolkit():
+        return await approval_executor(config, paths).continue_run(
+            continuation,
+            paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+            tool_context=turn,
+            tool_trace_collector=[],
+            quiet=False,
+            progress=None,
+            system_enrichment_items=(),
+        )
+
+
 @pytest.mark.asyncio
-async def test_a_file_downloaded_in_a_turn_is_sent_in_that_turn(
+async def test_a_file_downloaded_in_a_run_is_sent_once_the_owner_confirms(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     agent_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file fetched from one of the owner's rooms goes out in the same turn, uploaded as the owner, marked as the agent's."""
+    """A send waits for the owner and then runs in a context built anew, where a file the run downloaded still goes out.
+
+    Nothing is written before the owner confirms. The file is uploaded as the owner and marked as the agent's.
+    """
     files = "!files:example.com"
     content = {
         "msgtype": "m.file",
@@ -429,14 +540,31 @@ async def test_a_file_downloaded_in_a_turn_is_sent_in_that_turn(
             UPLOAD_PATH: {"content_uri": "mxc://example.com/copy"},
         },
     )
-    toolkit = owner_toolkit(config, paths)
+    send = tool_call("matrix_user_write", "send")
 
-    with owner_turn(config, paths), homeserver.serving_the_toolkit():
-        fetched = json.loads(await toolkit.matrix_user_read(action="download", room_id=files, event_id="$file"))
-        sent = json.loads(
-            await toolkit.matrix_user_write(action="send", room_id=ROOM, attachments=[fetched["attachment_id"]]),
-        )
+    async def name_the_download() -> None:
+        # The model sends the attachment that its download's result named.
+        fetched = json.loads(str(model.requests[-1].messages[-1].content))
+        arguments = {"action": "send", "room_id": ROOM, "attachments": [fetched["attachment_id"]]}
+        send["function"]["arguments"] = json.dumps(arguments)
 
+    model = ScriptedModel(
+        [
+            calls(tool_call("matrix_user_read", "fetch", action="download", room_id=files, event_id="$file")),
+            [Await(name_the_download), *calls(send)],
+            answer("Sent."),
+        ],
+    )
+
+    paused = await _run_until_a_write_waits(config, paths, homeserver, monkeypatch, model)
+
+    assert [waiting.tool_name for waiting in paused.tools] == ["matrix_user_write"]
+    assert _changes(homeserver) == []
+
+    result = await _confirm(config, paths, homeserver, paused)
+
+    assert isinstance(result, CompletedApprovalRun)
+    sent = json.loads(str(model.requests[-1].messages[-1].content))
     assert sent == ok_result("send", room_id=ROOM, event_id="$sent")
     [upload] = homeserver.requests_to(UPLOAD_PATH)
     assert upload.uploaded == b"Remember the milk"
@@ -444,8 +572,8 @@ async def test_a_file_downloaded_in_a_turn_is_sent_in_that_turn(
     [file] = _sent(homeserver)
     assert (file["msgtype"], file["url"], file["body"]) == ("m.file", "mxc://example.com/copy", "notes.txt")
     assert file[AGENT_AUTHORED_KEY] == agent_id
-    [send] = [request for request in _changes(homeserver) if request.path.startswith(_send_path())]
-    assert send.query["user_id"] == [OWNER]
+    [send_request] = [request for request in _changes(homeserver) if request.path.startswith(_send_path())]
+    assert send_request.query["user_id"] == [OWNER]
 
 
 @pytest.mark.asyncio
