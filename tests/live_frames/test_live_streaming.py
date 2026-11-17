@@ -502,6 +502,36 @@ async def test_compaction_change_schedules_checkpoint_with_live_frames(tmp_path:
     assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
 
 
+@pytest.mark.asyncio
+async def test_compaction_on_placeholder_earns_a_checkpoint_with_live_frames(tmp_path: Path, frames: _Frames) -> None:
+    """With frames on and no text yet, a compaction that starts over the placeholder still earns a durable checkpoint."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    # The pause lets frames go live first, so the compaction reaches the reply only through a checkpoint.
+    stream = _stream(0.15, compaction.start, 0.4, "Done.", 0.03)
+    await _run(
+        _config(tmp_path, update_interval=0.1),
+        stream,
+        records,
+        edits,
+        placeholder_event_id="$placeholder",
+        compactions=recorder,
+    )
+
+    checkpoints = [
+        content
+        for content in edits.contents
+        if COMPACTIONS_CONTENT_KEY in content and "io.mindroom.live_checkpoint" in content
+    ]
+    assert checkpoints
+    assert checkpoints[0]["body"] == PROGRESS_PLACEHOLDER
+    assert [entry["status"] for entry in checkpoints[0][COMPACTIONS_CONTENT_KEY]] == ["running"]
+    assert edits.contents.index(checkpoints[0]) < next(
+        index for index, content in enumerate(edits.contents) if content["body"] == "Done."
+    )
+    assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
+
+
 def test_compaction_change_is_uncommitted_once_the_reply_has_an_event(tmp_path: Path) -> None:
     """A change the reply's event does not show yet is uncommitted; before the event exists, its first write shows it."""
     recorder = ReplyCompactions()

@@ -232,6 +232,38 @@ def test_unbind_stops_reading_the_delivery() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failed"])
+async def test_a_failing_nudge_keeps_the_entry_and_its_lifecycle(outcome: str) -> None:
+    """A delivery nudge that raises loses only that refresh: start returns the id and later updates still land."""
+    recorder = ReplyCompactions()
+    nudges: list[None] = []
+
+    def failing_nudge() -> None:
+        nudges.append(None)
+        msg = "delivery queue gone"
+        raise RuntimeError(msg)
+
+    recorder.bind(tool_count=lambda: 0, changed=failing_nudge)
+    lifecycle = _lifecycle(recorder)
+
+    entry_id = await lifecycle.start(_start())
+    assert entry_id is not None
+    await lifecycle.progress(_progress(entry_id))
+    if outcome == "success":
+        await lifecycle.complete_success(_outcome(entry_id))
+    else:
+        await lifecycle.complete_failure(_failure(entry_id, "failed"))
+
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert entry["id"] == entry_id
+    assert entry["status"] == outcome
+    assert len(nudges) == 3
+    assert recorder.version == 3
+
+
+@pytest.mark.asyncio
 async def test_changed_called_on_every_change() -> None:
     """Every recorded change nudges the bound delivery and bumps the version."""
     recorder = ReplyCompactions()

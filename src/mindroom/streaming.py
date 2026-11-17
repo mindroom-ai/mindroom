@@ -863,8 +863,8 @@ class StreamingResponse:
             if elapsed_since_last_update >= self.update_interval:
                 await self._send_or_edit_message(
                     client,
-                    # A finished warm-up line is cleared, and a compaction change shown, even before any text arrived.
-                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit or self._compactions_unshown,
+                    # A finished warm-up line is cleared even before any text arrived.
+                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit,
                     capture_completions=capture_completions,
                 )
             else:

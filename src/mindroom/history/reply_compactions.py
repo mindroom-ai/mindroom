@@ -12,6 +12,8 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
+
+logger = get_logger(__name__)
 
 _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 
@@ -87,8 +91,13 @@ class ReplyCompactions:
 
     def _note_change(self) -> None:
         self.version += 1
-        if self._changed is not None:
+        if self._changed is None:
+            return
+        # Best effort: a failed nudge loses only this refresh. The entry is recorded, and the next write shows it.
+        try:
             self._changed()
+        except Exception:
+            logger.warning("reply_compaction_refresh_failed", version=self.version, exc_info=True)
 
 
 class ReplyCompactionLifecycle:
