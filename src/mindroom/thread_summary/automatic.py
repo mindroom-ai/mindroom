@@ -479,10 +479,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     ``retitle`` summarizes now, whatever the thread's count, for a message that changes what the thread is about,
     such as a call's notes. A pinned or resolved thread keeps its title all the same.
     """
-    baselines = schedule.THREAD_SUMMARY_BASELINES
-    # Mark before any await, so a prompt title still generating sees the delivered reply and is dropped.
-    baselines.supersede_provisional_title(room_id, thread_id)
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
+    baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
         projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
         if projected is None:
