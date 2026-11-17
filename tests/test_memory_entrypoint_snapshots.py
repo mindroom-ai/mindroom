@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from mindroom.memory import ConversationRef
 from mindroom.memory import _entrypoint_snapshots as snapshots
 
 MEMORY = Path("/workspace/MEMORY.md")
+STORE = Path("snapshots.json")
+
+
+@pytest.fixture(autouse=True)
+def _store_in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the relative ``STORE`` each test writes inside its own directory."""
+    monkeypatch.chdir(tmp_path)
 
 
 def _preamble(
@@ -26,6 +35,7 @@ def _preamble(
         path,
         text,
         f"preamble of {text!r}",
+        store=STORE,
         now=now,
     )
 
@@ -82,3 +92,12 @@ def test_idle_snapshots_are_dropped() -> None:
     _preamble("a", session="old", now=0)
     _preamble("a", session="new", now=4000)
     assert list(snapshots._snapshots) == [("mind", "new", MEMORY)]
+
+
+def test_snapshots_survive_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart must not change the system prompt of a conversation whose cache is still warm."""
+    _preamble("a", now=0)
+    monkeypatch.setattr(snapshots, "_snapshots", None)
+    assert _preamble("a\nb", now=3000) == "preamble of 'a'"
+    monkeypatch.setattr(snapshots, "_snapshots", None)
+    assert _preamble("a2\nb", now=3100) == "preamble of 'a2\\nb'"
