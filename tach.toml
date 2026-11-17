@@ -1581,6 +1581,7 @@ depends_on = [
 visibility = [
     "mindroom.api.connections",
     "mindroom.api.egress_credentials",
+    "mindroom.api.github_requests",
     "mindroom.api.oauth",
     "mindroom.api.tools",
     "mindroom.custom_tools.slack",
@@ -2039,6 +2040,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.github_requests"
+depends_on = [
+    "mindroom.api.client_sessions",
+    "mindroom.api.config_lifecycle",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
     "mindroom.api.agent_cli",
@@ -2074,6 +2084,7 @@ depends_on = [
     "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
+    "mindroom.api.github_requests",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
