@@ -258,7 +258,7 @@ Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 
 
 ```yaml
 reranker:
-  provider: cohere                 # or sentence_transformers, vertex_ai
+  provider: cohere                 # or sentence_transformers, vertex_ai, typesafe, openai_decisions
   model: rerank-v3.5
 ```
 
@@ -266,12 +266,12 @@ Earlier releases named this setting `knowledge_reranker`; that name still loads,
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | `cohere`, `sentence_transformers`, or `vertex_ai` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API |
-| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai` |
+| `provider` | `cohere`, `sentence_transformers`, `vertex_ai`, `typesafe`, or `openai_decisions` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API; `typesafe` and `openai_decisions` ask a [judgment backend](#judgment-rerankers) |
+| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai`; not set for `typesafe` and `openai_decisions` |
 | `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
 | `api_key` | string | `null` | API key for `cohere` |
 | `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
-| `threshold` | number from 0 to 1 | `0.5` | Minimum score of a memory that per-turn recall adds with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) |
+| `threshold` | number from 0 to 1 | `0.5`, or `0.8` for `typesafe` and `openai_decisions` | Minimum score of a memory that per-turn recall adds with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) |
 
 `vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
 Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
@@ -285,6 +285,23 @@ If the reranker fails, the search returns its results in the merged order and lo
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
+
+#### Judgment rerankers
+
+`typesafe` (System One, with `TYPESAFE_API_KEY`) and `openai_decisions` (the OpenAI Decisions API) rerank with the [judgment backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and take the same fields: `threshold`, `timeout_seconds` (default `1.5`), and for `openai_decisions` a `credentials_service`.
+
+```yaml
+reranker:
+  provider: openai_decisions
+  threshold: 0.8
+```
+
+One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
+The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
+A request holds up to 128,000 bytes, about 60 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
+A failed request, or a missing API key, fails reranking as described above.
+At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
+The default `threshold` of `0.8` has not been calibrated on representative memories.
 
 ### Contextual Chunk Headers
 

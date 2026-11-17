@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
-from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
+from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_service
@@ -184,7 +184,7 @@ class _CrossEncoderReranker:
 
 def _create_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker."""
-    if isinstance(config, TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig):
+    if not isinstance(config, KnowledgeRerankerConfig):
         reranker = create_judgment_reranker(config, runtime_paths)
         if reranker is None:
             msg = f"The {config.provider} reranker has no API key"

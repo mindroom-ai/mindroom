@@ -18,7 +18,7 @@ MAX_REQUEST_BYTES = 16_000
 # The posted wire body's limit: about 60 candidates clipped to 2,000 characters, under TypeSafe's 64k-token context.
 MAX_BATCH_REQUEST_BYTES = 128_000
 # OpenAI Decisions accepts at most 400 questions per request.
-MAX_BATCH_QUESTIONS = 400
+_MAX_BATCH_QUESTIONS = 400
 _MAX_CONTEXT_MESSAGES = 8
 # A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
 _CLIPPED_TEXT_CHARS = 2_000
@@ -192,7 +192,7 @@ def build_batch_request(
     """Ask many boolean questions about one user message in one request, refusing redacted or oversized input."""
     if not questions or not message.strip() or len({question.id for question in questions}) != len(questions):
         return _incomplete("missing_essential_input")
-    if len(questions) > MAX_BATCH_QUESTIONS:
+    if len(questions) > _MAX_BATCH_QUESTIONS:
         return _incomplete("essential_input_too_large")
     try:
         body = _canonical_json(

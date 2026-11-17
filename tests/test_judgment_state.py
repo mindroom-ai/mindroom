@@ -8,7 +8,7 @@ import json
 import pytest
 
 from mindroom.judgment.state import (
-    MAX_BATCH_QUESTIONS,
+    _MAX_BATCH_QUESTIONS,
     MAX_BATCH_REQUEST_BYTES,
     MAX_REQUEST_BYTES,
     JudgmentMessage,
@@ -174,7 +174,7 @@ def test_batch_without_distinct_questions_or_message_is_incomplete(
 
 def test_batch_over_400_questions_is_incomplete() -> None:
     """OpenAI accepts at most 400 questions per request, so a larger batch never produces wire bytes."""
-    assert MAX_BATCH_QUESTIONS == 400
+    assert _MAX_BATCH_QUESTIONS == 400
     assert build_batch_request(_candidates(400, "x"), "Where do I park?", instructions="").complete
     request = build_batch_request(_candidates(401, "x"), "Where do I park?", instructions="")
     assert request.body is None

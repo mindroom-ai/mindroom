@@ -17,7 +17,7 @@ from mindroom.judgment.answers import JudgmentError
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.evaluator import BatchEvaluator
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
-from mindroom.judgment.rerank import JudgmentReranker, create_judgment_reranker
+from mindroom.judgment.rerank import _JudgmentReranker, create_judgment_reranker
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from tests.conftest import test_runtime_paths
 
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-_SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"
+_SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"  # noqa: S105
 
 
 def _answers(probabilities: dict[str, float | None]) -> Callable[[list[str]], list[dict[str, Any]]]:
@@ -47,7 +47,7 @@ def _reranker(
     seen: list[httpx.Request],
     *,
     gate: bool = False,
-) -> JudgmentReranker:
+) -> _JudgmentReranker:
     """A reranker on the real OpenAI Decisions wire; a ``None`` answer fails with HTTP 500."""
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -64,7 +64,7 @@ def _reranker(
         evaluate=partial(client.judge_many, owner="root:rerank", allow_network=True),
         fits=client.batch_fits,
     )
-    return JudgmentReranker(batch, gate=gate)
+    return _JudgmentReranker(batch, gate=gate)
 
 
 @pytest.mark.asyncio
@@ -177,4 +177,4 @@ def test_judgment_provider_is_a_reranker_config(tmp_path: Path) -> None:
 
     paths = test_runtime_paths(tmp_path)
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
-    assert isinstance(rerank_module._create_reranker(config.reranker, paths), JudgmentReranker)
+    assert isinstance(rerank_module._create_reranker(config.reranker, paths), _JudgmentReranker)

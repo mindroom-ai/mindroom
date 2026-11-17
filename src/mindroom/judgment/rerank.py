@@ -41,7 +41,7 @@ def _candidate_question(index: int, document: str) -> JudgmentQuestion:
 
 
 @dataclass(frozen=True)
-class JudgmentReranker:
+class _JudgmentReranker:
     """Scores each document with the backend's probability that it helps reply to the query.
 
     ``gate`` adds one question about the query alone to the same request and caps every score at its probability.
@@ -57,7 +57,9 @@ class JudgmentReranker:
         extra = [_GATE] if self.gate else []
         count = len(candidates)
         request = build_batch_request([*candidates, *extra], message, instructions="")
-        while count and request.incomplete_reason in {None, "essential_input_too_large"} and not self.batch.fits(request):
+        while (
+            count and request.incomplete_reason in {None, "essential_input_too_large"} and not self.batch.fits(request)
+        ):
             count -= 1
             request = build_batch_request([*candidates[:count], *extra], message, instructions="")
         if not (count and request.complete):
@@ -70,7 +72,10 @@ class JudgmentReranker:
         return [min(probability, cap) for probability in probabilities] + [0.0] * (len(documents) - count)
 
 
-def create_judgment_reranker(settings: ProbabilityJudgmentConfig, runtime_paths: RuntimePaths) -> JudgmentReranker | None:
+def create_judgment_reranker(
+    settings: ProbabilityJudgmentConfig,
+    runtime_paths: RuntimePaths,
+) -> _JudgmentReranker | None:
     """Bind a judgment reranker to the backend's credential, or return None without one."""
     batch = create_batch_evaluator(
         settings,
@@ -78,4 +83,4 @@ def create_judgment_reranker(settings: ProbabilityJudgmentConfig, runtime_paths:
         owner=f"{runtime_paths.storage_root}:rerank",
         capacity=_RERANK_CAPACITY,
     )
-    return None if batch is None else JudgmentReranker(batch)
+    return None if batch is None else _JudgmentReranker(batch)
