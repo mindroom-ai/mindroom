@@ -8,6 +8,7 @@ Logs carry the method, the path's kind, and GitHub's status, never the token, th
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote
@@ -49,6 +50,20 @@ _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", 
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
 _PCHAR = r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})"
 _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
+
+
+def _scrub_github_url(record: logging.LogRecord) -> bool:
+    """Cut the path and query from httpx's line for a request to GitHub's API, which would name a repository."""
+    if isinstance(record.args, tuple):
+        record.args = tuple(
+            f"{_GITHUB_API}/…" if isinstance(arg, httpx.URL) and arg.host == "api.github.com" else arg
+            for arg in record.args
+        )
+    return True
+
+
+# httpx logs each request's full URL at INFO; a logger's filters outlast every later `dictConfig`.
+logging.getLogger("httpx").addFilter(_scrub_github_url)
 
 
 class GitHubRequest(BaseModel):

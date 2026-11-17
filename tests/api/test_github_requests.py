@@ -19,6 +19,7 @@ from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.logging_config import setup_logging
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -670,6 +671,35 @@ def test_logs_name_the_call_but_never_its_token_or_bodies(
     logged = repr(logs)
     for secret in (ALICE_TOKEN, "request-body-secret", "response-body-secret", "query-secret", "octo", "hello"):
         assert secret not in logged
+
+
+def test_production_logs_name_neither_the_repository_nor_the_query(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The lines MindRoom's own logging setup writes, httpx's included, carry no repository, query, token, or body."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(201, json={"answer": "response-body-secret"})
+    setup_logging(level="INFO", runtime_paths=paths)
+    capsys.readouterr()
+
+    ask(
+        client,
+        session(app, ALICE),
+        "/repos/private-owner/private-repository/issues?q=query-secret",
+        method="POST",
+        body={"body": "request-body-secret"},
+    )
+
+    logged = capsys.readouterr().err
+    assert "HTTP Request: POST https://api.github.com/" in logged
+    assert "/repos/{owner}/{repo}/issues" in logged
+    for secret in (ALICE_TOKEN, "private-owner", "private-repository", "query-secret", "request-body-secret"):
+        assert secret not in logged
+    assert "response-body-secret" not in logged
 
 
 def test_a_client_on_an_allowed_origin_may_call_the_routes(client: TestClient) -> None:
