@@ -13,10 +13,19 @@ import aiohttp
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.matrix_user_authority import MatrixUserActor, MatrixUserRefused, matrix_user_actor
-from mindroom.custom_tools.matrix_user_reads import MatrixRequestError, read_people, read_room, read_rooms
+from mindroom.custom_tools.matrix_user_reads import (
+    MatrixRequestError,
+    download_file,
+    mark_read,
+    read_messages,
+    read_people,
+    read_room,
+    read_rooms,
+    search_messages,
+)
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -25,16 +34,25 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
+    type _Read = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
+
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
 _UNREACHABLE = "The Matrix homeserver could not be reached."
 _TIMED_OUT = "The homeserver took too long to answer."
-_ROOM_NEEDED = "room needs room_id, a room ID such as !abc:example.com."
-_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
+_ROOM_ACTIONS = frozenset({"room", "messages", "download", "mark_read"})
+_PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
+_SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
+_EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
+_UNKNOWN_ACTION = "action must be rooms, messages, search, room, people, download, or mark_read."
+
+
+def _room_needed(action: str) -> str:
+    return f"{action} needs room_id, a room ID such as !abc:example.com."
 
 
 class MatrixUserTools(Toolkit):
-    """Matrix as the personal agent's owner: their rooms, one room, and people."""
+    """Matrix as the personal agent's owner: their rooms, messages, files, and people."""
 
     def __init__(
         self,
@@ -65,7 +83,7 @@ class MatrixUserTools(Toolkit):
             raise MatrixUserRefused(_NOT_THIS_AGENT)
         return actor
 
-    async def _as_owner(self, action: str, read: Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]) -> str:
+    async def _as_owner(self, action: str, read: _Read) -> str:
         """Return ``read``'s result, run with a client that acts as the call's owner, created for it and closed after.
 
         A refusal, a missing token, and a failed request are the error payload, which never holds the token or a URL.
@@ -100,11 +118,96 @@ class MatrixUserTools(Toolkit):
             await client.close()
         return self._payload("ok", action=action, **fields)
 
+    async def _download(self, client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, object]:
+        """Fetch a message's file as an attachment of the turn's conversation, which its tools are then offered.
+
+        A call without a turn, such as the MCP gateway's, keeps it for the file's own room and returns its ID.
+        """
+        context = get_tool_runtime_context()
+        fields = await download_file(
+            client,
+            room_id,
+            event_id,
+            storage_path=self._runtime_paths.storage_root,
+            for_room_id=room_id if context is None else context.room_id,
+            for_thread_id=None if context is None else context.resolved_thread_id,
+        )
+        append_tool_runtime_attachment_id(str(fields["attachment_id"]))
+        return fields
+
+    def _read_for(  # noqa: PLR0911 - one return per action and per missing argument
+        self,
+        action: str,
+        *,
+        room_id: str | None,
+        event_id: str | None,
+        thread_id: str | None,
+        query: str | None,
+        page_token: str | None,
+        limit: int | None,
+    ) -> _Read | str:
+        """Return the read ``action`` asks for, or which of its arguments is missing."""
+        if action in _ROOM_ACTIONS:
+            if room_id is None or not room_id.startswith("!"):
+                return _room_needed(action)
+            return self._room_read_for(
+                action,
+                room_id,
+                event_id=event_id,
+                thread_id=thread_id,
+                page_token=page_token,
+                limit=limit,
+            )
+        if action == "rooms":
+            return lambda client: read_rooms(client, query=query, limit=limit)
+        if action == "people":
+            if query is None or not query.strip():
+                return _PEOPLE_QUERY_NEEDED
+            return lambda client: read_people(client, query, limit=limit)
+        if action != "search":
+            return _UNKNOWN_ACTION
+        if query is None or not query.strip():
+            return _SEARCH_QUERY_NEEDED
+        if room_id is not None and not room_id.startswith("!"):
+            return _room_needed(action)
+        return lambda client: search_messages(client, query, room_id=room_id, page_token=page_token, limit=limit)
+
+    def _room_read_for(
+        self,
+        action: str,
+        room_id: str,
+        *,
+        event_id: str | None,
+        thread_id: str | None,
+        page_token: str | None,
+        limit: int | None,
+    ) -> _Read | str:
+        """Return the read of the room ``room_id`` that ``action`` asks for, or which of its arguments is missing."""
+        if action == "room":
+            return lambda client: read_room(client, room_id, limit=limit)
+        if action == "messages":
+            return lambda client: read_messages(
+                client,
+                room_id,
+                event_id=event_id,
+                thread_id=thread_id,
+                page_token=page_token,
+                limit=limit,
+            )
+        if action == "mark_read":
+            return lambda client: mark_read(client, room_id, event_id=event_id)
+        if event_id is None or not event_id.strip():
+            return _EVENT_NEEDED
+        return lambda client: self._download(client, room_id, event_id)
+
     async def matrix_user_read(
         self,
-        action: Literal["rooms", "room", "people"],
+        action: Literal["rooms", "messages", "search", "room", "people", "download", "mark_read"],
         room_id: str | None = None,
+        event_id: str | None = None,
+        thread_id: str | None = None,
         query: str | None = None,
+        page_token: str | None = None,
         limit: int | None = None,
     ) -> str:
         """Read Matrix as your owner: their own rooms and DMs, including those you are not in.
@@ -112,18 +215,25 @@ class MatrixUserTools(Toolkit):
         Actions:
         - rooms: Their rooms and invitations, unread first. query keeps rooms whose name contains it.
           limit: default 50, at most 200.
+        - messages: room_id's newest messages (limit: default 30, at most 100); page_token continues into older ones.
+          With thread_id: that thread's root and newest replies. With event_id: that message and those around it.
+        - search: Messages containing query, in all their rooms or in room_id (limit: default 10, at most 50);
+          page_token continues.
         - room: room_id's name, topic, encryption, whether it is a DM, and up to limit (default 50) members.
         - people: query is a full Matrix ID for that profile, or a name to search the user directory
           (limit: default 10, at most 50).
+        - download: The file of message event_id in room_id, as an attachment ID for your other tools.
+        - mark_read: Mark room_id read for them, up to event_id or its newest message.
         """
-        if action == "rooms":
-            return await self._as_owner(action, lambda client: read_rooms(client, query=query, limit=limit))
-        if action == "room":
-            if room_id is None or not room_id.startswith("!"):
-                return self._payload("error", action=action, message=_ROOM_NEEDED)
-            return await self._as_owner(action, lambda client: read_room(client, room_id, limit=limit))
-        if action == "people":
-            if query is None or not query.strip():
-                return self._payload("error", action=action, message=_QUERY_NEEDED)
-            return await self._as_owner(action, lambda client: read_people(client, query, limit=limit))
-        return self._payload("error", action=action, message="action must be rooms, room, or people.")
+        read = self._read_for(
+            action,
+            room_id=room_id,
+            event_id=event_id,
+            thread_id=thread_id,
+            query=query,
+            page_token=page_token,
+            limit=limit,
+        )
+        if isinstance(read, str):
+            return self._payload("error", action=action, message=read)
+        return await self._as_owner(action, read)

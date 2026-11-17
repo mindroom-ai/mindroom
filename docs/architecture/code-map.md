@@ -659,7 +659,7 @@ Matrix sync callback
 | `custom_tools/react.py` | Reaction-only agent tool: reacts in the current room under `matrix_message`'s per-room rate limit |
 | `custom_tools/matrix_user.py` | The `matrix_user` toolkit: a personal agent reads Matrix as its owner, on a client created per call |
 | `custom_tools/matrix_user_authority.py` | Whom a `matrix_user` call acts as: the owner of the personal agent making it, decided by the call's identity and room alone |
-| `custom_tools/matrix_user_reads.py` | The owner's room list from one uncached `/sync`, a room's facts and members, and people, with each answer bounded to 2 MiB and a short 429 retry |
+| `custom_tools/matrix_user_reads.py` | The owner's room list from one uncached `/sync`, a room's facts and members, people, messages and threads as lines with edits and reactions folded in, search, files fetched as attachments, and read markers, with each JSON answer bounded to 2 MiB and a short 429 retry |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
 | `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |

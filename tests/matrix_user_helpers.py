@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -17,6 +18,71 @@ if TYPE_CHECKING:
     import nio
 
 SYNC_PATH = "/_matrix/client/v3/sync"
+# The time of every room event the helpers make, plus its ``minute``.
+NOON = int(datetime(2026, 11, 16, 12, 0, tzinfo=UTC).timestamp() * 1000)
+
+
+def room_event(
+    event_id: str,
+    event_type: str,
+    content: dict[str, object],
+    *,
+    sender: str = "@bob:example.com",
+    minute: int = 0,
+    **fields: object,
+) -> dict[str, object]:
+    """Return one room event, sent ``minute`` minutes after noon, with any other top-level ``fields``."""
+    return {
+        "event_id": event_id,
+        "type": event_type,
+        "sender": sender,
+        "origin_server_ts": NOON + minute * 60_000,
+        "content": content,
+        **fields,
+    }
+
+
+def text_message(
+    event_id: str,
+    body: str,
+    *,
+    sender: str = "@bob:example.com",
+    minute: int = 0,
+    **fields: object,
+) -> dict[str, object]:
+    """Return a text message."""
+    content = {"msgtype": "m.text", "body": body}
+    return room_event(event_id, "m.room.message", content, sender=sender, minute=minute, **fields)
+
+
+def edit_of(
+    event_id: str,
+    original: str,
+    body: str,
+    *,
+    sender: str = "@bob:example.com",
+    minute: int = 1,
+    **fields: object,
+) -> dict[str, object]:
+    """Return an edit that replaces ``original``'s text with ``body``."""
+    content = {
+        "msgtype": "m.text",
+        "body": f"* {body}",
+        "m.new_content": {"msgtype": "m.text", "body": body},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": original},
+    }
+    return room_event(event_id, "m.room.message", content, sender=sender, minute=minute, **fields)
+
+
+def reaction(event_id: str, target: str, key: str, *, sender: str = "@bob:example.com") -> dict[str, object]:
+    """Return ``sender``'s reaction ``key`` to ``target``."""
+    content = {"m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": key}}
+    return room_event(event_id, "m.reaction", content, sender=sender, minute=2)
+
+
+def message_line(event_id: str, text: str, *, sender: str = "@bob:example.com", minute: int = 0) -> str:
+    """Return the line the toolkit shows for a message the helpers made."""
+    return f"{event_id} | 2026-11-16T12:{minute:02}Z | {sender} | {text}"
 
 
 def sync_answer(
@@ -134,6 +200,10 @@ class FakeHomeserver:
         """Make ``client`` send its requests here, and return it."""
         client.client_session = self  # type: ignore[assignment]
         return client
+
+    def requests_to(self, path: str) -> list[HomeserverRequest]:
+        """Return the requests to ``path``, in order."""
+        return [request for request in self.requests if request.path == path]
 
     @contextmanager
     def serving_the_toolkit(self) -> Iterator[None]:

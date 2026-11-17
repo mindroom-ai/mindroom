@@ -21,7 +21,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Read Matrix as a personal agent's owner: their rooms and DMs, invitations, a room's members, and people.
+- [`matrix_user`] - Read Matrix as a personal agent's owner: their rooms and DMs, messages and threads, search, files, a room's members, and people, and mark rooms read.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -312,15 +312,19 @@ matrix_api(
 `matrix_user` lets a [personal agent](../personal-agents.md) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in.
 It acts only for the agent's owner, in a chat with the agent or through the [MCP gateway](../deployment/mcp-gateway.md), and refuses, saying why, anyone else, any other agent, and a [contact conversation](../agent-contacts.md).
 
-`matrix_user_read(action, room_id=None, query=None, limit=None)` never writes.
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
 
 | Action | Returns |
 |--------|---------|
 | `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 50, at most 200) caps the lines, with `left_out` counting the rest |
+| `messages` | The newest messages of the room `room_id` names, oldest first, one line each with its latest edit applied and its file, reactions, and thread replies noted, and texts over 2000 characters cut; `limit` defaults to 30 (at most 100), and `page_token`, the previous result's `next_page_token`, continues into older messages; with `thread_id`, that thread's root and newest replies; with `event_id`, that message and up to half of `limit` messages on each side |
+| `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
 | `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
+| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
-Messages in encrypted rooms are not readable.
+Messages in encrypted rooms are not readable: they show as `[encrypted, not readable]`, and search does not find them.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
 Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`

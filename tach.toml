@@ -2559,7 +2559,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_user_reads"
-depends_on = ["mindroom.bounded_bytes"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.constants"]
 visibility = ["mindroom.custom_tools.matrix_user"]
 
 [[modules]]

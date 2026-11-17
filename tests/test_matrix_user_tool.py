@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
+from mindroom.attachments.storage import load_attachment
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.constants import resolve_runtime_paths
@@ -21,12 +22,17 @@ from mindroom.custom_tools.matrix_user import MatrixUserTools
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
 from mindroom.teams.members import resolve_exact_team_members
-from mindroom.tool_system.runtime_context import current_execution_identity, member_tool_scope, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    current_execution_identity,
+    get_tool_runtime_context,
+    member_tool_scope,
+    tool_runtime_context,
+)
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
-from tests.matrix_user_helpers import SYNC_PATH, FakeHomeserver, joined_room, sync_answer
+from tests.matrix_user_helpers import SYNC_PATH, Answer, FakeHomeserver, joined_room, room_event, sync_answer
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -279,6 +285,9 @@ async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimeP
             "room needs room_id, a room ID such as !abc:example.com.",
         ),
         ({"action": "people"}, "people needs query: a name, or a full Matrix ID such as @alice:example.com."),
+        ({"action": "messages"}, "messages needs room_id, a room ID such as !abc:example.com."),
+        ({"action": "search", "query": " "}, "search needs query: the words to look for."),
+        ({"action": "download", "room_id": ROOM}, "download needs event_id: the ID of the message with the file."),
     ],
 )
 async def test_each_action_names_the_arguments_it_is_missing(
@@ -302,10 +311,61 @@ async def test_each_action_names_the_arguments_it_is_missing(
 
 
 def test_the_function_takes_no_user_to_act_as(config: Config, paths: RuntimePaths) -> None:
-    """The model can name a room, a query and a limit, never a person to act as."""
+    """The model can name a room, an event, a thread, a query, a page and a limit, never a person to act as."""
     function = toolkit_offers(_toolkit(config, paths), "matrix_user_read")
 
-    assert list(function.parameters["properties"]) == ["action", "room_id", "query", "limit"]
+    assert list(function.parameters["properties"]) == [
+        "action",
+        "room_id",
+        "event_id",
+        "thread_id",
+        "query",
+        "page_token",
+        "limit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_downloaded_file_is_an_attachment_of_the_turn(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A file fetched from any of the owner's rooms is kept for the turn's conversation and offered to its tools."""
+    files = "!files:example.com"
+    content = {
+        "msgtype": "m.file",
+        "body": "notes.txt",
+        "url": "mxc://example.com/abc",
+        "info": {"mimetype": "text/plain"},
+    }
+    homeserver.answers.update(
+        {
+            f"/_matrix/client/v3/rooms/{files}/event/$file": room_event("$file", "m.room.message", content),
+            "/_matrix/client/v1/media/download/example.com/abc": Answer(b"Remember the milk"),
+        },
+    )
+
+    with _turn(config, paths), homeserver.serving_the_toolkit():
+        result = await _toolkit(config, paths).matrix_user_read(action="download", room_id=files, event_id="$file")
+        context = get_tool_runtime_context()
+
+    fields = json.loads(result)
+    assert fields == {
+        "status": "ok",
+        "tool": "matrix_user",
+        "action": "download",
+        "attachment_id": fields["attachment_id"],
+        "name": "notes.txt",
+        "mime_type": "text/plain",
+        "size_bytes": 17,
+    }
+    assert context is not None
+    assert context.runtime_attachment_ids == [fields["attachment_id"]]
+    record = load_attachment(paths.storage_root, fields["attachment_id"])
+    assert record is not None
+    assert (record.room_id, record.thread_id) == (ROOM, context.resolved_thread_id)
+    assert homeserver.closed
 
 
 @pytest.mark.asyncio
