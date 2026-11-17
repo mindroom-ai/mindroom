@@ -534,10 +534,23 @@ async def test_shipped_default_arm_indexes_the_archive(
     memory_dir: Path,
     embedder: _CountingEmbedder,
 ) -> None:
-    """With the product's default `memory.search`, which excludes nothing, the archived copy of a note is recalled too."""
+    """With the product's default `memory.search`, which excludes nothing, an archived note is indexed and recalled.
+
+    Every vector ties under the fake embedder, so the query matches a word only the archived note holds, which its
+    keyword half ranks first; the `shipped` arm, which excludes the archive, never returns it.
+    """
     assert embedder is not None
-    [hits] = await _replay(tmp_path, memory_dir, "shipped_default", [_turn("2026-01-15", "salmon kibble Pixel")])
-    assert "memory/archive/2026-01-10.md" in _sources(hits)
+    archived = "- [id=m_20260112090000_cccc3333] The quokka sanctuary moved to the north field."
+    (memory_dir / "archive" / "2026-01-12.md").write_text(f"{archived}\n")
+    turns = [_turn("2026-01-15", "quokka sanctuary")]
+
+    [default_hits] = await _replay(tmp_path / "default", memory_dir, "shipped_default", turns)
+    [shipped_hits] = await _replay(tmp_path / "shipped", memory_dir, "shipped", turns)
+
+    assert default_hits
+    assert default_hits[0]["memory"] == archived
+    assert _sources(default_hits)[0] == "memory/archive/2026-01-12.md"
+    assert not any(source.startswith("memory/archive/") for source in _sources(shipped_hits))
 
 
 def test_short_follow_up() -> None:
