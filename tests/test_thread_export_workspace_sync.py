@@ -178,7 +178,7 @@ async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) 
     ]
 
 
-async def test_each_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: Path) -> None:
+async def test_an_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: Path) -> None:
     """Every pass hands an agent's source the same record of what that agent's earlier passes wrote."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
