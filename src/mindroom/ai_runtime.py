@@ -25,6 +25,7 @@ __all__ = [
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
+    "reply_ended_for_follow_up",
     "told_to_pause",
 ]
 
@@ -54,6 +55,8 @@ class _QueuedMessageNoticeContext:
     mid_turn_gate: MidTurnGate | None = None
     response_turn_id: str = field(default_factory=lambda: str(uuid4()))
     notice_fired: bool = False
+    # Set when an owning run ended at its batch so a waiting message carries on its work as its own reply.
+    ended_for_follow_up: bool = False
 
 
 _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
@@ -187,6 +190,18 @@ def _requester_steers(context: _QueuedMessageNoticeContext) -> bool:
     return context.state is not None and bool(context.state.requester_steer_snapshot())
 
 
+def _end_for_follow_up(context: _QueuedMessageNoticeContext) -> bool:
+    """Note that this reply ends at its batch for a waiting message, and return True so its run ends there."""
+    context.ended_for_follow_up = True
+    return True
+
+
+def reply_ended_for_follow_up() -> bool:
+    """Return whether the current reply's run ended at a batch so a waiting message carries on its work."""
+    context = _queued_message_notice_context.get()
+    return context is not None and context.ended_for_follow_up
+
+
 async def _judge_queued_notice(
     messages: list[Message],
     *,
@@ -209,7 +224,7 @@ async def _judge_queued_notice(
         await gate.acknowledge_queued(message)
     if steering and _requester_steers(context):
         gate.report_stop()
-        return True
+        return _end_for_follow_up(context)
     pending = state.interrupting_snapshot()
     if not pending:
         return None
@@ -227,7 +242,7 @@ async def _judge_queued_notice(
         # judgment, so a later verdict on a reply that kept waiting cannot leave a mark behind.
         gate.report_stop()
         if steering and (_requester_steers(context) or gate.cannot_wait_stands(state.interrupting_snapshot())):
-            return True
+            return _end_for_follow_up(context)
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
     return None
 
@@ -250,7 +265,7 @@ def queued_notice_after_tool_batch(notice_text: str, *, steering: bool = False) 
         if completed and context.mid_turn_gate is not None:
             return await _judge_queued_notice(messages, notice_text=notice_text, steering=steering)
         if completed and steering and _requester_steers(context):
-            return True
+            return _end_for_follow_up(context)
         _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
         return None
 
@@ -270,7 +285,7 @@ def queued_notice_on_resume_entry(notice_text: str, *, steering: bool = False) -
         if context.mid_turn_gate is not None:
             return await _judge_queued_notice(messages, notice_text=notice_text, steering=steering)
         if steering and _requester_steers(context):
-            return True
+            return _end_for_follow_up(context)
         if context.state is not None and context.state.has_interrupting_messages():
             _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
         return None

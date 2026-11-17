@@ -1211,6 +1211,7 @@ visibility = [
     "mindroom.tool_jobs.runtime",
     "mindroom.loop_hooks",
     "mindroom.response_lifecycle",
+    "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.reply_turn.locked_turn",
 ]
@@ -3413,6 +3414,7 @@ depends_on = [
     "mindroom.agent_modes",
     "mindroom.agent_run_context",
     "mindroom.ai",
+    "mindroom.ai_runtime",
     "mindroom.ai_run_metadata",
     "mindroom.approval.response",
     "mindroom.constants",

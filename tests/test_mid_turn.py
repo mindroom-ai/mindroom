@@ -20,6 +20,7 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
     queued_notice_after_tool_batch,
     queued_notice_on_resume_entry,
+    reply_ended_for_follow_up,
     told_to_pause,
 )
 from mindroom.config.agent import AgentConfig
@@ -2613,6 +2614,39 @@ async def test_requester_steer_returns_batch_stop_without_notice_or_queue_consum
     assert not _has_notice(resumed)
     assert judged == []
     assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_reply_its_owner_ended_reads_the_follow_up_end_reason() -> None:
+    """The reply whose owning run ended at its batch for a waiting message, and only that reply, reads why it ended.
+
+    A delegated child's batch leaves the Steer to its owner and sets nothing; the owner's batch sets it; the next
+    reply starts without it.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+
+    def work() -> str:
+        """Do the work."""
+        queue.add_waiting_human_message(
+            "$steer",
+            text="Also print the date",
+            requester_id=_REQUESTER,
+            mode=MidTurnMode.STEER,
+        )
+        return "Completed action"
+
+    assert not reply_ended_for_follow_up()
+    with queued_message_signal_context(queue):
+        await _run_turn(ScriptedModel([calls(tool_call("work", "work")), answer("Child done")]), toolkit(work))
+        assert not reply_ended_for_follow_up()
+        await _run_turn(ScriptedModel([calls(tool_call("work", "work"))]), toolkit(work), hooks=_STEERING_HOOKS)
+        assert reply_ended_for_follow_up()
+    assert not reply_ended_for_follow_up()
+    # The Steer still waits, as it does until its own turn takes it, and the next reply's run has no batch to end.
+    with queued_message_signal_context(queue):
+        await _run_turn(ScriptedModel([answer("Next")]), hooks=_STEERING_HOOKS)
+        assert not reply_ended_for_follow_up()
 
 
 _VERDICTS: dict[str, bool | None] = {
