@@ -24,7 +24,7 @@ from mindroom.knowledge.registry import (
     get_published_index,
     refresh_target_for_published_index_key,
 )
-from mindroom.knowledge.rerank import create_reranker
+from mindroom.knowledge.rerank import build_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
@@ -355,14 +355,15 @@ class _DeferredReranker:
     """The configured reranker, built each time it scores.
 
     A slow build, such as the first install of the sentence-transformers extra, then counts against the caller's
-    deadline, and a failed build fails that scoring, which keeps the search order.
+    deadline, and a failed build, or one still running from an earlier search, fails that scoring, which keeps the
+    search order.
     """
 
     config: KnowledgeRerankerConfig
     runtime_paths: RuntimePaths
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        reranker = await asyncio.to_thread(create_reranker, self.config, self.runtime_paths)
+        reranker = await build_reranker(self.config, self.runtime_paths)
         return await reranker.ascore(query, documents)
 
 

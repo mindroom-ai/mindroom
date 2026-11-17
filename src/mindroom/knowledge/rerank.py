@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -33,6 +33,12 @@ _VERTEX_AI_RANK_URL = (
 )
 #: Records per Vertex AI ranking request: Google bills each 100 as one query, and smaller requests answer sooner.
 _VERTEX_AI_RECORDS_PER_REQUEST = 100
+#: Runs every blocking reranker step: building a reranker, which may install the sentence-transformers extra, signing
+#: in to Google, and cross-encoder scoring, which is serialized anyway. A step that outlasts its caller's deadline then
+#: holds up later reranking only, never the shared default executor the rest of a reply needs.
+_rerank_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
+#: The latest build of each reranker config, so a build still running is not started again.
+_builds: dict[str, Future[Reranker]] = {}
 
 
 class Reranker(Protocol):
@@ -79,7 +85,12 @@ class _VertexAIReranker:
     project: str | None
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        headers, project = await asyncio.to_thread(_google_request_auth, self.credentials_path, self.project)
+        headers, project = await asyncio.get_running_loop().run_in_executor(
+            _rerank_thread,
+            _google_request_auth,
+            self.credentials_path,
+            self.project,
+        )
         records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
         async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
             requests = [
@@ -142,7 +153,6 @@ def _google_request_auth(credentials_path: Path | None, project: str | None) -> 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
 _cross_encoders: dict[str, Any] = {}
 _cross_encoder_lock = threading.Lock()
-_cross_encoder_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
 
 
 @dataclass(frozen=True)
@@ -157,7 +167,7 @@ class _CrossEncoderReranker:
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
         # Scoring is serialized, so queued calls wait on their own thread, not in the shared default executor.
-        return await asyncio.get_running_loop().run_in_executor(_cross_encoder_thread, self._score, query, documents)
+        return await asyncio.get_running_loop().run_in_executor(_rerank_thread, self._score, query, documents)
 
     def _score(self, query: str, documents: Sequence[str]) -> list[float]:
         with _cross_encoder_lock:
@@ -170,7 +180,7 @@ class _CrossEncoderReranker:
             return [float(score) for score in encoder.predict([(query, document) for document in documents])]
 
 
-def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+def _create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker."""
     if config.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
@@ -183,3 +193,17 @@ def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths
         )
     api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)
+
+
+async def build_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+    """Build the configured reranker on the reranker thread.
+
+    Raises instead of starting a second build while one of the same config still runs, such as a first install.
+    """
+    key = config.model_dump_json()
+    running = _builds.get(key)
+    if running is not None and not running.done():
+        msg = f"The {config.provider} reranker is still being built"
+        raise RuntimeError(msg)
+    build = _builds[key] = _rerank_thread.submit(_create_reranker, config, runtime_paths)
+    return await asyncio.wrap_future(build)

@@ -19,7 +19,6 @@ import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.read_protocol import SearchHit
-from mindroom.knowledge.rerank import create_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from tests.conftest import test_runtime_paths
 
@@ -114,7 +113,7 @@ async def test_cohere_reranker_sends_cohere_requests(tmp_path: Path, monkeypatch
         "AsyncClient",
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
-    reranker = create_reranker(
+    reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(
             provider="cohere",
             model="rerank-v3.5",
@@ -156,7 +155,7 @@ async def test_partial_cohere_response_reranks_the_returned_hits_and_puts_the_mi
         "AsyncClient",
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
-    reranker = create_reranker(
+    reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(provider="cohere", model="m", url="https://rerank.test/v1/rerank", api_key="k"),
         test_runtime_paths(tmp_path),
     )
@@ -185,8 +184,11 @@ def test_cohere_reranker_reads_its_credential_service(tmp_path: Path, monkeypatc
     )
     runtime_paths = test_runtime_paths(tmp_path)
 
-    create_reranker(KnowledgeRerankerConfig(provider="cohere", model="m"), runtime_paths)
-    create_reranker(KnowledgeRerankerConfig(provider="cohere", model="m", credentials_service="jina"), runtime_paths)
+    rerank_module._create_reranker(KnowledgeRerankerConfig(provider="cohere", model="m"), runtime_paths)
+    rerank_module._create_reranker(
+        KnowledgeRerankerConfig(provider="cohere", model="m", credentials_service="jina"),
+        runtime_paths,
+    )
 
     assert services == ["cohere", "jina"]
 
@@ -242,7 +244,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
     )
     (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n")
     rerank_module._google_credentials.cache_clear()
-    reranker = create_reranker(
+    reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
         test_runtime_paths(tmp_path),
     )
@@ -261,7 +263,7 @@ def test_vertex_ai_reranker_reads_the_project_as_vertex_models_read_it(tmp_path:
     (tmp_path / ".env").write_text("GOOGLE_CLOUD_PROJECT=env-project\n", encoding="utf-8")
     runtime_paths = replace(test_runtime_paths(tmp_path), process_env={"GOOGLE_CLOUD_PROJECT": ""})
 
-    reranker = create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), runtime_paths)
+    reranker = rerank_module._create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), runtime_paths)
 
     assert isinstance(reranker, rerank_module._VertexAIReranker)
     assert reranker.project == "env-project"
@@ -279,7 +281,10 @@ async def test_vertex_ai_reranker_needs_a_google_cloud_project(
         lambda: (_GoogleCredentials(token=None), None),
     )
     rerank_module._google_credentials.cache_clear()
-    reranker = create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+    reranker = rerank_module._create_reranker(
+        KnowledgeRerankerConfig(provider="vertex_ai", model="m"),
+        test_runtime_paths(tmp_path),
+    )
 
     with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
         await reranker.ascore("q", ["d"])
@@ -298,7 +303,7 @@ async def test_cross_encoder_reranker_scores_query_document_pairs(
 
     monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
-    reranker = create_reranker(
+    reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model"),
         test_runtime_paths(tmp_path),
     )
@@ -319,7 +324,7 @@ async def test_local_reranking_does_not_need_the_shared_default_executor(
 
     monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
-    reranker = create_reranker(
+    reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model"),
         test_runtime_paths(tmp_path),
     )
@@ -354,7 +359,7 @@ def _cohere_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
         ),
     )
     config = KnowledgeRerankerConfig(provider="cohere", model="m", url="https://rerank.test", api_key="k")
-    return create_reranker(config, test_runtime_paths(tmp_path))
+    return rerank_module._create_reranker(config, test_runtime_paths(tmp_path))
 
 
 def _vertex_ai_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
@@ -368,7 +373,10 @@ def _vertex_ai_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         lambda: (_GoogleCredentials(token=None), "project"),
     )
     rerank_module._google_credentials.cache_clear()
-    return create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+    return rerank_module._create_reranker(
+        KnowledgeRerankerConfig(provider="vertex_ai", model="m"),
+        test_runtime_paths(tmp_path),
+    )
 
 
 def _cross_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
@@ -381,7 +389,7 @@ def _cross_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
     monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
     config = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
-    return create_reranker(config, test_runtime_paths(tmp_path))
+    return rerank_module._create_reranker(config, test_runtime_paths(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -416,7 +424,7 @@ async def test_a_reranker_that_cannot_be_built_keeps_the_interleaved_order(
         msg = "sentence-transformers extra missing"
         raise ImportError(msg)
 
-    monkeypatch.setattr(knowledge_utils, "create_reranker", failing_build)
+    monkeypatch.setattr(rerank_module, "_create_reranker", failing_build)
     config = Config(reranker={"provider": "sentence_transformers", "model": "local-model"})
     reranker = knowledge_utils.configured_reranker(config, test_runtime_paths(tmp_path))
     assert reranker is not None
@@ -431,3 +439,32 @@ async def test_a_reranker_that_cannot_be_built_keeps_the_interleaved_order(
     )
 
     assert [hit.content for hit in await knowledge.asearch("q", limit=2)] == ["a", "bbb"]
+
+
+@pytest.mark.asyncio
+async def test_a_running_build_is_not_started_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While a reranker config's build runs, another search fails fast instead of building it a second time."""
+    started = threading.Event()
+    release = threading.Event()
+    builds: list[str] = []
+
+    def stuck_build(config: KnowledgeRerankerConfig, _runtime_paths: object) -> Reranker:
+        builds.append(config.model)
+        started.set()
+        release.wait(timeout=10)
+        return _LengthReranker()
+
+    monkeypatch.setattr(rerank_module, "_create_reranker", stuck_build)
+    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="build-once")
+    runtime_paths = test_runtime_paths(tmp_path)
+    first = asyncio.create_task(rerank_module.build_reranker(config, runtime_paths))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        with pytest.raises(RuntimeError, match="still being built"):
+            await rerank_module.build_reranker(config, runtime_paths)
+    finally:
+        release.set()
+
+    assert isinstance(await first, _LengthReranker)
+    assert isinstance(await rerank_module.build_reranker(config, runtime_paths), _LengthReranker)
+    assert builds == ["build-once", "build-once"]
