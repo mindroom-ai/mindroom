@@ -107,7 +107,7 @@ def reject_legacy_defaults_fields(value: object) -> object:
 
 # LEGACY_COMPAT: Root knowledge_reranker setting.
 # Legacy format: the root reranker was configured as knowledge_reranker, when only search_knowledge_base used it.
-# Last legacy release: v2026.11.377; replacement: unreleased; memory searches can rerank too, so the setting is reranker.
+# Last legacy release: v2026.11.379; replacement: unreleased; memory searches can rerank too, so the setting is reranker.
 # Handling: Rename it to reranker before validation, so a config that still sets it loads unchanged and the next
 #   dashboard save writes the new name; a config that sets both fails, naming both.
 # Coverage: tests/test_config_validation_helpers.py::test_knowledge_reranker_key_still_loads,

@@ -30,8 +30,9 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
+    from mindroom.config.knowledge import KnowledgeRerankerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -345,19 +346,29 @@ async def resolve_agent_knowledge_access_async(
         agent_name,
         base_ids,
         resolved_bases,
-        reranker=await asyncio.to_thread(configured_reranker, config, runtime_paths),
+        reranker=configured_reranker(config, runtime_paths),
     )
 
 
+@dataclass(frozen=True)
+class _DeferredReranker:
+    """The configured reranker, built each time it scores.
+
+    A slow build, such as the first install of the sentence-transformers extra, then counts against the caller's
+    deadline, and a failed build fails that scoring, which keeps the search order.
+    """
+
+    config: KnowledgeRerankerConfig
+    runtime_paths: RuntimePaths
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        reranker = await asyncio.to_thread(create_reranker, self.config, self.runtime_paths)
+        return await reranker.ascore(query, documents)
+
+
 def configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
-    """Return the configured reranker, or None when none is configured or it cannot be built."""
-    if config.reranker is None:
-        return None
-    try:
-        return create_reranker(config.reranker, runtime_paths)
-    except Exception:
-        logger.warning("Reranker unavailable; searches keep their ranking", exc_info=True)
-        return None
+    """Return the configured reranker, built when it scores, or None when none is configured."""
+    return None if config.reranker is None else _DeferredReranker(config.reranker, runtime_paths)
 
 
 def _merge_agent_knowledge_resolutions(

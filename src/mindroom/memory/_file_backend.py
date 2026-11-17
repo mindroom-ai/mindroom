@@ -904,7 +904,7 @@ class FileMemoryBackend:
         search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
         semantic_search = search_config.mode == "semantic" and not editable
-        rerank = semantic_search and search_config.rerank and config.reranker is not None
+        reranker = configured_reranker(config, self.runtime_paths) if semantic_search and search_config.rerank else None
         if semantic_search:
             try:
                 results = await search_semantic_file_memories(
@@ -914,7 +914,7 @@ class FileMemoryBackend:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,
-                    limit=_RECALL_SEARCH_LIMIT if recall or rerank else limit,
+                    limit=_RECALL_SEARCH_LIMIT if recall or reranker else limit,
                     execution_identity=execution_identity,
                 )
             except SemanticFileMemoryIndexUnavailableError as exc:
@@ -937,19 +937,17 @@ class FileMemoryBackend:
         semantic = results is not None
         if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
+        elif recall:
+            threshold = config.reranker.threshold if reranker and config.reranker else None
+            results = await _retrieve_memories(
+                query,
+                results,
+                replace(_RECALL_SELECTION, min_rerank_score=threshold),
+                reranker=reranker,
+                deadline_seconds=_RECALL_RERANK_DEADLINE_SECONDS,
+            )
         else:
-            reranker = await asyncio.to_thread(configured_reranker, config, self.runtime_paths) if rerank else None
-            if recall:
-                threshold = config.reranker.threshold if config.reranker else None
-                results = await _retrieve_memories(
-                    query,
-                    results,
-                    replace(_RECALL_SELECTION, min_rerank_score=threshold),
-                    reranker=reranker,
-                    deadline_seconds=_RECALL_RERANK_DEADLINE_SECONDS,
-                )
-            else:
-                results = await _retrieve_memories(query, results, Selection(limit), reranker=reranker)
+            results = await _retrieve_memories(query, results, Selection(limit), reranker=reranker)
 
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
         if semantic and recall:

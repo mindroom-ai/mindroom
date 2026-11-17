@@ -15,7 +15,9 @@ import httpx
 import pytest
 
 import mindroom.knowledge.rerank as rerank_module
+import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.config.main import Config
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.rerank import create_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -402,3 +404,30 @@ async def test_scores_are_in_unit_interval(
     else:
         assert scores == [0.2, 0.9, -math.inf]
 
+
+@pytest.mark.asyncio
+async def test_a_reranker_that_cannot_be_built_keeps_the_interleaved_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured reranker is built when it scores, so a failed build only falls back to the search order."""
+
+    def failing_build(_config: KnowledgeRerankerConfig, _runtime_paths: object) -> Reranker:
+        msg = "sentence-transformers extra missing"
+        raise ImportError(msg)
+
+    monkeypatch.setattr(knowledge_utils, "create_reranker", failing_build)
+    config = Config(reranker={"provider": "sentence_transformers", "model": "local-model"})
+    reranker = knowledge_utils.configured_reranker(config, test_runtime_paths(tmp_path))
+    assert reranker is not None
+    knowledge = AgentKnowledge(
+        sources=(
+            KnowledgeSource(
+                description=KnowledgeSourceDescription(base_id="base", description="d"),
+                index=_Index(["a", "bbb", "cc"]),
+            ),
+        ),
+        reranker=reranker,
+    )
+
+    assert [hit.content for hit in await knowledge.asearch("q", limit=2)] == ["a", "bbb"]

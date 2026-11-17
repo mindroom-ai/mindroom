@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import tiktoken
 
+import mindroom.knowledge.utils as knowledge_utils
 import mindroom.memory._file_backend as file_backend_module
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
@@ -1135,6 +1137,35 @@ async def test_recall_reranker_failure_matches_hybrid_recall(
     assert reranker.documents
     assert reranked == hybrid
     assert _injected(reranked, [memory for memory, _score in _SHED_MEMORIES]) == [m for m, _ in _SHED_MEMORIES]
+
+
+@pytest.mark.asyncio
+async def test_recall_deadline_covers_building_the_reranker(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reranker whose first build is slow, such as one installing sentence-transformers, cannot hold up recall."""
+    config.memory.search.mode = "semantic"
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    config.memory.search.rerank = True
+    config.reranker = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
+    release = threading.Event()
+    builds: list[str] = []
+
+    def slow_build(reranker_config: KnowledgeRerankerConfig, _runtime_paths: object) -> _StubReranker:
+        builds.append(reranker_config.model)
+        release.wait(timeout=5)
+        return _StubReranker([0.9, 0.4])
+
+    monkeypatch.setattr(knowledge_utils, "create_reranker", slow_build)
+    monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
+    started = time.monotonic()
+    try:
+        reranked = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 2
+    assert builds == ["local-model"]
+    assert reranked == hybrid
 
 
 @pytest.mark.asyncio
