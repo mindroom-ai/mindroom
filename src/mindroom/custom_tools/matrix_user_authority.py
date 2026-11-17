@@ -1,7 +1,8 @@
-"""Whose Matrix account a personal agent may use: its owner's, and only when the owner asks it directly.
+"""Whose Matrix account a personal agent may use: its owner's, when the call runs for the owner outside a contact room.
 
-The person is read from the running call's turn alone, never from an argument, so nothing the model writes can name
-someone else.
+The person is read from the running call alone, never from an argument, so nothing the model writes can name someone
+else. What started the turn does not count: a refused turn could schedule a task or start a background job whose turn
+passes any check on its origin, so only who the call runs for and its room decide.
 """
 
 from __future__ import annotations
@@ -10,18 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.contacts.turns import contact_room
-from mindroom.dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    EDIT_SOURCE_KIND,
-    IMAGE_SOURCE_KIND,
-    INTERACTIVE_SELECTION_SOURCE_KIND,
-    MEDIA_SOURCE_KIND,
-    MESSAGE_SOURCE_KIND,
-    SCHEDULED_SOURCE_KIND,
-    SILENT_SCHEDULE_SOURCE_KIND,
-    VOICE_SOURCE_KIND,
-)
-from mindroom.entity_resolution import current_entity_id
+from mindroom.entity_resolution import MissingManagedEntityAccountError, current_entity_id
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 
@@ -30,22 +20,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = ["MatrixUserActor", "MatrixUserRefused", "matrix_user_actor"]
-
-# The turns the requester started: their own message in any form, their answer to a prompt, and a schedule they set.
-# Every other kind came from a hook, a trigger, or a relay, and a context built without an inbound message has none.
-_DIRECT_SOURCE_KINDS = frozenset(
-    {
-        MESSAGE_SOURCE_KIND,
-        VOICE_SOURCE_KIND,
-        IMAGE_SOURCE_KIND,
-        MEDIA_SOURCE_KIND,
-        EDIT_SOURCE_KIND,
-        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        INTERACTIVE_SELECTION_SOURCE_KIND,
-        SCHEDULED_SOURCE_KIND,
-        SILENT_SCHEDULE_SOURCE_KIND,
-    },
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,16 +38,19 @@ class MatrixUserRefused(Exception):  # noqa: N818 - it names a refusal, not a fa
 
 
 def matrix_user_actor(config: Config, runtime_paths: RuntimePaths) -> MatrixUserActor:
-    """Return who the running call acts as: the owner of its personal agent, when the owner asked it directly.
+    """Return who the running call acts as: the owner of its personal agent, when the call runs for the owner.
 
-    Only the owner's own chat turn with the agent, or the owner's MCP gateway call to it, qualifies.
+    Only a chat turn or an MCP gateway call qualifies, and a chat turn not in one of the agent's contact rooms.
     """
     identity = current_execution_identity()
-    if identity is None or identity.channel not in {"matrix", "mcp"}:
+    context = get_tool_runtime_context()
+    # A matrix identity bound without its turn's context has no room to check.
+    if (
+        identity is None
+        or identity.channel not in {"matrix", "mcp"}
+        or (identity.channel == "matrix" and context is None)
+    ):
         msg = "matrix_user works only in a chat turn or through the MCP gateway."
-        raise MatrixUserRefused(msg)
-    if identity.recipient != identity.agent_name:
-        msg = "matrix_user is not available to a team."
         raise MatrixUserRefused(msg)
     instance = config.personal_agent_instance(identity.agent_name)
     if instance is None:
@@ -87,19 +64,16 @@ def matrix_user_actor(config: Config, runtime_paths: RuntimePaths) -> MatrixUser
     ):
         msg = "Only the agent's owner may use matrix_user."
         raise MatrixUserRefused(msg)
-    context = get_tool_runtime_context()
-    if context is not None and (
-        context.source_kind not in _DIRECT_SOURCE_KINDS
-        or context.acts_for_requester
-        or contact_room(config, runtime_paths, context.room_id, identity.agent_name) is not None
-    ):
-        msg = (
-            "matrix_user works only when the owner asks directly: "
-            "not from a hook, a trigger, a contact, or another agent's message."
-        )
+    if context is not None and contact_room(config, runtime_paths, context.room_id, identity.agent_name) is not None:
+        msg = "matrix_user is not available in a contact conversation."
         raise MatrixUserRefused(msg)
+    try:
+        agent_id = current_entity_id(identity.agent_name, runtime_paths)
+    except MissingManagedEntityAccountError:
+        msg = "matrix_user is not available: this agent has no Matrix account yet."
+        raise MatrixUserRefused(msg) from None
     return MatrixUserActor(
         agent_name=identity.agent_name,
-        agent_user_id=current_entity_id(identity.agent_name, runtime_paths).full_id,
+        agent_user_id=agent_id.full_id,
         person_user_id=instance.user_id,
     )

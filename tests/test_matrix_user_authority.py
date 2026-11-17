@@ -1,4 +1,4 @@
-"""Whose Matrix account a personal agent may use, decided from the current turn alone."""
+"""Whose Matrix account a personal agent may use, decided by who the call runs for and its room, not what started it."""
 
 from __future__ import annotations
 
@@ -13,30 +13,22 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.matrix_user_authority import MatrixUserActor, MatrixUserRefused, matrix_user_actor
 from mindroom.dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    EDIT_SOURCE_KIND,
     EXTERNAL_TRIGGER_SOURCE_KIND,
-    HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
-    IMAGE_SOURCE_KIND,
-    INTERACTIVE_SELECTION_SOURCE_KIND,
-    MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    VOICE_SOURCE_KIND,
 )
 from mindroom.entity_resolution import current_entity_id
-from mindroom.hooks import MessageEnvelope
+from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.state import update_matrix_state
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from mindroom.turns.facts import IngressFacts
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
-from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,18 +49,18 @@ AGENT = "mind_alice"
 # The account recorded for Alice's agent, under a username other than the one MindRoom would generate.
 AGENT_USER_ID = "@recorded_mind_alice:localhost"
 SHARED_AGENT = "helper"
+TEAM = "crew"
 ROOM = "!room:example.com"
 CONTACT_ROOM = "!contact:example.com"
 THE_OWNERS_ACTOR = MatrixUserActor(agent_name=AGENT, agent_user_id=AGENT_USER_ID, person_user_id=OWNER)
 
 NOT_A_TURN = "matrix_user works only in a chat turn or through the MCP gateway."
-NOT_FOR_A_TEAM = "matrix_user is not available to a team."
 NOT_PERSONAL = "matrix_user works only for a personal agent."
 NOT_THE_OWNER = "Only the agent's owner may use matrix_user."
-NOT_DIRECT = (
-    "matrix_user works only when the owner asks directly: not from a hook, a trigger, a contact, "
-    "or another agent's message."
-)
+NOT_IN_A_CONTACT_ROOM = "matrix_user is not available in a contact conversation."
+NO_ACCOUNT = "matrix_user is not available: this agent has no Matrix account yet."
+
+_Channel = Literal["matrix", "mcp", "openai_compat"]
 
 
 @pytest.fixture
@@ -134,7 +126,7 @@ def _turn_context(
     )
 
 
-def _detached_identity(paths: RuntimePaths, channel: Literal["mcp", "openai_compat"]) -> ToolExecutionIdentity:
+def _detached_identity(paths: RuntimePaths, channel: _Channel) -> ToolExecutionIdentity:
     """Return the identity a runner without a Matrix conversation binds for Alice's call to her personal agent."""
     return build_tool_execution_identity(
         channel=channel,
@@ -152,24 +144,19 @@ def _detached_identity(paths: RuntimePaths, channel: Literal["mcp", "openai_comp
     "source_kind",
     [
         MESSAGE_SOURCE_KIND,
-        VOICE_SOURCE_KIND,
-        IMAGE_SOURCE_KIND,
-        MEDIA_SOURCE_KIND,
-        EDIT_SOURCE_KIND,
-        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        INTERACTIVE_SELECTION_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        None,
     ],
 )
-def test_the_owner_asking_directly_is_the_person(setup: tuple[Config, RuntimePaths], source_kind: str) -> None:
-    """The owner's own turn with their personal agent acts as the owner, through the agent's recorded account."""
-    config, paths = setup
-    with tool_runtime_context(_turn_context(config, paths, source_kind=source_kind)):
-        assert matrix_user_actor(config, paths) == THE_OWNERS_ACTOR
-
-
-@pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND])
-def test_the_owners_own_schedule_is_allowed(setup: tuple[Config, RuntimePaths], source_kind: str) -> None:
-    """A schedule the owner set runs as the owner's own request."""
+def test_the_owners_turn_is_allowed_whatever_started_it(
+    setup: tuple[Config, RuntimePaths],
+    source_kind: str | None,
+) -> None:
+    """A turn that runs for the owner acts as the owner, through the agent's recorded account, whatever started it."""
     config, paths = setup
     with tool_runtime_context(_turn_context(config, paths, source_kind=source_kind)):
         assert matrix_user_actor(config, paths) == THE_OWNERS_ACTOR
@@ -179,6 +166,13 @@ def test_the_owners_gateway_call_is_allowed(setup: tuple[Config, RuntimePaths]) 
     """The owner's MCP gateway call has no chat turn, only the identity the gateway authenticated."""
     config, paths = setup
     with detached_tool_scope(_detached_identity(paths, "mcp")):
+        assert matrix_user_actor(config, paths) == THE_OWNERS_ACTOR
+
+
+def test_a_team_run_the_owner_started_is_allowed(setup: tuple[Config, RuntimePaths]) -> None:
+    """The personal agent answering as a member of a team the owner asked still acts as the owner."""
+    config, paths = setup
+    with tool_runtime_context(_turn_context(config, paths, transport_agent_name=TEAM)):
         assert matrix_user_actor(config, paths) == THE_OWNERS_ACTOR
 
 
@@ -200,27 +194,29 @@ def _requested_by_managed_account(entity_name: str) -> _Scope:
     )
 
 
-def _detached(channel: Literal["mcp", "openai_compat"] | None) -> _Scope:
+def _detached(channel: _Channel | None) -> _Scope:
     return lambda _config, paths: detached_tool_scope(None if channel is None else _detached_identity(paths, channel))
+
+
+def _owners_turn_without_a_recorded_account(config: Config, paths: RuntimePaths) -> AbstractContextManager[object]:
+    """The owner's turn with an agent whose Matrix account the runtime has not recorded yet."""
+    update_matrix_state(paths, lambda state: state.accounts.pop(managed_account_key(AGENT)))
+    return tool_runtime_context(_turn_context(config, paths))
 
 
 @pytest.mark.parametrize(
     ("scope", "message"),
     [
+        pytest.param(_detached(None), NOT_A_TURN, id="no-identity"),
+        pytest.param(_detached("openai_compat"), NOT_A_TURN, id="openai-compat"),
+        pytest.param(_detached("matrix"), NOT_A_TURN, id="matrix-identity-without-a-turn"),
         pytest.param(_turn(agent_name=SHARED_AGENT), NOT_PERSONAL, id="shared-agent"),
         pytest.param(_turn(requester_id=STRANGER), NOT_THE_OWNER, id="another-person"),
+        pytest.param(_turn(requester_id=STRANGER, transport_agent_name=TEAM), NOT_THE_OWNER, id="another-persons-team"),
         pytest.param(_requested_by_managed_account(AGENT), NOT_THE_OWNER, id="the-agent-itself"),
         pytest.param(_requested_by_managed_account(ROUTER_AGENT_NAME), NOT_THE_OWNER, id="the-router"),
-        pytest.param(_turn(transport_agent_name="crew"), NOT_FOR_A_TEAM, id="team-member"),
-        pytest.param(_turn(source_kind=HOOK_SOURCE_KIND), NOT_DIRECT, id="hook"),
-        pytest.param(_turn(source_kind=HOOK_DISPATCH_SOURCE_KIND), NOT_DIRECT, id="hook-dispatch"),
-        pytest.param(_turn(source_kind=EXTERNAL_TRIGGER_SOURCE_KIND), NOT_DIRECT, id="external-trigger"),
-        pytest.param(_turn(source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND), NOT_DIRECT, id="relay"),
-        pytest.param(_turn(source_kind=None), NOT_DIRECT, id="no-source-kind"),
-        pytest.param(_turn(acts_for_requester=True), NOT_DIRECT, id="another-agent-wrote-it"),
-        pytest.param(_turn(room_id=CONTACT_ROOM), NOT_DIRECT, id="contact-room"),
-        pytest.param(_detached("openai_compat"), NOT_A_TURN, id="openai-compat"),
-        pytest.param(_detached(None), NOT_A_TURN, id="no-identity"),
+        pytest.param(_turn(room_id=CONTACT_ROOM), NOT_IN_A_CONTACT_ROOM, id="contact-room"),
+        pytest.param(_owners_turn_without_a_recorded_account, NO_ACCOUNT, id="no-recorded-account"),
     ],
 )
 def test_refusals(
@@ -228,51 +224,8 @@ def test_refusals(
     scope: _Scope,
     message: str,
 ) -> None:
-    """Anything but the owner asking their own personal agent directly is refused, saying why."""
+    """Anyone but the owner, a call outside a chat turn or the gateway, and a contact room are refused, saying why."""
     config, paths = setup
     with scope(config, paths), pytest.raises(MatrixUserRefused) as refused:
         matrix_user_actor(config, paths)
     assert str(refused.value) == message
-
-
-def _envelope(target: MessageTarget, facts: IngressFacts) -> MessageEnvelope:
-    return MessageEnvelope(
-        source_event_id="$event",
-        target=target,
-        body="hello",
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name="general",
-        origin=facts.origin,
-    )
-
-
-def test_the_turn_context_says_whether_an_agent_wrote_its_message_for_the_requester(tmp_path: Path) -> None:
-    """A turn's context carries whether another managed account wrote its message for the person it runs as."""
-    bot = _bot(tmp_path)
-    target = MessageTarget.resolve("!room:localhost", None, "$event")
-    own = IngressFacts(
-        physical_sender="@user:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
-        lane_requester_id="@user:localhost",
-    )
-    written_for = IngressFacts(
-        physical_sender="@mindroom_other:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
-        lane_requester_id="@mindroom_other:localhost",
-        acting_requester_id="@user:localhost",
-        sender_entity_name="other",
-    )
-
-    def built(facts: IngressFacts) -> ToolRuntimeContext:
-        context = bot.tool_runtime_support.build_context(
-            target,
-            user_id=facts.run_requester_id,
-            source_envelope=_envelope(target, facts),
-        )
-        assert context is not None
-        assert context.requester_id == "@user:localhost"
-        return context
-
-    assert built(own).acts_for_requester is False
-    assert built(written_for).acts_for_requester is True
