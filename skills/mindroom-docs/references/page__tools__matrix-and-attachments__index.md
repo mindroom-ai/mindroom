@@ -17,7 +17,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Use Matrix as a personal agent's owner: read their rooms and DMs, messages and threads, search, files, a room's members, and people, mark rooms read, and, with the owner's confirmation each time, send, react, edit, delete, and join, leave, invite, or create rooms as them.
+- [`matrix_user`] - Use Matrix as a personal agent's owner: read their rooms and DMs, messages and threads, search, files, a room's members, and people, mark rooms read, and send, react, edit, delete, and join, leave, invite, or create rooms as them, each write approved by the owner on its card or within an `!auto_approve` window they opened.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -322,7 +322,7 @@ It acts only for the agent's owner, in a chat with the agent or, for reads, thro
 
 Messages in encrypted rooms are not readable: they show as `[encrypted, not readable]`, and search does not find them.
 
-`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachments=None, name=None)` acts as the owner, and each call shows the owner an approval card first, whatever the [approval rules](https://docs.mindroom.chat/tool-approval/) say, so the MCP gateway does not offer it.
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachments=None, name=None)` acts as the owner, and each call is approved by the owner on its card, or within an [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window they opened themselves, whatever the [approval rules](https://docs.mindroom.chat/tool-approval/) say, so the MCP gateway does not offer it.
 
 | Action | Does |
 |--------|------|

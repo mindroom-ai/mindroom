@@ -282,16 +282,26 @@ def test_the_write_function_asks_for_confirmation_and_the_read_function_does_not
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"action": "send", "message": "Hi"},
+        {"action": "invite", "room_id": ROOM},
+        {"action": "create_room", "name": "Trip"},
+    ],
+    ids=["send", "invite", "create_room"],
+)
 async def test_the_write_function_takes_no_user_to_act_as(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    arguments: dict[str, str],
 ) -> None:
     """``user_id`` is only whom to message or invite: naming the owner, as if to act as them, is an error."""
     function = toolkit_offers(owner_toolkit(config, paths), "matrix_user_write")
 
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths).matrix_user_write(action="send", user_id=OWNER, message="Hi")
+        result = await owner_toolkit(config, paths).matrix_user_write(user_id=OWNER, **arguments)
 
     assert list(function.parameters["properties"]) == [
         "action",
@@ -307,7 +317,7 @@ async def test_the_write_function_takes_no_user_to_act_as(
     assert json.loads(result) == {
         "status": "error",
         "tool": "matrix_user",
-        "action": "send",
+        "action": arguments["action"],
         "message": "user_id is whom to message or invite, never your owner.",
     }
     assert homeserver.requests == []

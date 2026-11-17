@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict, deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
+import aiohttp
 import pytest
 from structlog.testing import capture_logs
 
@@ -14,6 +17,7 @@ from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
 from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.guarded_rooms import guarded_room
+from mindroom.matrix.user_masquerade import create_user_masquerade_client
 from tests.matrix_user_helpers import (
     OWNER,
     ROOM,
@@ -31,6 +35,8 @@ from tests.matrix_user_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -171,19 +177,26 @@ async def test_a_long_message_uploads_its_full_text_with_the_marker(
     homeserver: FakeHomeserver,
     agent_id: str,
 ) -> None:
-    """History reads a long message from its uploaded full text, so that text is marked as the agent's too."""
+    """History reads a long message or edit from its uploaded full text, so that text is marked as the agent's too."""
     homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/full"}
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
     text = "word " * 12_000
 
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message=text)
+    sent = await _write(config, paths, homeserver, action="send", room_id=ROOM, message=text)
+    edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message=text)
 
-    assert result == _ok("send", room_id=ROOM, event_id="$sent")
-    [upload] = homeserver.requests_to(UPLOAD_PATH)
-    assert upload.uploaded is not None
-    full = json.loads(upload.uploaded)
+    assert sent == _ok("send", room_id=ROOM, event_id="$sent")
+    assert edited == _ok("edit", room_id=ROOM, event_id="$sent")
+    [message_upload, edit_upload] = homeserver.requests_to(UPLOAD_PATH)
+    assert message_upload.uploaded is not None
+    full = json.loads(message_upload.uploaded)
     assert full["body"] == text.strip()
     assert full[AGENT_AUTHORED_KEY] == agent_id
-    [preview] = _sent(homeserver)
+    assert edit_upload.uploaded is not None
+    full_edit = json.loads(edit_upload.uploaded)
+    assert full_edit["m.new_content"]["body"] == text.strip()
+    assert full_edit[AGENT_AUTHORED_KEY] == full_edit["m.new_content"][AGENT_AUTHORED_KEY] == agent_id
+    [preview, _] = _sent(homeserver)
     assert len(preview["body"]) < len(text)
     assert preview[AGENT_AUTHORED_KEY] == agent_id
 
@@ -344,7 +357,7 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """A DM that could not be recorded sends nothing, says which room it is, and the next send to them uses it."""
+    """A DM that could not be recorded sends nothing and says which room to send to; the next send to them uses it."""
     homeserver.answers.update(
         {
             # The person has no DMs yet; the first record fails, the second works.
@@ -365,13 +378,36 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     assert failed == _error(
         "send",
         f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
-        "(Matrix answered 500 M_UNKNOWN: Database unavailable). Nothing was sent; sending again uses this room.",
+        "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
+        f"Nothing was sent; to send there, use room_id {NEW_DM}.",
     )
     assert retried == _ok("send", room_id=NEW_DM, event_id="$dm")
     assert len(homeserver.requests_to(CREATE_PATH)) == 1
     [_, recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
     assert recorded.body == {BOB: [NEW_DM]}
     assert len(_sent(homeserver, NEW_DM)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_dm_that_is_encrypted_names_the_room_it_made(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A homeserver that encrypts private rooms makes the new DM encrypted: nothing is sent, and the refusal names it."""
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: {},
+            CREATE_PATH: {"room_id": NEW_DM},
+            f"{CLIENT}/rooms/{NEW_DM}/state/m.room.encryption": MEGOLM,
+        },
+    )
+
+    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    assert result == _error("send", f"Made the DM {NEW_DM} with {BOB}. {ENCRYPTED}")
+    assert [request.path for request in _changes(homeserver)] == [CREATE_PATH, DIRECT_PATH]
+    assert _sent(homeserver, NEW_DM) == []
 
 
 @pytest.mark.asyncio
@@ -442,7 +478,10 @@ async def test_a_joined_room_is_still_checked_for_encryption_before_a_send(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["send", "edit"])
-@pytest.mark.parametrize("text", ["!help", "  !admin users list", "\\!admin x", "\\\\!x"])
+@pytest.mark.parametrize(
+    "text",
+    ["!help", "  !admin users list", "\\!admin x", "\\\\!x", "\ufeff!x", "\u200b!x", "\u2060\\\\!x"],
+)
 async def test_a_command_like_message_is_refused(
     config: Config,
     paths: RuntimePaths,
@@ -450,7 +489,10 @@ async def test_a_command_like_message_is_refused(
     action: str,
     text: str,
 ) -> None:
-    """A bridge or the homeserver would run such a message as the person's command, so it is never sent."""
+    """A bridge or the homeserver would run such a message as the person's command, so it is never sent.
+
+    Invisible characters before the command do not hide it: a recipient may drop them first.
+    """
     result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message=text)
 
     assert result == _error(action, COMMAND_LIKE)
@@ -529,6 +571,72 @@ async def test_react_edit_redact_send_their_events(
     assert edit[AGENT_AUTHORED_KEY] == edit["m.new_content"][AGENT_AUTHORED_KEY] == agent_id
     [redaction] = [request for request in _changes(homeserver) if "/redact/" in request.path]
     assert redaction.body == {"reason": "Sent by mistake", AGENT_AUTHORED_KEY: agent_id}
+
+
+@pytest.mark.asyncio
+async def test_every_built_content_carries_the_marker_before_the_client_stamps_it(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    agent_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each event the toolkit builds is marked as the agent's before the client marks it again on the wire."""
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Remember the milk")
+    record = register_local_attachment(paths.storage_root, notes, kind="file", mime_type="text/plain", room_id=ROOM)
+    assert record is not None
+    homeserver.answers.update(
+        {
+            UPLOAD_PATH: {"content_uri": "mxc://example.com/notes"},
+            OWN_EVENT_PATH: text_message("$own", "Helo", sender=OWNER),
+            f"{ROOM_PATH}/redact/$own/*": {"event_id": "$redaction"},
+        },
+    )
+    # What each event-creating request hands the client, by the event's type or as a redaction.
+    handed: list[tuple[str, dict[str, object]]] = []
+
+    def create(*args: Any, **kwargs: Any) -> nio.AsyncClient:  # noqa: ANN401
+        client = homeserver.serve(create_user_masquerade_client(*args, **kwargs))
+        send = client.send
+
+        async def handed_send(method: str, path: str, data: object = None, *rest: Any) -> Any:  # noqa: ANN401
+            event = re.search(r"/rooms/[^/]+/(?:send/([^/]+)|(redact))/", unquote(path))
+            if event is not None:
+                handed.append((event.group(1) or event.group(2), json.loads(str(data))))
+            return await send(method, path, data, *rest)
+
+        monkeypatch.setattr(client, "send", handed_send)
+        return client
+
+    monkeypatch.setattr("mindroom.custom_tools.matrix_user.create_user_masquerade_client", create)
+    toolkit = owner_toolkit(config, paths)
+    with owner_turn(config, paths, attachment_ids=(record.attachment_id,)):
+        results = [
+            json.loads(await toolkit.matrix_user_write(room_id=ROOM, **arguments))
+            for arguments in [
+                {"action": "send", "message": "Here it is", "attachments": [record.attachment_id]},
+                {"action": "react", "event_id": "$own", "emoji": "👍"},
+                {"action": "edit", "event_id": "$own", "message": "Hello"},
+                {"action": "redact", "event_id": "$own"},
+            ]
+        ]
+
+    assert [result["status"] for result in results] == ["ok"] * 4
+    assert [kind for kind, _ in handed] == [
+        "m.room.message",
+        "m.room.message",
+        "m.reaction",
+        "m.room.message",
+        "redact",
+    ]
+    text, file, reaction, edit, redaction = [content for _, content in handed]
+    assert file["msgtype"] == "m.file"
+    new_content = edit["m.new_content"]
+    assert isinstance(new_content, dict)
+    for content in (text, file, reaction, edit, new_content, redaction):
+        assert content[AGENT_AUTHORED_KEY] == agent_id
 
 
 @pytest.mark.asyncio
@@ -740,3 +848,24 @@ async def test_a_failed_attachment_names_what_was_already_sent(
         "send",
         f"Attachment {record.attachment_id} could not be sent; already sent into {ROOM}: $sent.",
     )
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_send_says_it_may_have_been_sent(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A send whose answer was lost may be in the room, and sending it again would post it twice as the owner."""
+    # The connection dropped while the answer was read, after the request had gone out.
+    homeserver.answers[f"{_send_path()}*"] = aiohttp.ClientPayloadError("Response payload is not completed")
+    unconfirmed = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Lunch?")
+    homeserver.answers[f"{_send_path()}*"] = matrix_error(403, "M_FORBIDDEN", "You cannot post here")
+    refused = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Lunch?")
+
+    assert unconfirmed == _error(
+        "send",
+        "The homeserver did not confirm the message. It may have been sent: read the room before sending again.",
+    )
+    assert refused["message"].startswith("Nothing was sent: ")
+    assert len(_sent(homeserver)) == 2

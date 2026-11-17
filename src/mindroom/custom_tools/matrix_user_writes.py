@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -34,6 +35,7 @@ from mindroom.custom_tools.matrix_user_reads import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
+    MatrixDeliveryFailureKind,
     build_edit_event_content,
     send_file_message,
     send_message_outcome,
@@ -77,6 +79,7 @@ _COMMAND_LIKE = 'A message sent as the person cannot start with "!" or "\\": it 
 _ENCRYPTED = "The room is encrypted, and nothing is sent as the person into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
 _CONTACT_ROOM = "Nothing is written as the person into a contact room."
+_UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
 def _given(text: str | None) -> bool:
@@ -97,7 +100,17 @@ def _user_problem(user_id: str | None) -> str | None:
 
 
 def _command_problem(text: str | None) -> str | None:
-    return _COMMAND_LIKE if text is not None and text.lstrip().startswith(("!", "\\")) else None
+    # A recipient may drop leading whitespace and invisible format characters (Unicode category Cf, such as U+FEFF and
+    # U+200B) before it looks for a command, so the first character that is neither decides.
+    first = next(
+        (
+            character
+            for character in (text or "")
+            if not character.isspace() and unicodedata.category(character) != "Cf"
+        ),
+        "",
+    )
+    return _COMMAND_LIKE if first in {"!", "\\"} else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +253,12 @@ async def _write(
         return await _send(client, actor, turn, write, written, files, marker)
     if write.action in {"react", "edit", "redact"}:
         return await _event_write(client, actor, turn, write, written, marker)
+    if write.action == "create_room":
+        # A plain request: the homeserver's default power levels, as a room the person makes in their own client has.
+        invite = {"invite": [write.user_id]} if write.user_id is not None else {}
+        body = {"name": write.name, "preset": "private_chat", **invite}
+        written.room_id = _created_room(await matrix_json(client, "POST", "/createRoom", body))
+        return {"room_id": written.room_id}
     room_id, room = str(write.room_id), quote(str(write.room_id), safe="")
     if write.action == "join":
         joined = await matrix_json(client, "POST", f"/join/{room}", {})
@@ -248,14 +267,9 @@ async def _write(
     if write.action == "leave":
         await matrix_json(client, "POST", f"/rooms/{room}/leave", {})
         return {"room_id": room_id}
-    if write.action == "invite":
-        await matrix_json(client, "POST", f"/rooms/{room}/invite", {"user_id": write.user_id})
-        return {"room_id": room_id}
-    # A plain request: the homeserver's default power levels, as a room the person makes in their own client has.
-    invite = {"invite": [write.user_id]} if write.user_id is not None else {}
-    created = await matrix_json(client, "POST", "/createRoom", {"name": write.name, "preset": "private_chat", **invite})
-    written.room_id = _created_room(created)
-    return {"room_id": written.room_id}
+    # The only action left: invite.
+    await matrix_json(client, "POST", f"/rooms/{room}/invite", {"user_id": write.user_id})
+    return {"room_id": room_id}
 
 
 def _turn_files(
@@ -297,6 +311,9 @@ async def _require_unencrypted(client: nio.AsyncClient, room_id: str) -> None:
 def _delivered(outcome: MatrixSendOutcome) -> str:
     if isinstance(outcome, DeliveredMatrixEvent):
         return outcome.event_id
+    if outcome.kind is MatrixDeliveryFailureKind.SEND_EXCEPTION:
+        # The request may have reached the homeserver, and a retry is a new transaction: a second message.
+        raise MatrixRequestError(_UNCONFIRMED)
     msg = f"Nothing was sent: {outcome.detail.rstrip('.')}."
     raise MatrixRequestError(msg)
 
@@ -311,11 +328,21 @@ async def _send(
     marker: dict[str, str],
 ) -> dict[str, object]:
     """Send the text, formatted as the agent's own messages are, then each file, into the room or the person's DM."""
-    room_id = write.room_id or await _direct_room(client, actor.person_user_id, str(write.user_id))
+    if write.room_id is not None:
+        room_id, made = write.room_id, False
+    else:
+        room_id, made = await _direct_room(client, actor.person_user_id, str(write.user_id))
     written.room_id = room_id
     if send_refused(room_id):
         raise MatrixRequestError(_CONTACT_ROOM)
-    await _require_unencrypted(client, room_id)
+    try:
+        await _require_unencrypted(client, room_id)
+    except MatrixRequestError as refused:
+        if not made:
+            raise
+        # The DM made for this send stays, with them invited, so the refusal names it.
+        msg = f"{_made_dm(room_id, str(write.user_id))}. {refused}"
+        raise MatrixRequestError(msg) from None
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
     if write.message is not None and write.message.strip():
         content = format_message_with_mentions(
@@ -432,11 +459,15 @@ async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: st
     return newest if isinstance(newest, str) else thread_id
 
 
-async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> str:
-    """Return the person's DM with ``them``, making one, and adding it to the person's `m.direct`, when there is none.
+def _made_dm(room_id: str, them: str) -> str:
+    return f"Made the DM {room_id} with {them}"
+
+
+async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple[str, bool]:
+    """Return the person's DM with ``them``, and whether it was made now, as one is when they have none.
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
-    two of them; one made earlier that could not be added there comes first.
+    two of them; one made earlier that could not be added there comes first. A room made now is added there.
     """
     direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
     direct = await optional_json(client, direct_path) or {}
@@ -448,7 +479,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> str:
         if await _only_the_two(client, room_id, person, them):
             if room_id not in listed:
                 await _record_direct_room(client, direct_path, {**direct, them: [*listed, room_id]}, person, them)
-            return room_id
+            return room_id, False
     created = await matrix_json(
         client,
         "POST",
@@ -458,7 +489,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> str:
     room_id = _created_room(created)
     _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
     await _record_direct_room(client, direct_path, {**direct, them: [*listed, room_id]}, person, them)
-    return room_id
+    return room_id, True
 
 
 async def _record_direct_room(
@@ -474,8 +505,8 @@ async def _record_direct_room(
         await matrix_json(client, "PUT", direct_path, direct)
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
         msg = (
-            f"Made the DM {room_id} with {them}, but could not record it as one ({_failure(error).rstrip('.')}). "
-            "Nothing was sent; sending again uses this room."
+            f"{_made_dm(room_id, them)}, but could not record it as one ({_failure(error).rstrip('.')}). "
+            f"Nothing was sent; to send there, use room_id {room_id}."
         )
         raise MatrixRequestError(msg) from None
     _UNRECORDED_DIRECT_ROOMS.pop((person, them), None)

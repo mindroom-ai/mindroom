@@ -531,11 +531,11 @@ def _reactions_note(message: dict[str, Any], senders_by_key: dict[str, set[str]]
     return f"[reactions: {' '.join(f'{name}{count}' for name, count in shown)}]" if shown else None
 
 
-def _thread_note(message: dict[str, Any]) -> str | None:
-    """Return the thread a reply in one is in, or how many replies a thread's root has."""
+def _thread_note(message: dict[str, Any], *, thread_page: bool) -> str | None:
+    """Return the thread a reply in one is in, unless the page is that thread's, or how many replies a root has."""
     relation = _relation(message)
     if relation.get("rel_type") == _THREAD and (root := _cut(_text(relation.get("event_id")), _MAX_NAME_CHARACTERS)):
-        return f"[in thread {root}]"
+        return None if thread_page else f"[in thread {root}]"
     replies = _count(_bundled(message, _THREAD).get("count"))
     return f"[thread: {replies} {'reply' if replies == 1 else 'replies'}]" if replies else None
 
@@ -546,11 +546,12 @@ def _message_columns(
     reactions: dict[str, set[str]],
     *,
     edited: str = "[edited]",
+    thread_page: bool = False,
 ) -> tuple[str, str, str, str]:
     """Return a message's ID, minute, sender, and text, with its latest edit and its reactions folded in.
 
     The edits are the page's and the one the homeserver bundles; the latest that may replace the message wins, and
-    ``edited`` says so.
+    ``edited`` says so. On a ``thread_page``, a page of one thread, a reply does not name its thread.
     """
     latest = max(
         (edit for edit in [*edits, _bundled(message, _EDIT)] if _replaces(edit, message)),
@@ -564,7 +565,7 @@ def _message_columns(
         edited if latest else None,
         file_note,
         _reactions_note(message, reactions),
-        _thread_note(message),
+        _thread_note(message, thread_page=thread_page),
     ]
     return (
         str(message.get("event_id")),
@@ -574,8 +575,11 @@ def _message_columns(
     )
 
 
-def _message_lines(events: list[dict[str, Any]]) -> list[str]:
-    """Return a line for each message among ``events``, in their order, with the edits and reactions among them."""
+def _message_lines(events: list[dict[str, Any]], *, thread_page: bool = False) -> list[str]:
+    """Return a line for each message among ``events``, in their order, with the edits and reactions among them.
+
+    On a ``thread_page``, a page of one thread, a reply does not name its thread.
+    """
     events = [event for event in events if not _redacted(event)]
     edits: dict[str, list[dict[str, Any]]] = {}
     reactions: dict[str, dict[str, set[str]]] = {}
@@ -589,7 +593,14 @@ def _message_lines(events: list[dict[str, Any]]) -> list[str]:
         elif relation.get("rel_type") == _REACTION and isinstance(key, str) and isinstance(sender, str):
             reactions.setdefault(target, {}).setdefault(key, set()).add(sender)
     return [
-        _line(*_message_columns(event, edits.get(event["event_id"], []), reactions.get(event["event_id"], {})))
+        _line(
+            *_message_columns(
+                event,
+                edits.get(event["event_id"], []),
+                reactions.get(event["event_id"], {}),
+                thread_page=thread_page,
+            ),
+        )
         for event in events
         if _is_message(event)
     ]
@@ -646,7 +657,8 @@ async def _thread(
     root = [] if page_token else [await matrix_json(client, "GET", f"/rooms/{room}/event/{thread}")]
     parameters = _page_query({"dir": "b", "limit": count}, page_token)
     replies = await matrix_json(client, "GET", f"/rooms/{room}/relations/{thread}/m.thread?{parameters}", version="v1")
-    return _messages_page(_message_lines([*root, *_objects(replies, "chunk")[::-1]]), replies.get("next_batch"))
+    lines = _message_lines([*root, *_objects(replies, "chunk")[::-1]], thread_page=True)
+    return _messages_page(lines, replies.get("next_batch"))
 
 
 async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int) -> dict[str, object]:

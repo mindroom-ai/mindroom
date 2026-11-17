@@ -704,7 +704,10 @@ async def test_a_page_token_continues_into_older_history(client: nio.AsyncClient
 
 @pytest.mark.asyncio
 async def test_a_thread_is_its_root_and_newest_replies(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
-    """A thread shows its root, then its newest replies oldest first; the next page continues with older replies only."""
+    """A thread shows its root, then its newest replies oldest first; the next page continues with older replies only.
+
+    The replies do not each name the thread asked for.
+    """
     relations_path = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
     homeserver.answers.update(
         {
@@ -736,12 +739,12 @@ async def test_a_thread_is_its_root_and_newest_replies(client: nio.AsyncClient, 
     assert newest == {
         "messages": [
             message_line("$root", "Lunch? [thread: 3 replies]", sender=CAROL),
-            message_line("$r2", "Pizza [in thread $root]", minute=2),
-            message_line("$r3", "Tacos [in thread $root]", minute=3),
+            message_line("$r2", "Pizza", minute=2),
+            message_line("$r3", "Tacos", minute=3),
         ],
         "next_page_token": "n1",
     }
-    assert older == {"messages": [message_line("$r1", "Yes [in thread $root]", minute=1)]}
+    assert older == {"messages": [message_line("$r1", "Yes", minute=1)]}
     assert homeserver.paths() == [f"{ROOM_PATH}/event/$root", relations_path, relations_path]
     first, second = homeserver.requests_to(relations_path)
     assert (first.query["dir"], first.query["limit"], "from" in first.query) == (["b"], ["2"], False)
