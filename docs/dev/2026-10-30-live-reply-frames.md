@@ -28,7 +28,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
   Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
-- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
+- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
   Measured on Codex on 2026-11-01, the first part came about 5 s after reasoning began for GPT-6.1 Sol and GPT-6 Luna, but only at the end of 16 s of reasoning for GPT-6 Astra.

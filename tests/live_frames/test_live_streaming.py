@@ -304,6 +304,37 @@ async def test_empty_reasoning_deltas_open_no_segment(tmp_path: Path, frames: _F
 
 
 @pytest.mark.asyncio
+async def test_reasoning_after_two_tool_calls_anchors_after_the_second(tmp_path: Path, frames: _Frames) -> None:
+    """A segment that begins after two completed tool calls counts both of them."""
+    records, edits = _records(), _Edits()
+    first = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"})
+    second = ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={"query": "nio"})
+    stream = _stream(
+        ToolStarted(first),
+        0.03,
+        ToolCompleted(
+            ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"}, result="ok"),
+        ),
+        0.03,
+        ToolStarted(second),
+        0.03,
+        ToolCompleted(
+            ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={"query": "nio"}, result="ok"),
+        ),
+        0.03,
+        ReasoningDelta("Both searches agree."),
+        0.03,
+        "Answer.",
+        0.03,
+    )
+    await _run(_config(tmp_path), stream, records, edits, placeholder_event_id="$placeholder")
+
+    (segment,) = _terminal(records)["io.mindroom.reasoning"]["segments"]
+    assert (segment["start"], segment["after_tool"]) == (0, 2)
+    assert _live_segments(frames.sent) == [{"start": 0, "after_tool": 2}]
+
+
+@pytest.mark.asyncio
 async def test_a_reasoning_segment_open_at_the_end_gets_its_duration(tmp_path: Path, frames: _Frames) -> None:
     """A stream that ends while reasoning closes that segment before the terminal update records it."""
     records, edits = _records(), _Edits()
