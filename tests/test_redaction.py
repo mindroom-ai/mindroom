@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -1127,6 +1129,9 @@ def test_a_long_text_redaction_left_unchanged_is_not_scanned_again(monkeypatch: 
     assert scanned == [prose, secret, secret]
     # What was left unchanged holds only for the length bound and the mode it was scanned with.
     assert redact_sensitive_text(prose, max_length=40).endswith("... [truncated]")
+    beyond_bounded_scan = prose * 200
+    assert redact_sensitive_data(beyond_bounded_scan) == beyond_bounded_scan
+    assert redact_sensitive_data(beyond_bounded_scan, max_string_length=100_000).endswith("... [truncated]")
     kebab_name = f"{prose}Install sk-learn first."
     assert redact_config_text(kebab_name) == kebab_name
     assert redact_sensitive_text(kebab_name) == f"{prose}Install {REDACTED} first."
@@ -1147,6 +1152,22 @@ def test_a_str_subclass_never_marks_a_text_unchanged(monkeypatch: pytest.MonkeyP
     redact_sensitive_data(EqualToAnything(text))
 
     assert "hunter2" not in str(redact_sensitive_data(text))
+
+
+def test_a_text_over_its_length_bound_is_not_hashed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A text cut to its bound never comes back unchanged, so redaction reads only the start of it, as before."""
+    hashed: list[int] = []
+
+    def recording_sha256(data: bytes) -> object:
+        hashed.append(len(data))
+        return hashlib.sha256(data)
+
+    monkeypatch.setattr(redaction, "hashlib", SimpleNamespace(sha256=recording_sha256))
+    text = "ordinary words, nothing secret. " * 1000
+
+    assert redact_sensitive_text(text, max_length=2048).endswith("... [truncated]")
+    assert redact_sensitive_text(text[:2000], max_length=2048) == text[:2000]
+    assert hashed == [2000]
 
 
 def test_the_unchanged_text_cache_keeps_the_latest_texts(monkeypatch: pytest.MonkeyPatch) -> None:
