@@ -8,7 +8,9 @@ import itertools
 import os
 import shlex
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +18,7 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    _schedule_process_tree_idle,
     check_command,
     kill_all_records,
     kill_command,
@@ -386,11 +389,39 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
     tmp_path: Path,
 ) -> None:
     """A busy build an agent starts must not take the CPU from the process that runs MindRoom."""
-    child = shlex.join([sys.executable, "-c", "import os; print(os.nice(0))"])
+    report = "import os, sys; print(os.nice(0), sys.platform != 'linux' or os.sched_getscheduler(0) == os.SCHED_IDLE)"
+    child = shlex.join([sys.executable, "-c", report])
 
     message = await _run(registry, ["/bin/sh", "-c", f"sleep 0.2; {child}"], tmp_path)
 
-    assert message == "19"
+    assert message == "19 True"
+
+
+def _process_group_threads(pgid: int) -> list[int]:
+    threads = []
+    for stat in Path("/proc").glob("[0-9]*/task/[0-9]*/stat"):
+        with contextlib.suppress(OSError):
+            if int(stat.read_text().rsplit(")", 1)[1].split()[2]) == pgid:
+                threads.append(int(stat.parent.name))
+    return threads
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+def test_threads_and_processes_a_command_started_before_its_policy_was_set_move_to_the_idle_policy() -> None:
+    """A busy event loop lets a command fork and start threads before MindRoom sets its policy."""
+    start_thread = "import threading, time; threading.Thread(target=time.sleep, args=(30,)).start(); time.sleep(30)"
+    threaded = shlex.join([sys.executable, "-c", start_thread])
+    # The leader, a subshell, its sleep (a grandchild), and the two threads of the Python process.
+    process = subprocess.Popen(["/bin/sh", "-c", f"(sleep 30; true) | {threaded}"], start_new_session=True)
+    try:
+        while len(threads := _process_group_threads(process.pid)) < 5:
+            time.sleep(0.01)
+        _schedule_process_tree_idle(process.pid)
+
+        assert {os.sched_getscheduler(thread) for thread in threads} == {os.SCHED_IDLE}
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 @pytest.mark.asyncio
