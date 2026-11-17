@@ -848,7 +848,7 @@ def secret_from_env_or_file(runtime_paths: RuntimePaths, value_env: str, file_en
         return value or None
     try:
         file_value = read_secret_file(file_path)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         msg = f"{file_env} is not readable: {file_path}"
         raise ValueError(msg) from exc
     if not file_value:

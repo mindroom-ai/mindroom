@@ -496,3 +496,16 @@ def test_an_unreadable_or_empty_token_file_is_refused(tmp_path: Path, contents: 
 
     with pytest.raises(ValueError, match=message):
         user_appservice_token(runtime_paths)
+
+
+def test_a_token_file_that_is_not_utf8_is_not_readable(tmp_path: Path) -> None:
+    """A token file that is not UTF-8 is refused as not readable, naming the variable and the file, not its bytes."""
+    token_file = tmp_path / "user-appservice-token"
+    token_file.write_bytes(b"secret\xff\xfe")
+    runtime_paths = _runtime_paths(tmp_path, MATRIX_USER_APPSERVICE_TOKEN_FILE=str(token_file))
+
+    with pytest.raises(ValueError, match="not readable") as raised:
+        user_appservice_token(runtime_paths)
+
+    assert str(raised.value) == f"MATRIX_USER_APPSERVICE_TOKEN_FILE is not readable: {token_file}"
+    assert all(fragment not in str(raised.value) for fragment in ("secret", "0xff", "0xfe", "\\xff", "\\xfe"))
