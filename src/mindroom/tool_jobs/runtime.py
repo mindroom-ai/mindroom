@@ -392,6 +392,10 @@ class ToolJobRuntime:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
 
+    def awaited_job_ids(self) -> frozenset[str]:
+        """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""
+        return frozenset(job_id for job_id, entry in self._entries.items() if entry.claim is not None)
+
     def _add_entry(self, entry: _Entry) -> None:
         """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job

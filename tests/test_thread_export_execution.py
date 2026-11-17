@@ -433,6 +433,81 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pass_indexes_the_threads_it_wrote_without_parsing_their_files(tmp_path: Path) -> None:
+    """A pass parses only thread files it did not write, and its index matches a rebuild that parses every file."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    rooms = _export_rooms(runtime_paths, "lobby")
+    thread_ids = ["$older:localhost", "$quiet:localhost", "$active:localhost"]
+    histories = {
+        thread_id: [
+            ResolvedVisibleMessage.synthetic(
+                sender=f"@{name}:localhost",
+                body=f"{name} opens",
+                timestamp=1_700_000_000_000 + index,
+                event_id=thread_id,
+            ),
+        ]
+        for index, (thread_id, name) in enumerate(zip(thread_ids, ["alice", "bob", "carol"], strict=True))
+    }
+
+    async def fetch_history(*_args: object, thread_id: str, **_kwargs: object) -> object:
+        return histories[thread_id]
+
+    async def export(enumerated: list[str], *, truncated: bool) -> ThreadExportStats:
+        with (
+            patch(
+                "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+                new=AsyncMock(return_value=(enumerated, truncated)),
+            ),
+            patch(
+                "mindroom.thread_export.execution.fetch_projected_thread_history",
+                new=AsyncMock(side_effect=fetch_history),
+            ),
+        ):
+            return await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                output_dir=output_dir,
+                rooms=rooms,
+            )
+
+    await export(thread_ids, truncated=False)
+    histories["$active:localhost"].append(
+        ResolvedVisibleMessage.synthetic(
+            sender="@dave:localhost",
+            body="dave replies",
+            timestamp=1_700_000_000_100,
+            event_id="$reply:localhost",
+            thread_id="$active:localhost",
+        ),
+    )
+    with patch.object(
+        thread_export_storage,
+        "_thread_index_entry",
+        wraps=thread_export_storage._thread_index_entry,
+    ) as parse:
+        stats = await export(thread_ids[1:], truncated=True)
+
+    assert stats.threads_unchanged == 1
+    assert [call.args[0] for call in parse.call_args_list] == [f"{quote('$older:localhost', safe='')}.yaml"]
+    index_path = output_dir / "lobby" / "index.json"
+    from_pass = index_path.read_bytes()
+    index_path.unlink()
+    write_room_index(output_dir, rooms[0])
+    assert index_path.read_bytes() == from_pass
+    index = json.loads(from_pass)
+    assert [(entry["thread_id"], entry["participants"]) for entry in index["threads"]] == [
+        ("$active:localhost", ["@carol:localhost", "@dave:localhost"]),
+        ("$quiet:localhost", ["@bob:localhost"]),
+        ("$older:localhost", ["@alice:localhost"]),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(tmp_path: Path) -> None:
     """An unchanged pass must remove an index entry left stale by an interrupted prior pass."""
     config = _config(tmp_path)
@@ -892,14 +967,14 @@ async def test_empty_complete_enumeration_repairs_index_after_committed_yaml_add
             ],
         }
 
-    assert write_thread_payload(output_dir, room, indexed_thread_id, payload(indexed_thread_id)) is True
+    assert write_thread_payload(output_dir, room, indexed_thread_id, payload(indexed_thread_id)).replaced is True
     index_path = output_dir / "lobby" / "index.json"
     if existing_index:
         write_room_index(output_dir, room)
         assert json.loads(index_path.read_text(encoding="utf-8"))["thread_count"] == 1
     else:
         assert not index_path.exists()
-    assert write_thread_payload(output_dir, room, committed_thread_id, payload(committed_thread_id)) is True
+    assert write_thread_payload(output_dir, room, committed_thread_id, payload(committed_thread_id)).replaced is True
 
     with patch(
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",

@@ -39,7 +39,7 @@ def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) 
         )
     return (
         f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
-        "Use `!room_model <name>` to switch this room, or `!room_model reset` to remove the override."
+        "Use `/room_model <name>` to switch this room, or `/room_model reset` to remove the override."
     )
 
 

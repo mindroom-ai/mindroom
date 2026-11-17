@@ -774,7 +774,7 @@ class TestCommandHandling:
 
         send_response.assert_called_once()
         assert send_response.await_args.kwargs["response_text"] == (
-            "❌ Unknown command. Try !help for available commands."
+            "❌ Unknown command. Try `/help` (or `!help`) for available commands."
         )
 
     @pytest.mark.asyncio

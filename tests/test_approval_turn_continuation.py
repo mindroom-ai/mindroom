@@ -26,6 +26,7 @@ from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
+from mindroom.delegation.cost import SubagentCost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.mid_turn_compaction import without_run_usage
@@ -572,6 +573,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         progress=None,
         system_enrichment_items=(),
         quiet=False,
+        subagent_cost=SubagentCost(),
     )
     assert isinstance(result, CompletedApprovalRun)
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
@@ -612,6 +614,7 @@ async def _settle_scripted(
         progress=None,
         system_enrichment_items=(),
         quiet=quiet,
+        subagent_cost=SubagentCost(),
     )
 
 
@@ -1444,6 +1447,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         progress=progress,
         system_enrichment_items=(),
         quiet=False,
+        subagent_cost=SubagentCost(),
     )
 
     assert isinstance(result, PausedAttempt)

@@ -28,7 +28,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
   Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
-- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
+- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
   Measured on Codex on 2026-11-01, the first part came about 5 s after reasoning began for GPT-6.1 Sol and GPT-6 Luna, but only at the end of 16 s of reasoning for GPT-6 Astra.
@@ -58,6 +58,7 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Send: `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/io.mindroom.live/{sid}.{seq}`; the homeserver keeps at most 256 events, 1 MiB, and 30 s per room, allows 30 events per second per sender and room, and refuses `m.*` types, non-members, and bodies over 64 KiB.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
+  A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 

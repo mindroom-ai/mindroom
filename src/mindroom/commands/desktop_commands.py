@@ -122,8 +122,8 @@ def _status_response(scope: DesktopCommandScope) -> str:
     if state.status is DesktopConfigurationStatus.READY:
         return f"✅ Desktop is configured for you and agent `{scope.agent_name}`."
     if state.status is DesktopConfigurationStatus.INVALID:
-        return f"⚠️ Desktop configuration is invalid: {state.error} Run `!desktop setup` to replace it."
-    return f"Desktop setup is required for you and agent `{scope.agent_name}`. Run `!desktop setup`."
+        return f"⚠️ Desktop configuration is invalid: {state.error} Run `/desktop setup` to replace it."
+    return f"Desktop setup is required for you and agent `{scope.agent_name}`. Run `/desktop setup`."
 
 
 def _run_command(scope: DesktopCommandScope, controller: DesktopControllerIdentity) -> str:
@@ -186,7 +186,7 @@ def _disconnect_response(scope: DesktopCommandScope, *, confirmed: bool) -> str:
     if not confirmed:
         return (
             f"This removes your Desktop target for agent `{scope.agent_name}`. "
-            "Run `!desktop disconnect confirm` to continue."
+            "Run `/desktop disconnect confirm` to continue."
         )
     _validate_desktop_scope(scope)
     delete_desktop_credentials(
@@ -212,8 +212,8 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
             response = _disconnect_response(scope, confirmed=len(parts) == 2 and parts[1].lower() == "confirm")
         else:
             response = (
-                "Usage: `!desktop setup`, `!desktop status`, `!desktop confirm <code> <verification>`, "
-                "`!desktop rotate`, or `!desktop disconnect [confirm]`."
+                "Usage: `/desktop setup`, `/desktop status`, `/desktop confirm <code> <verification>`, "
+                "`/desktop rotate`, or `/desktop disconnect [confirm]`."
             )
     except sqlite3.Error:
         return "❌ Desktop setup is temporarily unavailable. Please try again."

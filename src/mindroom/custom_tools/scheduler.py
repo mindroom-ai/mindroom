@@ -57,7 +57,7 @@ class SchedulerTools(Toolkit):
     ) -> str:
         """Schedule a task using natural language.
 
-        This uses the exact same scheduling backend as the `!schedule` command.
+        This uses the exact same scheduling backend as the `/schedule` command.
 
         Args:
             request: The scheduling request, e.g. "in 5 minutes remind me to check logs"

@@ -16,13 +16,19 @@ from structlog.testing import capture_logs
 
 import mindroom.live_frames.publisher as live_publisher_module
 import mindroom.streaming as streaming_module
+from mindroom import interactive, reply_scope
 from mindroom import reply_lifecycle as rl
-from mindroom import reply_scope
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import SKIP_MENTIONS_KEY, STREAM_STATUS_KEY
+from mindroom.constants import (
+    SKIP_MENTIONS_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
@@ -46,6 +52,7 @@ from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    make_ingress_facts,
     message_origin,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -1092,6 +1099,18 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
+async def test_a_selection_acknowledgement_is_pending_until_its_answer_completes_it(tmp_path: Path) -> None:
+    """Clients show the thread as working from the acknowledgement on, as they do for a Thinking placeholder."""
+    bot = await _streaming_bot(tmp_path)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    assert _sent_statuses(bot) == [STREAM_STATUS_PENDING]
+
+    request = replace(_plain_request(_target()), existing_event_id=ack_event_id, interactive_span_id=span_id)
+    assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == Owned()
+
+    assert _sent_statuses(bot)[-1] == STREAM_STATUS_COMPLETED
+
+
 async def test_a_selection_acknowledgement_wakes_no_agent_it_mentions(tmp_path: Path) -> None:
     """The acknowledgement echoes the member's selected value, so agents ignore any mention in it."""
     bot = await _streaming_bot(tmp_path)
@@ -1124,6 +1143,8 @@ async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp
     assert reply.owed_write is None
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
     assert _sent_bodies(bot)[-1] == "[general] ⚠️ Error: lookup failed"
+    # The error edit ends the acknowledgement's pending state.
+    assert _sent_statuses(bot) == [STREAM_STATUS_PENDING, STREAM_STATUS_ERROR]
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
@@ -1228,6 +1249,38 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
     bot.client.room_redact.assert_awaited_once()
     assert ack_event_id in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
     assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+
+
+async def test_a_selection_no_reply_took_does_not_leave_its_acknowledgement_processing(tmp_path: Path) -> None:
+    """A selection whose requester lost access before its answer ran removes its pending acknowledgement."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    selections = bot._interactive_selections
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question",
+        question_text="Proceed?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="yes",
+        thread_id=None,
+    )
+    room = MagicMock()
+    room.room_id = "!room:localhost"
+
+    with patch.object(type(runner.locked), "request_remains_authorized", AsyncMock(return_value=False)):
+        handed_off = await selections._execute_admitted_interactive_selection(
+            room,
+            selection=selection,
+            facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
+            source_event_id="$event",
+            response_target=selections._interactive_selection_target(room.room_id, selection),
+        )
+
+    assert handed_off is False
+    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+    reply = await _reply(bot)
+    assert reply.terminal
+    bot.client.room_redact.assert_awaited_once()
 
 
 async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: Path) -> None:

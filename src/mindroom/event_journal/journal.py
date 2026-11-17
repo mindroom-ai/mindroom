@@ -1188,10 +1188,23 @@ def _pending_rows(
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     room_clause = "" if room_id is None else " AND events.room_id = ?"
     room_params: tuple[object, ...] = () if room_id is None else (room_id,)
-    continuation_joins = f"""
-        LEFT JOIN ({approval_continuations.HELD_SOURCES})
+    # The rows of `LEFT JOIN (HELD_SOURCES)`, as two LEFT JOINs: SQLite cannot
+    # flatten a join on the right of a LEFT JOIN, so that form builds every
+    # principal's held sources, and an index over them, on each page with a
+    # pending row. The EXISTS keeps out a pending source no continuation holds.
+    continuation_joins = """
+        LEFT JOIN reply_span_sources AS held_source
           ON held_source.principal_id = events.principal_id
          AND held_source.event_id = events.event_id
+         AND held_source.role = 'pending'
+         AND EXISTS (
+             SELECT 1 FROM approval_continuations AS holder
+             WHERE holder.principal_id = held_source.principal_id
+               AND holder.span_id = held_source.span_id
+         )
+        LEFT JOIN approval_continuations AS continuations
+          ON continuations.principal_id = held_source.principal_id
+         AND continuations.span_id = held_source.span_id
         LEFT JOIN reply_spans AS claim_span
           ON claim_span.principal_id = continuations.principal_id
          AND claim_span.span_id = continuations.claim_span_id

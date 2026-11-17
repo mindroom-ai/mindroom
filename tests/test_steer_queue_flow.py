@@ -604,12 +604,12 @@ async def test_hidden_tool_only_steer_has_no_failed_or_stuck_placeholder(
     await _assert_settled(turn, _STEER)
 
 
-async def test_hidden_tool_only_steer_whose_stream_failed_keeps_its_failure(
+async def test_hidden_tool_only_steer_whose_progress_edits_failed_still_removes_its_placeholder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tools: type[_Tools],
 ) -> None:
-    """A Steer does not pass a reply whose Matrix writes failed off as finished: it fails with its note, as before."""
+    """Refused progress edits do not fail a reply (#4067), so a Steer still removes one that had nothing to show."""
     turn = await _flow(
         tmp_path,
         monkeypatch,
@@ -617,17 +617,16 @@ async def test_hidden_tool_only_steer_whose_stream_failed_keeps_its_failure(
         show_tool_calls=False,
     )
     notices, tools.during = _arrival(turn, mode=MidTurnMode.STEER)
-    # Its progress edit fails whether it lands before or after the Steer arrives: which comes first is a race.
-    turn.homeserver.fail_streaming = 1
+    # Every progress edit fails, whether it lands before or after the Steer arrives: which comes first is a race.
+    turn.homeserver.refuse_streaming_text = "Thinking..."
 
     await turn.runner.generate_response(_first_request())
 
     assert notices[0].stopped_reply
     old_reply = await _reply(turn, _SOURCE)
-    assert old_reply.state is rl.ReplyState.FAILED
-    assert old_reply.event_id not in [call.args[1] for call in turn.bot.client.room_redact.await_args_list]
-    assert turn.homeserver.statuses[-1] == "error"
-    assert "Failed to edit streaming message" in turn.homeserver.bodies[-1]
+    assert old_reply.state is rl.ReplyState.GONE
+    assert old_reply.event_id in [call.args[1] for call in turn.bot.client.room_redact.await_args_list]
+    assert "error" not in turn.homeserver.statuses
 
 
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
