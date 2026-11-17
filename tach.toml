@@ -1225,7 +1225,6 @@ visibility = [
     "mindroom.history.conversation_text",
     "mindroom.history.request_messages",
     "mindroom.history.run_checkpoint",
-    "mindroom.delegation.recovery",
 ]
 
 [[modules]]
@@ -8347,7 +8346,6 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
     "mindroom.history.run_checkpoint",
-    "mindroom.history.run_visibility",
     "mindroom.history.session_context",
     "mindroom.history.types",
     "mindroom.llm",

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from itertools import dropwhile, islice, takewhile
+from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_recovered_run, replays_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
 from mindroom.llm.messages import is_queued_notice_message
 
@@ -64,16 +64,13 @@ def scope_history_messages(
     conversation only, so turn context neither takes a slot in its window nor opens it without its prompt.
     Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
     Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
-    item except the newest viewed images. The recovered runs at the end of the history (``history.run_checkpoint``)
-    replay whole after what the limits keep: they are the turn the request continues, which only its answer ends.
+    item except the newest viewed images.
     """
     replayed = [run for run in runs if replays_in_scope(run, scope)]
-    # The recovered runs nothing follows are the turn this request continues, not earlier history: no limit trims them.
-    earlier = len(replayed) - sum(1 for _ in takewhile(is_recovered_run, reversed(replayed)))
-    continued = replayable_messages(replayed[earlier:])
-    replayed = replayed[:earlier]
     if num_history_runs is not None:
-        replayed = replayed[-num_history_runs:] if num_history_runs > 0 else []
+        if num_history_runs <= 0:
+            return []
+        replayed = replayed[-num_history_runs:]
     selected = replayable_messages(replayed)
     if num_history_messages is not None:
         conversation = [message for message in selected if message.add_to_agent_memory]
@@ -82,7 +79,6 @@ def scope_history_messages(
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
-    history += [_history_copy(message) for message in continued]
     return project_history_media_for_replay(history)
 
 
@@ -94,20 +90,18 @@ def replayed_history(
 ) -> tuple[list[Message], ScopeSummary | None]:
     """Return the stored history a request of ``scope`` replays under ``plan``, and the scope summary it follows.
 
-    A request without a scope or session sends its own messages only; one whose plan replays nothing still replays
-    the recovered runs it continues (``scope_history_messages``), without the summary.
+    A request without a scope or session, or whose plan replays nothing, sends its own messages only.
     """
-    if session is None or scope is None:
+    if session is None or scope is None or plan is None or not plan.add_history_to_context:
         return [], None
-    replays = plan is not None and plan.add_history_to_context
     history = scope_history_messages(
         session.runs,
         scope=scope,
-        num_history_runs=plan.num_history_runs if plan is not None and replays else 0,
-        num_history_messages=plan.num_history_messages if plan is not None and replays else None,
+        num_history_runs=plan.num_history_runs,
+        num_history_messages=plan.num_history_messages,
         max_tool_calls_from_history=settings.max_tool_calls_from_history,
     )
-    return history, session.summary if replays else None
+    return history, session.summary
 
 
 def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:

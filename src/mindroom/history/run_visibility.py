@@ -12,18 +12,11 @@ if TYPE_CHECKING:
 
 # A paused, stopped, or failed run is not part of the conversation the model sees.
 NON_VISIBLE_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
-# Set in the metadata of a run recovery finished (``history.run_checkpoint``), which did not end on its own.
-RECOVERED_RUN_KEY = "mindroom_recovered_run"
 
 
 def is_model_history_visible_run(run: AnyRunRecord) -> bool:
     """Return whether one stored run replays as model history: a finished top-level run."""
     return run.parent_run_id is None and run.status not in NON_VISIBLE_RUN_STATUSES
-
-
-def is_recovered_run(run: AnyRunRecord) -> bool:
-    """Return whether recovery finished ``run``, which was cut short and did not complete on its own."""
-    return bool((run.metadata or {}).get(RECOVERED_RUN_KEY))
 
 
 def run_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
