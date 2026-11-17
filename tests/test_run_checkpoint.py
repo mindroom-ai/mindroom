@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import shutil
 import sqlite3
@@ -13,12 +14,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import loop_hooks
+from mindroom import reply_lifecycle as rl
 from mindroom.ai import ai_response
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.run_checkpoint import (
     INTERRUPTED_CALL_RESULT,
     is_recovered_run,
@@ -32,8 +35,10 @@ from mindroom.llm.request_identity import request_prefixes
 from mindroom.llm.runs import RunStatus
 from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
+from mindroom.reply_turn.enrichment import interrupted_attempt_model_prompt
 from mindroom.response_turn import build_matrix_run_metadata
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, runtime_paths_for
@@ -73,10 +78,23 @@ def _config(storage: Path) -> Config:
     return config
 
 
-async def _respond(config: Config, prompt: str = "Do the work", event_id: str = _EVENT) -> None:
+async def _respond(
+    config: Config,
+    prompt: str = "Do the work",
+    event_id: str = _EVENT,
+    *,
+    model_prompt: str | None = None,
+    scheduled_history_budget: ScheduledHistoryBudget | None = None,
+) -> None:
     ctx = replace(
-        make_turn_context("general", session_id=_SESSION, matrix_run_metadata=build_matrix_run_metadata(event_id, [])),
+        make_turn_context(
+            "general",
+            session_id=_SESSION,
+            matrix_run_metadata=build_matrix_run_metadata(event_id, []),
+            scheduled_history_budget=scheduled_history_budget,
+        ),
         prompt=prompt,
+        model_prompt=model_prompt,
     )
     await ai_response(ctx, runtime_paths_for(config), config)
 
@@ -223,6 +241,64 @@ async def test_a_recovered_turn_replays_the_bytes_the_crashed_run_sent(
     }
     assert after[1]["content"][0]["content"] == INTERRUPTED_CALL_RESULT
     assert prompt in after[1]["content"][-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_s_prompt_lists_the_recovered_calls_the_agent_s_history_limit_leaves_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovered run is history like any run, so the replay's prompt lists its calls whatever history keeps."""
+    await _crash_mid_call(tmp_path, monkeypatch, _crashing_turns())
+    crashed = _config(tmp_path / "crashed")
+    crashed.agents["general"].max_tool_calls_from_history = 0
+    assert _recover(crashed)
+    # The account a replay's prompt gets from the reply's records, which hold each call as a preview.
+    account = interrupted_attempt_model_prompt(
+        "Do the work",
+        span_kind=rl.SpanKind.REPLAY,
+        unfinished=None,
+        recorded=(
+            ToolTraceEntry(type="tool_call_completed", tool_name="read_file", result_preview="contents of a"),
+            ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", args_preview="cmd=sleep 60"),
+        ),
+    )
+    model = ScriptedModel([answer("Finished")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    await _respond(crashed, model_prompt=account)
+
+    [request] = model.requests
+    assert not [message for message in request.messages if message.tool_calls or message.role == "tool"]
+    prompt = html.unescape(str(request.messages[-1].content))
+    assert 'The `read_file` tool finished with output preview "contents of a".' in prompt
+    assert 'The `run_shell_command` tool was still running with input preview "cmd=sleep 60"' in prompt
+    assert "their effects stand: do not call a finished tool with side effects again" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_turn_without_history_replays_nothing_of_another_turn_s_recovered_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovered run follows the limits of history, so a turn that replays none sends none of it."""
+    await _crash_mid_call(tmp_path, monkeypatch, _crashing_turns("the-other-task"))
+    crashed = _config(tmp_path / "crashed")
+    assert _recover(crashed)
+    model = ScriptedModel([answer("Scheduled answer")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    await _respond(
+        crashed,
+        prompt="An independent scheduled task",
+        event_id="$scheduled",
+        scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$scheduled"),
+    )
+
+    [request] = model.requests
+    assert [message.role for message in request.messages if message.role != "system"] == ["user"]
+    assert not any(message.from_history for message in request.messages)
+    assert "the-other-task" not in str([message.content for message in request.messages])
 
 
 @pytest.mark.asyncio
