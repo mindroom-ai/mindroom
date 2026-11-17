@@ -399,10 +399,10 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
 
 def _process_group_threads(pgid: int) -> list[int]:
     threads = []
-    for stat in Path("/proc").glob("[0-9]*/task/[0-9]*/stat"):
+    for thread in Path("/proc").glob("[0-9]*/task/[0-9]*"):
         with contextlib.suppress(OSError):
-            if int(stat.read_text().rsplit(")", 1)[1].split()[2]) == pgid:
-                threads.append(int(stat.parent.name))
+            if os.getpgid(int(thread.parent.parent.name)) == pgid:
+                threads.append(int(thread.name))
     return threads
 
 
@@ -414,7 +414,9 @@ def test_threads_and_processes_a_command_started_before_its_policy_was_set_move_
     # The leader, a subshell, its sleep (a grandchild), and the two threads of the Python process.
     process = subprocess.Popen(["/bin/sh", "-c", f"(sleep 30; true) | {threaded}"], start_new_session=True)
     try:
+        deadline = time.monotonic() + 10
         while len(threads := _process_group_threads(process.pid)) < 5:
+            assert time.monotonic() < deadline, f"the command started only these threads: {threads}"
             time.sleep(0.01)
         _schedule_process_tree_idle(process.pid)
 
