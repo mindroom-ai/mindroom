@@ -549,8 +549,10 @@ def _said(message: dict[str, Any], content: dict[str, Any]) -> tuple[str | None,
         return "[encrypted, not readable]", None
     body = content.get("body")
     if _media_kind(content) is None:
-        if isinstance(body, str) and "m.in_reply_to" in _relation(message):
-            # A reply's body starts with the message it answers, quoted, which would repeat that message's text.
+        relation = _relation(message)
+        if isinstance(body, str) and "m.in_reply_to" in relation and relation.get("is_falling_back") is not True:
+            # A reply's body starts with the message it answers, quoted, which would repeat that message's text. A
+            # thread message's `m.in_reply_to` is only the thread's fallback, and its body quotes nothing.
             body = strip_matrix_rich_reply_fallback(body)
         return _cut(_text(body)), None
     body, name = _text(body), _file_name(content)

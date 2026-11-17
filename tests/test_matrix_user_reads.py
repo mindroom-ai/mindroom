@@ -727,6 +727,46 @@ async def test_a_replys_quoted_original_is_not_repeated(client: nio.AsyncClient,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("relation", "text"),
+    [
+        (
+            {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": "$root"},
+            },
+            "> quoted line my comment [in thread $root]",
+        ),
+        ({"m.in_reply_to": {"event_id": "$root"}}, "my comment"),
+        (
+            {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": "$a"},
+            },
+            "my comment [in thread $root]",
+        ),
+    ],
+)
+async def test_only_a_real_reply_loses_its_quoted_prefix(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    relation: dict[str, object],
+    text: str,
+) -> None:
+    """A thread message's fallback reply is no reply: its own leading quote stays; a real reply's quote goes."""
+    content = {"msgtype": "m.text", "body": "> quoted line\n\nmy comment", "m.relates_to": relation}
+    homeserver.answers[MESSAGES_PATH] = {"chunk": [room_event("$said", "m.room.message", content)]}
+
+    result = await _messages(client)
+
+    assert result["messages"] == [message_line("$said", text)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("malformed", "lines"),
     [
         (
