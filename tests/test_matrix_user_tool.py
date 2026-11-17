@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
+TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -235,6 +236,7 @@ async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimeP
         ({"action": "search"}, "search needs query: the words to look for."),
         ({"action": "search", "query": " "}, "search needs query: the words to look for."),
         ({"action": "download", "room_id": ROOM}, "download needs event_id: the ID of the message with the file."),
+        ({"action": "download"}, f"download {ROOM_NEEDED}"),
     ],
 )
 async def test_each_action_names_the_arguments_it_is_missing(
@@ -253,6 +255,27 @@ async def test_each_action_names_the_arguments_it_is_missing(
         "tool": "matrix_user",
         "action": arguments["action"],
         "message": message,
+    }
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_argument_is_named_before_the_caller_or_the_token_is_checked(
+    tmp_path: Path,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A call that lacks an argument says so first, whoever makes it and whether or not the runtime has a token."""
+    paths = owner_runtime_paths(tmp_path)
+    config = owner_config(paths)
+
+    with owner_turn(config, paths, STRANGER), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_read(action="room")
+
+    assert json.loads(result) == {
+        "status": "error",
+        "tool": "matrix_user",
+        "action": "room",
+        "message": f"room {ROOM_NEEDED}",
     }
     assert homeserver.requests == []
 
@@ -324,6 +347,56 @@ async def test_a_room_named_by_alias_is_resolved_for_reads(
     assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
     assert first.path == f"{room_path}/{first_request}"
     assert all(ALIAS not in request.path for request in homeserver.requests[1:])
+
+
+@pytest.mark.asyncio
+async def test_a_search_in_a_room_named_by_alias_searches_the_room_it_names(
+    config: Config,
+    paths: RuntimePaths,
+) -> None:
+    """The owner's client looks the alias up first, and the search is then of the room it names."""
+    search_path = "/_matrix/client/v3/search"
+    homeserver = FakeHomeserver(
+        {
+            DIRECTORY_PATH: {"room_id": ALIASED_ROOM, "servers": ["example.com"]},
+            search_path: {"search_categories": {"room_events": {"results": []}}},
+        },
+    )
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_read(action="search", query="budget", room_id=ALIAS)
+
+    assert json.loads(result)["status"] == "ok"
+    lookup, search = homeserver.requests
+    assert (lookup.method, lookup.path) == ("GET", DIRECTORY_PATH)
+    assert (search.method, search.path) == ("POST", search_path)
+    assert search.body["search_categories"]["room_events"]["filter"]["rooms"] == [ALIASED_ROOM]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "requested"),
+    [
+        ({"action": "rooms"}, [SYNC_PATH]),
+        ({"action": "people", "query": STRANGER}, [f"/_matrix/client/v3/profile/{STRANGER}"]),
+    ],
+    ids=["rooms", "people"],
+)
+async def test_an_action_that_takes_no_room_looks_none_up(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+    requested: list[str],
+) -> None:
+    """`rooms` and `people` take no room, so a `room_id` sent with one, even one of no room, is not looked up."""
+    homeserver.answers[f"/_matrix/client/v3/profile/{STRANGER}"] = {"displayname": "Bob"}
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_read(**arguments, room_id="#gone:example.com")
+
+    assert json.loads(result)["status"] == "ok"
+    assert homeserver.paths() == requested
 
 
 @pytest.mark.asyncio
@@ -529,12 +602,26 @@ async def test_a_downloaded_file_is_an_attachment_of_the_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"room_id": ROOM, "event_id": "$file"}, TURN_NEEDED),
+        ({"room_id": ROOM}, TURN_NEEDED),
+        ({"event_id": "$file"}, f"download {ROOM_NEEDED}"),
+    ],
+    ids=["nothing-missing", "no-event", "no-room"],
+)
 async def test_download_without_a_turn_is_refused_before_any_request(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+    message: str,
 ) -> None:
-    """A call without a chat turn, such as the MCP gateway's, has no conversation to hand a file to, so fetches none."""
+    """A call without a chat turn, such as the MCP gateway's, has no conversation to hand a file to, so fetches none.
+
+    It says so before it names a missing event, and only after a missing room.
+    """
     owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
 
     with homeserver.serving_the_toolkit():
@@ -542,7 +629,7 @@ async def test_download_without_a_turn_is_refused_before_any_request(
             resolve_connection_agent(owner, AGENT),
             toolkit="matrix_user",
             function="matrix_user_read",
-            arguments={"action": "download", "room_id": ROOM, "event_id": "$file"},
+            arguments={"action": "download", **arguments},
         )
 
     assert "error" not in result
@@ -550,7 +637,7 @@ async def test_download_without_a_turn_is_refused_before_any_request(
         "status": "error",
         "tool": "matrix_user",
         "action": "download",
-        "message": "download needs a chat turn: the file is handed to the conversation it was asked in.",
+        "message": message,
     }
     assert homeserver.requests == []
 
