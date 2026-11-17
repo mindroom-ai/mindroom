@@ -209,7 +209,7 @@ async def test_deadline_keeps_hybrid_selection() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scores", [[0.9, 0.5], [0.1, 0.9, 0.5, 0.3], [0.1, math.nan, 0.5], [0.1, math.inf, 0.5]])
 async def test_wrong_count_or_non_finite_score_is_a_failure(scores: list[float]) -> None:
-    """Scores that do not give each candidate one finite value are not trusted: the hybrid selection is kept."""
+    """A wrong count, NaN or +inf is not trusted: the hybrid selection is kept."""
     kept = await retrieve("query", _GAP_CANDIDATES, _GAP_SELECTION, reranker=_Reranker(scores))
 
     assert kept == list(_GAP_CANDIDATES[:2])
@@ -224,3 +224,15 @@ async def test_min_rerank_score_selects_nothing_below_threshold() -> None:
     assert _items(kept) == ["c", "a"]
 
     assert await retrieve("query", _GAP_CANDIDATES, selection, reranker=_Reranker([0.79, 0.5, 0.1])) == []
+
+
+@pytest.mark.asyncio
+async def test_unjudged_candidate_ranks_last_and_never_passes_the_threshold() -> None:
+    """``-inf`` marks a candidate the reranker could not judge: the others are reranked and it comes last."""
+    reranker = _Reranker([-math.inf, 0.9, -2.0])
+
+    kept = await retrieve("query", _GAP_CANDIDATES, Selection(limit=3), reranker=reranker)
+    assert _items(kept) == ["b", "c", "a"]
+
+    threshold = Selection(limit=3, min_rerank_score=-math.inf)
+    assert _items(await retrieve("query", _GAP_CANDIDATES, threshold, reranker=reranker)) == ["b", "c"]

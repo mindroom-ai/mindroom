@@ -131,6 +131,45 @@ async def test_cohere_reranker_sends_cohere_requests(tmp_path: Path, monkeypatch
     }
 
 
+@pytest.mark.asyncio
+async def test_partial_cohere_response_reranks_the_returned_hits_and_puts_the_missing_one_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rerank response that omits a document still orders the others, raw negative logits included; it comes last."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={"results": [{"index": 2, "relevance_score": -1.5}, {"index": 1, "relevance_score": -3.0}]},
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        rerank_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    reranker = create_reranker(
+        KnowledgeRerankerConfig(provider="cohere", model="m", url="https://rerank.test/v1/rerank", api_key="k"),
+        test_runtime_paths(tmp_path),
+    )
+    knowledge = AgentKnowledge(
+        sources=(
+            KnowledgeSource(
+                description=KnowledgeSourceDescription(base_id="base", description="d"),
+                index=_Index(["a", "b", "c"]),
+            ),
+        ),
+        reranker=reranker,
+    )
+
+    hits = await knowledge.asearch("q", limit=3)
+
+    assert [hit.content for hit in hits] == ["c", "b", "a"]
+
+
 def test_cohere_reranker_reads_its_credential_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without an explicit key, the reranker reads the configured credential service, defaulting to ``cohere``."""
     services: list[str] = []

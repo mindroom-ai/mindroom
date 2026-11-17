@@ -77,15 +77,16 @@ async def retrieve[T](
 ) -> list[Candidate[T]]:
     """Return the leading candidates ``selection`` keeps, in the reranker's order when one is set.
 
-    A reranker that raises, passes ``deadline_seconds``, or does not return one finite score per candidate leaves the
+    A reranker that raises, passes ``deadline_seconds``, or does not return one score per candidate, each finite or
+    ``-inf`` (its mark for a candidate it could not judge, which ranks last and passes no threshold), leaves the
     candidates in their given order, selected by their hybrid scores.
     """
     if reranker is None or not candidates:
         return _select(candidates, selection, reranked=False)
     try:
         scores = await asyncio.wait_for(reranker.ascore(query, [c.text for c in candidates]), deadline_seconds)
-        if len(scores) != len(candidates) or not all(math.isfinite(score) for score in scores):
-            msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or a non-finite one"
+        if len(scores) != len(candidates) or any(math.isnan(score) or score == math.inf for score in scores):
+            msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or NaN or +inf"
             raise ValueError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
     except Exception:
         logger.warning("Reranking failed; keeping search order", exc_info=True)
@@ -100,7 +101,8 @@ def _select[T](ranked: Sequence[Candidate[T]], selection: Selection, *, reranked
     tokens = 0
     for candidate in ranked[: max(selection.limit, 0)]:
         if reranked:
-            if selection.min_rerank_score is not None and candidate.score < selection.min_rerank_score:
+            threshold = selection.min_rerank_score
+            if threshold is not None and (candidate.score < threshold or candidate.score == -math.inf):
                 break
         elif (
             selection.hybrid_score_gap is not None
