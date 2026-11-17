@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, quote
 
 import nio
+from yarl import URL
 
 from mindroom.constants import AGENT_AUTHORED_KEY, RuntimePaths, runtime_matrix_homeserver, secret_from_env_or_file
 from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, maybe_ssl_context
@@ -27,7 +28,8 @@ __all__ = ["create_user_masquerade_client", "user_appservice_token"]
 
 # The requests that create a room event: `send/<type>` and `redact/<event>`, each with or without a transaction ID.
 # Homeservers route a path with an empty segment too.
-_EVENT_CREATING_PATH = re.compile(r"/_matrix/client/[^/]*/rooms/[^/]*/(?:send|redact)/[^/]*(?:/[^/]*)?")
+# Matched at the end of the requested path, which begins with the homeserver URL's own path, if it has one.
+_EVENT_CREATING_PATH = re.compile(r"/_matrix/client/[^/]*/rooms/[^/]*/(?:send|redact)/[^/]*(?:/[^/]*)?\Z")
 
 
 def user_appservice_token(runtime_paths: RuntimePaths) -> str | None:
@@ -39,9 +41,9 @@ def user_appservice_token(runtime_paths: RuntimePaths) -> str | None:
     )
 
 
-def _names_a_user(query: str) -> bool:
-    """Return whether a query already has a `user_id` parameter, splitting on `;` too, as some servers do."""
-    return any(name == "user_id" for name, _ in parse_qsl(query.replace(";", "&"), keep_blank_values=True))
+def _named_user_count(query: str) -> int:
+    """Return how many `user_id` parameters a query has, splitting on `;` too, as some servers do."""
+    return sum(name == "user_id" for name, _ in parse_qsl(query.replace(";", "&"), keep_blank_values=True))
 
 
 def _stamped_event_body(data: object, agent_user_id: str) -> str:
@@ -88,17 +90,26 @@ class _UserMasqueradeClient(MindRoomAsyncClient):
         trace_context: object = None,
         timeout: float | None = None,  # noqa: ASYNC109 - nio's request timeout parameter
     ) -> ClientResponse:
-        """Send one request as the person, sending nothing when the path names a user or an event cannot be marked."""
-        if "#" in path:
+        """Send one request as the person; refuse one that leaves the homeserver, names a user, or is unmarkable."""
+        person_path = f"{path}{'&' if '?' in path else '?'}{self._person_query}"
+        # The parent requests `homeserver + path` as yarl parses it, which deletes tabs and line breaks, decodes
+        # unreserved characters, and resolves dot segments, so every check reads that URL, never the path string.
+        url = URL(self.homeserver + person_path)
+        homeserver = URL(self.homeserver)
+        if (url.scheme, url.raw_authority) != (homeserver.scheme, homeserver.raw_authority):
+            # A path not starting with `/` extends the authority: another host, a port, or user info.
+            msg = "A Matrix request must go to the homeserver"
+            raise ValueError(msg)
+        if url.raw_fragment:
+            # The person's parameter follows any `#` in the path, so it would never reach the homeserver.
             msg = "A Matrix request path must not have a fragment"
             raise ValueError(msg)
-        route, _, query = path.partition("?")
-        if _names_a_user(query):
+        if _named_user_count(url.raw_query_string) != 1:
+            # The one allowed is the person's: a homeserver may act as the first user a request names.
             msg = "The Matrix request already names a user"
             raise ValueError(msg)
-        if method.upper() != "GET" and _EVENT_CREATING_PATH.fullmatch(route):
+        if method.upper() != "GET" and _EVENT_CREATING_PATH.search(url.raw_path):
             data = _stamped_event_body(data, self._agent_user_id)
-        person_path = f"{path}{'&' if '?' in path else '?'}{self._person_query}"
         return await super().send(method, person_path, data, headers, trace_context, timeout)
 
 

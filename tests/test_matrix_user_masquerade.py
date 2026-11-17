@@ -74,9 +74,9 @@ def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
     )
 
 
-def _client(tmp_path: Path, body: dict[str, object]) -> tuple[nio.AsyncClient, _RecordingSession]:
+def _client(tmp_path: Path, body: dict[str, object], **env: str) -> tuple[nio.AsyncClient, _RecordingSession]:
     client = create_user_masquerade_client(
-        _runtime_paths(tmp_path),
+        _runtime_paths(tmp_path, **env),
         token=APPSERVICE_TOKEN,
         person_user_id=PERSON,
         agent_user_id=AGENT,
@@ -160,6 +160,38 @@ async def test_a_path_that_already_names_a_user_is_refused(tmp_path: Path, query
         await client.send("GET", f"/_matrix/client/v3/joined_rooms?{query}")
 
     assert session.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("character", ["\t", "\r", "\n"], ids=["tab", "carriage-return", "line-feed"])
+async def test_a_user_hidden_behind_a_control_character_is_refused(tmp_path: Path, character: str) -> None:
+    """The HTTP library deletes tabs and line breaks from a URL, so a key holding one still names a user."""
+    client, session = _client(tmp_path, {"joined_rooms": []})
+
+    with pytest.raises(ValueError, match="already names a user"):
+        await client.send("GET", f"/_matrix/client/v3/joined_rooms?user{character}_id=%40bob%3Aexample.com")
+
+    assert session.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "@evil.example/_matrix/client/v3/joined_rooms",
+        ".evil.example/_matrix/client/v3/joined_rooms",
+    ],
+    ids=["user-info", "host-suffix"],
+)
+async def test_a_path_that_leaves_the_homeserver_is_refused(tmp_path: Path, path: str) -> None:
+    """The URL is the homeserver followed by the path, so a path not starting with `/` can name another host."""
+    client, session = _client(tmp_path, {"joined_rooms": []})
+
+    with pytest.raises(ValueError, match="must go to the homeserver") as raised:
+        await client.send("GET", path)
+
+    assert session.requests == []
+    assert APPSERVICE_TOKEN not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -319,6 +351,40 @@ async def test_an_event_path_with_an_empty_segment_is_stamped(tmp_path: Path, pa
 
     [request] = session.requests
     assert _sent_body(request) == {"body": "hi", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/_matrix/client/v3/rooms/R/%73end/m.room.message/txn1",
+        "/%5Fmatrix/client/v3/rooms/R/send/m.room.message/txn1",
+        "/_matrix/client/v3/rooms/R/x/../send/m.room.message/txn1",
+        "/_matrix/client/v3/rooms/R/./send/m.room.message/txn1",
+        "/_matrix/client/v3/rooms/R/se\tnd/m.room.message/txn1",
+    ],
+    ids=["encoded-letter", "encoded-underscore", "parent-segment", "current-segment", "tab"],
+)
+async def test_a_path_that_normalizes_into_a_send_route_is_stamped(tmp_path: Path, path: str) -> None:
+    """The HTTP library normalizes the URL before requesting it, so a path that becomes a send route is stamped."""
+    client, session = _client(tmp_path, {"event_id": "$sent"})
+
+    await client.send("PUT", path, json.dumps({"body": "hi"}))
+
+    [request] = session.requests
+    assert _sent_body(request) == {"body": "hi", AGENT_AUTHORED_KEY: AGENT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("homeserver", ["https://matrix.example.com/", "https://example.com/matrix"])
+async def test_a_homeserver_url_with_a_path_still_stamps(tmp_path: Path, homeserver: str) -> None:
+    """The requested path starts with the homeserver URL's own path, so the send route is matched at its end."""
+    client, session = _client(tmp_path, {"event_id": "$sent"}, MATRIX_HOMESERVER=homeserver)
+
+    await client.room_send(ROOM, "m.room.message", {"msgtype": "m.text", "body": "hi"})
+
+    [request] = session.requests
+    assert _sent_body(request) == {"msgtype": "m.text", "body": "hi", AGENT_AUTHORED_KEY: AGENT}
 
 
 @pytest.mark.asyncio
