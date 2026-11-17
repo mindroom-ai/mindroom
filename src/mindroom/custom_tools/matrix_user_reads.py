@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MATRIX_USER_ID",
+    "REQUEST_FAILURES",
     "MatrixRequestError",
     "download_file",
     "json_objects",
@@ -186,6 +187,10 @@ def _refusal(status: int | None, answer: dict[str, Any]) -> MatrixRequestError:
     error = answer.get("error") if isinstance(answer.get("error"), str) else None
     answered = "Matrix answered" + (f" {status}" if status else "") + (f" {errcode}" if errcode else "")
     return MatrixRequestError(answered + (f": {error}" if error else ""), status=status, errcode=errcode)
+
+
+# What a failed request raises: the homeserver's refusal, a timeout, or the transport's own error.
+REQUEST_FAILURES = (MatrixRequestError, TimeoutError, aiohttp.ClientError)
 
 
 def request_failure(failed: MatrixRequestError | TimeoutError | aiohttp.ClientError) -> str:
@@ -852,7 +857,7 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
     person = quote(client.user_id, safe="")
     try:
         await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
-    except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
+    except REQUEST_FAILURES as error:
         msg = f"The room is read up to {read_up_to}, but it is still marked unread: {request_failure(error)}"
         raise MatrixRequestError(msg) from None
     return {} if event_id is not None else {"read_up_to": read_up_to}

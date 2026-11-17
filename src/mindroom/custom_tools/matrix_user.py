@@ -11,12 +11,10 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
-import aiohttp
-
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.matrix_user_authority import MatrixUserActor, MatrixUserRefused, matrix_user_actor
 from mindroom.custom_tools.matrix_user_reads import (
-    MatrixRequestError,
+    REQUEST_FAILURES,
     download_file,
     mark_read,
     read_messages,
@@ -126,7 +124,7 @@ class MatrixUserTools(Toolkit):
         )
         try:
             fields = await run(client, actor)
-        except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as failed:
+        except REQUEST_FAILURES as failed:
             return self._payload("error", action=action, message=request_failure(failed))
         finally:
             await client.close()

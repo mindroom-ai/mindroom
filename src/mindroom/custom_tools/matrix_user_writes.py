@@ -20,13 +20,12 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-import aiohttp
-
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools.attachments import resolve_context_attachment_record
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.matrix_user_reads import (
     MATRIX_USER_ID,
+    REQUEST_FAILURES,
     MatrixRequestError,
     json_objects,
     matrix_json,
@@ -181,7 +180,7 @@ async def write_as_person(
     written = _Written(room_id=write.room_id)
     try:
         fields = await _write(client, actor, turn, write, written)
-    except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
+    except REQUEST_FAILURES as error:
         _audit(actor, write, written, error=request_failure(error))
         raise
     _audit(actor, write, written)
@@ -287,7 +286,7 @@ async def _require_unencrypted(client: nio.AsyncClient, room_id: str) -> None:
     """Refuse a room that is encrypted, or whose encryption could not be read, before anything is sent into it."""
     try:
         encrypted = await room_encrypted(client, room_id)
-    except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
+    except REQUEST_FAILURES as error:
         msg = f"{_ENCRYPTION_UNKNOWN} ({request_failure(error).rstrip('.')})."
         raise MatrixRequestError(msg) from None
     if encrypted:
@@ -521,7 +520,7 @@ async def _record_direct_room(
         listed = listed if isinstance(listed, list) else []
         if room_id not in listed:
             await matrix_json(client, "PUT", direct_path, {**fresh, them: [*listed, room_id]})
-    except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
+    except REQUEST_FAILURES as error:
         msg = (
             f"{_made_dm(room_id, them)}, but could not record it as one ({request_failure(error).rstrip('.')}). "
             f"Nothing was sent; to send there, use room_id {room_id}."
