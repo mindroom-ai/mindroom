@@ -3045,31 +3045,29 @@ class TestStreamingBehavior:
         assert edited_statuses == [STREAM_STATUS_STREAMING]
 
     @pytest.mark.asyncio
-    async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
-        """A Matrix edit failure returning None must not be treated as a successful non-terminal send."""
+    async def test_streaming_progress_edit_returning_none_is_not_committed_and_the_terminal_update_lands(self) -> None:
+        """A progress edit Matrix fails is not a success, yet the stream goes on and its terminal update lands."""
         mock_client = _make_matrix_client_mock()
 
-        terminal_texts: list[str] = []
+        edited: list[tuple[str, object]] = []
         edit_results = [None, DeliveredMatrixEvent(event_id="$terminal", content_sent={})]
 
         async def record_edit(
             _client: object,
             _room_id: str,
             _event_id: str,
-            _new_content: dict[str, object],
+            new_content: dict[str, object],
             new_text: str,
         ) -> DeliveredMatrixEvent | None:
-            terminal_texts.append(new_text)
+            edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
             return edit_results.pop(0)
 
         async def stream() -> AsyncIterator[str]:
             yield "hello"
 
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError, match="Failed to edit streaming message") as exc_info,
-        ):
-            await send_streaming_response(
+        records = FakeReplyRecords(edit=record_edit)
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            outcome = await send_streaming_response(
                 client=mock_client,
                 target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
@@ -3078,12 +3076,78 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=_ImmediateStreamingResponse,
-                **FakeReplyRecords(edit=record_edit).hooks(),
+                **records.hooks(),
             )
 
-        # The failed edit is the stream's last write: its span exit, not the stream, notes the failure.
-        assert terminal_texts == ["hello"]
-        assert str(exc_info.value.error) == "Failed to edit streaming message"
+        assert edited == [("hello", STREAM_STATUS_STREAMING), ("hello", STREAM_STATUS_COMPLETED)]
+        # The failed edit never counts as delivered progress.
+        assert [write.kind for write in records.writes] == ["progress", "terminal"]
+        assert outcome.rendered_body == "hello"
+        assert outcome.visible_body_state == "visible_body"
+        assert not outcome.failed
+
+    @pytest.mark.asyncio
+    async def test_a_homeserver_blip_on_one_progress_edit_does_not_end_the_stream(self) -> None:
+        """One progress edit lost to a homeserver restart is resent by the next one, and the answer still lands."""
+        mock_client = _make_matrix_client_mock()
+
+        edited: list[tuple[str, object]] = []
+        edit_recorded = asyncio.Event()
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent | None:
+            edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
+            edit_recorded.set()
+            if len(edited) == 1:
+                # The homeserver is restarting: this edit does not land.
+                return None
+            return DeliveredMatrixEvent(event_id=f"$edit_{len(edited)}", content_sent=dict(new_content))
+
+        async def wait_for_edits(count: int) -> None:
+            async with asyncio.timeout(5):
+                while len(edited) < count:
+                    edit_recorded.clear()
+                    await edit_recorded.wait()
+
+        async def stream() -> AsyncIterator[str]:
+            yield "Checking"
+            await wait_for_edits(1)
+            yield " the logs"
+            await wait_for_edits(2)
+            yield " now."
+            await wait_for_edits(3)
+
+        records = FakeReplyRecords(edit=record_edit)
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            outcome = await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                streaming_cls=_ImmediateStreamingResponse,
+                **records.hooks(),
+            )
+
+        assert edited == [
+            ("Checking", STREAM_STATUS_STREAMING),
+            # The next edit carries the whole reply again, so the failed one's text is not lost.
+            ("Checking the logs", STREAM_STATUS_STREAMING),
+            ("Checking the logs now.", STREAM_STATUS_STREAMING),
+            ("Checking the logs now.", STREAM_STATUS_COMPLETED),
+        ]
+        delivered = [write.progress for write in records.writes if write.kind == "progress_delivered"]
+        assert len(delivered) == 2
+        assert outcome.rendered_body == "Checking the logs now."
+        assert outcome.visible_body_state == "visible_body"
+        assert not outcome.failed
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:
@@ -4392,9 +4456,9 @@ class TestStreamTransportStopsWithItsMembership:
     async def test_a_progressive_edit_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """The edit the fence invalidated must never leave this process.
 
-        Stopping is not failing. A failed non-terminal edit raises, and the
-        notice that failure produces would be one more direct write into the
-        same room the bot has left.
+        Stopping is not failing, and it is not trying either: a failed edit is
+        retried by the next one, and an edit that raises fails the stream,
+        whose notice would be one more direct write into the room the bot has left.
         """
         streaming = self._streaming(tmp_path, membership_is_current=False)
         streaming.event_id = "$visible"

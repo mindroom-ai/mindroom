@@ -276,7 +276,7 @@ class TestEncryptCommand:
         )
 
         assert "irreversible" in response
-        assert "!encrypt confirm" in response
+        assert "/encrypt confirm" in response
         client.room_put_state.assert_not_awaited()
 
     @pytest.mark.asyncio

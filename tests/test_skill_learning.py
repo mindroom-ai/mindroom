@@ -44,6 +44,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.assistant_turn import stamp_model
@@ -58,8 +59,8 @@ from mindroom.skill_learning import library
 from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, capture_final_request
 from mindroom.skill_learning.reviewer import review_conversation
-from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
+from mindroom.skill_learning.runner import SkillReviewRunner, _notice_files
+from mindroom.skill_learning.tools import ReviewFile, ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import openai_model_counter
@@ -1203,6 +1204,21 @@ async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path, m
     assert (sent_client, room_id) == (client, "!room:example.test")
     assert content["msgtype"] == "m.notice"
     assert content["body"] == "💾 Skill review: created `deploy-checks`"
+    learned_lines = LEARNED.splitlines()
+    assert content["io.mindroom.skill_review"] == {
+        "changes": {"deploy-checks": "created"},
+        "files": [
+            {
+                "skill": "deploy-checks",
+                "path": "deploy-checks/SKILL.md",
+                "action": "created",
+                "added": len(learned_lines),
+                "removed": 0,
+                "diff": f"@@ -0,0 +1,{len(learned_lines)} @@\n" + "".join(f"+{line}\n" for line in learned_lines),
+                "diff_truncated": False,
+            },
+        ],
+    }
     assert content["m.relates_to"]["event_id"] == "$thread"
     # Like approval events, clients without threads see the notice as a reply to the thread's newest event.
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread-latest"
@@ -2169,3 +2185,111 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
     recreated = library.read_skill_file(root, "deploy-checks")
     assert recreated is not None
     assert not recreated.learned
+
+
+@pytest.mark.asyncio
+async def test_a_review_records_each_files_content_before_its_first_and_after_its_last_change(tmp_path: Path) -> None:
+    """The notice compares each file as it was before the review touched it with how the review left it."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    library.write_skill_file(root, "deploy-checks", "references/old.md", "Old.\n", expected_digest=None, learner=True)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    progress = ReviewProgress()
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=progress)
+    await tools.get_skill_instructions("deploy-checks")
+    for old, new in (("1. Run the smoke test.", "1. Run smoke."), ("1. Run smoke.", "1. Run smoke.\n2. Retry.")):
+        assert json.loads(await tools.skill_manage("patch", "deploy-checks", old_string=old, new_string=new))["success"]
+    for file_path in ("references/new.md", "references/temp.md"):
+        written = await tools.skill_manage("write_file", "deploy-checks", file_path=file_path, file_content="New.\n")
+        assert json.loads(written)["success"]
+    assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/temp.md"))[
+        "success"
+    ]
+    await tools.get_skill_reference("deploy-checks", "references/old.md")
+    assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/old.md"))[
+        "success"
+    ]
+    refused = await tools.skill_manage("write_file", "deploy-checks", file_path="SKILL.md", file_content="x")
+    assert not json.loads(refused)["success"]
+
+    assert progress.files == {
+        ("deploy-checks", "SKILL.md"): ReviewFile(
+            "deploy-checks",
+            LEARNED,
+            LEARNED.replace("1. Run the smoke test.", "1. Run smoke.\n2. Retry."),
+        ),
+        ("deploy-checks", "references/new.md"): ReviewFile("deploy-checks", None, "New.\n"),
+        ("deploy-checks", "references/temp.md"): ReviewFile("deploy-checks", None, None),
+        ("deploy-checks", "references/old.md"): ReviewFile("deploy-checks", "Old.\n", None),
+    }
+    assert _notice_files(progress.files) == [
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/SKILL.md",
+            "action": "updated",
+            "added": 2,
+            "removed": 1,
+            "diff": "@@ -6,3 +6,4 @@\n     learned: true\n ---\n-1. Run the smoke test.\n+1. Run smoke.\n+2. Retry.\n",
+            "diff_truncated": False,
+        },
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/references/new.md",
+            "action": "created",
+            "added": 1,
+            "removed": 0,
+            "diff": "@@ -0,0 +1 @@\n+New.\n",
+            "diff_truncated": False,
+        },
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/references/old.md",
+            "action": "removed",
+            "added": 0,
+            "removed": 1,
+            "diff": "@@ -1 +0,0 @@\n-Old.\n",
+            "diff_truncated": False,
+        },
+    ]
+
+
+def test_notice_diffs_stop_at_line_boundaries_within_their_budgets() -> None:
+    """Each diff keeps whole lines within 4,000 characters, all diffs share 12,000, and the counts stay exact."""
+    big = "".join(f"{line:09d}\n" for line in range(1_000))
+    files = {("big", f"references/{index}.md"): ReviewFile("big", None, big) for index in range(5)}
+    entries = _notice_files(files)
+    full = "@@ -0,0 +1,1000 @@\n" + "".join(f"+{line}\n" for line in big.splitlines())
+    diffs = [entry["diff"] for entry in entries if "diff" in entry]
+    assert all(full.startswith(diff) and diff.endswith("\n") for diff in diffs)
+    # Serialized, the hunk header takes 22 characters and each line 14, so 284 lines fill a file's 4,000 at 3,998; the
+    # 6 left of the total after three files fit nothing more.
+    assert [len(diff) for diff in diffs] == [19 + 284 * 11] * 3
+    assert "diff" not in entries[3]
+    assert "diff" not in entries[4]
+    assert all(entry["diff_truncated"] for entry in entries)
+    assert all((entry["added"], entry["removed"]) == (1_000, 0) for entry in entries)
+    assert [entry["path"] for entry in entries] == [f"big/references/{index}.md" for index in range(5)]
+
+
+def test_notice_diff_budgets_count_what_the_event_serializes() -> None:
+    """Characters JSON escapes, like non-ASCII text, quotes, and control characters, count at their escaped size."""
+    content = ("漢" * 60 + '"\\\x01\n') * 200
+    files = {("big", f"references/{index}.md"): ReviewFile("big", None, content) for index in range(5)}
+    entries = _notice_files(files)
+    assert "diff" in entries[0]
+    assert all(entry["diff_truncated"] for entry in entries)
+    notice = {"changes": {"big": "updated"}, "files": entries}
+    assert calculate_event_size(notice) < 16_000
+
+
+def test_notice_diffs_show_a_changed_final_newline_and_other_line_separators() -> None:
+    """Lines split on newlines only, so a final newline or a vertical tab becoming a newline is a changed line."""
+    files = {
+        ("notes", "a.md"): ReviewFile("notes", "text", "text\n"),
+        ("notes", "b.md"): ReviewFile("notes", "a\vb\n", "a\nb\n"),
+    }
+    assert [(entry["added"], entry["removed"], entry["diff"]) for entry in _notice_files(files)] == [
+        (1, 1, "@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text\n"),
+        (2, 1, "@@ -1 +1,2 @@\n-a\vb\n+a\n+b\n"),
+    ]

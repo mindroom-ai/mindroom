@@ -13,13 +13,17 @@ FRAME_VERSION = 1
 
 @dataclass(frozen=True, slots=True)
 class LiveDocs:
-    """What one reply shows live: Markdown, reasoning, public tool-trace events, stream status, and worker activity."""
+    """What one reply shows live: Markdown, reasoning, public tool-trace events, stream status, and worker activity.
+
+    ``segments`` says where each reasoning segment begins in ``reasoning`` and how many tool calls preceded it.
+    """
 
     md: str
     reasoning: str
     tools: tuple[dict[str, object], ...]
     status: str
     activity: str
+    segments: tuple[dict[str, int], ...] = ()
 
     def to_json(self) -> dict[str, object]:
         """Return the snapshot form of these documents."""
@@ -29,6 +33,7 @@ class LiveDocs:
             "tools": list(self.tools),
             "status": self.status,
             "activity": self.activity,
+            "segments": [dict(segment) for segment in self.segments],
         }
 
 
@@ -37,7 +42,8 @@ def new_publisher_id() -> str:
     return f"{time.time_ns() // 1_000_000:013d}-{secrets.token_hex(4)}"
 
 
-def _utf16_length(text: str) -> int:
+def utf16_length(text: str) -> int:
+    """Return the length of ``text`` in UTF-16 code units, as clients count it."""
     return len(text.encode("utf-16-le")) // 2
 
 
@@ -57,10 +63,10 @@ def _utf16_splice(before: str, after: str) -> dict[str, object] | None:
     while suffix < limit - prefix and before[-1 - suffix] == after[-1 - suffix]:
         suffix += 1
     return {
-        "at": _utf16_length(before[:prefix]),
-        "del": _utf16_length(before[prefix : len(before) - suffix]),
+        "at": utf16_length(before[:prefix]),
+        "del": utf16_length(before[prefix : len(before) - suffix]),
         "ins": after[prefix : len(after) - suffix],
-        "len": _utf16_length(after),
+        "len": utf16_length(after),
     }
 
 
@@ -82,6 +88,8 @@ def live_delta(before: LiveDocs, after: LiveDocs) -> dict[str, object]:
         delta["status"] = after.status
     if before.activity != after.activity:
         delta["activity"] = after.activity
+    if before.segments != after.segments:
+        delta["segments"] = [dict(segment) for segment in after.segments]
     return delta
 
 

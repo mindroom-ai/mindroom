@@ -112,6 +112,8 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 When a model reasons before or between parts of its answer, as with Anthropic extended thinking, OpenAI reasoning summaries, Gemini thinking, or `<think>` blocks, a streamed reply shows that reasoning to everyone in the room.
 MindRoom Chat shows it live above the answer and, once the reply finishes, as a collapsed "Thought for N s" block, where N is how long the model reasoned.
 The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
+The final message also keeps where each reasoning segment began (`segments`: UTF-16 `start` in `text`, `after_tool`, `duration_ms`), so clients can show it between the tool calls; segment durations add up to the total unless long reasoning was cut, which drops the later segments.
+Live frames carry the same list without durations.
 Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
 Reasoning can describe tool calls that `show_tool_calls: false` hides, so set `show_reasoning: false` as well to keep them out of the room.
 Long reasoning is shortened on the final message so the reply stays one ordinary message; replies that are not streamed, team replies, and replies split into several messages (`large_message_strategy: split`) keep no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.

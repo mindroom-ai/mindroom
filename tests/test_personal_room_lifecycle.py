@@ -232,6 +232,15 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
 
 
 @pytest.mark.asyncio
+async def test_slash_form_runs_configured_bang_command(coordination: Coordination) -> None:
+    """``/personal`` runs the configured ``!personal`` command; ``//personal`` stays conversation."""
+    lifecycle = coordination.lifecycle
+    assert not await lifecycle.handle_command(LOBBY, command("//personal"), "@alice:localhost")
+    assert await lifecycle.handle_command(LOBBY, command(" /personal "), "@alice:localhost")
+    coordination.owner.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_live_onboarding_does_not_wait_for_target_first_sync(coordination: Coordination) -> None:
     """Connected targets accept durable events while startup backfill waits for sync."""
     lifecycle = coordination.lifecycle

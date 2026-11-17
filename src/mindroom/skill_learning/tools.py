@@ -130,10 +130,20 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
 
 
 @dataclass
+class ReviewFile:
+    """One file a review changed: its content before the review's first change and after its last, None when absent."""
+
+    skill: str
+    before: str | None
+    after: str | None = None
+
+
+@dataclass
 class ReviewProgress:
-    """The skills a review changed, recorded as each write lands."""
+    """The skills and files a review changed, recorded as each write lands; ``files`` keeps the order of first change."""
 
     changes: dict[str, str] = field(default_factory=dict)
+    files: dict[tuple[str, str], ReviewFile] = field(default_factory=dict)
 
 
 async def manage_skill_in_chat(
@@ -301,7 +311,16 @@ class SkillTools:
             return _refusal(f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change instead.")
         return None
 
-    async def _file(self, operation: Callable[[], None], *, name: str, action: str) -> None:
+    async def _file(
+        self,
+        operation: Callable[[], None],
+        *,
+        name: str,
+        action: str,
+        path: tuple[str, str],
+        before: SkillFile | None,
+        after: str | None,
+    ) -> None:
         """Run one file change in a thread that lands before a cancellation goes through, keeping this turn held.
 
         A review records the change when the write lands, so a notice after a timeout or a stop still names it.
@@ -311,6 +330,8 @@ class SkillTools:
             await asyncio.to_thread(operation)
             if self.progress is not None:
                 self.progress.changes.setdefault(name, action)
+                previous = before.content if before is not None else None
+                self.progress.files.setdefault(path, ReviewFile(name, previous)).after = after
 
         await run_coroutine_until_complete(change())
 
@@ -332,6 +353,9 @@ class SkillTools:
             ),
             name=name,
             action="created",
+            path=(name, SKILL_FILENAME),
+            before=None,
+            after=content,
         )
         frontmatter, instructions = parse_skill_markdown(content)
         self.catalog[name] = _CatalogEntry(
@@ -356,6 +380,9 @@ class SkillTools:
             ),
             name=name,
             action="updated",
+            path=(directory, relative_path),
+            before=read,
+            after=None,
         )
         self._reads.pop((directory, relative_path), None)
 
@@ -379,6 +406,9 @@ class SkillTools:
             ),
             name=name,
             action="updated",
+            path=(directory, relative_path),
+            before=read,
+            after=content,
         )
         self._reads[directory, relative_path] = SkillFile(
             content,

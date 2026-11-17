@@ -37,7 +37,7 @@ _MAX_PENDING_AGE_HOURS = 24
 
 _WITHHELD_VALUE_LOST_MESSAGE = (
     "⚠️ This pending change was lost when MindRoom restarted: its new value is kept out of room state, "
-    "so it cannot outlive the process. Run `!config set` again."
+    "so it cannot outlive the process. Run `/config set` again."
 )
 
 

@@ -30,6 +30,19 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Tell the agent its canvas pages may load images, styles, fonts, media and scripts from any https: address. Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.remoteAssets).",
+          "env": [],
+          "label": "Enable Canvas Remote Assets",
+          "name": "enable_canvas_remote_assets",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -8442,6 +8455,7 @@
       "file_access": "agent",
       "function_names": [
         "get_attachment",
+        "inline_image",
         "list_attachments",
         "register_attachment",
         "view_file"
@@ -8762,7 +8776,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": "Ask the requester to send `!desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent, plus the router when it serves the command.",
+      "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent, plus the router when it serves the command.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

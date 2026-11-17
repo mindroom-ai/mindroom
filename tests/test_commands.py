@@ -37,9 +37,9 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_plugins import _write_broken_tool_plugin
 
 WELCOME_QUICK_COMMAND_LINES = [
-    "\u2022 `!hi` - Show this welcome message again",
-    "\u2022 `!schedule <time> <message>` - Schedule tasks and reminders",
-    "\u2022 `!help [topic]` - Get detailed help",
+    "\u2022 `/hi` - Show this welcome message again",
+    "\u2022 `/schedule <time> <message>` - Schedule tasks and reminders",
+    "\u2022 `/help [topic]` - Get detailed help",
 ]
 
 
@@ -53,16 +53,29 @@ def _test_runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
+def _parse(text: str) -> Command | None:
+    """Parse ``text`` and check that its ``/`` form parses identically, or as conversation when unknown."""
+    command = command_parser.parse(text)
+    if "!" in text:
+        slash = command_parser.parse(text.replace("!", "/", 1))
+        if command is None or command.type is CommandType.UNKNOWN:
+            assert slash is None
+        else:
+            assert slash is not None
+            assert (slash.type, slash.args) == (command.type, command.args)
+    return command
+
+
 def test_help_command() -> None:
     """Test help command parsing."""
     # Basic help
-    command = command_parser.parse("!help")
+    command = _parse("!help")
     assert command is not None
     assert command.type == CommandType.HELP
     assert command.args["topic"] is None
 
     # Help with topic
-    command = command_parser.parse("!help invite")
+    command = _parse("!help invite")
     assert command is not None
     assert command.type == CommandType.HELP
     assert command.args["topic"] == "invite"
@@ -71,18 +84,18 @@ def test_help_command() -> None:
 def test_hi_command() -> None:
     """Test hi command parsing."""
     # Basic hi command
-    command = command_parser.parse("!hi")
+    command = _parse("!hi")
     assert command is not None
     assert command.type == CommandType.HI
     assert command.args == {}
 
     # Case insensitive
-    command = command_parser.parse("!HI")
+    command = _parse("!HI")
     assert command is not None
     assert command.type == CommandType.HI
 
     # With trailing space (should still work)
-    command = command_parser.parse("!hi ")
+    command = _parse("!hi ")
     assert command is not None
     assert command.type == CommandType.HI
 
@@ -98,7 +111,7 @@ def test_invalid_commands() -> None:
     ]
 
     for cmd_text in unknown_commands:
-        command = command_parser.parse(cmd_text)
+        command = _parse(cmd_text)
         assert command is not None
         assert command.type == CommandType.UNKNOWN
 
@@ -110,14 +123,14 @@ def test_invalid_commands() -> None:
     ]
 
     for cmd_text in non_commands:
-        command = command_parser.parse(cmd_text)
+        command = _parse(cmd_text)
         assert command is None
 
 
 def test_reload_plugins_command() -> None:
     """Test reload-plugins command parsing."""
     for cmd_text in ("!reload-plugins", "!reload_plugins", "!RELOAD-PLUGINS"):
-        command = command_parser.parse(cmd_text)
+        command = _parse(cmd_text)
         assert command is not None
         assert command.type == CommandType.RELOAD_PLUGINS
         assert command.args == {}
@@ -126,19 +139,19 @@ def test_reload_plugins_command() -> None:
 def test_schedule_command() -> None:
     """Test schedule command parsing."""
     # Basic schedule with time and message
-    command = command_parser.parse("!schedule in 5 minutes Check the deployment")
+    command = _parse("!schedule in 5 minutes Check the deployment")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
     assert command.args["full_text"] == "in 5 minutes Check the deployment"
 
     # Schedule with just time expression
-    command = command_parser.parse("!schedule tomorrow")
+    command = _parse("!schedule tomorrow")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
     assert command.args["full_text"] == "tomorrow"
 
     # Schedule with complex expression
-    command = command_parser.parse("!schedule tomorrow at 3pm Send the weekly report")
+    command = _parse("!schedule tomorrow at 3pm Send the weekly report")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
     assert command.args["full_text"] == "tomorrow at 3pm Send the weekly report"
@@ -163,7 +176,7 @@ def test_list_schedules_command() -> None:
     ]
 
     for cmd_text in variations:
-        command = command_parser.parse(cmd_text)
+        command = _parse(cmd_text)
         assert command is not None
         assert command.type == CommandType.LIST_SCHEDULES
         assert command.args == {}
@@ -171,17 +184,17 @@ def test_list_schedules_command() -> None:
 
 def test_removed_skill_command_is_unknown() -> None:
     """Test that the removed skill command is parsed as unknown."""
-    command = command_parser.parse("!skill repo-quick-audit")
+    command = _parse("!skill repo-quick-audit")
     assert command is not None
     assert command.type == CommandType.UNKNOWN
     assert command.args["raw_command"] == "!skill repo-quick-audit"
 
-    command = command_parser.parse("!skill summarize Release notes")
+    command = _parse("!skill summarize Release notes")
     assert command is not None
     assert command.type == CommandType.UNKNOWN
     assert command.args["raw_command"] == "!skill summarize Release notes"
 
-    command = command_parser.parse("!skill   ")
+    command = _parse("!skill   ")
     assert command is not None
     assert command.type == CommandType.UNKNOWN
     assert command.args["raw_command"] == "!skill"
@@ -200,20 +213,20 @@ def test_all_commands_have_documentation() -> None:
 
     # Check that all documentation entries are properly formatted
     for cmd_type, (syntax, description) in _COMMAND_DOCS.items():
-        assert syntax.startswith("!"), f"{cmd_type} syntax should start with '!'"
+        assert syntax.startswith("/"), f"{cmd_type} syntax should start with '/'"
         assert len(description) > 0, f"{cmd_type} should have a description"
 
 
 def test_background_job_commands() -> None:
     """`!jobs` lists the conversation's background jobs; `!cancel_job` cancels one or all of them."""
-    command = command_parser.parse("!jobs")
+    command = _parse("!jobs")
     assert command is not None
     assert command.type == CommandType.JOBS
-    command = command_parser.parse("!cancel_job abc123")
+    command = _parse("!cancel_job abc123")
     assert command is not None
     assert command.type == CommandType.CANCEL_JOB
     assert command.args == {"job_id": "abc123"}
-    command = command_parser.parse("!cancel-job all")
+    command = _parse("!cancel-job all")
     assert command is not None
     assert command.type == CommandType.CANCEL_JOB
     assert command.args == {"job_id": None}
@@ -222,34 +235,34 @@ def test_background_job_commands() -> None:
 def test_cancel_schedule_command() -> None:
     """Test cancel schedule command parsing."""
     # Basic cancel
-    command = command_parser.parse("!cancel_schedule abc123")
+    command = _parse("!cancel_schedule abc123")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "abc123"
     assert command.args["cancel_all"] is False
 
     # With hyphen
-    command = command_parser.parse("!cancel-schedule xyz789")
+    command = _parse("!cancel-schedule xyz789")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "xyz789"
     assert command.args["cancel_all"] is False
 
     # Case insensitive
-    command = command_parser.parse("!CANCEL_SCHEDULE task456")
+    command = _parse("!CANCEL_SCHEDULE task456")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["cancel_all"] is False
 
     # Cancel all tasks
-    command = command_parser.parse("!cancel_schedule all")
+    command = _parse("!cancel_schedule all")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "all"
     assert command.args["cancel_all"] is True
 
     # Cancel all with different case
-    command = command_parser.parse("!cancel_schedule ALL")
+    command = _parse("!cancel_schedule ALL")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "ALL"
@@ -258,22 +271,76 @@ def test_cancel_schedule_command() -> None:
 
 def test_edit_schedule_command() -> None:
     """Test edit schedule command parsing."""
-    command = command_parser.parse("!edit_schedule abc123 in 10 minutes check deployment")
+    command = _parse("!edit_schedule abc123 in 10 minutes check deployment")
     assert command is not None
     assert command.type == CommandType.EDIT_SCHEDULE
     assert command.args["task_id"] == "abc123"
     assert command.args["full_text"] == "in 10 minutes check deployment"
 
-    command = command_parser.parse("!edit-schedule task42 tomorrow at 9am @finance market update")
+    command = _parse("!edit-schedule task42 tomorrow at 9am @finance market update")
     assert command is not None
     assert command.type == CommandType.EDIT_SCHEDULE
     assert command.args["task_id"] == "task42"
     assert command.args["full_text"] == "tomorrow at 9am @finance market update"
 
-    command = command_parser.parse("!EDIT_SCHEDULE id999 every weekday at 8am check alerts")
+    command = _parse("!EDIT_SCHEDULE id999 every weekday at 8am check alerts")
     assert command is not None
     assert command.type == CommandType.EDIT_SCHEDULE
     assert command.args["task_id"] == "id999"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!config show",
+        "!config",
+        "!desktop setup",
+        "!mode helper minimal",
+        "!model opus",
+        "!model",
+        "!room_model reset",
+        "!room-model",
+        "!thread_mode room",
+        "!reply_mode mentions",
+        "!auto_approve 2h",
+        "!encrypt confirm",
+        "!e2ee",
+        "!jobs",
+        "!cancel_job all",
+        "!help schedule",
+        "!schedule in 5 minutes\nmultiline task",
+        "🎤 !schedule in 5 minutes check",
+        "  !hi  ",
+    ],
+)
+def test_slash_prefix_parses_like_bang(text: str) -> None:
+    """Every known command parses the same with ``/`` as with ``!``."""
+    command = _parse(text)
+    assert command is not None
+    assert command.type is not CommandType.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["/home/user/file.txt", "/s", "/unknown", "//schedule in 5 min x", "/schedule", "/ help", "/", "🎤 /foo"],
+)
+def test_unknown_slash_text_is_conversation(text: str) -> None:
+    """A ``/`` message that matches no command stays conversation."""
+    assert command_parser.parse(text) is None
+
+
+def test_unknown_bang_command_stays_unknown() -> None:
+    """``!unknown`` still parses as an unknown command."""
+    command = command_parser.parse("!unknown")
+    assert command is not None
+    assert command.type == CommandType.UNKNOWN
+
+
+def test_slash_command_keeps_original_raw_text() -> None:
+    """``raw_text`` carries the text as typed, after voice-prefix removal."""
+    command = command_parser.parse("🎤 /schedule tomorrow check")
+    assert command is not None
+    assert command.raw_text == "/schedule tomorrow check"
 
 
 def test_get_command_help() -> None:
@@ -281,13 +348,13 @@ def test_get_command_help() -> None:
     # General help
     help_text = get_command_help()
     assert "Available Commands" in help_text
-    assert "!schedule" in help_text
-    assert "!help" in help_text
-    assert "!schedule" in help_text
-    assert "!list_schedules" in help_text
-    assert "!cancel_schedule" in help_text
-    assert "!edit_schedule" in help_text
-    assert "!skill" not in help_text
+    assert "/schedule" in help_text
+    assert "/help" in help_text
+    assert "/schedule" in help_text
+    assert "/list_schedules" in help_text
+    assert "/cancel_schedule" in help_text
+    assert "/edit_schedule" in help_text
+    assert "/skill" not in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")
@@ -325,7 +392,7 @@ def test_get_command_help() -> None:
 
     reload_help = get_command_help("reload-plugins")
     assert "Reload Plugins Command" in reload_help
-    assert "!reload-plugins" in reload_help
+    assert "/reload-plugins" in reload_help
     assert "Admin only" in reload_help
 
     reload_help_alias = get_command_help("reload_plugins")
@@ -333,7 +400,7 @@ def test_get_command_help() -> None:
 
     skill_help = get_command_help("skill")
     assert "Available Commands" in skill_help
-    assert "!skill" not in skill_help
+    assert "/skill" not in skill_help
 
 
 def test_compact_command_entries_characterize_welcome_subset() -> None:

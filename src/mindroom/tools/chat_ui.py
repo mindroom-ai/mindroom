@@ -55,6 +55,17 @@ if TYPE_CHECKING:
                 "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries)."
             ),
         ),
+        ConfigField(
+            name="enable_canvas_remote_assets",
+            label="Enable Canvas Remote Assets",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                "Tell the agent its canvas pages may load images, styles, fonts, media and scripts from any https: address. "
+                "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.remoteAssets)."
+            ),
+        ),
     ],
     requires_primary_runtime=True,
     requires_room_context=True,
