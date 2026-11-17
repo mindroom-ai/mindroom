@@ -36,7 +36,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_forks import thread_fork_reference
+from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -108,16 +108,22 @@ _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
 
 
-def _inherit_fork_thread_models(deps: TurnDispatchDeps, event: PreparedIngress, thread_id: str | None) -> None:
-    """Give a fork's first message a snapshot of its parent thread's models, before any model of its turn resolves."""
-    content = event.source.get("content")
-    reference = thread_fork_reference(content) if thread_id == event.event_id and isinstance(content, dict) else None
-    if reference is None:
+def _inherit_fork_thread_models(
+    deps: TurnDispatchDeps,
+    turn: PreparedTurn,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> None:
+    """Give a fork's first turn a snapshot of its parent thread's models, before any model of the turn resolves."""
+    if thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
+        return
+    parent_thread_id = fork_parent_thread_id(thread_history, thread_id)
+    if parent_thread_id is None:
         return
     try:
-        copy_thread_model_override(deps.runtime_paths, reference.thread_id, event.event_id)
+        copy_thread_model_override(deps.runtime_paths, parent_thread_id, thread_id)
     except Exception:
-        deps.logger.exception("Fork thread model inheritance failed", parent_thread_id=reference.thread_id)
+        deps.logger.exception("Fork thread model inheritance failed", parent_thread_id=parent_thread_id)
 
 
 def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
@@ -824,7 +830,6 @@ class TurnDispatcher:
             target_start,
             resolved_thread_id=target.resolved_thread_id,
         )
-        _inherit_fork_thread_models(self.deps, event, target.resolved_thread_id)
         extract_context_start = time.monotonic()
         # A router relay of a human's message reads only the context the relay names.
         if turn.command is None and facts.router_relay and facts.original_sender_is_human:
@@ -848,6 +853,7 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
+        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
             event=event,

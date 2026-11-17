@@ -51,6 +51,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -142,8 +143,21 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(tmp_path: Path) -> None:
-    """The fork's first message copies the parent's thread model, so its first reply already runs on it."""
+@pytest.mark.parametrize(
+    ("source_event_ids", "inherited"),
+    [
+        (("$fork-root:localhost",), "large"),
+        (("$fork-root:localhost", "$fork-next:localhost"), "large"),
+        (("$fork-next:localhost",), None),
+    ],
+    ids=["first-message", "coalesced-first-messages", "later-message"],
+)
+async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(
+    tmp_path: Path,
+    source_event_ids: tuple[str, ...],
+    inherited: str | None,
+) -> None:
+    """The fork's first turn copies the parent's thread model, so its first reply already runs on it; later turns do not."""
     bot = _agent_bot(tmp_path)
     runtime_paths = bot._turn_dispatcher.deps.runtime_paths
     set_thread_model_override(
@@ -153,33 +167,34 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
         entity_names=("code",),
         config=bot.config,
     )
+    fork_id = "$fork-root:localhost"
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
         {
-            "event_id": "$fork-root:localhost",
+            "event_id": source_event_ids[-1],
             "sender": "@user:localhost",
             "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "@mindroom_code:localhost carry on",
-                FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"},
-            },
+            "content": {"msgtype": "m.text", "body": "@mindroom_code:localhost carry on"},
         },
     )
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    fork_root = make_visible_message(
+        event_id=fork_id,
+        content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"}},
+    )
+    context = replace(_dispatch_context(bot), is_thread=True, thread_id=fork_id, thread_history=[fork_root])
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
     turn = make_test_turn(
         room,
         event,
         "@user:localhost",
-        coalescing_key=requester_coalescing_key(ROOM_ID, event.event_id, "@user:localhost"),
-        handled_turn=TurnRecord.create([event.event_id]),
+        coalescing_key=requester_coalescing_key(ROOM_ID, fork_id, "@user:localhost"),
+        handled_turn=TurnRecord.create(list(source_event_ids)),
     )
 
     await bot._turn_dispatcher._prepare_dispatch(turn)
 
-    record = _get_thread_model_override(runtime_paths, event.event_id)
-    assert record is not None
-    assert record.get("model:code") == "large"
+    record = _get_thread_model_override(runtime_paths, fork_id)
+    assert (None if record is None else record.get("model:code")) == inherited
 
 
 def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
