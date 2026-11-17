@@ -67,9 +67,6 @@ _WRITES_WINDOW_SECONDS = 30.0
 _RATE_LIMIT_LOCK = Lock()
 # Recent writes by agent, requester, and room: the room written to, else the person messaged, else none for a new room.
 _RECENT_WRITES: defaultdict[tuple[str, str, str], deque[float]] = defaultdict(deque)
-# A DM made for the person with someone, by the two of them, that could not be added to the person's `m.direct`: the
-# next send to that someone uses it rather than making another.
-_UNRECORDED_DIRECT_ROOMS: dict[tuple[str, str], str] = {}
 # One call at a time finds or makes a DM for a person: two at once would each make one with the same someone, or
 # each write the person's `m.direct` whole and drop the DM the other added.
 _DIRECT_ROOM_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -179,6 +176,8 @@ class _Written:
     content: dict[str, Any] | None = None
     # Whom it invited: into a room, into a new room, or into a DM made for a send.
     invited: str | None = None
+    # Why the DM made for a send could not be added to the person's `m.direct`, when it could not.
+    dm_not_listed: str | None = None
 
 
 async def write_as_person(
@@ -227,6 +226,7 @@ def _audit(
         content_bytes=len(json.dumps(content).encode()) if content else 0,
         attachments=int(write.attachment is not None),
         **({} if written.invited is None else {"invited": written.invited}),
+        **({} if written.dm_not_listed is None else {"dm_not_listed": written.dm_not_listed}),
         **({} if error is None else {"error": error}),
     )
 
@@ -356,19 +356,35 @@ async def _send(
     file: AttachmentRecord | None,
     marker: dict[str, str],
 ) -> dict[str, object]:
-    """Send one event, the file or the text formatted as the agent's own messages are, into the room or the person's DM."""
+    """Send one event into the room, or into the person's DM with whom ``write`` names, made now when they have none."""
     if write.room_id is not None:
-        room_id, made = write.room_id, False
-    else:
-        room_id, made = await _direct_room(client, actor.person_user_id, str(write.user_id), written)
+        return await _send_into(client, turn, write, written, file, marker, write.room_id)
+    them = str(write.user_id)
+    room_id, made = await _direct_room(client, actor.person_user_id, them, written)
     try:
-        await _require_unencrypted(client, room_id)
-    except MatrixRequestError as refused:
+        fields = await _send_into(client, turn, write, written, file, marker, room_id)
+    except MatrixRequestError as failed:
         if not made:
             raise
-        # The DM made for this send stays, with them invited, so the refusal names it.
-        msg = f"{_made_dm(room_id, str(write.user_id))}. {refused}"
+        # The DM made for this send stays, with them invited, so the failure names it.
+        msg = f"{_made_dm(room_id, them, written.dm_not_listed)} {failed}"
         raise MatrixRequestError(msg) from None
+    if written.dm_not_listed is not None:
+        fields["note"] = _made_dm(room_id, them, written.dm_not_listed)
+    return fields
+
+
+async def _send_into(
+    client: nio.AsyncClient,
+    turn: ToolRuntimeContext,
+    write: MatrixUserWrite,
+    written: _Written,
+    file: AttachmentRecord | None,
+    marker: dict[str, str],
+    room_id: str,
+) -> dict[str, object]:
+    """Send one event into ``room_id``: the file, or the text formatted as the agent's own messages are."""
+    await _require_unencrypted(client, room_id)
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
     if file is not None:
         outcome = await send_file_message_outcome(
@@ -517,30 +533,30 @@ async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: st
     return newest if isinstance(newest, str) else thread_id
 
 
-def _made_dm(room_id: str, them: str) -> str:
-    return f"Made the DM {room_id} with {them}"
+def _made_dm(room_id: str, them: str, not_listed: str | None) -> str:
+    """Return what a result says of the DM made for its send, and of why it is not in the person's DMs, if it is not."""
+    made = f"Made the DM {room_id} with {them}"
+    if not_listed is None:
+        return f"{made}."
+    why = not_listed.rstrip(".")
+    return f"{made}, but could not list it as a DM ({why}). To send there again, use room_id {room_id}."
 
 
 async def _direct_room(client: nio.AsyncClient, person: str, them: str, written: _Written) -> tuple[str, bool]:
     """Return the person's DM with ``them``, and whether it was made now, as one is when they have none.
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
-    two of them; one made earlier that could not be added there comes first. A room made now is added there.
+    two of them. A room made now is added there, and is their DM for this send even when that fails.
     Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
-    ``written`` names the room, and whom a room made now invited, before it is recorded, which may fail.
+    ``written`` names the room, whom a room made now invited, and why it could not be added, if it could not.
     """
     async with _DIRECT_ROOM_LOCKS.setdefault(person, asyncio.Lock()):
         direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
         direct = await optional_json(client, direct_path) or {}
         listed = direct.get(them)
-        listed = [room_id for room_id in listed if isinstance(room_id, str)] if isinstance(listed, list) else []
-        unrecorded = _UNRECORDED_DIRECT_ROOMS.get((person, them))
-        candidates = [*([unrecorded] if unrecorded is not None and unrecorded not in listed else []), *reversed(listed)]
-        for room_id in candidates:
-            if await _only_the_two(client, room_id, person, them):
+        for room_id in reversed(listed if isinstance(listed, list) else []):
+            if isinstance(room_id, str) and await _only_the_two(client, room_id, person, them):
                 written.room_id = room_id
-                if room_id not in listed:
-                    await _record_direct_room(client, direct_path, person, them, room_id)
                 return room_id, False
         created = await matrix_json(
             client,
@@ -550,19 +566,12 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str, written:
         )
         room_id = _created_room(created)
         written.room_id, written.invited = room_id, them
-        _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
-        await _record_direct_room(client, direct_path, person, them, room_id)
+        written.dm_not_listed = await _record_direct_room(client, direct_path, them, room_id)
         return room_id, True
 
 
-async def _record_direct_room(
-    client: nio.AsyncClient,
-    direct_path: str,
-    person: str,
-    them: str,
-    room_id: str,
-) -> None:
-    """Add ``room_id`` to the person's `m.direct` list for ``them``, as it is when this writes.
+async def _record_direct_room(client: nio.AsyncClient, direct_path: str, them: str, room_id: str) -> str | None:
+    """Add ``room_id`` to the person's `m.direct` list for ``them``, as it is when this writes; return why it failed.
 
     `m.direct` is written as a whole, and the person's own client may have changed it since it was first read, so it is
     read again just before the write and that copy, not the early one, is written back. The caller holds the person's
@@ -575,12 +584,8 @@ async def _record_direct_room(
         if room_id not in listed:
             await matrix_json(client, "PUT", direct_path, {**fresh, them: [*listed, room_id]})
     except REQUEST_FAILURES as error:
-        msg = (
-            f"{_made_dm(room_id, them)}, but could not record it as one ({request_failure(error).rstrip('.')}). "
-            f"Nothing was sent; to send there, use room_id {room_id}."
-        )
-        raise MatrixRequestError(msg) from None
-    _UNRECORDED_DIRECT_ROOMS.pop((person, them), None)
+        return request_failure(error)
+    return None
 
 
 async def _only_the_two(client: nio.AsyncClient, room_id: str, person: str, them: str) -> bool:

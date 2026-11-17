@@ -83,11 +83,11 @@ ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an en
 COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
-# A DM made with Bob whose record in `m.direct` failed.
-DM_NOT_RECORDED = (
-    f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
-    "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
-    f"Nothing was sent; to send there, use room_id {NEW_DM}."
+# Why a DM made with Bob was not added to `m.direct`, and what the result of its send says of it.
+DM_NOT_LISTED_WHY = "Matrix answered 500 M_UNKNOWN: Database unavailable"
+DM_NOT_LISTED = (
+    f"Made the DM {NEW_DM} with {BOB}, but could not list it as a DM ({DM_NOT_LISTED_WHY}). "
+    f"To send there again, use room_id {NEW_DM}."
 )
 CONTACT_ROOM_REFUSED = "Nothing is written as your owner into a contact room."
 UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
@@ -147,9 +147,8 @@ def _notes(paths: RuntimePaths, tmp_path: Path, room_id: str = ROOM, **fields: s
 
 @pytest.fixture(autouse=True)
 def _fresh_write_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Start each test with no recent writes and no direct chat waiting to be recorded."""
+    """Start each test with no recent writes."""
     monkeypatch.setattr(matrix_user_writes, "_RECENT_WRITES", defaultdict(deque))
-    monkeypatch.setattr(matrix_user_writes, "_UNRECORDED_DIRECT_ROOMS", {})
 
 
 @pytest.fixture
@@ -688,38 +687,60 @@ async def test_send_to_a_person_without_a_dm_creates_one_and_records_it(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
+async def test_a_new_dm_that_could_not_be_listed_still_gets_the_message(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """A DM that could not be recorded sends nothing and says which room to send to; the next send to them uses it."""
+    """A DM made but not added to the owner's DMs is used all the same, and the result and the audit line say so."""
     homeserver.answers.update(
         {
-            # The person has no DMs yet. Each send reads `m.direct`, then reads it again before recording: the first
-            # record fails, the second works.
+            # The owner has no DMs yet; `m.direct` is read, read again before the write, and the write fails.
             DIRECT_PATH: [
                 matrix_error(404, "M_NOT_FOUND", "No m.direct"),
                 matrix_error(404, "M_NOT_FOUND", "No m.direct"),
                 matrix_error(500, "M_UNKNOWN", "Database unavailable"),
-                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
-                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
-                Answer({}),
             ],
             CREATE_PATH: {"room_id": NEW_DM},
-            _members_path(NEW_DM): _members(alice="join", bob="invite"),
         },
     )
 
-    failed = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-    retried = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert failed == error_result("send", DM_NOT_RECORDED)
-    assert retried == ok_result("send", room_id=NEW_DM, event_id="$dm")
-    assert len(homeserver.requests_to(CREATE_PATH)) == 1
-    [_, recorded] = _direct_changes(homeserver)
-    assert recorded.body == {BOB: [NEW_DM]}
-    assert len(_sent(homeserver, NEW_DM)) == 1
+    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm", note=DM_NOT_LISTED)
+    assert [content["body"] for content in _sent(homeserver, NEW_DM)] == ["Lunch?"]
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["room_id"], audit["invited"]) == ("ok", NEW_DM, BOB)
+    assert audit["dm_not_listed"] == DM_NOT_LISTED_WHY
+
+
+@pytest.mark.asyncio
+async def test_a_failed_send_into_a_new_dm_names_the_room_it_made(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """The DM made for a send stays when the send fails, so the error names it and whether it is listed."""
+    refused = matrix_error(403, "M_FORBIDDEN", "You cannot post here")
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: [{}, matrix_error(500, "M_UNKNOWN", "Database unavailable")],
+            CREATE_PATH: {"room_id": NEW_DM},
+            f"{_send_path(NEW_DM)}*": refused,
+        },
+    )
+
+    with capture_logs() as logs:
+        unlisted = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+    homeserver.answers[DIRECT_PATH] = {}
+    listed = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    nothing_sent = "Nothing was sent: RoomSendError: M_FORBIDDEN You cannot post here."
+    assert unlisted == error_result("send", f"{DM_NOT_LISTED} {nothing_sent}")
+    assert listed == error_result("send", f"Made the DM {NEW_DM} with {BOB}. {nothing_sent}")
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["room_id"], audit["dm_not_listed"]) == ("error", NEW_DM, DM_NOT_LISTED_WHY)
 
 
 @pytest.mark.asyncio
@@ -753,7 +774,10 @@ async def test_a_failed_second_read_records_nothing_and_names_the_room(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """When `m.direct` cannot be read again before the write, the early copy is not written in its place."""
+    """When `m.direct` cannot be read again before the write, the early copy is not written in its place.
+
+    The message goes into the new room all the same.
+    """
     homeserver.answers.update(
         {
             DIRECT_PATH: [
@@ -766,7 +790,7 @@ async def test_a_failed_second_read_records_nothing_and_names_the_room(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == error_result("send", DM_NOT_RECORDED)
+    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm", note=DM_NOT_LISTED)
     assert _direct_changes(homeserver) == []
 
 
@@ -1588,36 +1612,6 @@ async def test_the_audit_line_names_whom_a_write_invited(
     assert result["status"] == "ok"
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
     assert audit["invited"] == BOB
-
-
-@pytest.mark.asyncio
-async def test_the_audit_line_of_an_unrecorded_dm_names_its_room(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A DM made but not recorded is logged with its room and whom it invited; reused later, with its room alone."""
-    unavailable = matrix_error(500, "M_UNKNOWN", "Database unavailable")
-    no_direct = matrix_error(404, "M_NOT_FOUND", "No m.direct")
-    homeserver.answers.update(
-        {
-            # Each send reads `m.direct`, then fails to read it again before recording.
-            DIRECT_PATH: [no_direct, unavailable, no_direct, unavailable],
-            CREATE_PATH: {"room_id": NEW_DM},
-            _members_path(NEW_DM): _members(alice="join", bob="invite"),
-        },
-    )
-
-    with capture_logs() as logs:
-        made = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-        reused = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert made["status"] == reused["status"] == "error"
-    first, second = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert (first["room_id"], first["invited"]) == (NEW_DM, BOB)
-    assert second["room_id"] == NEW_DM
-    assert "invited" not in second
-    assert len(homeserver.requests_to(CREATE_PATH)) == 1
 
 
 @pytest.mark.asyncio
