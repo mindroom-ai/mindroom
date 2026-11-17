@@ -29,7 +29,11 @@ from mindroom.custom_tools.matrix_user_reads import (
 from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    append_tool_runtime_attachment_id,
+    get_tool_runtime_context,
+    require_tool_runtime_context,
+)
 from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
@@ -41,9 +45,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
-    type _Read = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
-    # A read of one room, given its ID.
-    type _RoomRead = Callable[[nio.AsyncClient, str], Awaitable[dict[str, object]]]
     type _Run = Callable[[nio.AsyncClient, MatrixUserActor], Awaitable[dict[str, object]]]
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
@@ -60,6 +61,24 @@ _WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
 def _non_blank(value: str | None) -> str | None:
     """Return ``value``, or None for a blank one, which a model may send for an argument it leaves out."""
     return value if value is not None and value.strip() else None
+
+
+def _read_problem(action: str, *, room_id: str | None, event_id: str | None, query: str | None) -> str | None:
+    """Return which argument the read ``action`` is missing, without asking the homeserver anything."""
+    if action in _ROOM_ACTIONS:
+        if room_id is None:
+            return room_needed(action)
+        if action == "download":
+            # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
+            if get_tool_runtime_context() is None:
+                return _TURN_NEEDED
+            if event_id is None:
+                return _EVENT_NEEDED
+        return None
+    if action == "rooms" or query is not None:
+        return None
+    # Without query: people, or the only action left, search.
+    return _PEOPLE_QUERY_NEEDED if action == "people" else _SEARCH_QUERY_NEEDED
 
 
 class MatrixUserTools(Toolkit):
@@ -149,8 +168,9 @@ class MatrixUserTools(Toolkit):
         append_tool_runtime_attachment_id(str(fields["attachment_id"]))
         return fields
 
-    def _read_for(  # noqa: PLR0911 - one return per action and per missing argument
+    async def _read(  # noqa: PLR0911 - one return per action
         self,
+        client: nio.AsyncClient,
         action: str,
         *,
         room_id: str | None,
@@ -159,72 +179,35 @@ class MatrixUserTools(Toolkit):
         query: str | None,
         page_token: str | None,
         limit: int | None,
-    ) -> _Read | str:
-        """Return the read ``action`` asks for, or which of its arguments is missing."""
-        if action in _ROOM_ACTIONS:
-            if room_id is None:
-                return room_needed(action)
-            read = self._room_read_for(
-                action,
-                event_id=event_id,
-                thread_id=thread_id,
-                page_token=page_token,
-                limit=limit,
-            )
-            return read if isinstance(read, str) else self._in_room(room_id, read)
+    ) -> dict[str, object]:
+        """Make the read ``action`` asks for, in the room ``room_id`` names, which ``client`` looks up first.
+
+        The arguments have no ``_read_problem``.
+        """
         if action == "rooms":
-            return lambda client: read_rooms(client, query=query, limit=limit)
+            return await read_rooms(client, query=query, limit=limit)
         if action == "people":
-            if query is None:
-                return _PEOPLE_QUERY_NEEDED
-            return lambda client: read_people(client, query, limit=limit)
-        # The only action left: search.
-        if query is None:
-            return _SEARCH_QUERY_NEEDED
-
-        def search(client: nio.AsyncClient, room: str | None = None) -> Awaitable[dict[str, object]]:
-            return search_messages(client, query, room_id=room, page_token=page_token, limit=limit)
-
-        return search if room_id is None else self._in_room(room_id, search)
-
-    def _room_read_for(
-        self,
-        action: str,
-        *,
-        event_id: str | None,
-        thread_id: str | None,
-        page_token: str | None,
-        limit: int | None,
-    ) -> _RoomRead | str:
-        """Return the read of a room, given its ID, that ``action`` asks for, or what it is missing."""
+            return await read_people(client, str(query), limit=limit)
+        # rooms and people take no room, so a stray room_id of theirs is not looked up; search may have none.
+        if room_id is not None:
+            room_id = await room_named(client, room_id, self._runtime_paths)
         if action == "room":
-            return lambda client, room_id: read_room(client, room_id, limit=limit)
+            return await read_room(client, str(room_id), limit=limit)
         if action == "messages":
-            return lambda client, room_id: read_messages(
+            return await read_messages(
                 client,
-                room_id,
+                str(room_id),
                 event_id=event_id,
                 thread_id=thread_id,
                 page_token=page_token,
                 limit=limit,
             )
         if action == "mark_read":
-            return lambda client, room_id: mark_read(client, room_id, event_id=event_id)
-        # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
-        turn = get_tool_runtime_context()
-        if turn is None:
-            return _TURN_NEEDED
-        if event_id is None:
-            return _EVENT_NEEDED
-        return lambda client, room_id: self._download(client, turn, room_id, event_id)
-
-    def _in_room(self, room: str, read: _RoomRead) -> _Read:
-        """Return ``read`` of the room ``room`` names, which the client making it looks up first."""
-
-        async def in_room(client: nio.AsyncClient) -> dict[str, object]:
-            return await read(client, await room_named(client, room, self._runtime_paths))
-
-        return in_room
+            return await mark_read(client, str(room_id), event_id=event_id)
+        if action == "download":
+            return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
+        # The only action left: search.
+        return await search_messages(client, str(query), room_id=room_id, page_token=page_token, limit=limit)
 
     async def _write(
         self,
@@ -262,18 +245,22 @@ class MatrixUserTools(Toolkit):
         - download: The file of message event_id in room_id, as an attachment ID for your other tools.
         - mark_read: Mark room_id read for them, up to event_id or its newest message.
         """
-        read = self._read_for(
+        room_id, event_id, query = _non_blank(room_id), _non_blank(event_id), _non_blank(query)
+        if (problem := _read_problem(action, room_id=room_id, event_id=event_id, query=query)) is not None:
+            return self._payload("error", action=action, message=problem)
+        return await self._as_owner(
             action,
-            room_id=_non_blank(room_id),
-            event_id=_non_blank(event_id),
-            thread_id=_non_blank(thread_id),
-            query=_non_blank(query),
-            page_token=_non_blank(page_token),
-            limit=limit,
+            lambda client, _actor: self._read(
+                client,
+                action,
+                room_id=room_id,
+                event_id=event_id,
+                thread_id=_non_blank(thread_id),
+                query=query,
+                page_token=_non_blank(page_token),
+                limit=limit,
+            ),
         )
-        if isinstance(read, str):
-            return self._payload("error", action=action, message=read)
-        return await self._as_owner(action, lambda client, _actor: read(client))
 
     async def matrix_user_write(
         self,
