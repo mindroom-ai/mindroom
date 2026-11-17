@@ -786,26 +786,76 @@ async def test_redacting_a_stopped_reply_removes_its_run(tmp_path: Path, monkeyp
     assert after.runs == []
 
 
+def _text_only_turns(streaming: asyncio.Event) -> list[Sequence[Any]]:
+    """Return a turn's script: a response that streams text, reports its usage, and keeps streaming nothing."""
+    return [[TextDelta("Let me "), TextDelta("look"), UsageReported(usage(10, 5)), _hanging(streaming)]]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streamed", [(), (TextDelta("Let me "), TextDelta("look"))], ids=["no response", "text only"])
-async def test_a_reply_stopped_before_it_called_a_tool_is_stored_as_an_account_of_it(
+async def test_a_reply_stopped_mid_response_before_it_called_a_tool_is_stored_as_its_own_messages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    streamed: tuple[TextDelta, ...],
 ) -> None:
-    """A stopped run that called no tool holds no work to keep, so the turn stores the prose record of what it showed."""
+    """A stopped run that called no tool keeps its prompt as sent, then the text its response showed and the note."""
     config = _config(tmp_path)
     streaming = asyncio.Event()
 
-    await _stop(config, monkeypatch, [[*streamed, _hanging(streaming)]], reached=streaming)
+    last_sent = await _stop(config, monkeypatch, _text_only_turns(streaming), reached=streaming)
+
+    run = _only_run(config)
+    assert is_recovered_run(run)
+    assert not is_interrupted_replay_run(run)
+    assert [(message.role, message.content) for message in run.messages] == [
+        ("user", "Do the work"),
+        ("assistant", f"Let me look\n\n{STOPPED_BY_USER_NOTE}"),
+    ]
+    assert (run.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == "$reply"
+    # The cut-off request's usage, which the run's own cancelled record already recorded, counts once.
+    assert _recorded_usage(tmp_path) == [15]
+    model = ScriptedModel([answer("Finished")])
+    install_model_providers(monkeypatch, {"default": model})
+    await _respond(config, prompt="Carry on", event_id="$next")
+    [following] = model.requests
+    sent, replayed = _wire(last_sent), _wire(following)
+    assert replayed[: len(sent)] == sent
+    assert request_prefixes(model, following)[: len(last_sent.messages) + 1] == request_prefixes(model, last_sent)
+    assert f"Let me look\\n\\n{STOPPED_BY_USER_NOTE}" in replayed[len(sent)]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_stopped_before_its_first_response_is_stored_as_an_account_of_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run stopped before any response began holds only its prompt, so the turn stores the prose record of it."""
+    config = _config(tmp_path)
+    streaming = asyncio.Event()
+
+    await _stop(config, monkeypatch, [[_hanging(streaming)]], reached=streaming)
 
     run = _only_run(config)
     assert is_interrupted_replay_run(run)
     assert not is_recovered_run(run)
-    assert [message.role for message in run.messages] == ["user", "assistant"]
-    assert run.messages[-1].content == "\n\n".join(
-        part for part in ("".join(delta.text for delta in streamed), "(turn stopped before completion)") if part
-    )
+    assert [(message.role, message.content) for message in run.messages] == [
+        ("user", "Do the work"),
+        ("assistant", "(turn stopped before completion)"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_before_a_run_called_a_tool_leaves_nothing_to_recover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run no user stopped that called no tool holds no work to keep: it stays cancelled and its replay starts over."""
+    config = _config(tmp_path)
+    streaming = asyncio.Event()
+
+    await _stop(config, monkeypatch, _text_only_turns(streaming), reached=streaming, shutdown=True)
+
+    cancelled = _only_run(config)
+    assert _recover(config) == [cancelled.run_id]
+    assert _only_run(config).status is RunStatus.cancelled
 
 
 @pytest.mark.asyncio
