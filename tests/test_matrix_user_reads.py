@@ -387,6 +387,23 @@ async def test_a_rate_limited_request_is_retried_at_most_twice(
 
 
 @pytest.mark.asyncio
+async def test_a_rate_limit_with_a_malformed_retry_after_uses_the_body(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A `Retry-After` that is no number, such as a superscript digit, counts as absent."""
+    limited = Answer(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests", "retry_after_ms": 1},
+        status=429,
+        headers={"Retry-After": "²"},
+    )
+    homeserver.answers[SYNC_PATH] = [limited, Answer(sync_answer(join={ROOM: joined_room("Room")}))]
+
+    assert (await read_rooms(client, query=None, limit=None))["rooms"] == [f"{ROOM} | Room"]
+    assert homeserver.paths() == [SYNC_PATH] * 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "limited",
     [

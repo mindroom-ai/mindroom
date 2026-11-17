@@ -174,7 +174,7 @@ def _json_object(content: bytes) -> dict[str, Any] | None:
 
 def _rate_limit_wait(retry_after: str | None, answer: dict[str, Any] | None) -> float:
     """Return the seconds a 429 asks to wait: its `Retry-After` header, else its `retry_after_ms`."""
-    if retry_after is not None and retry_after.strip().isdigit():
+    if retry_after is not None and retry_after.strip().isdecimal():
         return float(retry_after)
     milliseconds = (answer or {}).get("retry_after_ms")
     if isinstance(milliseconds, int) and not isinstance(milliseconds, bool):
