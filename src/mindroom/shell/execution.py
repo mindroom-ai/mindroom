@@ -767,8 +767,9 @@ async def _await_reader_tasks_with_grace(
 def _schedule_process_tree_idle(pid: int) -> None:
     """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
 
-    Nice 19 lowers a command's CPU share, but MindRoom's waking event loop still waits behind it for a CPU. The kernel
-    treats a CPU that runs only idle-policy threads as free, and a waking normal thread preempts them at once.
+    Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
+    MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
+    preempts them at once.
     A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
     before it reads that thread's children: whatever the thread starts afterwards inherits the policy.
     """
