@@ -24,7 +24,12 @@ from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    FORK_CONTENT_KEY,
+    THREAD_SUMMARY_CONTENT_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.llm.errors import ProviderError
@@ -172,9 +177,9 @@ def _make_summary_notice_message(
     sender: str = _ROUTER,
     pinned: bool | None = None,
     generated_at: str = "2026-01-01T00:00:00+00:00",
+    summary: str = "🧵 Existing thread summary",
 ) -> ResolvedVisibleMessage:
     """Build a synthetic thread summary notice for history-counting regressions."""
-    summary = "🧵 Existing thread summary"
     summary_metadata: dict[str, object] = {
         "version": 1,
         "summary": summary,
@@ -799,6 +804,93 @@ class TestMaybeGenerateThreadSummary:
             entity_name="router",
             membership_index=AgentReplyMembershipIndex(),
         )
+
+    def _fork_of_thread(self, parent: Sequence[ResolvedVisibleMessage], fork: Sequence[ResolvedVisibleMessage]) -> None:
+        """Serve the parent thread ``_THREAD`` and its fork ``$fork``, whose root ``fork`` starts."""
+        pages = {}
+        for thread_id, messages in ((_THREAD, parent), ("$fork", fork)):
+            serve_conversation_reader(self.conversation_reader, messages, room_id=_ROOM, thread_id=thread_id)
+            pages[thread_id] = self.conversation_reader.read_strict.return_value
+
+        async def read(*, thread_id: str, **_kwargs: object) -> object:
+            return pages[thread_id]
+
+        self.conversation_reader.read.side_effect = read
+        self.conversation_reader.read_strict.side_effect = read
+
+    @staticmethod
+    def _fork_root() -> ResolvedVisibleMessage:
+        return ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="carry on",
+            timestamp=1700000000,
+            event_id="$fork",
+            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": _THREAD, "event_id": "$event1"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("parent_title", "fork_title"),
+        [
+            ("Trip plan", "Trip plan (forked)"),
+            ("Trip plan (forked)", "Trip plan (forked)"),
+            (None, "Prompt title (forked)"),
+        ],
+        ids=["parent-title", "fork-of-a-fork", "untitled-parent"],
+    )
+    async def test_a_forks_first_title_is_its_parents_title_marked_forked(
+        self,
+        parent_title: str | None,
+        fork_title: str,
+    ) -> None:
+        """A fork's provisional title copies its parent's, without a model; an untitled parent's fork titles its prompt."""
+        model = self._summarizer(_title("Prompt title"))
+        parent = _make_thread_history(2)
+        if parent_title is not None:
+            parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary=parent_title))
+        self._fork_of_thread(parent, [self._fork_root()])
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_id="$fork",
+            prompt="carry on",
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == fork_title
+        assert sent["message_count"] == 0
+        assert len(model.requests) == (parent_title is None)
+
+    @pytest.mark.parametrize("generated", ["Fork answer", "Fork answer (forked)"])
+    async def test_a_forks_later_summaries_stay_marked_forked(self, generated: str) -> None:
+        """The marker survives every automatic summary of a fork, and is never doubled."""
+        self._summarizer(_title(generated))
+        reply = ResolvedVisibleMessage.synthetic(
+            sender="@bot:localhost",
+            body="answer",
+            timestamp=1700001000,
+            event_id="$fork-reply",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(_make_thread_history(2), [self._fork_root(), reply])
+
+        await _summary_pass(
+            self.client,
+            _mock_config(first_threshold=2),
+            self.rp,
+            self.conversation_reader,
+            thread_id="$fork",
+            delivered_response=DeliveredResponse(event_id="$fork-reply", body="answer"),
+        )
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Fork answer (forked)"
 
     async def test_provisional_title_uses_prompt_and_keeps_first_threshold(self) -> None:
         """A provisional title must not consume the first post-reply summary or request tags."""

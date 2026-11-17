@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
+from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
@@ -22,6 +23,7 @@ from mindroom.thread_summary.notices import (
 from mindroom.thread_summary.state import (
     SummaryState,
     TruncatedThreadHistoryError,
+    current_thread_summary,
     human_summary_authorizer,
     load_complete_thread_history,
     summary_state,
@@ -39,7 +41,7 @@ from mindroom.thread_tags import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     import nio
 
@@ -54,6 +56,43 @@ logger = get_logger(__name__)
 
 # Rooms already warned that their power levels refuse the agent's automatic tags.
 _rooms_refusing_automatic_tags: set[str] = set()
+# Ends every automatic title of a forked thread.
+_FORKED_TITLE_SUFFIX = " (forked)"
+
+
+def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
+    """Return ``title`` marked once as a fork's when ``history`` roots a fork, so a fork of a fork stays "X (forked)"."""
+    if fork_parent_thread_id(history, thread_id) is None:
+        return title
+    return f"{normalize_thread_summary_text(title).removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
+
+
+async def _provisional_title(
+    prompt_message: ResolvedVisibleMessage,
+    history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+    *,
+    parent_summary: Callable[[str], Awaitable[SummaryState | None]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+) -> str | None:
+    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's."""
+    parent_thread_id = fork_parent_thread_id(history, thread_id)
+    parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
+    title = None if parent_state is None else parent_state.summary
+    if title is None:
+        generated = await generate_summary(
+            [prompt_message],
+            config,
+            runtime_paths,
+            model_name=model_name,
+            tag_vocabulary=None,
+        )
+        if generated is None:
+            return None
+        title = generated.summary
+    return _with_fork_marker(title, history, thread_id)
 
 
 async def _thread_is_resolved(
@@ -422,14 +461,26 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             if (prompt_message := await sole_untitled_prompt(history)) is None:
                 return
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
-            generated = await generate_summary(
-                [replace(prompt_message, body=prompt)],
-                config,
-                runtime_paths,
+            title = await _provisional_title(
+                replace(prompt_message, body=prompt),
+                history,
+                thread_id,
+                parent_summary=partial(
+                    current_thread_summary,
+                    client,
+                    room_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    conversation_reader=conversation_reader,
+                    entity_name=entity_name,
+                    membership_index=membership_index,
+                    trusted_sender_ids=trusted_sender_ids,
+                ),
+                config=config,
+                runtime_paths=runtime_paths,
                 model_name=model_name,
-                tag_vocabulary=None,
             )
-            if generated is None:
+            if title is None:
                 return
             # A different runtime can title or pin the thread while the model
             # runs. Keep that title even though this runtime holds its lock.
@@ -452,7 +503,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 client,
                 room_id,
                 thread_id,
-                generated.summary,
+                title,
                 0,
                 model_name,
                 conversation_reader,
@@ -580,6 +631,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             )
             baselines.record(room_id, thread_id, message_count)
             return
+        normalized_summary = _with_fork_marker(normalized_summary, thread_history, thread_id)
 
         await _deliver_generated_summary(
             client,
