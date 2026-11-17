@@ -641,10 +641,11 @@ async def test_a_reply_v2026_11_384_stored_sends_its_reasoning_details_whole(tmp
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
         ],
-        "Two indexes.": [
+        "Two indexes and types.": [
             {**text, "index": 0, "text": "Rain"},
             {**text, "index": 0, "text": " ahead."},
-            {**text, "index": 1},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
         ],
     }
     history = [_user()]
@@ -670,7 +671,11 @@ async def test_a_reply_v2026_11_384_stored_sends_its_reasoning_details_whole(tmp
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
         ],
-        "Two indexes.": [{**text, "index": 0, "text": "Rain ahead."}, {**text, "index": 1}],
+        "Two indexes and types.": [
+            {**text, "index": 0, "text": "Rain ahead."},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
+        ],
     }
     assert [message.provider_data["reasoning_details"] for message in history[1::2]] == list(stored.values())
 
