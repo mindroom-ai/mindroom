@@ -23,6 +23,9 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -995,6 +998,51 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
 
 
 @pytest.mark.asyncio
+async def test_voice_echo_placeholder_is_pending_until_its_transcript_completes_it(tmp_path) -> None:  # noqa: ANN001
+    """Clients show the thread as working while the router transcribes, then as answered by the transcript."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
+
+    placeholder_request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert placeholder_request.response_text == "Router agent is transcribing…"
+    assert placeholder_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.new_text == f"{VOICE_PREFIX}@home turn on the lights"
+    assert edit_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_voice_echo_fallback_edit_completes_the_pending_placeholder(tmp_path) -> None:  # noqa: ANN001
+    """A failed transcription's raw-audio fallback ends the placeholder's pending state too."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch.object(
+            bot._turn_ingress.deps.normalizer,
+            "prepare_voice_event",
+            side_effect=RuntimeError("transcription failed"),
+        ),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+    ):
+        await bot._turn_ingress.handle_media_event(room, event)
+        await drain_coalescing(bot)
+
+    assert bot._delivery_gateway.send_text.await_args.args[0].extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_router_voice_echo_skips_transcription_placeholder_when_voice_is_disabled(tmp_path) -> None:  # noqa: ANN001
     """Disabled STT should post only truthful attached-voice fallback text."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path, voice_enabled=False)
@@ -1012,6 +1060,8 @@ async def test_router_voice_echo_skips_transcription_placeholder_when_voice_is_d
     assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
     assert request.extra_content is not None
     assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    # Sent final with no placeholder before it, the echo is complete from its first revision.
+    assert request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     bot._delivery_gateway.edit_text.assert_not_awaited()
 
 

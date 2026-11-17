@@ -362,6 +362,10 @@ class _RecordingDeliveryGateway:
         self.edited.append(request)
         return True
 
+    async def settle_unclaimed_reply(self, _source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:  # noqa: ARG002
+        """Report that no reply holds the sources, as no reply records exist here."""
+        return False
+
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Record the failure a reply shows, when the fixture says a reply owns the event."""
         if not self.replies_own_events:
