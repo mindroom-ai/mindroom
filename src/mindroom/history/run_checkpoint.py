@@ -67,16 +67,14 @@ def checkpoint_hooks(storage: RunStorage | None) -> CheckpointHooks | None:
     """Return the hooks that checkpoint a run stored in ``storage``, or None for a run that stores no turn.
 
     The hooks save the run before a tool batch runs, so its row ends in the calls about to take effect, and before
-    each later request, so it holds the batch's results. A checkpoint a reply can do without: a failed save is logged.
-    The resumed leg of a paused run saves none, since the paused row is what a resume cut short is settled from.
+    each request of a run that has called a tool, so it holds the batch's results, a subagent's answer the run paused
+    for included. A checkpoint a reply can do without: a failed save is logged.
     """
     if storage is None or storage.store is None or storage.usage_kind is not None:
         return None
     store, session = storage.store, storage.session
 
     async def checkpoint(state: LoopState) -> None:
-        if state.resumed:
-            return
         # The run's task waits here, so nothing changes the live record and messages the copy shares.
         run = replace(state.record, messages=list(state.messages))
         try:
@@ -85,8 +83,8 @@ def checkpoint_hooks(storage: RunStorage | None) -> CheckpointHooks | None:
             logger.warning("run_checkpoint_failed", run_id=run.run_id, exc_info=True)
 
     async def before_request(state: LoopState) -> RequestDecision:
-        # A run's first request has only its prompt, which a replayed turn sends again.
-        if state.request_index:
+        # A run that has called no tool holds only its prompt, which a replayed turn sends again.
+        if state.record.tools:
             await checkpoint(state)
         return SendRequest()
 

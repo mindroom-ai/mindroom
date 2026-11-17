@@ -242,6 +242,7 @@ class ResumeRunner:
                 storage=self.storage,
                 replay_plan=self._replay_plan,
                 prompt_id=None,
+                checkpoints=False,
             ),
         )
 

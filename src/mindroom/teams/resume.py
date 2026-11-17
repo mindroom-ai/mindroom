@@ -437,6 +437,7 @@ async def continue_paused_team_run(
                     storage=storage,
                     replay_plan=plan,
                     prompt_id=None,
+                    checkpoints=False,
                 ),
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),

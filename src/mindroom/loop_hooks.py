@@ -61,7 +61,8 @@ class HookTurn:
     history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
-    member lack. ``checkpoints`` is off for a turn that saves no checkpoint of its run, as a voice call's.
+    member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
+    resume, whose paused row is what settles it when it is cut short.
     """
 
     config: Config

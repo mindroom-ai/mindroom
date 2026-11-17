@@ -14,11 +14,17 @@ import pytest
 
 from mindroom import loop_hooks
 from mindroom.ai import ai_response
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run, recover_interrupted_turn
+from mindroom.history.run_checkpoint import (
+    INTERRUPTED_CALL_RESULT,
+    is_recovered_run,
+    recover_interrupted_run,
+    recover_interrupted_turn,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolCallReady, TurnCompleted, UsageReported
@@ -28,8 +34,12 @@ from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.response_turn import build_matrix_run_metadata
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, runtime_paths_for
+from tests.delegation_helpers import ScriptedAgents, _runtime_paths, native_delegation_config, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import PROBE_TOOL, ProbeTools, registered_probe_tools, stored_runs
 
 if TYPE_CHECKING:
@@ -301,6 +311,80 @@ async def test_a_checkpoint_never_recovered_stays_out_of_history(
     install_model_providers(monkeypatch, {"default": model})
     await _respond(crashed)
     assert [message.role for message in model.requests[0].messages if message.role != "system"] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_continued_after_a_subagent_answered_keeps_checkpointing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without tool jobs a parent pauses for its subagent and continues as a resumed leg, which checkpoints too."""
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        native_delegation_config(
+            {
+                "leader": AgentConfig(display_name="Leader", delegate_to=["child"], tools=[PROBE_TOOL]),
+                "child": AgentConfig(display_name="Child"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        "child",
+        users=["@alice:example.org"],
+    )
+    entity_ids(config, paths)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", agent_name="child", task="Help")),
+            calls(tool_call("read_file", "read", path="a")),
+            calls(tool_call("run_shell_command", "shell", cmd="sleep 60")),
+        ],
+    )
+    ScriptedAgents({"leader": leader, "child": ScriptedModel([answer("helped")])}).install(monkeypatch)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        None,
+        None,
+        "parent",
+    )
+    turn = asyncio.create_task(
+        respond("leader", "Do work", config=config, runtime_paths=paths, identity=identity, run_id="parent"),
+    )
+    try:
+        await asyncio.wait_for(ProbeTools.running.wait(), 10)
+        store = create_session_storage("leader", config, paths, execution_identity=identity)
+        checkpoint = store.get_run("parent")
+    finally:
+        # A restart stops the turn, which stores no interrupted record for a turn its replay continues.
+        request_task_cancel(turn, process_shutdown=True)
+        with suppress(asyncio.CancelledError):
+            await turn
+
+    assert checkpoint is not None
+    assert checkpoint.status is RunStatus.cancelled
+    assert [call["id"] for message in checkpoint.messages for call in message.tool_calls or ()] == [
+        "delegate",
+        "read",
+        "shell",
+    ]
+    session = store.load_session("parent")
+    assert session is not None
+    assert recover_interrupted_run(store, session, checkpoint)
+    recovered = store.get_run("parent")
+    assert recovered is not None
+    assert [(message.role, message.tool_call_id) for message in recovered.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "delegate"),
+        ("assistant", None),
+        ("tool", "read"),
+        ("assistant", None),
+        ("tool", "shell"),
+    ]
+    assert "helped" in str(recovered.messages[2].content)
+    assert recovered.messages[-1].content == INTERRUPTED_CALL_RESULT
 
 
 @pytest.mark.asyncio
