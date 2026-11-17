@@ -477,7 +477,6 @@ Matrix sync callback
 | `matrix/message_content.py` | Canonical extraction and sidecar resolution for received Matrix messages and edits |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/guarded_rooms.py` | The one room a task context may send into only from an allowed scope, checked by every Matrix send: a contact turn guards its contact room, and `matrix_message` allows the sends its contact policy approved |
-| `matrix/sent_events.py` | The Matrix events a tool call sent, recorded by every Matrix send into its turn's list, which the turn's run stores as seen so no later turn replays them as unread thread messages |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `matrix/provisioning_heartbeat.py` | Best-effort startup and periodic "last seen" heartbeat from paired installs to the hosted provisioning service |
 | `matrix/provisioning_env.py` | Slim environment readers deciding whether a hosted install registers by token, shared secret, or pairing, plus the paired-install client-credential headers (no Matrix/HTTP imports) |

@@ -20,7 +20,6 @@ from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
-from mindroom.matrix.sent_events import record_sent_event
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -98,7 +97,7 @@ def _log_matrix_delivery_exception(
     )
 
 
-async def _send_prepared_room_message(
+async def _send_prepared_room_message(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
     content_sent: dict[str, Any],
@@ -112,7 +111,7 @@ async def _send_prepared_room_message(
     """Send one prepared Matrix room message and normalize local delivery exceptions.
 
     Every message, edit, reaction, and file sent to a room passes here, so a send into the room this context guards
-    is refused here as a failed one, and an accepted one is recorded for a context that records what it sends.
+    is refused here as a failed one.
     """
     if send_refused(room_id):
         logger.warning("matrix_send_refused_in_guarded_room", room_id=room_id, operation=operation)
@@ -142,7 +141,7 @@ async def _send_prepared_room_message(
                 # uncached room into a second visible message.
                 transaction_id if transaction_id is not None else uuid4(),
             )
-            response: object = await client._send(
+            return await client._send(
                 nio.RoomSendResponse,
                 method,
                 path,
@@ -151,21 +150,20 @@ async def _send_prepared_room_message(
             )
         # Bots have no interactive device-verification flow, so encrypted sends
         # always deliver to unverified devices.
-        elif transaction_id is None:
-            response = await client.room_send(
+        if transaction_id is None:
+            return await client.room_send(
                 room_id=room_id,
                 message_type=message_type,
                 content=content_sent,
                 ignore_unverified_devices=True,
             )
-        else:
-            response = await client.room_send(
-                room_id=room_id,
-                message_type=message_type,
-                content=content_sent,
-                tx_id=transaction_id,
-                ignore_unverified_devices=True,
-            )
+        return await client.room_send(
+            room_id=room_id,
+            message_type=message_type,
+            content=content_sent,
+            tx_id=transaction_id,
+            ignore_unverified_devices=True,
+        )
     except Exception as error:
         _log_matrix_delivery_exception(
             client,
@@ -175,9 +173,6 @@ async def _send_prepared_room_message(
             cache_bypass=cache_bypass,
         )
         return None
-    if isinstance(response, nio.RoomSendResponse):
-        record_sent_event(str(response.event_id))
-    return response
 
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:

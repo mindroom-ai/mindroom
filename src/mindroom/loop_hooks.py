@@ -1,9 +1,8 @@
 """The hooks an agent or team-leader run or resume installs on the agent loop, in the order the turn applies them.
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
-turn or resume install the hooks ``_loop_hooks`` composes once: the seen mark on the Matrix events the turn's tool
-calls sent, the wait budget of managed tool-job calls, the participation gate, the approval receipt, mid-turn
-compaction, the run's checkpoints, the output-limit answer,
+turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the
+participation gate, the approval receipt, mid-turn compaction, the run's checkpoints, the output-limit answer,
 portable tool search, the tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
@@ -21,11 +20,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
+from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
@@ -35,13 +33,12 @@ from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
 from mindroom.tool_jobs.notices import job_notice_hook
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook, LoopState, RequestDecision
+    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
@@ -159,8 +156,7 @@ def _loop_hooks(
 ) -> LoopHooks:
     """Return the hooks of one run or resume, in the order the loop applies them before each request.
 
-    The request cap is the loop's own and refuses a request before any hook runs; the run first marks what its
-    turn's tool calls sent as seen, whatever a later hook decides; the wait budget of
+    The request cap is the loop's own and refuses a request before any hook runs; the wait budget of
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
@@ -171,7 +167,7 @@ def _loop_hooks(
     batch for a message that steers it instead; the run hears of the ended jobs of
     ``job_notices_for`` after each batch; ``skill_review_capture`` records the run's final request.
     """
-    before_request: list[BeforeRequestHook] = [sent_events_hook]
+    before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:
         before_request.append(job_definitions_hook(job_definitions))
     if participation is not None:
@@ -218,22 +214,6 @@ def _loop_hooks(
 
 
 _PAUSED_TOOL_CALL_RESULT = "Not run: a newer message arrived while you worked, so this turn ended before this call ran."
-
-
-async def sent_events_hook(state: LoopState) -> RequestDecision:
-    """Mark the Matrix events the turn's tool calls sent as seen by the run, whose calls and results hold them.
-
-    A later turn would otherwise read them as thread messages its history lacks and replay them as assistant turns
-    after this run's answer, where the model reads them as the end of that answer and writes such an ending itself.
-    A team's member stores no metadata, so its leader's run marks what the member sent.
-    """
-    runtime = get_tool_runtime_context()
-    metadata = state.record.metadata
-    if runtime is not None and metadata is not None and runtime.sent_event_ids:
-        seen = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY) or []
-        new = dict.fromkeys(event_id for event_id in runtime.sent_event_ids if event_id not in seen)
-        metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = [*seen, *new]
-    return SendRequest()
 
 
 def _answer_tool_calls() -> AnswerToolCalls:

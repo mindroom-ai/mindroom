@@ -132,8 +132,6 @@ class ToolRuntimeContext:
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
-    # The Matrix events this turn's tool calls sent, which its run stores as seen (``loop_hooks``).
-    sent_event_ids: list[str] = field(default_factory=list)
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None

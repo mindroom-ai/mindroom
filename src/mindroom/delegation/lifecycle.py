@@ -146,8 +146,7 @@ def child_tool_runtime_context(
     """Rebind a caller's tool context to the child turn running here, carrying its persona as the cap on copies it authors.
 
     The child's turn carries the ID of its child run and names the caller's turn as its parent. It hides its tool calls
-    whatever its caller's reply shows, so they never read as shown. What it sends stays out of its caller's sent
-    events, as the caller's run does not hold it. ``config`` is the live config the child runs under:
+    whatever its caller's reply shows, so they never read as shown. ``config`` is the live config the child runs under:
     the caller's turn may hold an older snapshot, against which a prepared CLI catalog would refuse every call.
     """
     observation = _CHILD_RUN.get()
@@ -162,7 +161,6 @@ def child_tool_runtime_context(
         turn_id=observation.turn_id,
         parent_turn_id=context.turn_id,
         tool_calls_shown=False,
-        sent_event_ids=[],
     )
 
 
