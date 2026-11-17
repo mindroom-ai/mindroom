@@ -25,6 +25,7 @@ from mindroom.judgment.client import (
 from mindroom.judgment.execution import JudgmentCapacity
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
 from mindroom.judgment.state import (
+    MAX_BATCH_REQUEST_BYTES,
     ChoiceQuestion,
     JudgmentMessage,
     JudgmentQuestion,
@@ -580,3 +581,49 @@ async def test_judge_refuses_a_batch_request() -> None:
     body = _batch_body(SYSTEM_ONE, [("c0", 0.9)])
     result = await _batch_client(SYSTEM_ONE, body).judge(_batch_request(count=1), owner="rerank", allow_network=True)
     assert result.failure == "invalid_request"
+
+
+def _guided_batch(count: int, text: str, guidance: str) -> JudgmentRequest:
+    questions = tuple(
+        JudgmentQuestion(
+            id=f"c{index}",
+            instructions=f"Does this passage help? {text}",
+            when_true="Relevant.",
+            when_false="Irrelevant.",
+        )
+        for index in range(count)
+    )
+    return build_batch_request(questions, "Where do I park?", instructions=guidance)
+
+
+@pytest.mark.parametrize("wire", [SYSTEM_ONE, OPENAI_DECISIONS], ids=["typesafe", "openai"])
+@pytest.mark.parametrize(
+    "request_",
+    [
+        _guided_batch(60, ("The garage is open late. " * 100)[:1898], ""),
+        _guided_batch(30, "Short passage.", "Judge relevance. " * 300),
+    ],
+    ids=["just-under-canonical-cap", "repeated-guidance"],
+)
+async def test_batch_over_the_cap_after_wire_encoding_never_posts(
+    wire: JudgmentWire,
+    request_: JudgmentRequest,
+) -> None:
+    """The cap bounds the bytes a provider receives, so a canonical batch that grows past it stays local."""
+    assert request_.complete
+    assert request_.state_bytes <= MAX_BATCH_REQUEST_BYTES
+    seen: list[httpx.Request] = []
+    client = _batch_client(wire, b"{}", seen)
+    assert not client.batch_fits(request_)
+    result = await client.judge_many(request_, owner="rerank", allow_network=True)
+    assert result.failure == "incomplete_state"
+    assert seen == []
+
+
+@pytest.mark.parametrize("wire", [SYSTEM_ONE, OPENAI_DECISIONS], ids=["typesafe", "openai"])
+async def test_batch_fits_accepts_batches_within_the_wire_cap(wire: JudgmentWire) -> None:
+    """A batch whose encoded body fits passes the check; single and incomplete requests never do."""
+    client = _batch_client(wire, b"{}")
+    assert client.batch_fits(_batch_request())
+    assert not client.batch_fits(_request())
+    assert not client.batch_fits(build_batch_request((), "Where do I park?", instructions=""))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -69,21 +70,32 @@ def create_choice_evaluator(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class BatchEvaluator:
+    """A bound batch backend: ``fits`` says whether a request's wire body fits, ``evaluate`` judges it."""
+
+    evaluate: _JudgmentEvaluator[tuple[float | None, ...]]
+    fits: Callable[[JudgmentRequest], bool]
+
+
 def create_batch_evaluator(
     settings: ProbabilityJudgmentConfig,
     runtime_paths: RuntimePaths,
     *,
     owner: str,
     capacity: JudgmentCapacity,
-) -> _JudgmentEvaluator[tuple[float | None, ...]] | None:
+) -> BatchEvaluator | None:
     """Bind a probability backend's batched predicates under their own capacity."""
     client = _probability_client(settings, runtime_paths, question_id=_BATCH, capacity=capacity)
     if client is None:
         return None
-    return _logged_evaluator(
-        partial(client.judge_many, owner=owner, allow_network=True),
-        settings,
-        question_id=_BATCH,
+    return BatchEvaluator(
+        evaluate=_logged_evaluator(
+            partial(client.judge_many, owner=owner, allow_network=True),
+            settings,
+            question_id=_BATCH,
+        ),
+        fits=client.batch_fits,
     )
 
 

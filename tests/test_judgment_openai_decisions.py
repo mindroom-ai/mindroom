@@ -450,7 +450,8 @@ async def test_batch_evaluator_uses_its_own_capacity(tmp_path: Path, monkeypatch
         return response
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
-    evaluate = create_batch_evaluator(settings, paths, owner="root:rerank", capacity=capacity)
-    assert evaluate is not None
-    results = await asyncio.gather(evaluate(_batch_request()), evaluate(_batch_request()))
+    batch = create_batch_evaluator(settings, paths, owner="root:rerank", capacity=capacity)
+    assert batch is not None
+    assert batch.fits(_batch_request())
+    results = await asyncio.gather(batch.evaluate(_batch_request()), batch.evaluate(_batch_request()))
     assert [result.decision for result in results] == [(0.25, 0.5, 0.75)] * 2

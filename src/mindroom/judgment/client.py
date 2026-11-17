@@ -251,8 +251,21 @@ class JudgmentClient:
         ):
             raise JudgmentError(failure="invalid_request")
         # The validated request bounds the wire, which only reframes the same rubric and messages.
-        body = json.dumps(self._wire.encode(payload), ensure_ascii=False, separators=(",", ":")).encode()
+        body = self._encoded(payload)
+        # A batch's wire encoding repeats per-question framing, so its cap applies to the bytes actually posted.
+        if batch and len(body) > MAX_BATCH_REQUEST_BYTES:
+            raise JudgmentError(failure="incomplete_state")
         return questions, body
+
+    def _encoded(self, payload: dict[str, Any]) -> bytes:
+        return json.dumps(self._wire.encode(payload), ensure_ascii=False, separators=(",", ":")).encode()
+
+    def batch_fits(self, request: JudgmentRequest) -> bool:
+        """Whether a complete batch request's wire body stays within the batch cap, without posting it."""
+        if not request.complete or request.body is None:
+            return False
+        payload = json.loads(request.body)
+        return "questions" in payload and len(self._encoded(payload)) <= MAX_BATCH_REQUEST_BYTES
 
     async def _probabilities(self, request: JudgmentRequest, *, batch: bool) -> WireAnswer[tuple[float | None, ...]]:
         questions, body = self._wire_body(request, choice=False, batch=batch)
