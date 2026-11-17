@@ -19,6 +19,7 @@ from mindroom.matrix import _owned_session, appservice, users
 from mindroom.matrix.client_session import MindRoomAsyncClient, PermanentMatrixStartupError, olm_store_dir
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.test_matrix_agent_manager import _runtime_paths
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ async def test_soft_logout_keeps_stream_crypto_and_retained_input(
             first.session._transport.request = AsyncMock(
                 return_value=json.dumps({"next_batch": "retained", "rooms": {}}).encode(),
             )
-            first.session._maintain_crypto = AsyncMock()
+            skip_crypto_maintenance(first.session)
             producer = asyncio.create_task(first.session.run())
             try:
                 await asyncio.wait_for(first.session.wait_for_work(), timeout=2)
