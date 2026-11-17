@@ -2,8 +2,8 @@
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
 turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the
-participation gate, the approval receipt, mid-turn compaction, the output-limit answer, portable tool search, the
-tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
+participation gate, the approval receipt, mid-turn compaction, the run's checkpoints, the output-limit answer,
+portable tool search, the tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
 the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``).
@@ -25,6 +25,7 @@ from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
@@ -60,7 +61,8 @@ class HookTurn:
     history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
-    member lack.
+    member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
+    resume, whose paused row is what settles it when it is cut short.
     """
 
     config: Config
@@ -71,6 +73,7 @@ class HookTurn:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
+    checkpoints: bool = True
 
 
 def agent_loop_hooks(
@@ -158,7 +161,8 @@ def _loop_hooks(
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
     it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
-    live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices
+    live messages, keeping the receipt, and folds into the scope only when the run replays it; the checkpoint then
+    saves the run as that request finds it, and again before each tool batch runs. Queued-message notices
     follow every tool batch and a resume's entry when ``queued_notices`` is on, and a ``steering`` run ends at such a
     batch for a message that steers it instead; the run hears of the ended jobs of
     ``job_notices_for`` after each batch; ``skill_review_capture`` records the run's final request.
@@ -184,11 +188,15 @@ def _loop_hooks(
             turn_recorder=turn.turn_recorder,
         ),
     )
+    checkpoint = checkpoint_hooks(turn.storage) if turn.checkpoints else None
+    if checkpoint is not None:
+        before_request.append(checkpoint.before_request)
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
         answer_tool_calls=_answer_tool_calls(),
         rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
+        before_dispatch=checkpoint.before_dispatch if checkpoint is not None else None,
         tool_middleware=tool_middleware,
         after_tool_batch=(
             *((ai_runtime.queued_notice_after_tool_batch(notice_text, steering=steering),) if queued_notices else ()),

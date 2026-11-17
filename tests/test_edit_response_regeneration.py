@@ -890,8 +890,15 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         await bot._on_message(room, edit_event)
         await finish_edit_regenerations(bot)
 
+    # The removal keeps the runs that read this edit, which only its own regeneration stores.
     assert mock_remove_run.call_args_list == [
-        call(storage, stored_target.session_id, _team_history_scope("test_team"), "$original:example.com"),
+        call(
+            storage,
+            stored_target.session_id,
+            _team_history_scope("test_team"),
+            "$original:example.com",
+            keeping=frozenset({"$edit:example.com"}),
+        ),
     ]
     mock_team_response.assert_awaited_once()
 
@@ -1461,12 +1468,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                     "!test:example.com",
                     _agent_history_scope("test_agent"),
                     "$first:example.com",
+                    keeping=frozenset({"$edit:example.com"}),
                 ),
                 call(
                     mock_create_storage.return_value,
                     "!test:example.com",
                     _agent_history_scope("test_agent"),
                     "$primary:example.com",
+                    keeping=frozenset({"$edit:example.com"}),
                 ),
             ],
         )
