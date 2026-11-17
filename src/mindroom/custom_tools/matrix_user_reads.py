@@ -1,7 +1,7 @@
 """What the `matrix_user` toolkit reads as the person: their rooms, messages, files, and people.
 
 Each read takes a client that acts as the person and returns its result's fields, with rooms, messages, and people as
-compact lines. Every request goes through ``matrix_json``, which reads an answer up to 2 MiB and retries a 429 at most
+compact lines. Every request goes through ``_matrix_json``, which reads an answer up to 2 MiB and retries a 429 at most
 twice, waiting at most 5 seconds each time, as matrix-mcp does; only a file's download, which is not JSON, goes through
 the capped media download instead, and an alias's lookup through the room resolver MindRoom's other Matrix tools use.
 """
@@ -45,21 +45,15 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = [
-    "MATRIX_USER_ID",
     "REQUEST_FAILURES",
     "MatrixRequestError",
     "download_file",
-    "json_objects",
     "mark_read",
-    "matrix_json",
-    "optional_json",
-    "read_event",
     "read_messages",
     "read_people",
     "read_room",
     "read_rooms",
     "request_failure",
-    "room_encrypted",
     "room_named",
     "room_needed",
     "search_messages",
@@ -90,7 +84,7 @@ _THREAD = "m.thread"
 # The first millisecond of the year 10000, which no date reaches.
 _END_OF_DATES_MS = 253_402_300_800_000
 # A full Matrix user ID, such as @alice:example.com.
-MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
+_MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
 # The room list's groups, in the order it lists them.
 _UNREAD, _INVITED, _OTHER = range(3)
 # Every event field the room list reads. The homeserver trims each event of the joined rooms to these, so a long last
@@ -124,7 +118,7 @@ class _AnswerTooLargeError(MatrixRequestError):
     """An answer over 2 MiB."""
 
 
-async def matrix_json(
+async def _matrix_json(
     client: nio.AsyncClient,
     method: str,
     path: str,
@@ -209,15 +203,11 @@ def room_needed(action: str) -> str:
     return f"{action} needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 
 
-async def room_named(client: nio.AsyncClient, room: str, runtime_paths: RuntimePaths, *, join: bool = False) -> str:
+async def room_named(client: nio.AsyncClient, room: str, runtime_paths: RuntimePaths) -> str:
     """Return the ID of the room ``room`` names: its ID, an alias, or a configured room name.
 
     Raises ``MatrixRequestError`` for a name of no room, and with the homeserver's answer to an alias it cannot resolve.
-    An alias of a room to ``join`` is returned as it is, with no lookup: the homeserver's join finds the servers through
-    the alias, which a join by room ID cannot, and its own answer says what came of it.
     """
-    if join and room.startswith("#"):
-        return room
     resolved = await resolve_room_reference(client, room, runtime_paths)
     if isinstance(resolved, str):
         return resolved
@@ -228,22 +218,22 @@ async def room_named(client: nio.AsyncClient, room: str, runtime_paths: RuntimeP
     raise _refusal(None, {"errcode": resolved.status_code, "error": resolved.message})
 
 
-async def optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
+async def _optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
     """Return the answer to a GET of something that may not exist, None only when the homeserver says it does not."""
     try:
-        return await matrix_json(client, "GET", path)
+        return await _matrix_json(client, "GET", path)
     except MatrixRequestError as error:
         if error.status == HTTPStatus.NOT_FOUND and error.errcode == "M_NOT_FOUND":
             return None
         raise
 
 
-async def room_encrypted(client: nio.AsyncClient, room_id: str) -> bool:
+async def _room_encrypted(client: nio.AsyncClient, room_id: str) -> bool:
     """Return whether a room is encrypted: it is not only when the homeserver says the room has no encryption state.
 
-    Any other answer that is not the state raises, as ``matrix_json`` does.
+    Any other answer that is not the state raises, as ``_matrix_json`` does.
     """
-    return await optional_json(client, f"/rooms/{quote(room_id, safe='')}/state/m.room.encryption") is not None
+    return await _optional_json(client, f"/rooms/{quote(room_id, safe='')}/state/m.room.encryption") is not None
 
 
 def _clamped(limit: int | None, default: int, maximum: int) -> int:
@@ -254,14 +244,14 @@ def _mapping(value: object) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
-def json_objects(answer: dict[str, Any], key: str) -> list[dict[str, Any]]:
+def _json_objects(answer: dict[str, Any], key: str) -> list[dict[str, Any]]:
     """Return the JSON objects listed under ``key`` of a homeserver's answer, such as a page's events."""
     listed = answer.get(key)
     return [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else []
 
 
 def _events(section: object) -> list[dict[str, Any]]:
-    return json_objects(_mapping(section), "events")
+    return _json_objects(_mapping(section), "events")
 
 
 def _state_event(events: list[dict[str, Any]], event_type: str, state_key: str = "") -> dict[str, Any]:
@@ -405,7 +395,7 @@ async def read_rooms(client: nio.AsyncClient, *, query: str | None, limit: int |
     """
     parameters = {"timeout": 0, "set_presence": "offline", "filter": json.dumps(_rooms_filter())}
     try:
-        sync = await matrix_json(client, "GET", f"/sync?{urlencode(parameters)}")
+        sync = await _matrix_json(client, "GET", f"/sync?{urlencode(parameters)}")
     except _AnswerTooLargeError:
         raise MatrixRequestError(_TOO_MANY_ROOMS) from None
     partners = _direct_partners(_account_data(sync.get("account_data"), "m.direct"))
@@ -430,12 +420,12 @@ async def read_room(client: nio.AsyncClient, room_id: str, *, limit: int | None)
     Encryption counts as off only when the homeserver says the room has no encryption state.
     """
     room = quote(room_id, safe="")
-    joined = _mapping((await matrix_json(client, "GET", f"/rooms/{room}/joined_members")).get("joined"))
-    name = _mapping(await optional_json(client, f"/rooms/{room}/state/m.room.name")).get("name")
-    topic = _mapping(await optional_json(client, f"/rooms/{room}/state/m.room.topic")).get("topic")
-    encrypted = await room_encrypted(client, room_id)
+    joined = _mapping((await _matrix_json(client, "GET", f"/rooms/{room}/joined_members")).get("joined"))
+    name = _mapping(await _optional_json(client, f"/rooms/{room}/state/m.room.name")).get("name")
+    topic = _mapping(await _optional_json(client, f"/rooms/{room}/state/m.room.topic")).get("topic")
+    encrypted = await _room_encrypted(client, room_id)
     person = quote(client.user_id, safe="")
-    direct = _mapping(await optional_json(client, f"/user/{person}/account_data/m.direct"))
+    direct = _mapping(await _optional_json(client, f"/user/{person}/account_data/m.direct"))
     members = [
         _line(user_id, _name(_mapping(member).get("display_name"))) for user_id, member in sorted(joined.items())
     ]
@@ -456,14 +446,14 @@ async def read_people(client: nio.AsyncClient, query: str, *, limit: int | None)
     ``limit`` (default 10, at most 50) bounds a search, and ``limited`` says whether the directory had more.
     """
     query = query.strip()
-    if MATRIX_USER_ID.fullmatch(query):
-        profile = await matrix_json(client, "GET", f"/profile/{quote(query, safe='')}")
+    if _MATRIX_USER_ID.fullmatch(query):
+        profile = await _matrix_json(client, "GET", f"/profile/{quote(query, safe='')}")
         return {"people": [_line(query, _name(profile.get("displayname")))]}
     count = _clamped(limit, _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT)
-    found = await matrix_json(client, "POST", "/user_directory/search", {"search_term": query, "limit": count})
+    found = await _matrix_json(client, "POST", "/user_directory/search", {"search_term": query, "limit": count})
     people = [
         _line(result["user_id"], _name(result.get("display_name")))
-        for result in json_objects(found, "results")
+        for result in _json_objects(found, "results")
         if isinstance(result.get("user_id"), str)
     ]
     return {"people": people[:count], "limited": found.get("limited") is True}
@@ -570,7 +560,7 @@ def _reactions_note(message: dict[str, Any], senders_by_key: dict[str, set[str]]
     A bundled count already covers the page's reactions, so a key counts the larger of the two.
     """
     counts = {key: len(senders) for key, senders in senders_by_key.items()}
-    for group in json_objects(_bundled(message, _REACTION), "chunk"):
+    for group in _json_objects(_bundled(message, _REACTION), "chunk"):
         key = group.get("key")
         if isinstance(key, str):
             counts[key] = max(counts.get(key, 0), _count(group.get("count")))
@@ -696,8 +686,8 @@ async def read_messages(
     if event_id is not None:
         return await _around(client, room, quote(event_id, safe=""), count=count)
     parameters = _page_query({"dir": "b", "limit": count, "filter": _MESSAGES_FILTER}, page_token)
-    page = await matrix_json(client, "GET", f"/rooms/{room}/messages?{parameters}")
-    return _messages_page(_message_lines(json_objects(page, "chunk")[::-1]), page.get("end"))
+    page = await _matrix_json(client, "GET", f"/rooms/{room}/messages?{parameters}")
+    return _messages_page(_message_lines(_json_objects(page, "chunk")[::-1]), page.get("end"))
 
 
 async def _thread(
@@ -709,10 +699,10 @@ async def _thread(
     count: int,
 ) -> dict[str, object]:
     """Return a thread's root, unless continuing, and then its newest ``count`` replies before ``page_token``."""
-    root = [] if page_token else [await matrix_json(client, "GET", f"/rooms/{room}/event/{thread}")]
+    root = [] if page_token else [await _matrix_json(client, "GET", f"/rooms/{room}/event/{thread}")]
     parameters = _page_query({"dir": "b", "limit": count}, page_token)
-    replies = await matrix_json(client, "GET", f"/rooms/{room}/relations/{thread}/m.thread?{parameters}", version="v1")
-    lines = _message_lines([*root, *json_objects(replies, "chunk")[::-1]], thread_page=True)
+    replies = await _matrix_json(client, "GET", f"/rooms/{room}/relations/{thread}/m.thread?{parameters}", version="v1")
+    lines = _message_lines([*root, *_json_objects(replies, "chunk")[::-1]], thread_page=True)
     return _messages_page(lines, replies.get("next_batch"))
 
 
@@ -720,10 +710,10 @@ async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int)
     """Return an event with up to ``count // 2`` events on each side, even from a homeserver that sends more."""
     side = count // 2
     parameters = urlencode({"limit": side * 2, "filter": _MESSAGES_FILTER})
-    context = await matrix_json(client, "GET", f"/rooms/{room}/context/{event}?{parameters}")
+    context = await _matrix_json(client, "GET", f"/rooms/{room}/context/{event}?{parameters}")
     # The events before come newest first.
-    before = json_objects(context, "events_before")[:side][::-1]
-    after = json_objects(context, "events_after")[:side]
+    before = _json_objects(context, "events_before")[:side][::-1]
+    after = _json_objects(context, "events_after")[:side]
     return _messages_page(_message_lines([*before, _mapping(context.get("event")), *after]))
 
 
@@ -746,10 +736,10 @@ async def search_messages(
         search_filter["rooms"] = [room_id]
     criteria = {"search_term": query, "order_by": "recent", "keys": ["content.body"], "filter": search_filter}
     path = "/search" + (f"?{urlencode({'next_batch': page_token})}" if page_token else "")
-    answer = await matrix_json(client, "POST", path, {"search_categories": {"room_events": criteria}})
+    answer = await _matrix_json(client, "POST", path, {"search_categories": {"room_events": criteria}})
     found = _mapping(_mapping(answer.get("search_categories")).get("room_events"))
     lines: dict[str, str] = {}
-    for hit in json_objects(found, "results"):
+    for hit in _json_objects(found, "results"):
         event = _mapping(hit.get("result"))
         room = event.get("room_id")
         if _redacted(event) or not isinstance(room, str):
@@ -768,13 +758,13 @@ async def search_messages(
     return _messages_page(list(lines.values()), found.get("next_batch"))
 
 
-async def read_event(client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, Any]:
+async def _read_event(client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, Any]:
     """Return the event ``event_id`` of the room ``room_id``, refusing one that says it is in another room.
 
     A homeserver finds an event under a room only when the room holds it; the event's own room is checked too, so a
     homeserver that answers otherwise moves no marker and hands over no file.
     """
-    event = await matrix_json(client, "GET", f"/rooms/{quote(room_id, safe='')}/event/{quote(event_id, safe='')}")
+    event = await _matrix_json(client, "GET", f"/rooms/{quote(room_id, safe='')}/event/{quote(event_id, safe='')}")
     if "room_id" in event and event["room_id"] != room_id:
         raise MatrixRequestError(_OTHER_ROOM)
     return event
@@ -803,7 +793,7 @@ async def download_file(
 
     The download stops at the attachment store's size cap. Returns the attachment's ID, name, type, and size.
     """
-    event = await read_event(client, room_id, event_id)
+    event = await _read_event(client, room_id, event_id)
     if _encrypted(event):
         raise MatrixRequestError(_ENCRYPTED)
     content, media = _content(event), parse_matrix_media_event_source(event)
@@ -847,18 +837,23 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
     """
     room = quote(room_id, safe="")
     if event_id is None:
-        newest = await matrix_json(client, "GET", f"/rooms/{room}/messages?{urlencode({'dir': 'b', 'limit': 1})}")
-        read_up_to = next(iter(json_objects(newest, "chunk")), {}).get("event_id")
+        newest = await _matrix_json(client, "GET", f"/rooms/{room}/messages?{urlencode({'dir': 'b', 'limit': 1})}")
+        read_up_to = next(iter(_json_objects(newest, "chunk")), {}).get("event_id")
         if not isinstance(read_up_to, str):
             raise MatrixRequestError(_NOTHING_TO_MARK)
     else:
-        await read_event(client, room_id, event_id)
+        await _read_event(client, room_id, event_id)
         read_up_to = event_id
     markers = {"m.fully_read": read_up_to, "m.read.private": read_up_to}
-    await matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)
+    await _matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)
     person = quote(client.user_id, safe="")
     try:
-        await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
+        await _matrix_json(
+            client,
+            "PUT",
+            f"/user/{person}/rooms/{room}/account_data/m.marked_unread",
+            {"unread": False},
+        )
     except REQUEST_FAILURES as error:
         msg = f"The room is read up to {read_up_to}, but it is still marked unread: {request_failure(error)}"
         raise MatrixRequestError(msg) from None

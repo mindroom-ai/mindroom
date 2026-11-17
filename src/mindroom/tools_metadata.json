@@ -337,14 +337,13 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "The owner's own Matrix account: catch up on their rooms and DMs, search, read, and, when they ask for exactly that, write as them",
+      "description": "The owner's own Matrix account: catch up on their rooms and DMs, search, and read as them",
       "display_name": "Matrix as the Owner",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "matrix_user_read",
-        "matrix_user_write"
+        "matrix_user_read"
       ],
       "helper_text": null,
       "icon": "UserRound",

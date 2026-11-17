@@ -6,7 +6,6 @@ The homeserver answers canned JSON per request path.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -186,10 +185,7 @@ def matrix_error(status: int, errcode: str, error: str, **fields: object) -> Ans
 
 @dataclass(frozen=True)
 class HomeserverRequest:
-    """One request the fake homeserver received, with its path unquoted and its JSON body parsed.
-
-    A text body that is no JSON is kept as it was sent, so a request the client should have refused is still recorded.
-    """
+    """One request the fake homeserver received, with its path unquoted and its JSON body parsed."""
 
     method: str
     url: str
@@ -197,15 +193,6 @@ class HomeserverRequest:
     query: dict[str, list[str]]
     body: object
     headers: dict[str, str]
-    # The bytes of an upload, whose body is a stream rather than JSON text.
-    uploaded: bytes | None = None
-
-
-def _parsed(text: str) -> object:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
 
 
 @dataclass
@@ -286,10 +273,9 @@ class FakeHomeserver:
         """Record the request and answer it, or raise the transport failure its path answers."""
         split = urlsplit(url)
         path = unquote(split.path)
-        body = _parsed(data) if isinstance(data, str) else None
-        uploaded = b"".join([chunk async for chunk in data]) if isinstance(data, AsyncIterable) else None
+        body = json.loads(data) if isinstance(data, str) else None
         query = parse_qs(split.query)
-        self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers), uploaded))
+        self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers)))
         answer = self._answer(path)
         content = answer.body if isinstance(answer.body, bytes) else json.dumps(answer.body).encode()
         return _Response(answer.status, answer.headers, _Content(content))
@@ -370,14 +356,12 @@ def owner_turn(
     paths: RuntimePaths,
     requester_id: str = OWNER,
     agent_name: str = AGENT,
-    attachment_ids: tuple[str, ...] = (),
     room_id: str = ROOM,
     **fields: object,
 ) -> AbstractContextManager[None]:
     """Enter a chat turn in ``room_id`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
 
-    The turn holds the attachments ``attachment_ids`` name, stored in the runtime's storage, as a bot's turn does, and
-    any other context ``fields``.
+    The turn holds any other context ``fields``.
     """
     context = make_test_tool_runtime_context(
         agent_name=agent_name,
@@ -388,8 +372,6 @@ def owner_turn(
         runtime_paths=paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        storage_path=paths.storage_root,
-        attachment_ids=attachment_ids,
         **fields,
     )
     return tool_runtime_context(context)
