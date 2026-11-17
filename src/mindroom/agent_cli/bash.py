@@ -42,7 +42,7 @@ def minimal_bash_toolkit(
         Args:
             command: The Bash command to run.
             timeout: Seconds after which the command and every process it started are stopped, returning the output
-                so far; null stops it after 120 seconds, or never when it runs as part of a background job.
+                so far; null stops it after 120 seconds, or after 30 minutes when it runs as part of a background job.
             tail: The number of output lines to return.
 
         """

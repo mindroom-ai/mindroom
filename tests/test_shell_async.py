@@ -820,18 +820,23 @@ async def test_run_shell_command_stops_a_command_past_its_timeout(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_only_a_job_command_runs_past_the_default_time_limit(tmp_path: Path) -> None:
-    """Without a timeout, a call that runs as a background job has no limit and any other call has the default."""
+async def test_a_job_command_runs_past_the_default_time_limit_until_the_job_limit(tmp_path: Path) -> None:
+    """Without a timeout, a background job's call gets the longer job limit, so a hung command still ends."""
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
     command = ["bash", "-c", "sleep 0.6; echo done"]
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with (
+        patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2),
+        patch("mindroom.shell.execution._DEFAULT_JOB_RUN_TIMEOUT_SECONDS", 1.5),
+    ):
         stopped = await entrypoint(command)
         with job_control_context(JobControl()):
             finished = await entrypoint(command)
+            hung = await entrypoint(["bash", "-c", "echo started; sleep 300"])
 
     assert stopped == "Stopped after 0.2s."
     assert finished == "done"
+    assert hung == "Stopped after 1.5s.\nOutput:\nstarted"
 
 
 @pytest.mark.asyncio

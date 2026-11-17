@@ -87,7 +87,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or never when it runs as part of a background job."
+                "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or after 30 minutes when it runs as part of a background job."
               },
               "tail": {
                 "type": "integer",

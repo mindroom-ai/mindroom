@@ -10578,7 +10578,7 @@ With a working directory, the returned output and any saved file start with a `[
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
-Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) stops after 30 minutes, even while the reply waits for it, and any other command stops after 120 seconds.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
 A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
@@ -15647,7 +15647,7 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
+A shell command that runs as a job stops after 30 minutes unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
 A shell call that runs outside any job, such as during a voice call, in a [contact turn](https://docs.mindroom.chat/agent-contacts/#contact-turns), in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job, except browser calls: a `browser` call stops after its own 120-second limit, and a `browser_mcp` call after the worker's request timeouts, 120 seconds by default.
@@ -26318,7 +26318,7 @@ Use `--allow-app` to save app choices at the same time.
 │ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Pairing ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                        TEXT  Short-lived code returned by !desktop setup.    │
+│ *  --code                        TEXT  Short-lived code returned by /desktop setup.    │
 │                                        [required]                                      │
 │ *  --controller-user-id          TEXT  Pinned cloud controller Matrix user. [required] │
 │ *  --controller-device-id        TEXT  Pinned cloud controller device. [required]      │

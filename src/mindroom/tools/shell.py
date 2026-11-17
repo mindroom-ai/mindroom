@@ -489,7 +489,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             stdout is preserved together with stderr. A command still running after
             ``timeout`` seconds is stopped with the processes it started, and its
             output so far is returned. Without ``timeout``, a call that runs as part
-            of a background job has no time limit; that includes every call that
+            of a background job stops after 30 minutes; that includes every call that
             accepts ``background_after`` and, with background jobs on, a subagent's
             calls for its delegated task, whether or not its caller waits for it. A
             call that accepts ``background_after`` and leaves it unset returns a job

@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 _DEFAULT_RUN_TIMEOUT_SECONDS = 120
+# A job's call without its own timeout still ends, so a hung command (such as `find /`) cannot hold a child for hours.
+_DEFAULT_JOB_RUN_TIMEOUT_SECONDS = 1800
 # Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
 _SHELL_REQUEST_GRACE_SECONDS = 30.0
 
@@ -202,11 +204,11 @@ class ShellRunResult:
     output_file_handled: bool = False
 
 
-def shell_call_timeout(timeout: float | None) -> float | None:
-    """Return when a shell call's command is stopped: its own timeout, none for a job's call, else the default."""
+def shell_call_timeout(timeout: float | None) -> float:
+    """Return when a shell call's command is stopped: its own timeout, the job default for a job's call, else the default."""
     if timeout is not None:
         return timeout
-    return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
+    return _DEFAULT_JOB_RUN_TIMEOUT_SECONDS if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
 def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
@@ -223,7 +225,7 @@ def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
     """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
 
-    Callers give a job's call no budget, as `shell_call_timeout` gives its command no limit.
+    Callers give a job's call no budget, as its command runs well past any foreground wait.
     """
     if tool_name != "shell" or function_name != SHELL_FUNCTION:
         return 0.0
