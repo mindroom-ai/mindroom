@@ -3235,7 +3235,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
-    "mindroom.constants",
+    "mindroom.room_steward",
     "mindroom.thread_snooze",
     "mindroom.thread_tags",
 ]
@@ -3333,6 +3333,7 @@ depends_on = [
     "mindroom.plugin_lifecycle",
     "mindroom.response_activity",
     "mindroom.response_admission",
+    "mindroom.room_steward",
     "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
     "mindroom.approval.tool_approval",
@@ -4739,6 +4740,10 @@ path = "mindroom.room_reply_modes"
 depends_on = [
     "mindroom.constants",
 ]
+
+[[modules]]
+path = "mindroom.room_steward"
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.room_modes"
@@ -8686,10 +8691,10 @@ depends_on = [
 path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
-    "mindroom.constants",
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
+    "mindroom.room_steward",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 

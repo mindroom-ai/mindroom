@@ -113,6 +113,14 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Return the router bot's hook support, whose client backs what another bot's own cannot."""
         ...
 
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the bot that does one room's shared invisible work now."""
+        ...
+
+    def room_poster(self, room_id: str) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers."""
+        ...
+
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
         ...

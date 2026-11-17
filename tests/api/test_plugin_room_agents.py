@@ -103,6 +103,7 @@ class _Room:
         self.ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, paths).items()}
         members = [ALICE, BOB, CAROL, self.ids[ROUTER_AGENT_NAME], *(self.ids[name] for name in joined)]
         self.client = SimpleNamespace(
+            user_id=self.ids[ROUTER_AGENT_NAME],
             rooms={ROOM: nio.MatrixRoom(ROOM, self.ids[ROUTER_AGENT_NAME])},
             joined_members=AsyncMock(return_value=joined_members_response(ROOM, *members)),
             joined_rooms=AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])),

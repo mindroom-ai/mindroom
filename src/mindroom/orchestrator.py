@@ -138,6 +138,7 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
+from .room_steward import room_poster, room_steward
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -1014,6 +1015,14 @@ class _MultiAgentOrchestrator:
         """Return the router bot's hook support, whose client backs what another bot's own cannot."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         return None if router_bot is None else router_bot.hook_context
+
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the bot that does one room's shared invisible work now."""
+        return room_steward(self.agent_bots, room_id)
+
+    def room_poster(self, room_id: str) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers."""
+        return room_poster(self.agent_bots, room_id)
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""

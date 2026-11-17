@@ -209,6 +209,8 @@ class LoadedPlugin:
         router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
         self._router_member = {router_id: config.entity_display_name(ROUTER_AGENT_NAME)}
         self._rooms: dict[str, Room] = {}
+        # The router's own cache of each room it is joined to, which the choice of the bot that reads a room goes by.
+        self._cached_rooms: dict[str, nio.MatrixRoom] = {}
         self._event_ids = count(1)
         self._tokens: dict[str, list[str]] = {}
         self._memberships = AgentReplyMembershipIndex()
@@ -218,7 +220,8 @@ class LoadedPlugin:
             "nio.AsyncClient",
             _StandIn(
                 "Matrix client",
-                rooms=self._rooms,
+                user_id=router_id,
+                rooms=self._cached_rooms,
                 joined_rooms=self._joined_rooms,
                 joined_members=self._joined_members,
                 room_get_state=self._room_get_state,
@@ -268,6 +271,7 @@ class LoadedPlugin:
         levels = dict(power_levels) if power_levels is not None else None
         room = Room(room_id, MappingProxyType(dict(members)), levels, direct, history_visibility, key)
         self._rooms[room_id] = room
+        self._cached_rooms[room_id] = nio.MatrixRoom(room_id, self._client.user_id)
         if key is not None:
             update_matrix_state(self.runtime_paths, lambda state: state.add_room(key, room_id, "", key))
         # The next decision reads every room again, as membership events make the router do live.
