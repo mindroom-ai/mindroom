@@ -40,7 +40,7 @@ BOB = "@bob:example.org"
 CLIENT_ORIGIN = "https://chat.example.org"
 ALICE_TOKEN = "gho-alice-access"  # noqa: S105
 SHARED_TOKEN = "ghp-shared-token"  # noqa: S105
-ALICE_PAT = "github_pat_alice-personal"  # noqa: S105
+ALICE_PAT = "github_pat_alice-personal"
 DEFAULT_ACCEPT = "application/vnd.github+json"
 
 type Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
@@ -1341,5 +1341,12 @@ def test_logs_never_carry_a_token_or_its_login_lookup(
         ask(client, session(app, ALICE))
 
     logged = repr(logs) + caplog.text
-    for secret in (ALICE_PAT, "ghp_rejected-token", "ghp_bad token", "pat-gh", "login-lookup-secret", "Bad credentials"):
+    for secret in (
+        ALICE_PAT,
+        "ghp_rejected-token",
+        "ghp_bad token",
+        "pat-gh",
+        "login-lookup-secret",
+        "Bad credentials",
+    ):
         assert secret not in logged
