@@ -12,7 +12,12 @@ import pytest
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    ROUTER_AGENT_NAME,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
@@ -235,6 +240,58 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
     assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
     assert await _await_responder(harness, source_event_id) is True
     assert not harness.gateway.send_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_published_before_revocation_is_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A placeholder the requester lost access behind stops saying the router is still transcribing."""
+    harness = _echo_harness(tmp_path, voice_enabled=True)
+    source_event_id = "$voice-revoked-after-placeholder"
+    edit = AsyncMock(return_value=True)
+    monkeypatch.setattr(harness.gateway, "edit_text", edit)
+    handle = harness.router.start(_request(source_event_id))
+    assert handle is not None
+    assert handle.placeholder_task is not None
+    assert await handle.placeholder_task == "$echo:localhost"
+
+    # The requester loses access to the router while the audio is transcribed.
+    monkeypatch.setattr("mindroom.voice.visible_voice_echo.is_sender_allowed_for_agent_reply_in_room", lambda *_: False)
+    # No relay is owed to a requester the router may not answer, so the turn is still ready.
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+
+    edit.assert_awaited_once()
+    request = edit.await_args.args[0]
+    assert request.event_id == "$echo:localhost"
+    # It must not relay the transcript the router may no longer show.
+    assert request.new_text == "Router agent is transcribing…"
+    assert request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert request.extra_content[VISIBLE_ROUTER_VOICE_ECHO_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_finalized_echo_is_not_reset_after_revocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A redelivery after revocation leaves an echo that already shows the transcript alone."""
+    harness = _echo_harness(tmp_path, voice_enabled=True)
+    source_event_id = "$voice-finalized-then-revoked"
+    monkeypatch.setattr(
+        harness.router.deps.turn_store,
+        "visible_echo",
+        AsyncMock(return_value=SourceVisibleEcho("$echo:localhost", is_fallback=False)),
+    )
+    edit = AsyncMock(return_value=True)
+    monkeypatch.setattr(harness.gateway, "edit_text", edit)
+    handle = harness.router.start(_request(source_event_id))
+    assert handle is not None
+    assert handle.placeholder_task is not None
+    assert await handle.placeholder_task == "$echo:localhost"
+
+    monkeypatch.setattr("mindroom.voice.visible_voice_echo.is_sender_allowed_for_agent_reply_in_room", lambda *_: False)
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+
+    edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

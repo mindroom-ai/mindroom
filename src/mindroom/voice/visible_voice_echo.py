@@ -486,9 +486,25 @@ class VisibleVoiceEchoLifecycle:
             _serialize_update(self._update_key(request)),
             self.deps.runtime.admission_fence(),
         ):
-            if not self._sender_is_authorized(request):
-                return None
             tracked = await self.deps.turn_store.visible_echo(request.source_event_id)
+            if not self._sender_is_authorized(request):
+                if placeholder_event_id is not None and (tracked is None or tracked.is_fallback is None):
+                    # The router may no longer relay this requester's words, so end its placeholder as it stands.
+                    await self.deps.delivery_gateway.edit_text(
+                        EditTextRequest(
+                            target=request.target,
+                            event_id=placeholder_event_id,
+                            new_text=_VOICE_TRANSCRIPTION_PLACEHOLDER,
+                            extra_content={
+                                **self._extra_content(
+                                    requester_user_id=request.requester_user_id,
+                                    normalized_source=request.raw_source,
+                                ),
+                                STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+                            },
+                        ),
+                    )
+                return None
             if tracked is not None and tracked.is_fallback is not None and (not tracked.is_fallback or is_fallback):
                 return tracked.event_id
 
