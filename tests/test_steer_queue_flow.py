@@ -28,7 +28,7 @@ from mindroom.llm.runs import RunStatus, run_tool_executions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnMode
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_payload_preparation import STEER_CONTINUATION_LINE, steered_follow_up_prompt
+from mindroom.response_payload_preparation import _STEER_CONTINUATION_LINE, _steered_follow_up_prompt
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
@@ -362,8 +362,8 @@ async def test_steer_finishes_old_reply_and_followup_replays_its_tools(
     assert prompt.role == "user"
     text = str(prompt.content)
     assert sum(content.count(_STEER_TEXT) for content in _contents(follow_up)) == 1
-    assert sum(content.count(STEER_CONTINUATION_LINE) for content in _contents(follow_up)) == 1
-    assert text.index(_STEER_TEXT) < text.index(STEER_CONTINUATION_LINE)
+    assert sum(content.count(_STEER_CONTINUATION_LINE) for content in _contents(follow_up)) == 1
+    assert text.index(_STEER_TEXT) < text.index(_STEER_CONTINUATION_LINE)
 
     # Two replies, each answering its own message, each source settled once by its own completed turn.
     new_reply = await _reply(turn, _STEER)
@@ -426,7 +426,7 @@ async def test_team_leader_steer_ends_its_run_and_the_team_followup_replays_it(
         _plain_request(_target(reply_to_event_id=_STEER), source_event_id=_STEER),
         prompt=_STEER_TEXT,
         # The marked prompt the payload preparer builds for a message that stopped the reply.
-        model_prompt=steered_follow_up_prompt(_STEER_TEXT),
+        model_prompt=_steered_follow_up_prompt(_STEER_TEXT),
     )
     await _team_reply(turn, follow_up_request)
 
@@ -437,7 +437,7 @@ async def test_team_leader_steer_ends_its_run_and_the_team_followup_replays_it(
     assert (result.role, result.tool_call_id) == ("tool", "call-all")
     assert "Writer fact." in str(result.content)
     assert "Checker fact." in str(result.content)
-    assert str(prompt.content).count(STEER_CONTINUATION_LINE) == 1
+    assert str(prompt.content).count(_STEER_CONTINUATION_LINE) == 1
     # The members answered once, for the cut-off run only.
     assert [len(turn.models[name].requests) for name in ("writer-model", "checker-model")] == [1, 1]
     old_run, new_run = [run for run in turn.team_runs() if run.parent_run_id is None]
@@ -498,7 +498,7 @@ async def test_auto_failure_and_queue_keep_distinct_request_traces(
 
     follow_up = model.requests[-1]
     assert len(model.requests) == 3
-    assert not any(STEER_CONTINUATION_LINE in content for content in _contents(follow_up))
+    assert not any(_STEER_CONTINUATION_LINE in content for content in _contents(follow_up))
     assert sum(content.count(_STEER_TEXT) for content in _contents(follow_up)) == 1
     assert (await _reply(turn, _STEER)).state is rl.ReplyState.COMPLETED
     await _assert_settled(turn, _STEER)
@@ -687,8 +687,8 @@ async def test_hidden_tool_only_steer_of_a_person_approved_resume_ends_with_its_
     assert [(m.role, m.content) for m in follow_up.messages if m.role == "tool"] == [("tool", "echoed hi")]
     text = str(follow_up.messages[-1].content)
     assert sum(content.count(_STEER_TEXT) for content in _contents(follow_up)) == 1
-    assert sum(content.count(STEER_CONTINUATION_LINE) for content in _contents(follow_up)) == 1
-    assert text.index(_STEER_TEXT) < text.index(STEER_CONTINUATION_LINE)
+    assert sum(content.count(_STEER_CONTINUATION_LINE) for content in _contents(follow_up)) == 1
+    assert text.index(_STEER_TEXT) < text.index(_STEER_CONTINUATION_LINE)
     new_reply = await _reply(turn, _STEER)
     assert new_reply.reply_id != old_reply.reply_id
     assert new_reply.state is rl.ReplyState.COMPLETED

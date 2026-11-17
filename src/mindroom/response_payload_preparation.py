@@ -39,19 +39,19 @@ if TYPE_CHECKING:
     from mindroom.turn_policy import PreparedDispatch
 
 
-STEER_CONTINUATION_LINE = (
+_STEER_CONTINUATION_LINE = (
     "Your previous reply was cut short by this message after its last tool calls; carry on with the task, taking "
     "this message into account."
 )
 
 
-def steered_follow_up_prompt(prompt: str) -> str:
+def _steered_follow_up_prompt(prompt: str) -> str:
     """Return the model's copy of a message that cut the agent's reply short, ending with the carry-on line.
 
     The line follows the message and its enrichment, as every model-only addition does, so the person's own text
     still opens the model's copy and is read once.
     """
-    return f"{prompt.rstrip()}\n\n{STEER_CONTINUATION_LINE}"
+    return f"{prompt.rstrip()}\n\n{_STEER_CONTINUATION_LINE}"
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ class ResponsePayloadPreparer:
         model_prompt = prepared_payload.payload.model_prompt
         if preparation.dispatch.stopped_reply:
             # The message ended the running reply, or arrived while its final text was written; the model carries on.
-            model_prompt = steered_follow_up_prompt(
+            model_prompt = _steered_follow_up_prompt(
                 model_prompt if model_prompt is not None else prepared_payload.payload.prompt,
             )
         payload_ready_monotonic = time.monotonic()

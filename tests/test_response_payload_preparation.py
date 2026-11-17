@@ -23,10 +23,10 @@ from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import (
-    STEER_CONTINUATION_LINE,
+    _STEER_CONTINUATION_LINE,
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
-    steered_follow_up_prompt,
+    _steered_follow_up_prompt,
 )
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import PreparedDispatch
@@ -332,7 +332,7 @@ async def test_carry_on_line_follows_only_marked_model_prompt_after_enrichment(
     assert result.response_envelope.body == preparation.dispatch.envelope.body
     assert "Enriched note." in result.model_prompt
     assert ("The attachment is a photo." in result.model_prompt) is (model_prompt is not None)
-    assert result.model_prompt.count(STEER_CONTINUATION_LINE) == (1 if stopped_reply else 0)
+    assert result.model_prompt.count(_STEER_CONTINUATION_LINE) == (1 if stopped_reply else 0)
     memory_prompt, _history, model_prompt_text, _model_history = prepare_memory_and_model_context(
         result.prompt,
         [],
@@ -346,5 +346,5 @@ async def test_carry_on_line_follows_only_marked_model_prompt_after_enrichment(
     current = _compose_current_turn_prompt(raw_prompt=memory_prompt, model_prompt=model_prompt_text)
     assert current.count("raw prompt") == 1
     assert current.startswith("raw prompt\n\n")
-    assert current.endswith(STEER_CONTINUATION_LINE) is stopped_reply
-    assert steered_follow_up_prompt("Do X") == f"Do X\n\n{STEER_CONTINUATION_LINE}"
+    assert current.endswith(_STEER_CONTINUATION_LINE) is stopped_reply
+    assert _steered_follow_up_prompt("Do X") == f"Do X\n\n{_STEER_CONTINUATION_LINE}"

@@ -119,7 +119,7 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _QueuedMessageState
 from mindroom.response_payload_preparation import (
-    STEER_CONTINUATION_LINE,
+    _STEER_CONTINUATION_LINE,
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
@@ -7630,7 +7630,7 @@ async def test_requester_steer_after_final_text_dispatches_once_with_bypass(
         assert (request.participation is None) is steered
         assert request.prompt == body
         model_prompt = await _prepared_model_prompt(harness, request)
-        assert model_prompt.count(STEER_CONTINUATION_LINE) == (1 if steered else 0)
+        assert model_prompt.count(_STEER_CONTINUATION_LINE) == (1 if steered else 0)
         assert not queue.has_pending_human_messages()
     finally:
         idle.set()
@@ -7698,8 +7698,8 @@ async def test_edited_steer_behind_another_requester_keeps_its_followup_mark(con
         ] == [(("$remark:localhost",), False), (("$steer:localhost",), True)]
         remark, steer = harness.runner.requests
         assert steer.prompt == edited
-        assert (await _prepared_model_prompt(harness, steer)).count(STEER_CONTINUATION_LINE) == 1
-        assert STEER_CONTINUATION_LINE not in await _prepared_model_prompt(harness, remark)
+        assert (await _prepared_model_prompt(harness, steer)).count(_STEER_CONTINUATION_LINE) == 1
+        assert _STEER_CONTINUATION_LINE not in await _prepared_model_prompt(harness, remark)
     finally:
         idle.set()
         await gate.drain_all()
