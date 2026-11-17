@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -13,13 +15,15 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from evals.memory_recall import judge, run
+from evals.memory_recall import arms, judge, run
 from evals.memory_recall.arms import ARMS, replay
 from evals.memory_recall.judge import Verdict
 from evals.memory_recall.run import arm_metrics
 from evals.memory_recall.turns import Turn, write_turns
 from mindroom.config.main import load_config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.config.memory import MemorySearchConfig
+from mindroom.constants import resolve_runtime_paths, runtime_paths_with_storage_root
+from mindroom.memory._semantic_file_search import search_semantic_file_memories
 from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
@@ -55,6 +59,24 @@ METRIC_KEYS = {
 }
 THREAD = "!room:example.org:$thread-root"
 ROOM = "!room:example.org"
+
+
+class _RankedEmbedder:
+    """Embeds a text holding `rankNNN` so its cosine to every query falls with NNN; vector rank is NNN + 1."""
+
+    sends_batches = False
+
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        _ = purpose
+        vectors = []
+        for text in texts:
+            match = re.search(r"rank(\d+)", text)
+            angle = int(match[1]) / 100 if match else 0.0
+            vectors.append([math.cos(angle), math.sin(angle)])
+        return vectors
+
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 class _CountingEmbedder:
@@ -233,11 +255,12 @@ async def test_chunk_is_dated_by_the_entries_it_holds(
     """A file spanning several 5,000-character chunks dates each chunk by its own entries, not the whole file's."""
     assert embedder is not None
     old = [
-        f"- [id=m_20260101{n:06d}_old{n}] The lighthouse keeper logged visit number {n} in the ledger."
+        f"- [id=m_2026010100{n // 60:02d}{n % 60:02d}_old{n}] The lighthouse keeper logged visit number {n} in the ledger."
         for n in range(65)
     ]
     new = [
-        f"- [id=m_20260301{n:06d}_new{n}] The submarine crew logged dive number {n} in the ledger." for n in range(20)
+        f"- [id=m_2026030100{n // 60:02d}{n % 60:02d}_new{n}] The submarine crew logged dive number {n} in the ledger."
+        for n in range(20)
     ]
     (memory_dir / "ledger.md").write_text("\n".join([*old, *new]) + "\n")
     assert len("\n".join(old)) > 5000
@@ -250,13 +273,88 @@ async def test_chunk_is_dated_by_the_entries_it_holds(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arm", ["A0", "A2"])
+async def test_id_time_is_compared_exactly_with_the_turn(
+    tmp_path: Path,
+    memory_dir: Path,
+    embedder: _CountingEmbedder,
+    arm: str,
+) -> None:
+    """An entry whose id time (UTC) is a minute before the turn is kept; a minute after, it is dropped."""
+    assert embedder is not None
+    # The turn is at 2026-01-25 12:00 PST, which is 20:00 UTC.
+    (memory_dir / "before.md").write_text("- [id=m_20260125195900_before01] The zeppelin hangar opened early.\n")
+    (memory_dir / "after.md").write_text("- [id=m_20260125200100_after001] The zeppelin hangar closed late.\n")
+    [hits] = await _replay(tmp_path, memory_dir, arm, [_turn("2026-01-25", "zeppelin hangar")])
+    sources = _sources(hits)
+    assert any(source.startswith("memory/before.md") for source in sources)
+    assert not any(source.startswith("memory/after.md") for source in sources)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arm", ["A0", "A2"])
+async def test_date_only_entry_counts_from_the_turn_day(
+    tmp_path: Path,
+    memory_dir: Path,
+    embedder: _CountingEmbedder,
+    arm: str,
+) -> None:
+    """An entry dated only by day may postdate a turn that day, so it is dropped; the day before, it is kept."""
+    assert embedder is not None
+    (memory_dir / "2026-01-24.md").write_text("## Zebra\n\nThe zebra stable got fresh straw.\n")
+    (memory_dir / "2026-01-25.md").write_text("## Zebra\n\nThe zebra stable got a new gate.\n")
+    [hits] = await _replay(tmp_path, memory_dir, arm, [_turn("2026-01-25", "zebra stable")])
+    sources = _sources(hits)
+    assert any(source.startswith("memory/2026-01-24.md") for source in sources)
+    assert not any(source.startswith("memory/2026-01-25.md") for source in sources)
+
+
+@pytest.mark.asyncio
+async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over more than 50 chunks, A0's top 3 are the hits the live per-turn search (limit 3) returns.
+
+    The three `beacon` matches rank 55-57 by vector. Live recall fuses the top 50 of each ranking, so they count by
+    keyword alone and only the first ties into the top 3; a wider fusion would add their vector ranks and put all three
+    on top. The `lantern` matches rank 48-50 and top the fusion, with closer vectors right below them, which only the
+    three hits live recall converts leave out of their scores.
+    """
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _RankedEmbedder())
+    memory_dir = tmp_path / "workspace" / "memory"
+    memory_dir.mkdir(parents=True)
+    for number in range(120):
+        keyword = " beacon" if number in {54, 55, 56} else " lantern" if number in {47, 48, 49} else ""
+        (memory_dir / f"note-{number:03d}.md").write_text(f"rank{number:03d}{keyword}\n")
+
+    queries = {
+        "beacon": ["memory/note-000.md", "memory/note-054.md", "memory/note-001.md"],
+        "lantern": ["memory/note-047.md", "memory/note-048.md", "memory/note-049.md"],
+    }
+    replayed = await _replay(tmp_path, memory_dir, "A0", [_turn("2026-01-25", query) for query in queries])
+
+    config, runtime_paths = _load(tmp_path)
+    [home] = [path.parent for path in (tmp_path / "out" / "index").glob("*/ready")]
+    for (query, expected), hits in zip(queries.items(), replayed, strict=True):
+        live = await search_semantic_file_memories(
+            query,
+            scope_user_id=arms._SCOPE_USER_ID,
+            root=home / "corpus",
+            config=config,
+            runtime_paths=runtime_paths_with_storage_root(runtime_paths, home / "storage"),
+            search_config=MemorySearchConfig(mode="semantic"),
+            limit=3,
+        )
+        assert _sources(live) == expected
+        assert hits == live, query
+
+
+@pytest.mark.asyncio
 async def test_entry_arm_recalls_single_entries(tmp_path: Path, memory_dir: Path, embedder: _CountingEmbedder) -> None:
     """With entry chunks, a hit is one note entry, not the whole daily file."""
     assert embedder is not None
     [hits] = await _replay(tmp_path, memory_dir, "A2", [_turn("2026-01-15", "salmon kibble for Pixel")])
     assert hits[0]["memory"].startswith("- [id=m_20260110100000_bbbb2222]")
     assert "garden shed" not in hits[0]["memory"]
-    assert _sources(hits)[0] == "memory/2026-01-10.md.entries/2026-01-10__2.md"
+    assert _sources(hits)[0] == "memory/2026-01-10.md.entries/20260110T100000Z__2.md"
 
 
 @pytest.mark.asyncio

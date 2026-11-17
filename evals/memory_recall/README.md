@@ -15,9 +15,15 @@ The design is in `docs/baspowers/specs/2026-11-16-memory-recall-efficiency-desig
 
 Every arm indexes its corpus with MindRoom's own knowledge indexer (`KnowledgeManager.reindex_all`) and the embedder in
 `memory.embedder`, and searches it through the file-memory overlay with hybrid search.
-Each query over-fetches 50 hits; hits written after the turn are dropped before selection.
-A hit's date is its entry id (`m_YYYYMMDD…`), else a `YYYY-MM-DD` file name, else the file's first commit in the
-memory directory's Git repository; with none of those it is kept.
+Each query over-fetches 25 hits, the most that keep live recall's ranking: the store fuses `max(limit * 2, 50)`
+candidates per ranking, and live recall asks for 3.
+Hits that may have been written after the turn are dropped before selection:
+
+- An entry with an `m_YYYYMMDDhhmmss_` id was written at that UTC time, and is dropped when that is after the turn.
+- Otherwise its day comes from a `YYYY-MM-DD` file name, else the file's first commit in the memory directory's Git
+  repository. A day-only entry is dropped from the turn's own local day on, since it may be from later that day.
+- An entry with no known date is kept.
+- A chunk holding several entries is dropped when any of them is.
 
 ## Run
 

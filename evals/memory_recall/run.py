@@ -53,7 +53,10 @@ _METRIC_COLUMNS = (
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m evals.memory_recall.run", description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(
+        prog="python -m evals.memory_recall.run",
+        description=(__doc__ or "").split("\n")[0],
+    )
     parser.add_argument("--turns", type=Path, required=True, help="JSONL written by turns.write_turns")
     parser.add_argument("--memory-dir", type=Path, required=True, help="The agent's memory/ directory")
     parser.add_argument("--config", type=Path, required=True, help="MindRoom config.yaml with memory.embedder")
