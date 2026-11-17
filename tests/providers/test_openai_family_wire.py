@@ -17,6 +17,7 @@ import httpx
 import httpx2
 import openai
 import pytest
+from openai.types.chat import ChatCompletionChunk
 from openai.types.responses import ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent
 from pydantic import BaseModel
 from structlog.testing import capture_logs
@@ -51,6 +52,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.chat_wire import ChatStream, ChatWire
 from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
@@ -589,6 +591,31 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
     assert turn.message.reasoning_content == "Rain is likely this afternoon."
     assert turn.message.provider_data["reasoning_details"] == first + second
     assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
+
+
+def test_chat_reasoning_carries_when_its_call_or_last_text_began() -> None:
+    """OpenRouter sends a call's reasoning in one burst at its end, so a thought starts at the call or its last text."""
+    before = time.monotonic()
+    stream = ChatStream(ChatWire(route="openrouter", system_role="system"))
+    created = time.monotonic()
+    time.sleep(0.01)
+
+    def delta(fields: dict[str, Any]) -> ReasoningDelta:
+        [event] = stream.add(ChatCompletionChunk.model_validate(_chunk(fields)["data"]))
+        assert isinstance(event, ReasoningDelta)
+        return event
+
+    # OpenRouter's reasoning chunks carry an empty ``content`` beside the reasoning.
+    first = delta({"reasoning": "Plan.", "content": ""})
+    stream.add(ChatCompletionChunk.model_validate(_chunk({"content": "Checking."})["data"]))
+    text_sent = time.monotonic()
+    time.sleep(0.01)
+    second = delta({"reasoning": "Next.", "content": ""})
+
+    assert first.started_at is not None
+    assert before <= first.started_at <= created
+    assert second.started_at is not None
+    assert created <= second.started_at <= text_sent
 
 
 @pytest.mark.asyncio
