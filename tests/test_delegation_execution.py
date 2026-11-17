@@ -15,6 +15,7 @@ import threading
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -28,7 +29,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation import execution
+from mindroom.delegation import execution, lifecycle
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.activity import SubagentSnapshot
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
@@ -474,6 +476,52 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
     assert re.fullmatch(r"\nCalling write_report \(started \d\d:\d\d:\d\d UTC\)\nchild result", reports[-1])
+
+
+@pytest.mark.asyncio
+async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_caller_s_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's progress names when the paused call was first announced, the start its feed row keeps."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), answer("child result")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: clock.now))
+    snapshots: list[SubagentSnapshot] = []
+    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: snapshots.append)
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        clock.now = 10_900.0
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    starts = [item.started_at for snapshot in snapshots for item in snapshot.items if item.kind == "tool"]
+    assert starts
+    assert set(starts) == {100.0}
+    calling = [line for report in reports for line in report.splitlines() if line.startswith("Calling")]
+    assert calling
+    assert set(calling) == {"Calling write_report (started 00:01:40 UTC)"}
 
 
 @pytest.mark.asyncio
