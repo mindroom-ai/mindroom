@@ -6,7 +6,7 @@ import pytest
 
 from mindroom.agent_loop.tools import media_follow_up
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
-from mindroom.history.conversation_text import thread_context_note, utterances
+from mindroom.history.conversation_text import own_thread_message, thread_context_note, utterances
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.media import Image
@@ -176,6 +176,22 @@ def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Messa
         ("reply", None, "Paused."),
     ]
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["said", "reply", "runtime", "reply"]
+
+
+@pytest.mark.parametrize("metadata", [{}, {TURN_INTENT_RUN_METADATA_KEY: "job_follow_up"}], ids=["message", "follow-up"])
+def test_the_agents_own_thread_message_is_its_reply(metadata: dict[str, object]) -> None:
+    """A turn's input holds the agent's earlier thread messages as tagged user messages; they stay the agent's words."""
+    own = own_thread_message(render_msg_tag(sender="@mindroom_mind:x", body="Here is the mockup.", event_id="$sent"))
+    run = _run(
+        Message.from_dict(own.to_dict()),
+        Message(role="user", content=render_msg_tag(sender="@alice:x", body="Did it work?")),
+        Message(role="assistant", content="Yes."),
+        **metadata,
+    )
+
+    asked = [] if metadata else [("said", "@alice:x", "Did it work?")]
+    assert _kinds(run) == [("reply", None, "Here is the mockup."), *asked, ("reply", None, "Yes.")]
+    assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["reply", "runtime" if metadata else "said", "reply"]
 
 
 @pytest.mark.parametrize("agent_work", [False, True], ids=["conversation", "agent-work"])

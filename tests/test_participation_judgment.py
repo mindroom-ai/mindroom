@@ -23,6 +23,7 @@ from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
+from mindroom.history.conversation_text import own_thread_message
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
@@ -588,6 +589,30 @@ async def test_a_media_message_reaches_the_judge_as_its_kind_whatever_its_body(
         'user: <msg from="speaker_1"><![CDATA[[sent a file]]]></msg>',
         "assistant: [sent audio]",
         'user: <msg from="speaker_2"><![CDATA[Got it, thanks.]]></msg>',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_agents_own_thread_messages_reach_the_judge_as_the_assistant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply model reads the agent's earlier thread messages as tagged messages; the judge hears the assistant."""
+    gate, ids, posted = _decisions(tmp_path, monkeypatch, 0.9)
+    messages = [
+        Message(role="user", content=_msg("@alice:example.org", "Can you render the mockup?")),
+        own_thread_message(_msg(ids["helper"], "Here is the mockup.", event_id="$sent-1")),
+        own_thread_message(_msg(ids["helper"], "mockup.png", event_id="$sent-2"), {MEDIA_MSGTYPE_KEY: "m.image"}),
+        Message(role="user", content=_msg("@alice:example.org", "Thanks, that is the one.")),
+    ]
+    model = ScriptedModel([answer("Useful answer")])
+
+    await _reply(model, gate, messages)
+
+    assert [message["content"] for message in posted[0]["input"]] == [
+        'user: <msg from="speaker_1"><![CDATA[Can you render the mockup?]]></msg>',
+        "assistant: Here is the mockup.\n[sent an image]",
+        'user: <msg from="speaker_1"><![CDATA[Thanks, that is the one.]]></msg>',
     ]
 
 

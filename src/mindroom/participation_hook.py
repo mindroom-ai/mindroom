@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
 from mindroom.agent_loop.tools import is_media_follow_up
 from mindroom.attachments.storage import mentions_attachments
+from mindroom.history.conversation_text import own_thread_message_text
 from mindroom.history.message_content import message_media_entries
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import render_transient_context
@@ -124,7 +125,8 @@ def _used(names: Sequence[object]) -> str:
 def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMessage, ...] | str:
     """Project room text with tool calls and files as placeholders, or say why the reply model must judge."""
     conversation = [
-        message
+        # The agent's own thread message, which the reply model reads as a tagged message, is the assistant's here.
+        message if (own := own_thread_message_text(message)) is None else replace(message, role="assistant", content=own)
         for message in messages
         # A compaction summary retells earlier tool results, and a media follow-up is the loop's, not a person's.
         if message.role in {"user", "assistant"}

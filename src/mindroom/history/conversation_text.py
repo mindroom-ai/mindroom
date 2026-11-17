@@ -3,7 +3,8 @@
 Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model, and compaction hands
 the turns it folds to plugins. This module owns the decisions they share: which turns and messages are conversation and
 who said each message, so a prompt MindRoom wrote is never read as someone's words. Each reader renders and redacts the
-text itself. A turn's own preparation marks the notes it adds to a thread's context (``thread_context_note``).
+text itself. A turn's own preparation marks the notes it adds to a thread's context (``thread_context_note``) and
+the agent's own thread messages its input carries (``own_thread_message``).
 """
 
 from __future__ import annotations
@@ -23,11 +24,16 @@ from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.llm.runs import AnyRunRecord
 
 # The ``provider_data`` key marking a note MindRoom adds to a thread's context: that earlier messages were omitted, that
 # the agent's previous reply is still being delivered, or that reply's unfinished text. The note is stored with its turn.
 _THREAD_CONTEXT_NOTE_KEY = "mindroom_thread_context_note"
+# The ``provider_data`` key marking a thread message the agent itself sent, which a turn's input carries because its
+# scope stores no run that holds it.
+_OWN_THREAD_MESSAGE_KEY = "mindroom_own_thread_message"
 
 
 @dataclass(frozen=True)
@@ -35,8 +41,8 @@ class Utterance:
     """One message of a stored turn: who said it and what, before redaction or clipping."""
 
     # `said` is a message in a prompt, `reply` the run's agent, `runtime` a prompt MindRoom wrote, `tool_result` a tool's.
-    # A `reply` names who spoke, not which model answered: an earlier reply of the agent that the turn's input carried,
-    # which the turn stores because its scope had not, is a `reply` too.
+    # A `reply` names who spoke, not which model answered: an earlier message of the agent that the turn's input carried
+    # (``own_thread_message``), which the turn stores because its scope had not, is a `reply` too.
     kind: Literal["said", "reply", "runtime", "tool_result"]
     # The Matrix ID behind a `said` message; None for the agent, MindRoom, or a tool.
     sender: str | None
@@ -55,6 +61,23 @@ def thread_context_note(content: str) -> Message:
 
 def _is_thread_context_note(message: Message) -> bool:
     return (message.provider_data or {}).get(_THREAD_CONTEXT_NOTE_KEY) is True
+
+
+def own_thread_message(content: str, provider_data: Mapping[str, object] | None = None) -> Message:
+    """Return a user message holding ``content``, the ``<msg>`` tag of a thread message the agent itself sent.
+
+    The model reads its own earlier message as a thread message from its Matrix ID, never as an assistant turn:
+    providers merge consecutive assistant turns, so one would read as the end of the answer before it, and the model
+    then ends its answers the same way. A reader of stored turns still hears the agent (``own_thread_message_text``).
+    """
+    return Message(role="user", content=content, provider_data={**(provider_data or {}), _OWN_THREAD_MESSAGE_KEY: True})
+
+
+def own_thread_message_text(message: Message) -> str | None:
+    """Return what the agent said in a message ``own_thread_message`` built, or None for any other message."""
+    if (message.provider_data or {}).get(_OWN_THREAD_MESSAGE_KEY) is not True or not isinstance(message.content, str):
+        return None
+    return "\n".join(body for _, _, body in parse_msg_tags(message.content, default_sender=""))
 
 
 def one_line(text: str) -> str:
@@ -108,6 +131,10 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
         if not message.add_to_agent_memory:
             continue
         content = message.content if isinstance(message.content, str) else ""
+        if (own_text := own_thread_message_text(message)) is not None:
+            if own_text.strip():
+                said.append(Utterance("reply", None, None, own_text, message))
+            continue
         mindroom_wrote = (
             runtime_prompt
             or is_queued_notice_message(message)
