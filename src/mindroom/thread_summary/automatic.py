@@ -12,7 +12,12 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
-from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
+from mindroom.thread_summary.generation import (
+    GeneratedSummary,
+    generate_summary,
+    resolve_thread_summary_model_name,
+    room_summary_instructions,
+)
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
     normalize_thread_summary_text,
@@ -428,6 +433,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 runtime_paths,
                 model_name=model_name,
                 tag_vocabulary=None,
+                room_instructions=await room_summary_instructions(client, room_id),
             )
             if generated is None:
                 return
@@ -558,6 +564,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 runtime_paths,
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
+                room_instructions=await room_summary_instructions(client, room_id),
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)

@@ -165,6 +165,8 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    # A value unlike nio's default, so the assertion fails if the timeout is not passed through.
+    @patch("mindroom.bot._SYNC_TIMEOUT_MS", 12_345)
     @patch("mindroom.bot.login_agent_owned_session")
     async def test_agent_bot_start(
         self,
@@ -195,7 +197,7 @@ class TestAgentBot(AgentBotTestBase):
         assert type(login_kwargs["new_consumer_generation"]) is UUID
         ingestion_config = login_kwargs["config"]
         assert isinstance(ingestion_config, DurableSyncConfig)
-        assert ingestion_config.sync_timeout_ms == 30_000
+        assert ingestion_config.sync_timeout_ms == 12_345
         assert ingestion_config.sync_filter == {"room": {"timeline": {"limit": 5000}}}
         # The owned ingestion pump is the sole durable source owner. The
         # public client keeps only compatibility callbacks; it must not retain

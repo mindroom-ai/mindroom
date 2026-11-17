@@ -32,6 +32,7 @@ from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
@@ -47,6 +48,7 @@ from mindroom.thread_summary.generation import (
     _ThreadSummary,
     generate_summary,
     resolve_thread_summary_model_name,
+    room_summary_instructions,
 )
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
@@ -274,6 +276,8 @@ class _RoomState:
     failing_tags: frozenset[str] = frozenset()
     power_level: int = 100
     reads: int = 0
+    # The room's thread_summary_instructions setting: its content, a read failure, or None for M_NOT_FOUND.
+    title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
 
     def serve(self, client: AsyncMock) -> None:
         client.room_get_state.side_effect = self.room_get_state
@@ -310,7 +314,17 @@ class _RoomState:
         room_id: str,
         event_type: str,
         state_key: str = "",
-    ) -> nio.RoomGetStateEventResponse:
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == ROOM_SETTINGS_EVENT_TYPE:
+            assert state_key == "thread_summary_instructions"
+            rules = self.title_rules
+            if isinstance(rules, Exception):
+                raise rules
+            if rules is None:
+                return nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+            if isinstance(rules, nio.RoomGetStateEventError):
+                return rules
+            return nio.RoomGetStateEventResponse(rules, event_type, state_key, room_id)
         if event_type == "m.room.create":
             return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
         content = {"users": {self.user_id: self.power_level}, "state_default": 50}
@@ -828,6 +842,74 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 2
         assert _sent_summaries(self.client)[1]["message_count"] == 2
         assert not self.room_state.tags(_THREAD)
+
+    async def test_room_title_rules_reach_every_automatic_pass(self) -> None:
+        """The provisional, after-reply, and forced passes all append the room's rules to the normal instructions."""
+        self.room_state.title_rules = {"value": "  Use at most 4 words  "}
+        model = self._summarizer(_title("Trip plan"), _title("Trip answer"), _title("Trip retitle"))
+        self._history(_make_thread_history(1))
+        config = _mock_config(first_threshold=2)
+
+        await self._provisional(config=config)
+        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        await self._maybe_generate(config)
+        await self._maybe_generate(config, retitle=True)
+
+        assert len(model.requests) == 3
+        for request in model.requests:
+            instructions = request.messages[0].get_content_string()
+            assert instructions.startswith(THREAD_SUMMARY_INSTRUCTIONS)
+            assert "ROOM RULES:" in instructions
+            assert instructions.endswith("\n\nUse at most 4 words")
+
+    @pytest.mark.parametrize(
+        "rules",
+        [
+            None,
+            {},
+            {"value": "   "},
+            {"value": 4},
+            TimeoutError("state timeout"),
+            nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN"),
+        ],
+        ids=["not-found", "cleared", "blank", "not-string", "exception", "error-response"],
+    )
+    async def test_unset_or_unreadable_room_title_rules_keep_the_normal_instructions(
+        self,
+        rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None,
+    ) -> None:
+        """An unset or unreadable room setting still titles the thread, with exactly the normal instructions."""
+        self.room_state.title_rules = rules
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional()
+
+        [request] = model.requests
+        assert request.messages[0].get_content_string() == THREAD_SUMMARY_INSTRUCTIONS.strip()
+        assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
+
+    async def test_room_title_rules_render_through_prompt_overrides(self) -> None:
+        """A room setting renders the overridden room template around the overridden base instructions."""
+        self.room_state.title_rules = {"value": "Use at most 4 words"}
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+        prompts = {
+            "THREAD_SUMMARY_INSTRUCTIONS": "Title the thread.",
+            "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE": "<base>{instructions}</base><room>{room_instructions}</room>",
+        }
+
+        await self._provisional(config=Config(prompts=prompts))
+
+        [request] = model.requests
+        expected = "<base>Title the thread.</base><room>Use at most 4 words</room>"
+        assert request.messages[0].get_content_string() == expected
+
+    async def test_room_title_rules_are_capped(self) -> None:
+        """A room setting over 2,000 characters is cut to 2,000."""
+        self.room_state.title_rules = {"value": " " + "x" * 2500}
+
+        assert await room_summary_instructions(self.client, _ROOM) == "x" * 2000
 
     @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
     async def test_provisional_title_skips_existing_threads(self, case: str) -> None:
