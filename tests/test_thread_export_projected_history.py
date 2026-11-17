@@ -801,7 +801,7 @@ async def test_a_thread_fingerprint_moves_with_every_change_its_export_shows(rou
     original = raw("$b:example.org", "v1", ts=200, thread_id=ROOT)
     serve_thread(homeserver, root, [original])
     reader = reader_for(router, homeserver)
-    await export(reader)
+    await admit_live(router, [root, original])
     seen = [await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT)]
 
     async def moved() -> bool:
@@ -810,6 +810,9 @@ async def test_a_thread_fingerprint_moves_with_every_change_its_export_shows(rou
         seen.append(fingerprint)
         return new
 
+    # The walk finds the rows sync already admitted; only the hydration marker it leaves is new.
+    await export(reader)
+    assert await moved()
     await admit_live(router, [raw("$other:example.org", "elsewhere", ts=150, thread_id="$elsewhere:example.org")])
     assert not await moved()
     await admit_live(router, [raw("$edit:example.org", "v2", ts=300, replaces="$b:example.org")])
