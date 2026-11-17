@@ -21,7 +21,7 @@ The token never leaves the server.
 - **Answer:** `{status, body, headers}` with GitHub's status and JSON (or text for `.diff`) and only these headers passed through: `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, `x-github-request-id`. HTTP status of the route itself is 200 for any GitHub answer, so the client can tell GitHub's refusal from the route's.
 - **Not connected:** 409 `{"error": "github_not_connected"}` (also when the OAuth client is not configured), so the client falls back.
 - **`GET /api/github/status`:** `{connected: bool, login?: str}` for the session's user, from stored state only (no GitHub call), so the panel can choose its path once.
-- **Logs:** method, path template and status only; the token and request/response bodies never.
+- **Logs:** the route's own lines carry method, path template and status only; the token and request/response bodies never. HTTP client libraries (httpx at INFO, httpcore at DEBUG) may log the full URL, including repository and query, as for every outbound call; only the operator reads those logs, and the operator already holds the token.
 
 ### Plugin
 

@@ -2,14 +2,14 @@
 
 The client names a method and a repository or GraphQL path; this route adds the user's token, sends the request to
 `api.github.com` only, and answers with GitHub's status, body, and a few headers, so the token never leaves MindRoom.
-Logs carry the method, the path's kind, and GitHub's status, never the token, the repository, or a body.
+This route's own log lines carry the method, the path's kind, and GitHub's status, never the token, the repository, or
+a body; HTTP client libraries may log the URL at INFO or DEBUG, as for every outbound call MindRoom makes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import re
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
@@ -57,20 +57,6 @@ _PCHAR = r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})"
 # Logs name the segment after the repository only when it reads as an API resource, such as `pulls` or `check-runs`.
 _RESOURCE = re.compile(r"[a-z][a-z_-]{0,31}")
 _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
-
-
-def _scrub_github_url(record: logging.LogRecord) -> bool:
-    """Cut the path and query from httpx's line for a request to GitHub's API, which would name a repository."""
-    if isinstance(record.args, tuple):
-        record.args = tuple(
-            f"{_GITHUB_API}/…" if isinstance(arg, httpx.URL) and arg.host == "api.github.com" else arg
-            for arg in record.args
-        )
-    return True
-
-
-# httpx logs each request's full URL at INFO; a logger's filters outlast every later `dictConfig`.
-logging.getLogger("httpx").addFilter(_scrub_github_url)
 
 
 class GitHubRequest(BaseModel):
