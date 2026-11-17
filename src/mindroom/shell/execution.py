@@ -771,7 +771,8 @@ def _schedule_process_tree_idle(pid: int) -> None:
     MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
     preempts them at once.
     A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
-    before it reads that thread's children: whatever the thread starts afterwards inherits the policy.
+    before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
+    thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
     """
     pending = [pid]
     while pending:
