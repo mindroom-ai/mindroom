@@ -1757,8 +1757,13 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
 async def _restarted_after_partial(
     tmp_path: Path,
     shown_text: str | None = "Partial",
+    *,
+    config_reload: bool = False,
 ) -> tuple[AgentBot, asyncio.Task[SourceFate]]:
-    """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over."""
+    """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over.
+
+    A ``config_reload`` stops it as a config reload replaces one agent; otherwise the process stops with it.
+    """
     old = await _streaming_bot(tmp_path)
     response = await _blocked_stream(old, shown_text)
 
@@ -1767,6 +1772,8 @@ async def _restarted_after_partial(
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(shown(), timeout=5)
+    if config_reload:
+        await old.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
@@ -1809,12 +1816,7 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
 
 async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_config_change(tmp_path: Path) -> None:
     """A config reload replaces only the agent, so its successor's note says so rather than blaming a service restart."""
-    old = await _streaming_bot(tmp_path)
-    response = await _blocked_stream(old)
-    await old.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    restarted = _bot(tmp_path)
-    unique_room_send_responses(restarted.client)
-    await restarted._take_over_replies()
+    restarted, response = await _restarted_after_partial(tmp_path, config_reload=True)
 
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "The complete report."
