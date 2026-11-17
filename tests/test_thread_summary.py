@@ -868,6 +868,39 @@ class TestMaybeGenerateThreadSummary:
         assert sent["message_count"] == 0
         assert len(model.requests) == (parent_title is None)
 
+    @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
+    async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
+        """Without a prompt (a coalesced first turn), a fork takes its parent's title and an untitled parent's gets none."""
+        model = self._summarizer(_title("Prompt title"))
+        parent = _make_thread_history(2)
+        if parent_title is not None:
+            parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary=parent_title))
+        follow_up = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="and more",
+            timestamp=1700000001,
+            event_id="$next",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(parent, [self._fork_root(), follow_up])
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_id="$fork",
+            prompt=None,
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        sent = _sent_summaries(self.client)
+        assert [summary["summary"] for summary in sent] == ([] if parent_title is None else ["Trip plan (forked)"])
+        assert model.requests == []
+
     @pytest.mark.parametrize("generated", ["Fork answer", "Fork answer (forked)"])
     async def test_a_forks_later_summaries_stay_marked_forked(self, generated: str) -> None:
         """The marker survives every automatic summary of a fork, and is never doubled."""

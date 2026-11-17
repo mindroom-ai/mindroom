@@ -385,19 +385,25 @@ class TurnDispatcher:
         """Start a new thread's title once selected to route or respond, before execution can block."""
         turn = prepared.turn
         thread_id = prepared.dispatch.target.resolved_thread_id
-        if (
-            thread_id is None
-            or thread_id != turn.event.event_id
-            or turn.handled_turn.is_coalesced
-            or turn.payload.raw_audio_fallback
-            or not first_reply_reaches_first_threshold(self.deps.runtime.config)
-        ):
+        if thread_id is None or not first_reply_reaches_first_threshold(self.deps.runtime.config):
             return
-        # A single-event turn has no coalescing wrapper or reply enrichment;
-        # voice normalization has already replaced the audio filename with text.
-        prompt = turn.event.body
-        if turn.payload.voice_transcript:
-            prompt = prompt.removeprefix(VOICE_PREFIX)
+        prompt: str | None
+        if turn.handled_turn.is_coalesced:
+            # A fork's first title is its parent's, which needs no prompt, so a batch holding the fork root gets it too.
+            if (
+                thread_id not in turn.handled_turn.source_event_ids
+                or fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is None
+            ):
+                return
+            prompt = None
+        elif thread_id != turn.event.event_id or turn.payload.raw_audio_fallback:
+            return
+        else:
+            # A single-event turn has no coalescing wrapper or reply enrichment;
+            # voice normalization has already replaced the audio filename with text.
+            prompt = turn.event.body
+            if turn.payload.voice_transcript:
+                prompt = prompt.removeprefix(VOICE_PREFIX)
         create_background_task(
             maybe_generate_prompt_summary(
                 self._client(),
@@ -405,7 +411,7 @@ class TurnDispatcher:
                 thread_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                prompt_event_id=turn.event.event_id,
+                prompt_event_id=thread_id,
                 prompt=prompt,
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,

@@ -73,7 +73,7 @@ def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thr
 
 
 async def _provisional_title(
-    prompt_message: ResolvedVisibleMessage,
+    prompt_message: ResolvedVisibleMessage | None,
     history: Sequence[ResolvedVisibleMessage],
     thread_id: str,
     *,
@@ -82,11 +82,13 @@ async def _provisional_title(
     runtime_paths: RuntimePaths,
     model_name: str,
 ) -> str | None:
-    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's."""
+    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's, if any."""
     parent_thread_id = fork_parent_thread_id(history, thread_id)
     parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
     title = None if parent_state is None else parent_state.summary
     if title is None:
+        if prompt_message is None:
+            return None
         generated = await generate_summary(
             [prompt_message],
             config,
@@ -368,7 +370,7 @@ async def _countable_thread_history(
         return None
 
 
-async def _sole_untitled_prompt(
+async def _untitled_prompt(
     history: ThreadHistoryResult,
     *,
     client: nio.AsyncClient,
@@ -379,8 +381,9 @@ async def _sole_untitled_prompt(
     runtime_paths: RuntimePaths,
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
+    sole: bool,
 ) -> ResolvedVisibleMessage | None:
-    """Return the prompt while it is the only prompt of an untitled, unresolved thread."""
+    """Return the prompt while it is in an untitled, unresolved thread, and, when ``sole``, its only prompt, unedited."""
     state = summary_state(
         history,
         thread_id=thread_id,
@@ -396,16 +399,17 @@ async def _sole_untitled_prompt(
         for message in state.ordinary_messages
         if message.event_id == prompt_event_id or not is_managed_entity_id(message.sender, config, runtime_paths)
     ]
-    if len(ordinary) != 1 or ordinary[0].event_id != prompt_event_id:
+    prompt_message = next((message for message in ordinary if message.event_id == prompt_event_id), None)
+    if prompt_message is None:
         return None
     # An edit keeps the prompt's event ID but changes its text, so the prompt
     # this title would be made from is no longer what the thread shows.
-    if ordinary[0].latest_event_id != prompt_event_id:
+    if sole and (len(ordinary) != 1 or prompt_message.latest_event_id != prompt_event_id):
         return None
     # Resolution lives in room state, which a history read cannot see.
     if await _thread_is_resolved(client, room_id, thread_id):
         return None
-    return ordinary[0]
+    return prompt_message
 
 
 async def maybe_generate_prompt_summary(  # noqa: PLR0911
@@ -416,14 +420,17 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
     *,
     prompt_event_id: str,
-    prompt: str,
+    prompt: str | None,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
 ) -> None:
-    """Title a new thread from its prompt without advancing the post-reply schedule."""
+    """Title a new thread from its prompt without advancing the post-reply schedule.
+
+    ``prompt`` is None for a batch of messages starting a fork: only the parent's title can title it then.
+    """
     baselines = schedule.THREAD_SUMMARY_BASELINES
-    if not prompt.strip() or not baselines.claim_provisional_title(room_id, thread_id):
+    if (prompt is not None and not prompt.strip()) or not baselines.claim_provisional_title(room_id, thread_id):
         return
     try:
         async with baselines.lock(room_id, thread_id):
@@ -452,8 +459,8 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 entity_name,
                 membership_index,
             )
-            sole_untitled_prompt = partial(
-                _sole_untitled_prompt,
+            untitled_prompt = partial(
+                _untitled_prompt,
                 client=client,
                 room_id=room_id,
                 thread_id=thread_id,
@@ -462,12 +469,13 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
+                sole=prompt is not None,
             )
-            if (prompt_message := await sole_untitled_prompt(history)) is None:
+            if (prompt_message := await untitled_prompt(history)) is None:
                 return
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             title = await _provisional_title(
-                replace(prompt_message, body=prompt),
+                None if prompt is None else replace(prompt_message, body=prompt),
                 history,
                 thread_id,
                 parent_summary=partial(
@@ -499,7 +507,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 return
             # Everything that made the thread eligible can change while the model
             # runs: another title or pin, a resolution, or a deleted or edited prompt.
-            if await sole_untitled_prompt(history) is None:
+            if await untitled_prompt(history) is None:
                 return
             # The reply can be delivered while the model runs; its post-reply pass titles the thread instead.
             if baselines.provisional_title_superseded(room_id, thread_id):
