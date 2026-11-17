@@ -63,6 +63,7 @@ from tests.turn_dispatch_helpers import make_test_turn
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -112,13 +113,14 @@ def test_store_roundtrip(tmp_path: Path) -> None:
 
 
 def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: Path) -> None:
-    """A fork takes its parent's whole record only while it has none of its own."""
+    """A fork takes all its parent's selections once; its own selections and resets stay its own."""
     config = _config_with_models(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
     fork_id = "$fork-root:localhost"
 
-    copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
-    assert _get_thread_model_override(runtime_paths, fork_id) is None
+    def entity_models(thread_id: str) -> dict[str, str]:
+        record = _get_thread_model_override(runtime_paths, thread_id) or {}
+        return {field: value for field, value in record.items() if field.startswith("model:")}
 
     set_thread_model_override(
         runtime_paths,
@@ -128,7 +130,7 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
         config=config,
     )
     copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
-    assert _get_thread_model_override(runtime_paths, fork_id) == _get_thread_model_override(runtime_paths, THREAD_ID)
+    assert entity_models(fork_id) == {"model:test_agent": "large", "model:router": "large"}
 
     set_thread_model_override(
         runtime_paths,
@@ -141,33 +143,23 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     assert _stored_model(runtime_paths, fork_id) == "default"
     assert _stored_model(runtime_paths, THREAD_ID) == "large"
 
+    clear_thread_model_override(runtime_paths, fork_id, entity_names=("test_agent", "router"), config=config)
+    copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
+    assert entity_models(fork_id) == {}
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_event_ids", "inherited"),
-    [
-        (("$fork-root:localhost",), "large"),
-        (("$fork-root:localhost", "$fork-next:localhost"), "large"),
-        (("$fork-next:localhost",), None),
-    ],
-    ids=["first-message", "coalesced-first-messages", "later-message"],
-)
-async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(
-    tmp_path: Path,
-    source_event_ids: tuple[str, ...],
-    inherited: str | None,
-) -> None:
-    """The fork's first turn copies the parent's thread model, so its first reply already runs on it; later turns do not."""
-    bot = _agent_bot(tmp_path)
-    runtime_paths = bot._turn_dispatcher.deps.runtime_paths
-    set_thread_model_override(
-        runtime_paths,
-        thread_id=THREAD_ID,
-        model_name="large",
-        entity_names=("code",),
-        config=bot.config,
-    )
-    fork_id = "$fork-root:localhost"
+
+_FORK_ID = "$fork-root:localhost"
+
+
+def _fork_bot(tmp_path: Path, agent_name: str = "code") -> AgentBot:
+    """Return a bot whose config offers the ``large`` model a parent thread may select."""
+    bot = _agent_bot(tmp_path, agent_name=agent_name)
+    bot.config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    return bot
+
+
+async def _dispatch_fork_turn(bot: AgentBot, source_event_ids: tuple[str, ...] = (_FORK_ID,)) -> None:
+    """Prepare one turn of the fork ``_FORK_ID`` of ``THREAD_ID`` whose sources are ``source_event_ids``."""
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
         {
@@ -178,23 +170,88 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
         },
     )
     fork_root = make_visible_message(
-        event_id=fork_id,
+        event_id=_FORK_ID,
         content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"}},
     )
-    context = replace(_dispatch_context(bot), is_thread=True, thread_id=fork_id, thread_history=[fork_root])
+    context = replace(_dispatch_context(bot), is_thread=True, thread_id=_FORK_ID, thread_history=[fork_root])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
     turn = make_test_turn(
         room,
         event,
         "@user:localhost",
-        coalescing_key=requester_coalescing_key(ROOM_ID, fork_id, "@user:localhost"),
+        coalescing_key=requester_coalescing_key(ROOM_ID, _FORK_ID, "@user:localhost"),
         handled_turn=TurnRecord.create(list(source_event_ids)),
     )
-
     await bot._turn_dispatcher._prepare_dispatch(turn)
 
-    record = _get_thread_model_override(runtime_paths, fork_id)
-    assert (None if record is None else record.get("model:code")) == inherited
+
+def _fork_model(bot: AgentBot) -> str:
+    """Return the model the ``code`` agent's next turn in the fork resolves."""
+    scope = ModelScope(entity="code", room_id=ROOM_ID, thread_id=_FORK_ID)
+    return resolve_turn_model(bot.config, bot._turn_dispatcher.deps.runtime_paths, scope, None).model_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_event_ids", "inherited"),
+    [
+        ((_FORK_ID,), "large"),
+        ((_FORK_ID, "$fork-next:localhost"), "large"),
+        (("$fork-next:localhost",), "default"),
+    ],
+    ids=["first-message", "coalesced-first-messages", "later-message"],
+)
+async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(
+    tmp_path: Path,
+    source_event_ids: tuple[str, ...],
+    inherited: str,
+) -> None:
+    """The fork's first turn copies the parent's thread model, so its first reply already runs on it; later turns do not."""
+    bot = _fork_bot(tmp_path)
+    set_thread_model_override(
+        bot._turn_dispatcher.deps.runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("code",),
+        config=bot.config,
+    )
+
+    await _dispatch_fork_turn(bot, source_event_ids)
+
+    assert _fork_model(bot) == inherited
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_has_override", [True, False], ids=["fork-reset", "parent-changed-later"])
+async def test_a_delayed_responder_never_copies_the_parent_model_again(
+    tmp_path: Path,
+    parent_has_override: bool,
+) -> None:
+    """The fork's snapshot is taken once: a second responder of its first turn neither undoes a reset nor takes a later parent change."""
+    first, delayed = _fork_bot(tmp_path), _fork_bot(tmp_path, agent_name="router")
+    runtime_paths = first._turn_dispatcher.deps.runtime_paths
+
+    def select_large_in_parent() -> None:
+        set_thread_model_override(
+            runtime_paths,
+            thread_id=THREAD_ID,
+            model_name="large",
+            entity_names=("code",),
+            config=first.config,
+        )
+
+    if parent_has_override:
+        select_large_in_parent()
+    await _dispatch_fork_turn(first)
+    if parent_has_override:
+        assert _fork_model(first) == "large"
+        assert clear_thread_model_override(runtime_paths, _FORK_ID, entity_names=("code",), config=first.config)
+    else:
+        select_large_in_parent()
+
+    await _dispatch_fork_turn(delayed)
+
+    assert _fork_model(first) == "default"
 
 
 def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
