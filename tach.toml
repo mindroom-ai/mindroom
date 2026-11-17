@@ -2969,6 +2969,7 @@ depends_on = [
 visibility = [
     "mindroom.history.storage",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.session_runs",
 ]
 
@@ -9485,7 +9486,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.history.types", "mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.legacy_usage_totals", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.legacy_usage_totals", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.mid_turn_compaction", "mindroom.history.run_checkpoint", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
@@ -10064,6 +10065,8 @@ depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.llm",
     "mindroom.session_storage.store",
+    "mindroom.session_storage.summary_rows",
+    "mindroom.usage.storage",
 ]
 visibility = [
     "mindroom.agent_cli.checkpoint",

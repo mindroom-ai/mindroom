@@ -19,6 +19,8 @@ from mindroom.history.run_visibility import is_model_history_visible_run, run_in
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
+from mindroom.session_storage.summary_rows import folded_tool_call_ids
+from mindroom.usage.storage import carry_request_usage
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -26,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeDispatchHook, BeforeRequestHook, LoopState, RequestDecision
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.history.types import HistoryScope
+    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.run_storage import RunStorage
     from mindroom.session_storage.store import ConversationStore
@@ -105,30 +108,33 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
 
     The turn keeps the run's stored messages exactly, reasoning included, so a later request replays what the run's
     own requests sent. Only what no request could follow changes: the usage a cut-off response left on a message
-    without content goes, and each call of the last batch that has no result message gets one, the result its
-    execution recorded when a sibling finished before the stop, else ``INTERRUPTED_CALL_RESULT``. A run that called
-    no tool holds no work to keep and stays as it is. The run's usage is recorded, which a checkpoint never is.
+    without content goes (the run keeps its request's usage), and each call of the last batch that has no result
+    message gets one, the result its execution recorded when a sibling finished before the stop, else
+    ``INTERRUPTED_CALL_RESULT``. A run that called no tool, not even one a mid-turn fold took into the scope's
+    summary, holds no work to keep and stays as it is. The run's usage is recorded, which a checkpoint never is.
     """
     if run.status is not RunStatus.cancelled or run.parent_run_id is not None:
         return False
     messages = list(run.messages)
+    cut_off: list[Message] = []
     while (
         messages and messages[-1].role == "assistant" and not messages[-1].tool_calls and messages[-1].content is None
     ):
-        messages.pop()
+        cut_off.append(messages.pop())
     calling = max((index for index, message in enumerate(messages) if message.tool_calls), default=None)
-    if calling is None:
+    if calling is None and not folded_tool_call_ids(store, session_id=session.session_id, run_id=run.run_id):
         return False
-    # The batch's results follow its assistant message; a batch cut short stored none of them.
-    end = calling + 1
+    # The batch's results follow its assistant message; a batch cut short stored none of them. Without one, a mid-turn
+    # fold took every call into the scope's summary, and the messages stay as they are.
+    start = end = len(messages) if calling is None else calling + 1
     while end < len(messages) and messages[end].role == "tool":
         end += 1
-    answered = {message.tool_call_id for message in messages[calling + 1 : end]}
+    answered = {message.tool_call_id for message in messages[start:end]}
     tools = list(run.tools or ())
     # A provider may reuse a call id within one run; the last batch's executions are the last recorded.
     places = {tool.tool_call_id: place for place, tool in enumerate(tools)}
     results = []
-    for call in messages[calling].tool_calls or ():
+    for call in () if calling is None else messages[calling].tool_calls or ():
         call_id = call["id"]
         if call_id in answered:
             continue
@@ -153,6 +159,7 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
         error=None,
         metadata={**(run.metadata or {}), _RECOVERED_RUN_KEY: True},
     )
+    carry_request_usage(recovered, cut_off)
     return store.save_run(session, recovered, record_usage=True) == "written"
 
 

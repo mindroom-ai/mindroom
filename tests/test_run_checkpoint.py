@@ -28,20 +28,24 @@ from mindroom.history.run_checkpoint import (
     link_response_event,
     recover_interrupted_run,
     recover_interrupted_turn,
+    save_run_checkpoint,
 )
 from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.request_identity import request_prefixes
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.usage import RunMetrics
 from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.reply_turn.enrichment import interrupted_attempt_model_prompt
 from mindroom.response_turn import build_matrix_run_metadata
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.summary_rows import Fold, append_summary
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.usage.storage import run_usage_snapshot
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, runtime_paths_for
 from tests.delegation_helpers import ScriptedAgents, _runtime_paths, native_delegation_config, respond
@@ -557,3 +561,68 @@ async def test_redacting_a_reply_removes_the_recovered_attempt_a_compaction_fold
     assert after is not None
     assert after.summary is None
     assert "PRIVATE_RESULT" not in str([run.messages for run in after.runs if run.status is RunStatus.completed])
+
+
+@pytest.mark.asyncio
+async def test_redacting_a_reply_removes_an_attempt_whose_calls_a_mid_turn_fold_all_took(tmp_path: Path) -> None:
+    """An attempt cut short after a mid-turn fold took all its calls is still recovered and linked to the reply."""
+    config = _config(tmp_path)
+    store = _store(config)
+    session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
+    run = _stored_attempt("crashed", RunStatus.cancelled)
+    run.tools = [ToolExecution(tool_call_id="crashed-read", tool_name="read_file", result="PRIVATE_RESULT")]
+    await save_run_checkpoint(store, session, run)
+    fold = Fold(run=run, messages=tuple(run.messages[1:]), member_run_ids=frozenset())
+    assert append_summary(
+        store,
+        session_id=_SESSION,
+        scope_key=_SCOPE.key,
+        based_on=None,
+        covered=[],
+        summary="PRIVATE_RESULT from this turn",
+        fold=fold,
+        session=session,
+    )
+    # The checkpoint before the next request keeps only the prompt; the fold's summary holds the calls.
+    await save_run_checkpoint(store, session, replace(run, messages=run.messages[:1]))
+
+    continued = _recover(config)
+
+    assert continued == ["crashed"]
+    session = store.load_session(_SESSION)
+    assert session is not None
+    store.save_run(session, _stored_attempt("final", RunStatus.completed, continued), record_usage=False)
+    link_response_event(store, _SESSION, "final", "$reply")
+
+    async def redacted(event_ids: Collection[str]) -> dict[str, None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    linked = store.load_session(_SESSION)
+    assert linked is not None
+    assert await remove_history_of_redacted_events(store, linked, redacted) == ["$reply"]
+    after = store.load_session(_SESSION)
+    assert after is not None
+    assert after.summary is None
+
+
+def test_a_recovered_run_keeps_the_usage_of_a_cut_off_response(tmp_path: Path) -> None:
+    """The empty message a response cut off mid-stream left goes, and the run keeps that request's usage."""
+    config = _config(tmp_path)
+    store = _store(config)
+    session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
+    run = _stored_attempt("cancelled", RunStatus.cancelled)
+    run.model, run.model_provider, run.metrics = "test-model", "openai", RunMetrics()
+    cut_off = Message(role="assistant")
+    run.messages.append(cut_off)
+    for message in (run.messages[1], cut_off):
+        message.metrics = usage(10, 5)
+        message.provider_data = model_provenance(run.model, run.model_provider)
+        run.metrics.add(message.metrics, model_id=run.model, provider=run.model_provider)
+    store.save_run(session, run, record_usage=True)
+
+    assert recover_interrupted_run(store, session, store.get_run(run.run_id))
+
+    recovered = store.get_run(run.run_id)
+    assert cut_off.id not in {message.id for message in recovered.messages}
+    requests = run_usage_snapshot(recovered)["requests"]
+    assert sum(request["metrics"]["total_tokens"] for request in requests) == 30
