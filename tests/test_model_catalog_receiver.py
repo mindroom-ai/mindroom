@@ -482,6 +482,7 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
         await callback(request())
     assert cancelled.is_set()
     sent.assert_not_awaited()
+    assert len(logs) == 1
     assert dropped(logs) == ["timeout"]
     assert logs[0]["elapsed_ms"] >= 0
     # The follow-up only proves released capacity, so give it the real deadline.
@@ -511,8 +512,9 @@ async def test_work_error_logs_once_without_detail_and_releases_capacity(
     assert logs[0]["request_id"] == "request-1"
     assert "secret-sentinel" not in repr(logs)
     sent.side_effect = None
+    # The same request id again: a leaked reservation would drop it as a duplicate.
     with capture_logs() as logs:
-        await callback(request(request_id="request-2"))
+        await callback(request())
     assert [entry["event"] for entry in logs] == ["model_catalog_answered"]
     assert sent.await_count == 2
 
