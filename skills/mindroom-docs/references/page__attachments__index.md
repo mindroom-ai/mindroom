@@ -24,6 +24,25 @@ Some provider integrations never send certain media kinds, so MindRoom leaves th
 Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
 Claude models (the `anthropic`, `vertexai_claude`, and `bedrock_claude` providers) and models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file type.
 
+## Files Sent with Text
+
+A message with several files, or with files and text, reaches the room as one event per file with the text last, and the agent answers them as one turn.
+After an unmarked file, MindRoom waits `coalescing.debounce_ms` (1 second by default) for another file or the text before replying, and text replies at once.
+
+MindRoom Chat marks each event of such a submission so MindRoom does not have to guess when it is complete:
+
+```json
+"io.mindroom.submission": {"id": "<one ID per submission>", "more": true}
+```
+
+- `more: true` says the client sends another event of this submission without the person doing anything, so MindRoom waits up to 10 seconds after that event for the next one instead of `debounce_ms`, which covers sync delays between the events.
+- The submission's last event carries `more: false`, read as `false` when missing, and MindRoom replies at once, even when that event is a file.
+- When the last event never arrives, MindRoom answers what did after those 10 seconds; shutdown never waits for an open submission.
+- A text-only message carries no marker.
+  A marker that is not an object with a non-empty string `id` and a boolean `more` is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
+
+The wait only holds the sender's own submission, and only while no response to its conversation is already running.
+
 ## Attachment IDs
 
 Each received or registered file gets an attachment ID such as `att_abc123`.

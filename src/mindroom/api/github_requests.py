@@ -46,6 +46,8 @@ router = APIRouter(prefix="/api/github")
 _GITHUB_API = "https://api.github.com"
 _TIMEOUT_SECONDS = 30.0
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+# GitHub redirects a renamed or transferred repository's old path to `/repositories/<id>/...` on the same host.
+_MAX_REDIRECTS = 3
 # Far longer than any GitHub API path a client builds, and far below the longest URL httpx sends.
 _MAX_PATH_LENGTH = 4096
 # The stored connection could not be read or refreshed for a reason a retry may fix.
@@ -95,7 +97,7 @@ def _path_kind(path: str) -> str | None:
 
 
 def _github_client() -> httpx.AsyncClient:
-    """Build the client for one request; it never follows a redirect, so the token goes to `api.github.com` only."""
+    """Build the client for one request; it follows no redirect itself, since only `_redirect` may send the token on."""
     return httpx.AsyncClient(timeout=_TIMEOUT_SECONDS, follow_redirects=False)
 
 
@@ -191,29 +193,51 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
         "Accept": payload.accept,
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    method, url = payload.method, httpx.URL(_GITHUB_API + payload.path)
     content = None if payload.body is None else json.dumps(payload.body).encode()
-    if content is not None:
-        headers["Content-Type"] = "application/json"
     try:
-        async with (
-            _github_client() as client,
-            client.stream(payload.method, _GITHUB_API + payload.path, headers=headers, content=content) as response,
-        ):
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body += chunk
-                if len(body) > _MAX_RESPONSE_BYTES:
-                    logger.warning("github_request_too_large", method=payload.method, path=kind)
-                    return _error(502, "github_response_too_large")
-    except httpx.HTTPError as exc:
+        async with asyncio.timeout(_TIMEOUT_SECONDS), _github_client() as client:
+            for redirects in range(_MAX_REDIRECTS + 1):
+                typed = {"Content-Type": "application/json"} if content is not None else {}
+                async with client.stream(method, url, headers=headers | typed, content=content) as response:
+                    hop = _redirect(response, method, content) if redirects < _MAX_REDIRECTS else None
+                    if hop is None:
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body += chunk
+                            if len(body) > _MAX_RESPONSE_BYTES:
+                                logger.warning("github_request_too_large", method=payload.method, path=kind)
+                                return _error(502, "github_response_too_large")
+                        break
+                method, url, content = hop
+    except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("github_request_failed", method=payload.method, path=kind, error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
-    logger.info("github_request", method=payload.method, path=kind, status=response.status_code)
+    logger.info("github_request", method=payload.method, path=kind, status=response.status_code, redirects=redirects)
     return {
         "status": response.status_code,
         "body": _answer_body(bytes(body), response.headers.get("content-type", "")),
         "headers": {name: response.headers[name] for name in _PASSED_HEADERS if name in response.headers},
     }
+
+
+def _redirect(
+    response: httpx.Response,
+    method: str,
+    content: bytes | None,
+) -> tuple[str, httpx.URL, bytes | None] | None:
+    """Return the method, URL, and body a browser would send next for a redirect within `https://api.github.com`.
+
+    None for any other answer, and for a 301 or 302 to a write, so a write is never sent again by surprise.
+    """
+    url = None if response.next_request is None else response.next_request.url
+    if url is None or (url.scheme, url.host, url.port, url.userinfo) != ("https", "api.github.com", None, b""):
+        return None
+    if response.status_code == 303:
+        return "GET", url, None
+    if response.status_code in {307, 308} or method == "GET":
+        return method, url, content
+    return None
 
 
 def _answer_body(body: bytes, content_type: str) -> JsonValue:

@@ -27,7 +27,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials, serve_token_endpoint
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -40,7 +40,7 @@ ALICE_TOKEN = "gho-alice-access"  # noqa: S105
 SHARED_TOKEN = "ghp-shared-token"  # noqa: S105
 DEFAULT_ACCEPT = "application/vnd.github+json"
 
-type Handler = Callable[[httpx.Request], httpx.Response]
+type Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
 
 
 class GitHubPeer:
@@ -50,7 +50,7 @@ class GitHubPeer:
         self.requests: list[httpx.Request] = []
         self.handler: Handler = lambda _request: httpx.Response(200, json={"ok": True})
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def handle(self, request: httpx.Request) -> httpx.Response | Awaitable[httpx.Response]:
         """Record ``request`` and answer it."""
         self.requests.append(request)
         return self.handler(request)
@@ -94,7 +94,7 @@ def github(monkeypatch: pytest.MonkeyPatch) -> GitHubPeer:
 
 
 def test_the_github_client_follows_no_redirect_and_times_out() -> None:
-    """The route's client sends the token to one URL only and gives up on a slow GitHub."""
+    """The route's client leaves every redirect to the route and gives up on a slow GitHub."""
     real = github_requests._github_client()
 
     assert real.follow_redirects is False
@@ -600,20 +600,175 @@ def test_a_connection_store_that_fails_can_be_retried(
     assert github.requests == []
 
 
-def test_a_redirect_is_answered_not_followed(
+def test_a_redirect_on_api_github_com_is_followed_with_the_token(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
 ) -> None:
-    """A redirect is answered as GitHub's status, so the token never follows it."""
+    """A renamed repository's redirect to `/repositories/<id>` is followed, and its answer is the one relayed."""
     connect(paths, ALICE)
-    github.handler = lambda _request: httpx.Response(302, headers={"location": "https://evil.example/steal"})
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/repos/"):
+            return httpx.Response(301, headers={"location": "https://api.github.com/repositories/1/pulls/1"})
+        return httpx.Response(200, json={"number": 1}, headers={"x-github-request-id": "EF"})
+
+    github.handler = moved
+
+    with capture_logs() as logs:
+        response = ask(client, session(app, ALICE), "/repos/octo/old-name/pulls/1")
+
+    assert response.json() == {"status": 200, "body": {"number": 1}, "headers": {"x-github-request-id": "EF"}}
+    first, followed = github.requests
+    assert str(followed.url) == "https://api.github.com/repositories/1/pulls/1"
+    assert followed.method == "GET"
+    for name in ("authorization", "accept", "x-github-api-version"):
+        assert followed.headers[name] == first.headers[name]
+    assert followed.headers["authorization"] == f"Bearer {ALICE_TOKEN}"
+    assert {"path": "/repos/{owner}/{repo}/pulls", "status": 200, "redirects": 1}.items() <= logs[-1].items()
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/steal",
+        "//evil.example/repos/octo/hello",
+        "http://api.github.com/repositories/1/pulls/1",
+        "https://api.github.com:8443/repositories/1/pulls/1",
+        "https://user@api.github.com/repositories/1/pulls/1",
+        "https://user:pass@api.github.com/repositories/1/pulls/1",
+        "https://api.github.com.evil.example/repositories/1",
+        "https://api.github.com@evil.example/repositories/1",
+        None,
+    ],
+)
+def test_a_redirect_off_api_github_com_is_answered_not_followed(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    location: str | None,
+) -> None:
+    """A redirect anywhere but `https://api.github.com` is answered as GitHub's status, so the token never follows it."""
+    connect(paths, ALICE)
+    headers = {} if location is None else {"location": location}
+    github.handler = lambda _request: httpx.Response(302, headers=headers)
 
     response = ask(client, session(app, ALICE))
 
     assert response.json() == {"status": 302, "body": None, "headers": {}}
     assert len(github.requests) == 1
+
+
+def test_a_redirect_loop_stops_after_three_hops(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """After three followed redirects the next one is answered as GitHub's status."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(308, headers={"location": "/repositories/1"})
+
+    response = ask(client, session(app, ALICE))
+
+    assert response.json() == {"status": 308, "body": None, "headers": {}}
+    assert len(github.requests) == 4
+
+
+@pytest.mark.parametrize(("method", "status"), [("POST", 301), ("PATCH", 302), ("DELETE", 301)])
+def test_a_write_is_not_resent_on_a_moved_redirect(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    method: str,
+    status: int,
+) -> None:
+    """A 301 or 302 answer to a write is relayed, so the write is never sent again by surprise."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(status, headers={"location": "/repositories/1/issues/3/comments"})
+
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/issues/3/comments", method=method, body={"b": 1})
+
+    assert response.json()["status"] == status
+    assert len(github.requests) == 1
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_a_write_follows_a_redirect_that_keeps_its_method(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    status: int,
+) -> None:
+    """A 307 or 308 answer to a write sends the same method and body to the new URL."""
+    connect(paths, ALICE)
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/repos/"):
+            return httpx.Response(status, headers={"location": "/repositories/1/pulls/7/merge"})
+        return httpx.Response(200, json={"merged": True})
+
+    github.handler = moved
+
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7/merge", method="PUT", body={"m": "squash"})
+
+    assert response.json()["body"] == {"merged": True}
+    _, followed = github.requests
+    assert (followed.method, str(followed.url)) == ("PUT", "https://api.github.com/repositories/1/pulls/7/merge")
+    assert json.loads(followed.content) == {"m": "squash"}
+    assert followed.headers["content-type"] == "application/json"
+    assert followed.headers["authorization"] == f"Bearer {ALICE_TOKEN}"
+
+
+def test_a_see_other_redirect_is_fetched_with_a_get(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A 303 answer to a write is followed by a GET without the body."""
+    connect(paths, ALICE)
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/repos/"):
+            return httpx.Response(303, headers={"location": "/repositories/1/issues/3"})
+        return httpx.Response(200, json={"number": 3})
+
+    github.handler = moved
+
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/issues/3", method="PATCH", body={"state": "open"})
+
+    assert response.json()["body"] == {"number": 3}
+    _, followed = github.requests
+    assert (followed.method, followed.content) == ("GET", b"")
+    assert "content-type" not in followed.headers
+    assert followed.headers["authorization"] == f"Bearer {ALICE_TOKEN}"
+
+
+def test_redirects_share_one_deadline(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout bounds the whole exchange, so redirects that are each fast enough still give up together."""
+    connect(paths, ALICE)
+    monkeypatch.setattr(github_requests, "_TIMEOUT_SECONDS", 0.1)
+
+    async def slow_redirect(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.04)
+        return httpx.Response(307, headers={"location": "/repositories/1"})
+
+    github.handler = slow_redirect
+
+    response = ask(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_unreachable"})
 
 
 def test_an_oversized_answer_is_refused(
