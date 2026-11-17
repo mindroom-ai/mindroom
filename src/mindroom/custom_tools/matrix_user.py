@@ -217,8 +217,7 @@ class MatrixUserTools(Toolkit):
         write: MatrixUserWrite,
     ) -> dict[str, object]:
         """Make ``write`` in the room its ``room_id`` names, which ``client`` looks up first."""
-        # create_room names no room.
-        if write.room_id is not None and write.action != "create_room":
+        if write.room_id is not None:
             room_id = await room_named(client, write.room_id, self._runtime_paths, join=write.action == "join")
             write = replace(write, room_id=room_id)
         return await write_as_person(client, actor, turn, write)
@@ -287,15 +286,17 @@ class MatrixUserTools(Toolkit):
         - join, leave: room_id. invite: user_id into room_id.
         - create_room: A private room called name, inviting user_id if given.
         """
+        # Like any argument an action does not take, create_room's room_id and attachments other than send's are left
+        # out, so they neither name a room or files nor count for the rate limit or the audit line.
         write = MatrixUserWrite(
             action,
-            room_id=_non_blank(room_id),
+            room_id=None if action == "create_room" else _non_blank(room_id),
             user_id=_non_blank(user_id),
             message=_non_blank(message),
             event_id=_non_blank(event_id),
             thread_id=_non_blank(thread_id),
             emoji=_non_blank(emoji),
-            attachments=tuple(attachments or ()),
+            attachments=tuple(attachments or ()) if action == "send" else (),
             name=_non_blank(name),
         )
         turn = get_tool_runtime_context()

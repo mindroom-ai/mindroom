@@ -1162,6 +1162,69 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
 
 
 @pytest.mark.asyncio
+async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """create_room takes no room_id, so varying one given anyway leaves every create_room one count."""
+    homeserver.answers[CREATE_PATH] = {"room_id": NEW_DM}
+    toolkit = owner_toolkit(config, paths)
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        results = [
+            json.loads(
+                await toolkit.matrix_user_write(action="create_room", name="Trip", room_id=f"!stray{n}:example.com"),
+            )
+            for n in range(13)
+        ]
+
+    assert {result["status"] for result in results[:12]} == {"ok"}
+    assert results[12] == _error("create_room", "Rate limit exceeded for matrix_user writes (12 per 30s).")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_create_room_does_not_log_a_stray_room_id(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """The audit line of a create_room that failed names no room, whatever room_id it was given."""
+    homeserver.answers[CREATE_PATH] = matrix_error(500, "M_UNKNOWN", "Database unavailable")
+
+    with capture_logs() as logs:
+        failed = await _write(config, paths, homeserver, action="create_room", name="Trip", room_id=OTHER_ROOM)
+
+    assert failed["status"] == "error"
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert audit["room_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_stray_attachment_on_react_counts_for_nothing(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Only send takes attachments: one given to a reaction, even one the turn does not hold, is not looked at."""
+    with capture_logs() as logs:
+        result = await _write(
+            config,
+            paths,
+            homeserver,
+            action="react",
+            room_id=ROOM,
+            event_id="$own",
+            emoji="👍",
+            attachments=["att_missing"],
+        )
+
+    assert result == _ok("react", room_id=ROOM, event_id="$reaction")
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert audit["attachments"] == 0
+
+
+@pytest.mark.asyncio
 async def test_each_write_leaves_one_audit_line_without_the_text(
     config: Config,
     paths: RuntimePaths,
