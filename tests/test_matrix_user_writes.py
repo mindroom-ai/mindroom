@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -69,6 +70,13 @@ ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an en
 COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
+# A DM made with Bob whose record in `m.direct` failed.
+DM_NOT_RECORDED = (
+    f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
+    "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
+    f"Nothing was sent; to send there, use room_id {NEW_DM}."
+)
+CONTACT_ROOM_REFUSED = "Nothing is written as your owner into a contact room."
 
 
 def _send_path(room_id: str = ROOM, event_type: str = "m.room.message") -> str:
@@ -109,6 +117,20 @@ def _changes(homeserver: FakeHomeserver) -> list[HomeserverRequest]:
     return [request for request in homeserver.requests if request.method != "GET"]
 
 
+def _direct_changes(homeserver: FakeHomeserver) -> list[HomeserverRequest]:
+    """Return the requests that change the owner's `m.direct`."""
+    return [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
+
+
+def _notes(paths: RuntimePaths, tmp_path: Path, **fields: str) -> AttachmentRecord:
+    """Write `notes.txt` and register it as a file of ``ROOM`` with ``fields``, as an attachment of a turn is."""
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Remember the milk")
+    record = register_local_attachment(paths.storage_root, notes, kind="file", room_id=ROOM, **fields)
+    assert record is not None
+    return record
+
+
 @pytest.fixture(autouse=True)
 def _fresh_write_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start each test with no recent writes and no direct chat waiting to be recorded."""
@@ -147,9 +169,16 @@ def homeserver() -> FakeHomeserver:
     )
 
 
-async def _write(config: Config, paths: RuntimePaths, homeserver: FakeHomeserver, **arguments: object) -> dict:
-    """Call `matrix_user_write` in Alice's turn with her agent and return its fields."""
-    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+async def _write(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    *,
+    attachment_ids: tuple[str, ...] = (),
+    **arguments: object,
+) -> dict:
+    """Call `matrix_user_write` in Alice's turn, holding ``attachment_ids``, with her agent and return its fields."""
+    with owner_turn(config, paths, attachment_ids=attachment_ids), homeserver.serving_the_toolkit():
         return json.loads(await owner_toolkit(config, paths).matrix_user_write(**arguments))
 
 
@@ -271,22 +300,22 @@ async def test_send_with_an_attachment(
     agent_id: str,
 ) -> None:
     """A file of the turn goes out after the text, uploaded as the owner and marked as the agent's."""
-    notes = tmp_path / "notes.txt"
-    notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", mime_type="text/plain", room_id=ROOM)
-    assert record is not None
+    record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
     homeserver.answers[f"{_send_path()}*"] = [Answer({"event_id": "$text"}), Answer({"event_id": "$file"})]
 
-    with owner_turn(config, paths, attachment_ids=(record.attachment_id,)), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths).matrix_user_write(
-            action="send",
-            room_id=ROOM,
-            message="Here it is",
-            attachments=[record.attachment_id],
-        )
+    result = await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        action="send",
+        room_id=ROOM,
+        message="Here it is",
+        attachments=[record.attachment_id],
+    )
 
-    assert json.loads(result) == ok_result("send", room_id=ROOM, event_id="$text", event_ids=["$text", "$file"])
+    assert result == ok_result("send", room_id=ROOM, event_id="$text", event_ids=["$text", "$file"])
     [upload] = homeserver.requests_to(UPLOAD_PATH)
     assert upload.uploaded == b"Remember the milk"
     assert upload.query["user_id"] == [OWNER]
@@ -359,19 +388,19 @@ async def test_a_command_like_file_name_is_refused(
 
     Whoever sent a file named it, so a downloaded file can carry such a name.
     """
-    notes = tmp_path / "notes.txt"
-    notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", filename=name, room_id=ROOM)
-    assert record is not None
+    record = _notes(paths, tmp_path, filename=name)
 
-    with owner_turn(config, paths, attachment_ids=(record.attachment_id,)), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths).matrix_user_write(
-            action="send",
-            room_id=ROOM,
-            attachments=[record.attachment_id],
-        )
+    result = await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        action="send",
+        room_id=ROOM,
+        attachments=[record.attachment_id],
+    )
 
-    assert json.loads(result) == error_result(
+    assert result == error_result(
         "send",
         f"Attachment {record.attachment_id}'s file name is sent as its text. {COMMAND_LIKE}",
     )
@@ -494,15 +523,10 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     failed = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
     retried = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert failed == error_result(
-        "send",
-        f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
-        "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
-        f"Nothing was sent; to send there, use room_id {NEW_DM}.",
-    )
+    assert failed == error_result("send", DM_NOT_RECORDED)
     assert retried == ok_result("send", room_id=NEW_DM, event_id="$dm")
     assert len(homeserver.requests_to(CREATE_PATH)) == 1
-    [_, recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
+    [_, recorded] = _direct_changes(homeserver)
     assert recorded.body == {BOB: [NEW_DM]}
     assert len(_sent(homeserver, NEW_DM)) == 1
 
@@ -528,7 +552,7 @@ async def test_recording_a_new_dm_keeps_what_the_owner_changed_meanwhile(
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
     assert result == ok_result("send", room_id=NEW_DM, event_id="$dm")
-    [recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
+    [recorded] = _direct_changes(homeserver)
     assert recorded.body == {CAROL: ["!c:example.com"], **dave, BOB: [NEW_DM]}
 
 
@@ -551,13 +575,8 @@ async def test_a_failed_second_read_records_nothing_and_names_the_room(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == error_result(
-        "send",
-        f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
-        "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
-        f"Nothing was sent; to send there, use room_id {NEW_DM}.",
-    )
-    assert [request for request in _changes(homeserver) if request.path == DIRECT_PATH] == []
+    assert result == error_result("send", DM_NOT_RECORDED)
+    assert _direct_changes(homeserver) == []
 
 
 @dataclass
@@ -818,7 +837,6 @@ async def test_a_room_setting_cannot_be_redacted_or_edited(
 ) -> None:
     """The owner sent the events that made and set up their rooms, but only their messages and reactions are offered."""
     homeserver.answers[OWN_EVENT_PATH] = state
-    homeserver.answers[f"{ROOM_PATH}/redact/$own/*"] = {"event_id": "$redaction"}
 
     result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message="Hello")
 
@@ -922,10 +940,7 @@ async def test_every_built_content_carries_the_marker_before_the_client_stamps_i
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each event the toolkit builds is marked as the agent's before the client marks it again on the wire."""
-    notes = tmp_path / "notes.txt"
-    notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", mime_type="text/plain", room_id=ROOM)
-    assert record is not None
+    record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers.update(
         {
             UPLOAD_PATH: {"content_uri": "mxc://example.com/notes"},
@@ -1031,23 +1046,6 @@ async def test_join_passes_an_alias_to_the_homeserver_as_it_is(
     assert result == ok_result("join", room_id=OTHER_ROOM)
     [join] = homeserver.requests
     assert (join.method, urlsplit(join.url).path) == ("POST", f"{CLIENT}/join/{quote(ALIAS, safe='')}")
-    assert homeserver.requests_to(DIRECTORY_PATH) == []
-
-
-@pytest.mark.asyncio
-async def test_join_still_takes_an_alias_the_owner_is_not_in(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """An alias the directory would not resolve goes to the homeserver as it is, whose join resolves it."""
-    alias = "#elsewhere:example.org"
-    homeserver.answers[f"{CLIENT}/join/{alias}"] = {"room_id": OTHER_ROOM}
-
-    result = await _write(config, paths, homeserver, action="join", room_id=alias)
-
-    assert result == ok_result("join", room_id=OTHER_ROOM)
-    assert [(request.method, request.path) for request in homeserver.requests] == [("POST", f"{CLIENT}/join/{alias}")]
 
 
 @pytest.mark.asyncio
@@ -1077,7 +1075,7 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
         guarded = json.loads(await owner_toolkit(config, paths).matrix_user_write(room_id=ALIAS, **arguments))
 
     assert result == ok_result(action, room_id=OTHER_ROOM, event_id="$sent")
-    assert guarded == error_result(action, "Nothing is written as your owner into a contact room.")
+    assert guarded == error_result(action, CONTACT_ROOM_REFUSED)
     lookup, encryption, *_, sent, guarded_lookup = homeserver.requests
     assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
     assert (encryption.method, encryption.path) == ("GET", f"{CLIENT}/rooms/{OTHER_ROOM}/state/m.room.encryption")
@@ -1112,7 +1110,7 @@ async def test_a_contact_room_is_refused_before_any_request(
     with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(ROOM):
         result = await owner_toolkit(config, paths).matrix_user_write(action="send", room_id=ROOM, message="Hi")
 
-    assert json.loads(result) == error_result("send", "Nothing is written as your owner into a contact room.")
+    assert json.loads(result) == error_result("send", CONTACT_ROOM_REFUSED)
     assert homeserver.requests == []
 
 
@@ -1124,10 +1122,7 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
     tmp_path: Path,
 ) -> None:
     """Twelve writes per 30 seconds into one room, a file counting as one more; another room has its own count."""
-    notes = tmp_path / "notes.txt"
-    notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", mime_type="text/plain", room_id=ROOM)
-    assert record is not None
+    record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = {"content_uri": "mxc://example.com/notes"}
     homeserver.answers[f"{_send_path(OTHER_ROOM, 'm.reaction')}*"] = {"event_id": "$elsewhere"}
     toolkit = owner_toolkit(config, paths)
@@ -1396,21 +1391,21 @@ async def test_a_failed_attachment_names_what_was_already_sent(
     tmp_path: Path,
 ) -> None:
     """A message whose file failed to go out says so and which events did, so the model does not send them again."""
-    notes = tmp_path / "notes.txt"
-    notes.write_text("Remember the milk")
-    record = register_local_attachment(paths.storage_root, notes, kind="file", mime_type="text/plain", room_id=ROOM)
-    assert record is not None
+    record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = matrix_error(413, "M_TOO_LARGE", "Too large")
 
-    with owner_turn(config, paths, attachment_ids=(record.attachment_id,)), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths).matrix_user_write(
-            action="send",
-            room_id=ROOM,
-            message="Here it is",
-            attachments=[record.attachment_id],
-        )
+    result = await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        action="send",
+        room_id=ROOM,
+        message="Here it is",
+        attachments=[record.attachment_id],
+    )
 
-    assert json.loads(result) == error_result(
+    assert result == error_result(
         "send",
         f"Attachment {record.attachment_id} could not be sent; already sent into {ROOM}: $sent.",
     )
