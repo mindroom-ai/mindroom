@@ -921,6 +921,51 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 1
         assert not _sent_summaries(self.client)
 
+    async def test_provisional_title_is_dropped_once_the_first_reply_is_delivered(self) -> None:
+        """A reply delivered while the prompt title generates makes that title stale, so only the post-reply one is sent.
+
+        A delivery before the prompt pass starts skips its model call entirely.
+        """
+        config = _mock_config(first_threshold=2)
+        reply = DeliveredResponse(event_id="$reply", body="Here is your trip")
+        post_reply: list[asyncio.Task[None]] = []
+
+        async def deliver_reply() -> None:
+            post_reply.append(
+                asyncio.create_task(
+                    _summary_pass(self.client, config, self.rp, self.conversation_reader, delivered_response=reply),
+                ),
+            )
+            await asyncio.sleep(0)
+
+        model = self._summarizer(Await(deliver_reply), _title("Trip answer"))
+        self._history(_make_thread_history(1))
+        await self._provisional(config=config)
+        await post_reply[0]
+
+        assert len(model.requests) == 2
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Trip answer"
+        assert sent["message_count"] == 2
+
+        other_thread = "$thread2"
+        self.baselines.supersede_provisional_title(_ROOM, other_thread)
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            other_thread,
+            config,
+            self.rp,
+            prompt_event_id="$event0",
+            prompt="Plan a trip",
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        assert len(model.requests) == 2
+        assert len(_sent_summaries(self.client)) == 1
+
     async def test_provisional_title_skips_thread_resolved_during_generation(self) -> None:
         """Resolution lives in room state, so a thread resolved while the model ran must not get the title."""
 

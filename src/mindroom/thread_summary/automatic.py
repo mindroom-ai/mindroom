@@ -384,8 +384,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     try:
         async with baselines.lock(room_id, thread_id):
             # A baseline means this process already summarized the thread, maybe
-            # before that notice reached any history read.
-            if baselines.count(room_id, thread_id) > 0:
+            # before that notice reached any history read. A prompt title only
+            # covers the wait for the first reply, so a delivered reply makes it stale.
+            if baselines.count(room_id, thread_id) > 0 or baselines.provisional_title_superseded(room_id, thread_id):
                 return
             # The claim stops this process's other bots. Another runtime's title,
             # or a pin from Chat, may not have reached this client's sync yet, so
@@ -444,6 +445,9 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
             # runs: another title or pin, a resolution, or a deleted or edited prompt.
             if await sole_untitled_prompt(history) is None:
                 return
+            # The reply can be delivered while the model runs; its post-reply pass titles the thread instead.
+            if baselines.provisional_title_superseded(room_id, thread_id):
+                return
             await send_thread_summary_notice(
                 client,
                 room_id,
@@ -475,8 +479,10 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     ``retitle`` summarizes now, whatever the thread's count, for a message that changes what the thread is about,
     such as a call's notes. A pinned or resolved thread keeps its title all the same.
     """
-    refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
+    # Mark before any await, so a prompt title still generating sees the delivered reply and is dropped.
+    baselines.supersede_provisional_title(room_id, thread_id)
+    refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     async with baselines.lock(room_id, thread_id):
         projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
         if projected is None:
