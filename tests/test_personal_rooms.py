@@ -3421,14 +3421,6 @@ async def test_welcome_delivery_rechecks_policy_after_intent_write(
     assert next(iter(server.messages.values()))["content"]["body"] == "Original @alice:localhost"
 
 
-def _membership(server: MatrixServer, room_id: str, user_id: str) -> str:
-    return next(
-        event["content"]["membership"]
-        for event in server.state[room_id]
-        if (event["type"], event["state_key"]) == ("m.room.member", user_id)
-    )
-
-
 @pytest.mark.asyncio
 async def test_a_refused_initial_join_counts_when_the_homeserver_joins_the_owner_itself(
     tmp_path: Path,
@@ -3461,7 +3453,7 @@ async def test_a_refused_initial_join_counts_when_the_homeserver_joins_the_owner
         path = personal_room_record_path(owner.runtime_paths, "helper", user_id)
         record = read_personal_room(path)
         assert record.initial_join_pending is False
-        assert _membership(server, record.room_id, user_id) == "join"
+        assert server.membership(record.room_id, user_id) == "join"
 
 
 @pytest.mark.asyncio
@@ -3495,8 +3487,70 @@ async def test_an_accepted_initial_join_waits_for_nothing(tmp_path: Path, monkey
         return None
 
     monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user_failure", admin_join)
-    monkeypatch.setattr(PersonalRoomService, "_owner_joins_within_wait", AsyncMock(side_effect=AssertionError))
+    reads: list[tuple[str, str]] = []
+    read_state_event = server.room_get_state_event
+
+    async def recording_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        reads.append((event_type, state_key))
+        return await read_state_event(room_id, event_type, state_key)
+
+    server.room_get_state_event = recording_read
 
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
 
-    assert _membership(server, room_id, "@alice:localhost") == "join"
+    assert server.membership(room_id, "@alice:localhost") == "join"
+    assert ("m.room.member", "@alice:localhost") not in reads
+
+
+@pytest.mark.asyncio
+async def test_a_retried_initial_join_does_not_wait_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the attempt that sent the invite can race the homeserver's own join, so a retry fails without waiting."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="")
+    monkeypatch.setattr(
+        "mindroom.matrix.personal_rooms.admin_join_room_user_failure",
+        AsyncMock(return_value="answered HTTP 403 M_FORBIDDEN"),
+    )
+    with pytest.raises(RuntimeError, match="initial join"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    reads: list[tuple[str, str]] = []
+    read_state_event = server.room_get_state_event
+
+    async def recording_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        reads.append((event_type, state_key))
+        return await read_state_event(room_id, event_type, state_key)
+
+    server.room_get_state_event = recording_read
+
+    with pytest.raises(RuntimeError, match="initial join"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    assert ("m.room.member", "@alice:localhost") not in reads
+
+
+@pytest.mark.asyncio
+async def test_a_slow_membership_read_still_ends_the_wait_on_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read the client keeps retrying cannot hold the attempt past the wait; the refusal fails it as before."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="")
+    monkeypatch.setattr(
+        "mindroom.matrix.personal_rooms.admin_join_room_user_failure",
+        AsyncMock(return_value="answered HTTP 403 M_FORBIDDEN"),
+    )
+    read_state_event = server.room_get_state_event
+
+    async def slow_owner_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        if (event_type, state_key) == ("m.room.member", "@alice:localhost"):
+            await asyncio.Event().wait()
+        return await read_state_event(room_id, event_type, state_key)
+
+    server.room_get_state_event = slow_owner_read
+
+    with pytest.raises(RuntimeError, match="the router's admin join answered HTTP 403 M_FORBIDDEN"):
+        await asyncio.wait_for(owner.ensure("@alice:localhost", "!lobby:localhost", server), timeout=5)
+
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    assert read_personal_room(path).initial_join_pending is True
