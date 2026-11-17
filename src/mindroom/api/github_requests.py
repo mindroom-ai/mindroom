@@ -1,0 +1,243 @@
+"""`/api/github`: GitHub API requests a signed-in client makes with its user's own connected GitHub account.
+
+The client names a method and a repository or GraphQL path; this route adds the user's token, sends the request to
+`api.github.com` only, and answers with GitHub's status, body, and a few headers, so the token never leaves MindRoom.
+This route's own log lines carry the method, the path's kind, and GitHub's status, never the token, the repository, or
+a body; HTTP client libraries may log the URL at INFO or DEBUG, as for every outbound call MindRoom makes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import re
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from urllib.parse import unquote
+
+import httpx
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, JsonValue
+
+from mindroom.api import config_lifecycle
+from mindroom.api.client_sessions import presented_session
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.logging_config import get_logger
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialUnreadableError,
+    load_oauth_credentials_status,
+    oauth_credentials_usable,
+    oauth_verified_claim,
+    refresh_oauth_credentials,
+    resolve_oauth_credential_context,
+)
+from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+
+if TYPE_CHECKING:
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/api/github")
+
+_GITHUB_API = "https://api.github.com"
+_TIMEOUT_SECONDS = 30.0
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+# Far longer than any GitHub API path a client builds, and far below the longest URL httpx sends.
+_MAX_PATH_LENGTH = 4096
+# The stored connection could not be read or refreshed for a reason a retry may fix.
+_UNAVAILABLE = "github_connection_unavailable"
+_PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
+# One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
+# and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
+_PCHAR = r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})"
+# Logs name the segment after the repository only when it reads as an API resource, such as `pulls` or `check-runs`.
+_RESOURCE = re.compile(r"[a-z][a-z_-]{0,31}")
+_PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
+
+
+class GitHubRequest(BaseModel):
+    """One GitHub API call: `path` is `/graphql` or under `/repos/<owner>/<repo>`, with an optional query."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+    path: str
+    body: JsonValue = None
+    accept: Literal[
+        "application/vnd.github+json",
+        "application/vnd.github.full+json",
+        "application/vnd.github.diff",
+    ] = "application/vnd.github+json"
+
+
+def _path_kind(path: str) -> str | None:
+    r"""Return how logs name ``path`` when a client may request it, else None.
+
+    A segment that decodes to `.` or `..`, or to anything holding `/`, `\`, or a control character, is refused too,
+    so no server on the way can resolve the path outside the repository.
+    """
+    match = _PATH.fullmatch(path) if len(path) <= _MAX_PATH_LENGTH else None
+    if match is None:
+        return None
+    segments = [unquote(segment) for segment in match.group(1).split("/")[1:]]
+    if any(s in {".", ".."} or "/" in s or "\\" in s or not s.isprintable() for s in segments):
+        return None
+    if segments[0] == "graphql":
+        return "/graphql"
+    if len(segments) == 3:
+        return "/repos/{owner}/{repo}"
+    resource = segments[3] if _RESOURCE.fullmatch(segments[3]) else "{other}"
+    return f"/repos/{{owner}}/{{repo}}/{resource}"
+
+
+def _github_client() -> httpx.AsyncClient:
+    """Build the client for one request; it never follows a redirect, so the token goes to `api.github.com` only."""
+    return httpx.AsyncClient(timeout=_TIMEOUT_SECONDS, follow_redirects=False)
+
+
+def _error(status_code: int, error: str) -> JSONResponse:
+    return JSONResponse({"error": error}, status_code=status_code)
+
+
+def _credential_context(request: Request) -> OAuthCredentialContext | None:
+    """Return the session user's own GitHub connection, the one the `github` tool uses for them with any agent.
+
+    None when the session resolves no person: such a context would name the unscoped store, which is no one's own.
+    """
+    user_id = presented_session(request).user_id
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    paths = snapshot.runtime_paths
+    # A requester-scoped provider keeps one connection per person whatever the agent; the name only fills the identity.
+    identity = build_requester_execution_identity(agent_name="oauth", runtime_paths=paths, requester_id=user_id)
+    context = resolve_oauth_credential_context(
+        github_oauth_provider(),
+        paths,
+        get_runtime_credentials_manager(paths),
+        None,
+        execution_identity=identity,
+        config=snapshot.runtime_config,
+    )
+    return None if context.worker_target is None else context
+
+
+async def _usable_credentials(context: OAuthCredentialContext | None) -> dict[str, Any] | None:
+    """Return the stored connection while it can authenticate, without refreshing it or creating a store."""
+    if context is None:
+        return None
+    credentials = (await load_oauth_credentials_status(context, create_store=False)).credentials
+    return credentials if await _usable(context, credentials) else None
+
+
+async def _usable(context: OAuthCredentialContext, credentials: dict[str, Any] | None) -> bool:
+    """Check ``credentials`` against the GitHub App client, whose credential file is read in a thread."""
+    return bool(credentials) and await asyncio.to_thread(
+        oauth_credentials_usable,
+        context.provider,
+        context.runtime_paths,
+        credentials,
+    )
+
+
+async def _access_token(context: OAuthCredentialContext | None) -> str | None:
+    """Return a current access token, refreshing one about to expire, or None while the user is not connected."""
+    if context is None or await _usable_credentials(context) is None:
+        return None
+    try:
+        credentials = await refresh_oauth_credentials(context)
+    except (OAuthCredentialUnreadableError, OAuthRefreshRejectedError):
+        return None
+    if not await _usable(context, credentials):
+        return None
+    token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
+    return token if isinstance(token, str) and token else None
+
+
+@router.get("/status", response_model=None)
+async def github_status(request: Request) -> dict[str, object] | JSONResponse:
+    """Say whether the session's user has a usable GitHub connection and its login, from stored state only."""
+    context = _credential_context(request)
+    try:
+        credentials = await _usable_credentials(context)
+    except OAuthProviderError:
+        return _error(503, _UNAVAILABLE)
+    if credentials is None:
+        return {"connected": False}
+    login = oauth_verified_claim(credentials, "login")
+    return {"connected": True} if login is None else {"connected": True, "login": login}
+
+
+@router.post("/request", response_model=None)
+async def github_request(payload: GitHubRequest, request: Request) -> dict[str, object] | JSONResponse:
+    """Send ``payload`` to GitHub as the session's user and answer with GitHub's status, body, and rate headers.
+
+    Any GitHub answer is a 200 here; 409 means the user has no usable GitHub connection, so the client can fall back.
+    """
+    context = _credential_context(request)
+    kind = _path_kind(payload.path)
+    if kind is None:
+        return _error(400, "github_path_not_allowed")
+    try:
+        token = await _access_token(context)
+    except OAuthProviderError:
+        return _error(503, _UNAVAILABLE)
+    if token is None:
+        return _error(409, "github_not_connected")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": payload.accept,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    content = None if payload.body is None else json.dumps(payload.body).encode()
+    if content is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        async with (
+            _github_client() as client,
+            client.stream(payload.method, _GITHUB_API + payload.path, headers=headers, content=content) as response,
+        ):
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) > _MAX_RESPONSE_BYTES:
+                    logger.warning("github_request_too_large", method=payload.method, path=kind)
+                    return _error(502, "github_response_too_large")
+    except httpx.HTTPError as exc:
+        logger.warning("github_request_failed", method=payload.method, path=kind, error_type=type(exc).__name__)
+        return _error(502, "github_unreachable")
+    logger.info("github_request", method=payload.method, path=kind, status=response.status_code)
+    return {
+        "status": response.status_code,
+        "body": _answer_body(bytes(body), response.headers.get("content-type", "")),
+        "headers": {name: response.headers[name] for name in _PASSED_HEADERS if name in response.headers},
+    }
+
+
+def _answer_body(body: bytes, content_type: str) -> JsonValue:
+    """Return GitHub's JSON when its media type says JSON, else its text, or None when it sent nothing.
+
+    An answer holding a number that is not finite, such as `NaN`, which no JSON answer can carry, is text too.
+    """
+    if not body:
+        return None
+    text = body.decode(errors="replace")
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type != "application/json" and not media_type.endswith("+json"):
+        return text
+    try:
+        return json.loads(text, parse_constant=_not_finite, parse_float=_finite_float)
+    except ValueError:
+        return text
+
+
+def _not_finite(number: str) -> NoReturn:
+    msg = f"{number} is not a finite number"
+    raise ValueError(msg)
+
+
+def _finite_float(number: str) -> float:
+    value = float(number)
+    return value if math.isfinite(value) else _not_finite(number)
