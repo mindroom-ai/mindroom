@@ -34,7 +34,7 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
-With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, worker-routed `shell` and `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, `shell` calls and worker-routed `python` calls of an agent with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) can use stored API keys and connected accounts that the worker never sees.
 Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
@@ -222,9 +222,13 @@ agents:
 
 `temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service, a passphrase, or a pairing code.
 It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+The agent can also give a `label` that says what the secret is, the `url` of a page where the user gets or creates it, and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
   Other people in the thread see who the card waits for.
+- A `label` becomes the card's title and a `placeholder` the hint in the empty field, each cut to one line of 80 characters.
+  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host, no `user:password@` part, and no spaces.
+  The agent chooses the link, so the user should check the host on the button before signing in there.
 - The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
   A restart forgets a value kept in memory and reads back one kept in a file.
   The file is deleted at the first tool call or answer after the value expired.

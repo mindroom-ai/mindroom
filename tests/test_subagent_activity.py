@@ -18,6 +18,7 @@ from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
 from mindroom.delegation import lifecycle
@@ -501,6 +502,24 @@ async def test_a_resumed_attempt_publishes_to_its_own_sink() -> None:
 
 
 @pytest.mark.asyncio
+async def test_frames_carry_the_model_the_child_runs_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mid-run model switch and a resume's model reach the next snapshot, and the switched one its run's meta."""
+    monkeypatch.setattr(lifecycle, "update_subagent_turn_sync", lambda *_args: None)
+    seen = _Sink()
+    child = _child()
+    feed = ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(1)).model_name == "fast"
+    lifecycle.note_child_run_id(child, "run-2", _runtime_paths(tmp_path), model_name="smart")
+    switched = await seen.wait_for(2)
+    assert subagents_module._run_meta(switched, full=False)["model"] == {"config": "smart"}
+    feed.status("paused")
+    await seen.wait_for(3)
+    child.model_name = "retained"
+    ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(4)).model_name == "retained"
+
+
+@pytest.mark.asyncio
 async def test_a_terminal_status_forgets_the_entry() -> None:
     """A finished run is published once with its result, and the same id later starts empty."""
     seen = _Sink()
@@ -722,6 +741,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     room = FrameRoom(encrypted=encrypted)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+    config.models["default"] = ModelConfig(provider="anthropic", id="claude-opus-5-5", display_name="Opus 5.5")
     context, _bot = _in_room(runtime, room)
 
     with tool_runtime_context(context):
@@ -730,6 +750,8 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     assert result.text.endswith("Done")
     frames = await _run_frames(room)
     first, last = frames[0], frames[-1]
+    model = {"config": "default", "display_name": "Opus 5.5", "id": "claude-opus-5-5", "provider": "anthropic"}
+    assert all(frame["meta"]["model"] == model for frame in frames)
     assert {frame["run"] for frame in frames} == {first["run"]}
     assert "snapshot" in first
     assert (first["meta"]["status"], first["meta"]["caller"], first["meta"]["root"]) == ("running", "leader", "leader")

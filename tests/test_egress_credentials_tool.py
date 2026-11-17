@@ -462,14 +462,14 @@ def test_without_worker_target_explains_a_worker_scoped_agent_is_required(tmp_pa
     assert "worker-scoped" in str(payload["note"])
 
 
-def test_an_agent_whose_commands_run_in_the_primary_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
-    """Its shell runs in the primary, so the tool lists no services and sends the agent to the operator, not a page."""
+def test_an_agent_whose_only_command_tool_is_a_primary_python_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
+    """A primary python runs in-process, so the tool lists no services and sends the agent to the operator, not a page."""
     runtime_paths = _runtime_paths(
         tmp_path,
         MINDROOM_PUBLIC_URL="https://mindroom.example",
         MINDROOM_EGRESS_BROKER_PORT="8768",
     )
-    agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_tools=[])
+    agent = AgentConfig(display_name="Code", tools=["python", "egress_credentials"], worker_tools=[])
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, agents={"code": agent}))
 
@@ -504,8 +504,8 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's worker-routed shell and python calls into Agent Keys, see which keys and accounts it can use, "
-        "and ask the user for a missing key"
+        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
+        "can use, and ask the user for a missing key"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
@@ -1036,9 +1036,10 @@ def _start(
     context: ToolRuntimeContext,
     service: str = "github",
     reason: str = _REASON,
+    **shown: str,
 ) -> asyncio.Task[str]:
     with tool_runtime_context(context):
-        return asyncio.create_task(tool.request_secret(service, reason))
+        return asyncio.create_task(tool.request_secret(service, reason, **shown))
 
 
 async def _ask(
@@ -1079,6 +1080,34 @@ def _final_card(context: ToolRuntimeContext, status: str) -> dict[str, object]:
     assert new_content["msgtype"] == "m.notice"
     assert new_content[SECRET_REQUEST_CONTENT_KEY] == {**card[SECRET_REQUEST_CONTENT_KEY], "status": status}
     return new_content
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_shows_a_link_and_a_field_hint(tmp_path: Path) -> None:
+    """The agent can name the page that gives the key and hint at its form; both stay on the card's edit."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, url="https://github.com/settings/tokens", placeholder=" ghp_…\n")
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["url"], content["placeholder"]) == ("https://github.com/settings/tokens", "ghp_…")
+    assert card["body"].endswith("Where to get it: https://github.com/settings/tokens")
+    _final_card(context, "declined")
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_refuses_a_link_no_card_can_show(tmp_path: Path) -> None:
+    """A link that is no `http` or `https` page posts no card and tells the agent why."""
+    tool, context = _asking(tmp_path)
+
+    result = json.loads(await _start(tool, context, url="javascript:alert(1)"))
+
+    assert result["status"] == "error"
+    assert "`url`" in result["message"]
+    context.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1256,7 +1285,10 @@ async def test_refuses_without_posting(
         "openai": {**_SERVICES["openai"], "admin_key": True},
         "acme": {**_SERVICES["github"], "display_name": "Acme", "github_app": app},
     }
-    agent_fields = {"no-agent-keys": {"worker_tools": []}, "not-a-user": {"access": {"users": [_BOB]}}}.get(case)
+    agent_fields = {
+        "no-agent-keys": {"tools": ["python", "egress_credentials"], "worker_tools": []},
+        "not-a-user": {"access": {"users": [_BOB]}},
+    }.get(case)
     tool, context = _asking(
         tmp_path,
         services,

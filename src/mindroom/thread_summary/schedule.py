@@ -19,11 +19,13 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _PREQUEUE_CONCURRENCY_MARGIN = 2
+# A new thread's first reply brings it to two messages: the prompt and the answer.
+_NEW_THREAD_SIZE_AFTER_FIRST_REPLY = 2
 
 
 @dataclass
 class _ThreadSummaryBaselines:
-    """Each thread's summarized message count and summary-write lock, shared by every bot in the process.
+    """Each thread's summarized count, summary-write lock, and prompt-title claim, shared by every bot in the process.
 
     A count only rises, and the trusted notices in a thread's history restore it after a restart.
     """
@@ -33,6 +35,14 @@ class _ThreadSummaryBaselines:
         default_factory=lambda: defaultdict(asyncio.Lock),
         init=False,
     )
+    _provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
+
+    def claim_provisional_title(self, room_id: str, thread_id: str) -> bool:
+        """Claim one thread's single prompt-only title attempt, so only the first responder in the process makes it."""
+        if (room_id, thread_id) in self._provisional_titles:
+            return False
+        self._provisional_titles.add((room_id, thread_id))
+        return True
 
     def lock(self, room_id: str, thread_id: str) -> asyncio.Lock:
         """Return the lock every summary write to one thread holds."""
@@ -74,6 +84,14 @@ def thread_summary_message_count_hint(
         if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is None
     )
     return ordinary + 1
+
+
+def first_reply_reaches_first_threshold(config: Config) -> bool:
+    """Return whether the first automatic summary is due at a new thread's first reply.
+
+    Only then may a prompt-only title come earlier; a higher first threshold keeps new threads untitled for longer.
+    """
+    return config.defaults.thread_summary_first_threshold <= _NEW_THREAD_SIZE_AFTER_FIRST_REPLY
 
 
 def should_queue_thread_summary(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -22,6 +22,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
+    VOICE_PREFIX,
     RuntimePaths,
 )
 from mindroom.conversation_resolver import MessageContext
@@ -30,7 +31,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_handoff import DispatchPayloadMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
@@ -54,7 +55,7 @@ from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import SourceVisibleEcho, TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
@@ -1878,7 +1879,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("mentions", "waits"), [((), True), (("@other:localhost",), False)])
-    async def test_voice_follow_up_for_someone_else_stops_waiting_once_transcribed(
+    async def test_voice_follow_up_for_someone_else_never_waits_for_the_running_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1886,9 +1887,10 @@ class TestAgentBot(AgentBotTestBase):
         *,
         waits: bool,
     ) -> None:
-        """A voice follow-up whose transcript mentions only someone else no longer asks the running response to wrap up.
+        """A voice follow-up whose transcript mentions only someone else never asks the running response to wrap up.
 
-        Like every voice message it counts as waiting while it is transcribed; it then drops that notice and gets no ⏳.
+        The running response hears of a voice message only once it is transcribed, so this one sends no notice and gets
+        no ⏳.
         """
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -1934,8 +1936,8 @@ class TestAgentBot(AgentBotTestBase):
 
         reservation = reserve.return_value
         pending_event = admit.await_args.kwargs["ready_result"].pending_event
+        assert reserve.called is waits
         assert (pending_event.notice is reservation) is waits
-        assert reservation.release.called is not waits
         assert shows_waiting.called is waits
         pending_event.close()
 
@@ -2727,3 +2729,154 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         await assert_no_turn_answered(bot)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prompt_kind", ["text", "voice_transcript", "raw_audio_fallback"])
+    @pytest.mark.parametrize("action", ["ignore", "route", "individual", "team", "skip", "reject"])
+    async def test_prompt_title_is_queued_before_execution_without_waiting(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        prompt_kind: Literal["text", "voice_transcript", "raw_audio_fallback"],
+        action: Literal["ignore", "route", "individual", "team", "skip", "reject"],
+    ) -> None:
+        """Turns that will be answered queue their prompt without waiting; others, and untranscribed audio, never do."""
+        voice = prompt_kind != "text"
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$prompt",
+            body=f"{VOICE_PREFIX if voice else ''}Plan a trip",
+            source={
+                "content": {
+                    "body": "recording.ogg" if voice else "Plan a trip",
+                    "msgtype": "m.audio" if voice else "m.text",
+                },
+            },
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id="$prompt", reply_to_event_id="$prompt")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$prompt",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$prompt",
+            envelope=_hook_envelope(body="ENRICHED CONTEXT", source_event_id="$prompt", target=target),
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        plan = (
+            DispatchPlan(kind=action)
+            if action in {"ignore", "route"}
+            else DispatchPlan(kind="respond", response_action=ResponseAction(kind=action))
+        )
+        queued = action in {"route", "individual", "team"} and prompt_kind != "raw_audio_fallback"
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+
+        async def summarize(*_args: object, **kwargs: object) -> None:
+            assert kwargs["prompt"] == "Plan a trip"
+            assert kwargs["prompt_event_id"] == "$prompt"
+            started.set()
+            await release.wait()
+
+        async def execute(*_args: object, **_kwargs: object) -> None:
+            if queued:
+                await asyncio.wait_for(started.wait(), timeout=1)
+                assert not release.is_set()
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock(side_effect=execute)),
+            patch(
+                "mindroom.turns.dispatch.maybe_generate_prompt_summary",
+                new=AsyncMock(side_effect=summarize),
+            ) as summary,
+        ):
+            try:
+                await dispatch_test_turn(
+                    bot._turn_dispatcher,
+                    room,
+                    event,
+                    event.sender,
+                    payload_metadata=DispatchPayloadMetadata(
+                        voice_transcript=prompt_kind == "voice_transcript",
+                        raw_audio_fallback=prompt_kind == "raw_audio_fallback",
+                    ),
+                    coalescing_key=requester_coalescing_key(room.room_id, "$prompt", event.sender),
+                )
+                if queued:
+                    summary.assert_awaited_once()
+                else:
+                    summary.assert_not_called()
+            finally:
+                release.set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["first_threshold_after_first_reply", "thread_reply", "coalesced"])
+    async def test_prompt_title_is_not_queued_unless_new_thread_is_titled_at_first_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        case: Literal["first_threshold_after_first_reply", "thread_reply", "coalesced"],
+    ) -> None:
+        """Only a new thread's single prompt is titled early, and only when its first reply would title it anyway."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 3 if case == "first_threshold_after_first_reply" else 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        thread_id = "$root" if case == "thread_reply" else "$prompt"
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$prompt",
+            body="Plan a trip",
+            source={"content": {"body": "Plan a trip", "msgtype": "m.text"}},
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id=thread_id, reply_to_event_id="$prompt")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id=thread_id,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$prompt",
+            envelope=_hook_envelope(body="Plan a trip", source_event_id="$prompt", target=target),
+        )
+        plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock()) as apply_plan,
+            patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as summary,
+        ):
+            await dispatch_test_turn(
+                bot._turn_dispatcher,
+                room,
+                event,
+                event.sender,
+                handled_turn=(
+                    TurnRecord.create(["$earlier", "$prompt"], completed=False) if case == "coalesced" else None
+                ),
+                coalescing_key=requester_coalescing_key(room.room_id, thread_id, event.sender),
+            )
+
+        apply_plan.assert_awaited_once()
+        summary.assert_not_called()

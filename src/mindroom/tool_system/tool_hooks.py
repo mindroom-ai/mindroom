@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -72,8 +73,9 @@ type _ToolApprovalGate = Callable[[BackgroundScriptToolOrigin, str, dict[str, An
 
 
 logger = get_logger(__name__)
-# The one call a temporary secret is a variable of, by toolkit and function.
-_SECRET_RECEIVER = ("shell", "run_shell_command")
+# The shell command call, by toolkit and function: the one call a temporary secret is a variable of, and the call whose
+# command gets the egress broker's env when it runs in the primary.
+_SHELL_COMMAND = ("shell", "run_shell_command")
 
 
 @dataclass(slots=True)
@@ -685,8 +687,11 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
     # types there.
     given = await _given_secrets(resolved_context)
-    if given and (registered_toolkit, tool_name) == _SECRET_RECEIVER:
+    if given and (registered_toolkit, tool_name) == _SHELL_COMMAND:
         environment = environment.then(ToolEnvironment(values=given))
+    # The egress broker's env goes over everything else, as the sandbox proxy puts it over a worker call's own.
+    if (registered_toolkit, tool_name) == _SHELL_COMMAND and egress_broker_enabled(resolved_context.runtime_paths):
+        environment = environment.then(await _primary_shell_broker_environment(resolved_context))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -716,6 +721,27 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     return await answer(result, "error" if _answered_failure(result) else "success")
+
+
+async def _primary_shell_broker_environment(resolved_context: _ResolvedToolContext) -> ToolEnvironment:
+    """Return the egress broker's env for a shell call of an agent that uses the broker and runs its shell here.
+
+    Empty for any other call, including one routed to a worker, which the sandbox proxy gives the env instead.
+    """
+    agent_name = resolved_context.agent_name
+    if agent_name is None:
+        return ToolEnvironment()
+    # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+    from mindroom.egress_broker.service import execution_env_for_primary_shell  # noqa: PLC0415
+
+    # The agent's tools are resolved and the credential store read, so off the event loop.
+    return await asyncio.to_thread(
+        execution_env_for_primary_shell,
+        resolved_context.runtime_paths,
+        config=resolved_context.config,
+        agent_name=agent_name,
+        execution_identity=resolved_context.execution_identity,
+    )
 
 
 async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:

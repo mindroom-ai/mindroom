@@ -30,7 +30,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, File, Image
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -566,19 +566,249 @@ async def test_a_payload_rejection_retries_without_learning() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_mixed_media_rejection_retries_without_learning() -> None:
-    """A rejection of a request with two media kinds cannot say which kind the model lacks."""
-    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+async def test_audio_rejection_preserves_viewed_image_and_learns_only_audio() -> None:
+    rejection = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
-    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
-    audio = Audio(content=b"RIFF", mime_type="audio/wav")
-    request = ModelRequest(messages=[_user(_PROMPT, audio=[audio], images=[_image()])])
+    viewed = _image(f"{VIEWED_IMAGE_ID_PREFIX}att-1")
+    receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
+    request = ModelRequest(
+        messages=[
+            _user("Earlier voice message", audio=[_CLIP]),
+            Message(role="tool", tool_call_id="call_1", content=receipt),
+            _user("Viewed image follows.", images=[viewed]),
+        ],
+    )
 
-    await _drain(provider, request)
-    await _drain(provider, request)
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        assert attempt.messages[0].audio is None
+        assert FALLBACK_MARKER in attempt.messages[0].content
+        assert attempt.messages[1].content == receipt
+        assert attempt.messages[2].images == [viewed]
+        assert attempt.messages[2].content == "Viewed image follows."
+    assert request.messages[0].audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "removed"),
+    [
+        ("This model does not support audio input", "audio"),
+        ("Audio inputs are not supported", "audio"),
+        ("This model doesn't support images", "image"),
+        ("This model does not support vision", "image"),
+        ("No endpoints found that support input video", "video"),
+        ("File input is not supported", "file"),
+        ("This model does not support pdf input", "file"),
+        ("Document inputs are not supported", "file"),
+        ("This model does not support audio input; images are supported", "audio"),
+    ],
+)
+async def test_named_media_kind_aliases_retry_and_learn_only_that_kind(error: str, removed: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    video = Video(content=b"video", mime_type="video/mp4")
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT], videos=[video])])
+    expected = {
+        "image": None if removed == "image" else [_image()],
+        "audio": None if removed == "audio" else [_CLIP],
+        "file": None if removed == "file" else [_REPORT],
+        "video": None if removed == "video" else [video],
+    }
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        message = attempt.messages[0]
+        assert {
+            "image": message.images,
+            "audio": message.audio,
+            "file": message.files,
+            "video": message.videos,
+        } == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "rejects_files"),
+    [
+        ("Audio and video inputs are not supported", False),
+        ("Audio or video inputs are not supported", False),
+        ("Audio, video and file inputs are not supported", True),
+        ("Audio, video, and files are not supported; images are supported", True),
+        ("No endpoints found that support input audio and video", False),
+        ("No endpoints found that support input audio, video and file", True),
+        ("This model does not support audio or video inputs; images are supported", False),
+        ("Images are supported, but audio and video inputs are not supported", False),
+    ],
+)
+async def test_coordinated_media_rejection_preserves_images_and_learns_all_rejected_kinds(
+    error: str,
+    rejects_files: bool,
+) -> None:
+    """A coordinated unsupported clause removes and teaches every named kind, not unrelated supported kinds."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    video = Video(content=b"video", mime_type="video/mp4")
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP], videos=[video], files=[_REPORT])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        message = attempt.messages[0]
+        assert message.images == [_image()]
+        assert message.audio is None
+        assert message.videos is None
+        assert message.files == (None if rejects_files else [_REPORT])
+        assert message.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        "This model does not support audio and images are supported",
+        "This model does not support audio, images are supported",
+    ],
+)
+async def test_affirmative_clause_after_unsupported_kind_keeps_its_kind(error: str) -> None:
+    """A kind that starts its own "are supported" clause is not part of the unsupported list."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        assert attempt.messages[0].images == [_image()]
+        assert attempt.messages[0].audio is None
+
+
+@pytest.mark.asyncio
+async def test_kind_retry_failure_uses_backstop_without_learning_unrelated_images() -> None:
+    inner = _ScriptedProvider(
+        [
+            [_rejection(message="No endpoints found that support input audio")],
+            [_rejection(message="Invalid request")],
+            [_turn()],
+            [_turn()],
+        ],
+    )
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert [(r.messages[0].images, r.messages[0].audio) for r in inner.requests] == [
+        ([_image()], [_CLIP]),
+        ([_image()], None),
+        (None, None),
+        ([_image()], None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["Invalid request", "This is not a multimodal model"])
+async def test_unnamed_media_errors_strip_all_without_learning(error: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
 
     assert (inner.requests[1].messages[0].images, inner.requests[1].messages[0].audio) == (None, None)
-    assert (inner.requests[2].messages[0].images, inner.requests[2].messages[0].audio) == ([_image()], [audio])
+    assert (inner.requests[2].messages[0].images, inner.requests[2].messages[0].audio) == ([_image()], [_CLIP])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        InvalidRequest("This model does not support audio input", provider="Scripted", status_code=413),
+        ContextWindowExceeded("This model does not support audio input", provider="Scripted"),
+        InvalidRequest("Audio exceeds size limit; does not support audio input", provider="Scripted"),
+        InvalidRequest("Unsupported MIME type; does not support audio input", provider="Scripted"),
+        InvalidRequest("Invalid audio; model does not support images", provider="Scripted"),
+        InvalidRequest("This is not a multimodal model", provider="Scripted"),
+        InvalidRequest("This is only supported by certain models", provider="Scripted"),
+    ],
+)
+async def test_media_learning_requires_a_named_capability_gap_not_an_input_error(rejection: ProviderError) -> None:
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert inner.requests[1].messages[0].audio is None
+    assert inner.requests[2].messages[0].audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "removed"),
+    [("Unsupported file", "file"), ("Unsupported image type", "image")],
+)
+async def test_unsupported_payload_retries_only_named_kind_without_learning(error: str, removed: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    retry = inner.requests[1].messages[0]
+    assert retry.images == (None if removed == "image" else [_image()])
+    assert retry.files == (None if removed == "file" else [_REPORT])
+    assert retry.audio == [_CLIP]
+    subsequent = inner.requests[2].messages[0]
+    assert subsequent.images == [_image()]
+    assert subsequent.files == [_REPORT]
+    assert subsequent.audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end", ["failed", "visible", "closed", "cancelled"])
+async def test_unsuccessful_kind_retry_does_not_teach_capabilities(end: str) -> None:
+    rejection = _rejection(message="This model does not support audio input")
+    waiting = asyncio.Event()
+
+    async def wait_for_cancellation() -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    steps: list[_Step] = [TextDelta("partial")] if end != "failed" else []
+    if end == "cancelled":
+        steps = [Await(wait_for_cancellation)]
+    elif end != "closed":
+        steps.append(_transient())
+    inner = _ScriptedProvider([[rejection], steps, [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+    provider = _fallback_stage(inner)
+
+    if end == "cancelled":
+        task = asyncio.create_task(_drain(provider, request))
+        await waiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif end == "closed":
+        stream = provider.stream(request)
+        assert isinstance(await anext(stream), TextDelta)
+        await stream.aclose()
+    else:
+        with pytest.raises(ProviderError):
+            await _drain(provider, request)
+    await _drain(provider, request)
+
+    assert inner.requests[-1].messages[0].images == [_image()]
+    assert inner.requests[-1].messages[0].audio == [_CLIP]
 
 
 @pytest.mark.asyncio
@@ -652,7 +882,7 @@ _REPORT = File(id="att_report", content=b"%PDF-1.4", filename="report.pdf", mime
 _CLIP = Audio(id="att_clip", content=b"RIFF", mime_type="audio/wav")
 
 
-def _rejection(*rejected: str, message: str = "Unsupported image") -> InvalidRequest:
+def _rejection(*rejected: str, message: str = "Unsupported media") -> InvalidRequest:
     return InvalidRequest(message, provider="Scripted", status_code=400, rejected_media=frozenset(rejected))
 
 
@@ -710,6 +940,22 @@ async def test_a_rejection_that_names_no_part_of_the_media_retries_without_any_o
 
     assert _sent(inner.requests[1].messages) == _MEDIA_FREE
     assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicitly_rejected_items_take_precedence_over_a_named_kind() -> None:
+    rejection = _rejection(
+        "att_photo",
+        "att_scan",
+        "att_report",
+        "att_clip",
+        message="This model does not support image input",
+    )
+    inner = _ScriptedProvider([[rejection], [_turn()]])
+
+    await _drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
 
 
 @pytest.mark.asyncio
@@ -773,7 +1019,7 @@ async def test_a_named_retry_ends_at_a_failure_the_media_cannot_have_caused(fail
 
 @pytest.mark.asyncio
 async def test_a_named_retry_that_answers_teaches_the_route_nothing() -> None:
-    """Only a request without any of the media shows the model lacks a kind, so the next request sends it all."""
+    """Removing one image while another succeeds cannot establish an image capability gap."""
     gap = "This model does not support image input"
     inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_turn()], [_turn()]])
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
@@ -796,6 +1042,19 @@ async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers(
 
     assert [len(attempt.messages[0].images or ()) for attempt in inner.requests] == [2, 1, 0, 0]
     assert len(inner.requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_openrouters_missing_audio_endpoint_is_learned() -> None:
+    """OpenRouter names the gap as no endpoint supporting input audio, so the next request leaves the audio out."""
+    gap = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
+    inner = _ScriptedProvider([[gap], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, audio=[_CLIP])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert [attempt.messages[0].audio for attempt in inner.requests] == [[_CLIP], None, None]
 
 
 @pytest.mark.asyncio

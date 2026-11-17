@@ -36,14 +36,16 @@ MID_TURN_QUESTION = JudgmentQuestion(
     instructions="Does any newly queued message require an immediate change to, pause of, or stop of the active task?",
     when_true=(
         "A new message requests stopping or pausing the active task, corrects it, changes a relevant "
-        "requirement, or explicitly asks to switch tasks immediately. A relevant change takes priority "
-        "over praise or 'keep going' in the same message or queue."
+        "requirement, or explicitly asks to switch tasks immediately, whether the active request's requester "
+        "or another person sends it. A relevant change takes priority over praise or 'keep going' in the same "
+        "message or queue."
     ),
     when_false=(
         "The messages acknowledge progress, express thanks, ask to continue unchanged, or request "
         "NOT interrupting. 'Do not interrupt' means continue; 'do not continue' means stop. "
         "Unrelated questions or tasks can wait until afterward, even without explicit 'later' wording. "
-        "Mere relevance to the task does not make praise or thanks an interruption."
+        "Mere relevance to the task does not make praise or thanks an interruption. A message from another "
+        "person that is not about the active task is conversation among people and can wait."
     ),
 )
 
@@ -65,12 +67,14 @@ def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class QueuedMessage:
-    """One message queued during an active reply; without text it cannot be judged, so the reply wraps up for it."""
+    """One message queued during an active reply; without text it cannot be judged."""
 
     event_id: str
     text: str | None
     visible_response: str | None = ""
     requester_id: str | None = None
+    # Unknown counts as mentioning someone, so an unjudged queue holding it wraps the reply up.
+    mentions_nobody: bool = False
 
 
 @dataclass
@@ -78,14 +82,22 @@ class MidTurnGate:
     """Reuse one decision per pending snapshot within one active response."""
 
     active_text: str | None
+    # True when the queue can wait, False when it cannot, None when the judge gave no answer.
     evaluate: Callable[[JudgmentRequest], Awaitable[bool | None]]
+    # The person the active reply answers; None for a reply no person asked for, such as a scheduled one.
+    requester_id: str | None = None
     instructions: str = ""
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
+    # Receives the messages, as the judge read them, the reply wraps up for.
+    on_stop: Callable[[tuple[QueuedMessage, ...]], None] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
+    # Messages, as they read then, in a queue that could wait, and those this reply's verdicts say it cannot wait for.
+    _waited: set[QueuedMessage] = field(default_factory=set)
+    _stopping: set[QueuedMessage] = field(default_factory=set)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
@@ -105,6 +117,10 @@ class MidTurnGate:
             return
         self._acknowledged.add(message.event_id)
         await self.on_defer(message.event_id)
+
+    def _between_people(self, message: QueuedMessage) -> bool:
+        """Return whether another person than the requester wrote this message, mentioning nobody."""
+        return self.requester_id is not None and message.mentions_nobody and message.requester_id != self.requester_id
 
     async def defers(
         self,
@@ -128,6 +144,9 @@ class MidTurnGate:
             # Matrix delivery can yield to a newer correction or a concurrent handoff.
             if not current():
                 return False
+            # Whether the agent answers another person's remark is decided after the reply, not promised here.
+            if self._between_people(message):
+                continue
             try:
                 await self._acknowledge_deferred(message)
             except Exception:
@@ -139,7 +158,7 @@ class MidTurnGate:
         async with self._lock:
             if judge and self._checked == pending:
                 return self._finish
-            finish = False
+            finish = stops = False
             # An earlier judgment weighed the work that ran then, not a reply that only waits on jobs.
             request = self._request(pending) if judge else "only_waiting_on_jobs"
             if isinstance(request, str):
@@ -148,14 +167,45 @@ class MidTurnGate:
                 reason = request.incomplete_reason
                 if request.complete:
                     try:
-                        finish = await self.evaluate(request) is True
+                        verdict = await self.evaluate(request)
                     except Exception:
                         # Logged without the exception, whose SDK message can contain private inputs.
                         reason = "judge_error"
+                    else:
+                        finish, stops = verdict is True, verdict is False
+                        reason = "no_answer" if verdict is None else None
             if reason is not None:
-                logger.info("Mid-turn judgment skipped", reason=reason, queued_messages=len(pending))
+                # Unjudged, the reply wraps up, unless only other people's messages to nobody in particular wait.
+                finish = judge and all(self._between_people(message) for message in pending)
+                logger.info(
+                    "Mid-turn judgment skipped",
+                    reason=reason,
+                    queued_messages=len(pending),
+                    outcome="waits" if finish else "wraps_up",
+                )
+            if finish:
+                self._waited.update(pending)
+                self._stopping.difference_update(pending)
+            elif stops and self._stopping.isdisjoint(pending):
+                # One verdict covers the whole queue, so it names the messages the judge has not let wait (as they read
+                # then, so an edit of one can count) only when one person sent them all and no earlier verdict's
+                # message, still waiting, already explains it.
+                fresh = [message for message in pending if message not in self._waited]
+                if len({message.requester_id for message in fresh}) == 1:
+                    self._stopping.update(fresh)
             self._checked, self._finish = pending, finish
             return finish
+
+    def report_stop(self) -> None:
+        """Hand ``on_stop`` the messages, as the judge read them, that this reply's verdicts say it cannot wait for."""
+        if self.on_stop is not None and self._stopping:
+            self.on_stop(tuple(self._stopping))
+
+    def _sender_label(self, message: QueuedMessage) -> str:
+        """Name the sender by role only, so no user ID reaches the judge."""
+        if self.requester_id is None:
+            return ""
+        return ' from="requester"' if message.requester_id == self.requester_id else ' from="another person"'
 
     def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:
         """Build the judge's request, or name why the queue cannot be judged."""
@@ -173,7 +223,7 @@ class MidTurnGate:
             if message.visible_response is None or not clip_is_unredacted(message.visible_response):
                 return "visible_response_unavailable"
             queued.append(
-                f"<queued_message>\n{message.text}\n</queued_message>\n"
+                f"<queued_message{self._sender_label(message)}>\n{message.text}\n</queued_message>\n"
                 f"<visible_response>\n{clip_judgment_text(message.visible_response)}\n</visible_response>",
             )
         # Plain tags, not JSON: escaping changes redacted text, and the redaction check would refuse it.

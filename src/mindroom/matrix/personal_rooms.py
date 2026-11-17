@@ -25,7 +25,7 @@ from mindroom.managed_room_notice import join_names
 from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
-    admin_join_room_user,
+    admin_join_room_user_failure,
     create_room,
     ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
@@ -414,8 +414,9 @@ class PersonalRoomService:
             and settings.auto_join_requester
         ):
             assert record.room_id is not None
-            if not await admin_join_room_user(source_client, record.room_id, record.user_id):
-                msg = "Personal-room initial join failed"
+            failure = await admin_join_room_user_failure(source_client, record.room_id, record.user_id)
+            if failure is not None:
+                msg = f"Personal-room initial join failed: the router's admin join {failure}"
                 raise RuntimeError(msg)
             human_joined = True
         else:

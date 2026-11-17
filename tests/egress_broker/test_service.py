@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
@@ -30,7 +31,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
-from mindroom.egress_broker.env import apply_runner_ca_bundle
+from mindroom.egress_broker.env import BROKER_CA_PEM_ENV, RUNNER_CA_BUNDLE_ENV, apply_runner_ca_bundle
 from mindroom.egress_broker.github_app import GITHUB_APP_PERMISSIONS
 from mindroom.egress_broker.secrets import (
     Secret,
@@ -43,6 +44,7 @@ from mindroom.egress_broker.secrets import (
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
+    execution_env_for_primary_shell,
     execution_env_for_worker,
     manage_url,
     serve_egress_broker,
@@ -56,6 +58,7 @@ from mindroom.egress_broker.user_services import (
 from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.plugins import ConfigPlugins
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -73,12 +76,12 @@ from .conftest import (
     free_port,
     host_not_allowed,
     proxy_authorization,
+    tool_identity,
     worker_target,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
@@ -328,6 +331,236 @@ async def test_end_to_end_inject_through_running_service(
         assert audit is not None
         [record] = await audit_records(audit, 1)
         assert (record.host, record.service, record.agent_name) == ("localhost", "github", "code")
+
+
+def _primary_shell_config(**agent: object) -> Config:
+    """Return the GitHub service and an unscoped `code` agent with shell and `egress_credentials`, changed by `agent`."""
+    return Config(
+        agents={
+            "code": {
+                "display_name": "Code",
+                "tools": ["shell", "egress_credentials"],
+                "include_default_tools": False,
+                **agent,
+            },
+        },
+        egress_broker={"services": {"github": _GITHUB}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_through_files(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+    tmp_path: Path,
+) -> None:
+    """A shell command run in the primary dials the bound broker on loopback, never the worker-facing URL.
+
+    It trusts the broker CA through files in the primary's storage instead of the PEM variable workers get, and its
+    Git config entries go after the ones the command already has.
+    """
+    port = free_port()
+    runtime_paths = tmp_runtime_paths(
+        MINDROOM_EGRESS_BROKER_PORT=str(port),
+        MINDROOM_EGRESS_BROKER_HOST="0.0.0.0",  # noqa: S104 - the wildcard bind primary commands reach on loopback
+        MINDROOM_EGRESS_BROKER_URL=f"http://host.docker.internal:{port}",
+    )
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    command_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        environment = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        )
+        env = environment.applied(command_env, {})
+        response = await get_through(env)
+
+    proxy = urlsplit(env["HTTPS_PROXY"])
+    assert (proxy.hostname, proxy.port) == ("127.0.0.1", port)
+    assert response.status_code == 200
+    assert response.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert BROKER_CA_PEM_ENV not in env
+    ca_dir = tmp_path / "mindroom_data" / "egress_broker" / "primary_ca"
+    assert stat.S_IMODE(ca_dir.stat().st_mode) == 0o700
+    assert {name: env[name] for name in RUNNER_CA_BUNDLE_ENV} == dict.fromkeys(
+        RUNNER_CA_BUNDLE_ENV,
+        env["SSL_CERT_FILE"],
+    )
+    assert {Path(env["SSL_CERT_FILE"]).parent, Path(env["NODE_EXTRA_CA_CERTS"]).parent} == {ca_dir}
+    assert [env[f"GIT_CONFIG_KEY_{index}"] for index in range(3)] == [
+        "core.askPass",
+        "http.proxy",
+        "http.proxyAuthMethod",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_still_trusts_the_private_cas_its_own_variables_named(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tmp_path: Path,
+) -> None:
+    """The CA files a primary shell command gets keep the certificates of the files the primary's variables name.
+
+    Those variables are replaced, so a command that reached a private HTTPS service through them would otherwise
+    stop trusting it. A shell command inherits them from the exported environment and from the `.env` beside the
+    config, so both count. A variable that names a missing file adds nothing.
+    """
+    company_roots = "-----BEGIN CERTIFICATE-----\ncompany-root\n-----END CERTIFICATE-----"
+    node_roots = "-----BEGIN CERTIFICATE-----\nnode-root\n-----END CERTIFICATE-----\n"
+    (tmp_path / "company-ca.pem").write_text(company_roots, encoding="utf-8")
+    (tmp_path / "node-ca.pem").write_text(node_roots, encoding="utf-8")
+    (tmp_path / ".env").write_text(f"NODE_EXTRA_CA_CERTS={tmp_path / 'node-ca.pem'}\n", encoding="utf-8")
+    runtime_paths = tmp_runtime_paths(
+        **_broker_env(
+            free_port(),
+            CURL_CA_BUNDLE=str(tmp_path / "company-ca.pem"),
+            REQUESTS_CA_BUNDLE=str(tmp_path / "missing.pem"),
+        ),
+    )
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+
+    node_file = Path(env["NODE_EXTRA_CA_CERTS"]).read_text(encoding="utf-8")
+    assert node_file.startswith(node_roots)
+    broker_ca = node_file.removeprefix(node_roots)
+    assert broker_ca.count("-----BEGIN CERTIFICATE-----") == 1
+    bundle = Path(env["CURL_CA_BUNDLE"]).read_text(encoding="utf-8")
+    assert bundle.endswith(f"{company_roots}\n{broker_ca}")
+    assert "node-root" not in bundle
+    assert "company-root" not in node_file
+
+
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [
+        pytest.param("0.0.0.0", "http://127.0.0.1:8768", id="ipv4-wildcard"),  # noqa: S104
+        pytest.param("::", "http://[::1]:8768", id="ipv6-wildcard"),
+        pytest.param("127.0.0.1", "http://127.0.0.1:8768", id="loopback"),
+        pytest.param("::1", "http://[::1]:8768", id="ipv6-loopback"),
+        pytest.param("10.0.0.5", "http://10.0.0.5:8768", id="one-interface"),
+    ],
+)
+def test_primary_commands_dial_the_bound_broker_address(host: str, url: str) -> None:
+    """A wildcard bind is reached on the loopback of its address family; any other bound address is dialed as it is."""
+    settings = service._BrokerSettings(
+        host=host,
+        port=8768,
+        url="http://host.docker.internal:8768",
+        token_ttl_seconds=60,
+    )
+
+    assert settings.primary_url == url
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])  # noqa: S104 - the wildcard binds primary commands dial
+@pytest.mark.asyncio
+async def test_primary_commands_connect_to_a_broker_bound_to_a_wildcard(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    host: str,
+) -> None:
+    """The loopback address a wildcard bind maps to accepts connections; a `::` listener takes only IPv6 here."""
+    if host == "::":
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind(("::1", 0))
+        except OSError:
+            pytest.skip("no IPv6 loopback")
+    port = free_port()
+    runtime_paths = tmp_runtime_paths(
+        MINDROOM_EGRESS_BROKER_PORT=str(port),
+        MINDROOM_EGRESS_BROKER_HOST=host,
+        MINDROOM_EGRESS_BROKER_URL=f"http://host.docker.internal:{port}",
+    )
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+        runtime = service._active.runtime
+        assert runtime is not None
+        url = urlsplit(runtime.primary_url)
+        assert url.port == port
+        _reader, writer = await asyncio.open_connection(url.hostname, url.port)
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("agent", "sandbox_env"),
+    [
+        pytest.param(
+            {"worker_tools": ["shell"]},
+            {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"},
+            id="shell-in-worker",
+        ),
+        pytest.param({"tools": ["shell"]}, {}, id="no-egress-tool"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_a_primary_shell_of_a_broker_agent_gets_the_primary_env(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    agent: dict[str, object],
+    sandbox_env: dict[str, str],
+) -> None:
+    """A worker-routed shell gets the env from the sandbox proxy alone, and an agent without the tool never does."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()), **sandbox_env)
+    config = _primary_shell_config(**agent)
+    identity = tool_identity("@alice:example.org")
+    stopped = execution_env_for_primary_shell(
+        runtime_paths,
+        config=_primary_shell_config(),
+        agent_name="code",
+        execution_identity=identity,
+    )
+    assert stopped == ToolEnvironment(), "the broker is not running"
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        environment = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=identity,
+        )
+    assert environment == ToolEnvironment()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_runs_without_the_broker_env_when_building_it_fails(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure resolving the call's scope is logged, and the command runs as with the broker off."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _primary_shell_config()
+
+    def unresolvable(*_args: object, **_kwargs: object) -> None:
+        msg = "no requester"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(service, "resolve_agent_execution", unresolvable)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with capture_logs() as logs:
+            environment = execution_env_for_primary_shell(
+                runtime_paths,
+                config=config,
+                agent_name="code",
+                execution_identity=None,
+            )
+    assert environment == ToolEnvironment()
+    assert [log["error_type"] for log in logs if log["event"] == "egress_broker_primary_shell_env_failed"] == [
+        "ValueError",
+    ]
 
 
 @pytest.mark.asyncio

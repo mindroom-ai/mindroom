@@ -51,6 +51,7 @@ The welcome is sent once, and changing `welcome` or `welcome_dispatch` later doe
 
 `auto_join_requester: true` requires the router's Matrix account to be allowed to use the homeserver's Synapse-compatible admin join API.
 It applies only when MindRoom creates the room, and never joins someone who already joined, left, or was banned.
+When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the router's account is not a homeserver admin.
 
 ## Onboarding Behavior
 
@@ -82,7 +83,8 @@ Revoking the human's access to the agent, or disabling `personal_rooms`, cancels
 | `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and retries repeat it only when those members change. MindRoom does not change the room, and that human's onboarding, such as the invite, admin grant, and welcome, waits until the room holds only participants its record lists. |
 | `Personal-room validation failed for an owner membership event` | The owner joined or changed their profile in a personal room that fails these checks; the agent keeps answering there. A room whose reconciliation is still failing keeps retrying up to hourly; otherwise the room is checked again on restart or config reload. |
 | `Personal-room onboarding trigger failed` | Any other failure, such as an invite refused by the human's homeserver. |
-| `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. |
+| `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. It is a warning, because a retry usually succeeds, until the third failed attempt in a row; from then on, each kind of error logs one error and its repeats stay warnings. |
+| `Personal-room reconciliation recovered` | An attempt, such as a retry or a lobby join or command, succeeded after earlier attempts failed; `failed_attempts` says how many. |
 
 ## Adopting an Existing Room
 

@@ -57,6 +57,9 @@ async def _client_to_upstream(websocket: WebSocket, upstream: aiohttp.ClientWebS
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
+            # uvicorn reports a caller lost without a close frame as 1005 with no reason.
+            if message.get("code") == 1005 and "reason" not in message:
+                return 1011
             return _close_code(message.get("code"))
         if message.get("bytes") is not None:
             await upstream.send_bytes(message["bytes"])

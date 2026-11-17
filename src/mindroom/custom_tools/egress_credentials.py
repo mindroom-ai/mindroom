@@ -1,6 +1,6 @@
 """Egress broker credential status tool for MindRoom agents.
 
-Listing this tool opts an agent into Agent Keys: only its worker-routed shell and python calls get the broker env.
+Listing this tool opts an agent into Agent Keys: its shell calls and its worker-routed python calls get the broker env.
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
 credentials for, which of them have a key or a connected account Agent Keys
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker.env import egress_agent_scope, egress_tool_without_worker_commands, personal_page_served
+from mindroom.egress_broker.env import egress_agent_scope, egress_tool_with_only_primary_python, personal_page_served
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
@@ -31,7 +31,15 @@ from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.secret_request_cards import SecretRequestCard, ask_with_card, card_reason, chat_refusal
+from mindroom.secret_request_cards import (
+    LINK_REFUSAL,
+    SecretRequestCard,
+    ask_with_card,
+    card_line,
+    card_link,
+    card_reason,
+    chat_refusal,
+)
 from mindroom.secret_requests import SECRET_REQUEST_TTL_SECONDS, KeyTarget, secret_request_hosts
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -53,10 +61,10 @@ _NO_WORKER_NOTE = (
     "Egress credentials require a worker-scoped agent; ask the operator to give this agent a worker scope."
 )
 _NO_CONFIG_NOTE = "The egress broker configuration is not available in this context, so no services can be listed."
-_NO_WORKER_COMMANDS_NOTE = (
-    "None of this agent's shell or python calls run in a worker, so Agent Keys never adds a key or account to them "
-    "and the Agent Keys pages do not list this agent. Ask the operator to route `shell` or `python` to a worker "
-    "with `worker_tools`."
+_ONLY_PRIMARY_PYTHON_NOTE = (
+    "This agent's only command tool is `python` running inside MindRoom's own process, which Agent Keys cannot reach, "
+    "so Agent Keys never adds a key or account to its calls and the Agent Keys pages do not list this agent. Ask the "
+    "operator to give it `shell`, or to route `python` to a worker with `worker_tools`."
 )
 _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
@@ -96,7 +104,7 @@ def _key_access_refusal(
     if egress_agent_scope(config, agent_name, runtime_paths) is None:
         return (
             "This agent's commands do not reach Agent Keys, so no key can be stored for it: it needs "
-            "`egress_credentials` and a `shell` or `python` tool that runs in a worker."
+            "`egress_credentials` and a `shell` tool, or a `python` tool that runs in a worker."
         )
     access = egress_key_access(requester_id, agent_name, config, runtime_paths, memberships)
     if access is None:
@@ -177,8 +185,8 @@ class EgressCredentialsTools(Toolkit):
             return self._payload([], link, _NO_CONFIG_NOTE)
         config = context.current_config
         agent_name = self._worker_target.routing_agent_name
-        if agent_name is not None and egress_tool_without_worker_commands(config, agent_name, self._runtime_paths):
-            return self._payload([], None, _NO_WORKER_COMMANDS_NOTE)
+        if agent_name is not None and egress_tool_with_only_primary_python(config, agent_name, self._runtime_paths):
+            return self._payload([], None, _ONLY_PRIMARY_PYTHON_NOTE)
         manager = get_runtime_credentials_manager(self._runtime_paths)
         # The config's services plus the ones the user defined in this agent's scope, as the broker matches them.
         # A restrict-only service only limits paths and never takes a credential, and the broker refuses this agent a
@@ -195,7 +203,13 @@ class EgressCredentialsTools(Toolkit):
         note = self._note(link, settable=settable, shared=not is_personal_target(self._worker_target))
         return self._payload(entries, link, note)
 
-    async def request_secret(self, service: str, reason: str) -> str:
+    async def request_secret(
+        self,
+        service: str,
+        reason: str,
+        url: str | None = None,
+        placeholder: str | None = None,
+    ) -> str:
         """Ask the user for a missing API key with a card in this conversation, and wait for their answer.
 
         Call this when a brokered request fails with `credential_not_configured` for a service that takes an API key
@@ -203,6 +217,8 @@ class EgressCredentialsTools(Toolkit):
         key is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's
         Agent Keys key for the service. The key never reaches you, the chat, or your commands.
         A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
+        Give `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to
+        hint at the key's form.
         Waits up to 15 minutes and returns `status`:
         `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
         `declined` when the user refused: do not ask again for this service in this turn;
@@ -212,6 +228,8 @@ class EgressCredentialsTools(Toolkit):
         Args:
             service: The service's `name` from `list_egress_credentials`.
             reason: What you need the key for, in a sentence or two the user reads on the card.
+            url: An `http` or `https` page where the user gets or creates the key, such as the service's keys page.
+            placeholder: A hint the empty field shows, such as the key's form (`sk-…`). Never a real value.
 
         """
         context = get_tool_runtime_context()
@@ -221,7 +239,18 @@ class EgressCredentialsTools(Toolkit):
         if target is None or target.routing_agent_name is None:
             return self._request_error(_NO_WORKER_NOTE)
         agent_name = target.routing_agent_name
-        card = await self._card(context, target, agent_name, service, reason)
+        link = card_link(url)
+        if link is None:
+            return self._request_error(LINK_REFUSAL)
+        card = await self._card(
+            context,
+            target,
+            agent_name,
+            service,
+            reason,
+            url=link,
+            placeholder=card_line(placeholder),
+        )
         if isinstance(card, str):
             return self._request_error(card)
         asked = await ask_with_card(context, card, agent_name=agent_name)
@@ -238,6 +267,9 @@ class EgressCredentialsTools(Toolkit):
         agent_name: str,
         service: str,
         reason: str,
+        *,
+        url: str,
+        placeholder: str,
     ) -> SecretRequestCard | str:
         """Return the card asking the turn's requester for `service`'s key, or why no card may be posted.
 
@@ -245,7 +277,8 @@ class EgressCredentialsTools(Toolkit):
         alias resolved, whose scope the key goes to. The service resolves as `list_egress_credentials` lists it, and the
         requester must be one who may set this agent's keys, as on the Agent Keys pages; the card needs no personal
         page, so it works where none is served. Chat answers through this MindRoom's API with a client session, so a
-        card needs what that session needs.
+        card needs what that session needs. `url` and `placeholder` are what the card shows of the agent's, already
+        checked and cut, each empty when it gave none.
         """
         requester_id = resolve_tool_approval_approver(context.current_config, self._runtime_paths, context.requester_id)
         if requester_id is None:
@@ -282,6 +315,8 @@ class EgressCredentialsTools(Toolkit):
             target=KeyTarget(service=service, worker_target=target, hosts=secret_request_hosts(egress_service)),
             display_name=egress_service.display_name or service,
             replaces=key_path is not None and key_path.exists(),
+            url=url,
+            placeholder=placeholder,
         )
 
     def _settable(self) -> bool:

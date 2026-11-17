@@ -41,7 +41,7 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.providers.credentials import model_uses_own_credential
+from mindroom.providers.credentials import model_uses_own_credential, unset_api_key_variable
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import ollama_client_options
@@ -464,7 +464,12 @@ def _ollama_model_options(config: Config, model_name: str, runtime_paths: Runtim
     from mindroom.providers.ollama.adapter import build_provider  # noqa: PLC0415 - loads the Ollama SDK
     from mindroom.providers.registry import configured_model  # noqa: PLC0415 - loads every provider family
 
-    return build_provider(configured_model(config, runtime_paths, model_name), runtime_paths).client_options()
+    model_config = configured_model(config, runtime_paths, model_name)
+    if variable := unset_api_key_variable(model_config, runtime_paths):
+        # The reference itself must not reach the server as a key.
+        msg = f"{variable} not set"
+        raise ValueError(msg)
+    return build_provider(model_config, runtime_paths).client_options()
 
 
 def _mem0_ollama_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:

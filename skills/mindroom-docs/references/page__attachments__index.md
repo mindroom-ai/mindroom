@@ -42,7 +42,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
@@ -64,6 +64,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
 
 ```python
 list_attachments()
@@ -104,6 +105,19 @@ Save attachments this way before processing them with `file`, `coding`, `python`
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Inline Images
+
+`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
+using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
+Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
+The alt text defaults to the filename.
+
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
+Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
+In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 

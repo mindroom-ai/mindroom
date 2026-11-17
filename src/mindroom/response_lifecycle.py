@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mindroom import constants
@@ -188,6 +188,8 @@ class _QueuedMessageState:
     # Replaced on every change of the queue, so each waiter wakes once per change.
     _changed: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Waiting messages the mid-turn judge said the running reply cannot wait for.
+    stopped_reply_event_ids: set[str] = field(default_factory=set)
     calls: ReplyToolCalls = field(init=False)
 
     def __post_init__(self) -> None:
@@ -227,18 +229,42 @@ class _QueuedMessageState:
         *,
         text: str | None = None,
         requester_id: str | None = None,
+        mentions_nobody: bool = False,
     ) -> bool:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress, requester_id)
+        self._pending_messages[source_event_id] = QueuedMessage(
+            source_event_id,
+            text,
+            progress,
+            requester_id,
+            mentions_nobody,
+        )
         self._notify_changed()
         return True
+
+    def update_waiting_human_message(self, source_event_id: str, *, text: str | None, mentions_nobody: bool) -> None:
+        """Give a waiting message its edited text and mentions, keeping its place and the progress it arrived to."""
+        message = self._pending_messages.get(source_event_id)
+        if message is None:
+            return
+        self._pending_messages[source_event_id] = replace(message, text=text, mentions_nobody=mentions_nobody)
+        # A verdict covered the text the judge read, not the edit.
+        self.stopped_reply_event_ids.discard(source_event_id)
+        self._notify_changed()
+
+    def mark_stopped_reply(self, judged: tuple[QueuedMessage, ...]) -> None:
+        """Mark the judged messages that still wait as the judge read them."""
+        self.stopped_reply_event_ids.update(
+            message.event_id for message in judged if self._pending_messages.get(message.event_id) == message
+        )
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
+        self.stopped_reply_event_ids.discard(source_event_id)
         self._notify_changed()
 
     def _notify_changed(self) -> None:
@@ -290,11 +316,40 @@ class QueuedHumanNoticeReservation:
     _state: _QueuedMessageState
     _source_event_id: str
     _active: bool = True
+    _stopped_reply: bool = False
+
+    @property
+    def active(self) -> bool:
+        """Return whether this message still counts as waiting for the running response."""
+        return self._active
+
+    @property
+    def stopped_reply(self) -> bool:
+        """Return whether the mid-turn judge said the running response cannot wait for this message, kept on release."""
+        if not self._active:
+            return self._stopped_reply
+        return self._source_event_id in self._state.stopped_reply_event_ids
+
+    def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
+        """Show the running response's judge an edit of this waiting message; a released one stays released.
+
+        No verdict covered the edited text, so a released message also loses the verdict it kept.
+        """
+        if not self._active:
+            self._stopped_reply = False
+            return
+        self._state.update_waiting_human_message(
+            self._source_event_id,
+            text=message_text_for_judgment(response_envelope),
+            mentions_nobody=mentions_nobody,
+        )
 
     def release(self) -> None:
         """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
+        # A follow-up a requester split held back releases its notice before it dispatches, and still answers.
+        self._stopped_reply = self.stopped_reply
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
 
@@ -484,8 +539,10 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,
+        transcript: str | None = None,
     ) -> QueuedHumanNoticeReservation | None:
-        """Reserve an active-turn notice before queued dispatch owns the follow-up."""
+        """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -494,8 +551,9 @@ class ResponseLifecycleCoordinator:
         queued_signal = self._get_or_create_queued_signal(target)
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
-            text=message_text_for_judgment(response_envelope),
+            text=transcript if transcript is not None else message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
+            mentions_nobody=mentions_nobody,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
@@ -634,6 +692,8 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
+                if mid_turn_gate is not None:
+                    mid_turn_gate.on_stop = queued_signal.mark_stopped_reply
                 with (
                     # A newer human message also releases the reply's tool waits; other queued turns wait for it.
                     pending_human_messages_context(queued_signal, calls=queued_signal.calls),

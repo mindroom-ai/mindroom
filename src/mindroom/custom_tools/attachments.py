@@ -22,7 +22,12 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import resolve_agent_file
 from mindroom.llm.media import Audio, File, Video, is_document_mime_type, named_mime_type
-from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
+from mindroom.matrix.client_delivery import (
+    resolve_room_encryption_outcome,
+    send_file_message,
+    send_runtime_encrypted_media_message,
+    upload_media_bytes_as_mxc,
+)
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.media_delivery import MAX_SOURCE_BYTES, image_result, media_error, view_agent_image
@@ -229,7 +234,9 @@ def _view_attachment(  # noqa: PLR0911
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
         )
-        if not allowed:
+        # The turn's own attachments were scoped when it was given them, a forked thread's parents included.
+        given = attachment.attachment_id in context.attachment_ids and attachment.room_id == context.room_id
+        if not (allowed or given):
             return media_error("Attachment is outside the authorized conversation context.", metadata=metadata)
         return image_result(payload, metadata=metadata)
     content = json.dumps(metadata, sort_keys=True)
@@ -405,6 +412,7 @@ class AttachmentTools(Toolkit):
                 self.list_attachments,
                 self.get_attachment,
                 self.register_attachment,
+                self.inline_image,
                 self.view_file,
             ],
         )
@@ -702,4 +710,75 @@ class AttachmentTools(Toolkit):
             "ok",
             attachment_id=attachment_record.attachment_id,
             attachment=_attachment_record_payload(attachment_record, tools_use_worker=self._workspace_in_worker),
+        )
+
+    async def inline_image(self, reference: str, alt: str | None = None) -> str:  # noqa: PLR0911
+        """Upload an image so it can appear inline; unencrypted rooms only.
+
+        Paste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.
+        """
+        context = get_tool_runtime_context()
+        if context is None:
+            return _attachment_tool_payload(
+                "error",
+                message="Tool runtime context is unavailable in this runtime path.",
+            )
+        encrypted_message = (
+            "Inline images require an unencrypted room. Send the image as an attachment with matrix_message instead."
+        )
+        if (
+            await resolve_room_encryption_outcome(context.client, context.room_id, operation="inline_image")
+            is not False
+        ):
+            return _attachment_tool_payload("error", message=encrypted_message)
+        resolved = await asyncio.to_thread(
+            resolve_send_attachment,
+            context,
+            reference.strip(),
+            workspace_root=self._tool_output_workspace_root,
+            file_access=self._file_access,
+        )
+        if isinstance(resolved, str):
+            return _attachment_tool_payload("error", message=resolved)
+        record, _ = resolved
+        if not isinstance(record, AttachmentRecord):
+            return _attachment_tool_payload(
+                "error",
+                message="Inline images need plaintext media, not encrypted Matrix media.",
+            )
+        if not record.mime_type or not record.mime_type.startswith("image/"):
+            return _attachment_tool_payload(
+                "error",
+                message="Inline images require an image attachment (image/* MIME type).",
+            )
+        data, error = await asyncio.to_thread(
+            _read_attachment_bytes,
+            record,
+            byte_limit=MAX_SOURCE_BYTES,
+            limit_label="inline image",
+        )
+        if error is not None or data is None:
+            return _attachment_tool_payload("error", message=error or "Attachment is unavailable.")
+        mime_type = resolve_image_mime_type(data, record.mime_type).detected_mime_type
+        if mime_type is None:
+            return _attachment_tool_payload("error", message="Attachment bytes are not a recognized image.")
+        filename = record.filename or record.local_path.name
+        mxc_uri, upload_payload = await upload_media_bytes_as_mxc(
+            context.client,
+            context.room_id,
+            data,
+            filename=filename,
+            mimetype=mime_type,
+        )
+        if upload_payload is not None and "file" in upload_payload:
+            return _attachment_tool_payload("error", message=encrypted_message)
+        if mxc_uri is None or upload_payload is None:
+            return _attachment_tool_payload("error", message="Failed to upload inline image.")
+        label = (alt or filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        label = " ".join(label.splitlines())
+        return _attachment_tool_payload(
+            "ok",
+            attachment_id=record.attachment_id,
+            mxc_uri=mxc_uri,
+            markdown=f"![{label}]({mxc_uri})",
         )
