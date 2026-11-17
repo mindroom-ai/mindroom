@@ -220,7 +220,11 @@ def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: st
             logger.warning("Thread model store is unreadable; the fork does not inherit", thread_id=target_thread_id)
             return
         overrides = _load_overrides(path)
-        if target_thread_id in overrides:
+        if (own := overrides.get(target_thread_id)) is not None:
+            # The fork's own selection, made before this first copy, stands; marking it keeps a later reset from
+            # letting a delayed copy take the parent's.
+            if _INHERITED_FROM_FIELD not in own:
+                _save_thread_record(path, overrides, target_thread_id, {**own, _INHERITED_FROM_FIELD: source_thread_id})
             return
         parent = overrides.get(source_thread_id, {})
         record = {

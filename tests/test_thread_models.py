@@ -248,14 +248,28 @@ async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("parent_has_override", [True, False], ids=["fork-reset", "parent-changed-later"])
+@pytest.mark.parametrize(
+    ("parent_has_override", "fork_has_override"),
+    [(True, False), (False, False), (True, True)],
+    ids=["fork-reset", "parent-changed-later", "fork-selected-first-then-reset"],
+)
 async def test_a_delayed_responder_never_copies_the_parent_model_again(
     tmp_path: Path,
     parent_has_override: bool,
+    fork_has_override: bool,
 ) -> None:
     """The fork's snapshot is taken once: a second responder of its first turn neither undoes a reset nor takes a later parent change."""
     first, delayed = _fork_bot(tmp_path), _fork_bot(tmp_path, agent_name="router")
     runtime_paths = first._turn_dispatcher.deps.runtime_paths
+    if fork_has_override:
+        # The fork's own selection, made before its first responder runs, is not replaced by the parent's.
+        set_thread_model_override(
+            runtime_paths,
+            thread_id=_FORK_ID,
+            model_name="default",
+            entity_names=("code",),
+            config=first.config,
+        )
 
     def select_large_in_parent() -> None:
         set_thread_model_override(
@@ -270,7 +284,7 @@ async def test_a_delayed_responder_never_copies_the_parent_model_again(
         select_large_in_parent()
     await _dispatch_fork_turn(first)
     if parent_has_override:
-        assert _fork_model(first) == "large"
+        assert _fork_model(first) == ("default" if fork_has_override else "large")
         assert clear_thread_model_override(runtime_paths, _FORK_ID, entity_names=("code",), config=first.config)
     else:
         select_large_in_parent()
