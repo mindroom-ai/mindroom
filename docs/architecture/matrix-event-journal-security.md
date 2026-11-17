@@ -53,6 +53,7 @@ A redaction one login observes is applied to the projection, pending journal row
   `tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
   An ended job, read or not, is deleted 30 days after its last change, or one day after it when the call that started the job returned its result inline, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
   `tool_job_owner` holds only the runtime generation that owns the jobs.
+- `room_event_claims` holds room and event IDs with the name of the entity that owns one per-event job, such as answering an unmentioned message, and no message text.
 
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 

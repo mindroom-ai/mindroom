@@ -19,6 +19,7 @@ from . import (
     journal,
     reads,
     replies,
+    room_claims,
     tool_jobs,
     turn_rows,
 )
@@ -39,7 +40,7 @@ from .views import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -246,6 +247,21 @@ class EventJournalStore:
         """End the open replies of the entities ``ends`` names; return how many ended."""
         return await self.backend.write(
             lambda transaction: replies.end_entity_replies(transaction, ends, now_ns=now_ns),
+        )
+
+    async def claim_room_event(self, room_id: str, event_id: str, purpose: str, owner: str) -> str:
+        """Save ``owner`` for one room event's purpose unless one is saved; return the saved owner (first writer wins).
+
+        Shared across principals: the claim says which bot does a once-per-event job, so every bot must read one row.
+        """
+        return await self.backend.write(
+            lambda transaction: room_claims.claim(transaction, room_id, event_id, purpose, owner),
+        )
+
+    async def room_event_claims(self, room_id: str, event_ids: Sequence[str], purpose: str) -> dict[str, str]:
+        """Return the saved owner of each of these room events that has one for ``purpose``."""
+        return await self.backend.read(
+            lambda transaction: room_claims.claims(transaction, room_id, event_ids, purpose),
         )
 
     async def generation(self, *, new_generation: str) -> str:
