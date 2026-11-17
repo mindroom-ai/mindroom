@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -21,8 +22,11 @@ from mindroom.judgment.client import (
     _parse_json,
 )
 from mindroom.judgment.execution import JudgmentCapacity
+from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
 from mindroom.judgment.state import (
+    ChoiceQuestion,
     JudgmentMessage,
+    JudgmentQuestion,
     JudgmentRequest,
     build_judgment_request,
 )
@@ -426,3 +430,57 @@ async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pyt
     result = await client.judge(_request(), owner="test", allow_network=True)
     assert result.failure == "timeout"
     assert result.decision is None
+
+
+_GOLDEN_QUESTION = JudgmentQuestion(
+    id="golden",
+    instructions="Is the request routine?",
+    when_true="Routine.",
+    when_false="Not routine.",
+)
+_GOLDEN_CHOICE = ChoiceQuestion(id="pick", instructions="Pick one.", options=(("a", "First"), ("b", "Second")))
+
+
+@pytest.mark.parametrize(
+    ("question", "canonical", "typesafe", "openai"),
+    [
+        (
+            _GOLDEN_QUESTION,
+            "6199ef5277830e12a8ea529be987d3e6336e7aaa405deb350882c7d48531aae6",
+            "616323133ad339a88abda1f8482efa6ca3845f8da7c9d5cd05a28d01bf4eb70e",
+            "7ba3c12c1e987b0f9497832750a78f75431bbf9c7b144179417c2953bb050087",
+        ),
+        (
+            _GOLDEN_CHOICE,
+            "e7e5aad083e5a660c1b828ae10f0c6c2c3c3bc21bb719415618be181a5f8a49a",
+            "b81a9cb276cb0f220cc3a8d8ea29d7f4785504cb14ca2481a24cf2ca9c453daa",
+            "33be626ced0a51024c43d517e8509af82df904228636952f917a46a211850535",
+        ),
+    ],
+    ids=["predicate", "choice"],
+)
+async def test_single_question_request_bytes_unchanged(
+    question: JudgmentQuestion | ChoiceQuestion,
+    canonical: str,
+    typesafe: str,
+    openai: str,
+) -> None:
+    """Single-question users keep the exact canonical and posted bytes they had before batching."""
+    request = build_judgment_request(
+        question,
+        (JudgmentMessage("user", 'Hi <msg from="@x:y">there</msg> é'), JudgmentMessage("assistant", "Hello.")),
+        instructions="Judge it.",
+        agent_ids=("@x:y",),
+    )
+    assert request.request_hash == canonical
+    for wire, expected in ((SYSTEM_ONE, typesafe), (OPENAI_DECISIONS, openai)):
+        seen: list[bytes] = []
+
+        def respond(outbound: httpx.Request, seen: list[bytes] = seen) -> httpx.Response:
+            seen.append(outbound.content)
+            return httpx.Response(500)
+
+        client = JudgmentClient(api_key="k", wire=wire, transport=httpx.MockTransport(respond))
+        judge = client.judge_choice if isinstance(question, ChoiceQuestion) else client.judge
+        await judge(request, owner="golden", allow_network=True)
+        assert [hashlib.sha256(body).hexdigest() for body in seen] == [expected]
