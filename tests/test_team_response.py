@@ -569,7 +569,7 @@ async def test_the_leader_reads_the_turn_s_media_on_its_prompt(
 
 
 @pytest.mark.asyncio
-async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_replies_as_assistant_turns(
+async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_replies_as_its_thread_messages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,11 +582,12 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
     await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
 
-    # Each thread message is capped at 200 characters; the team's own reply is its assistant turn.
+    # Each thread message is capped at 200 characters; the team's own reply is a thread message from its Matrix ID,
+    # never an assistant turn, which a provider would merge into the answer before it.
     assert _leader_turn_messages(team)[:-1] == [
         ("user", render_msg_tag(sender="@alice:localhost", body=f"{'x' * 199}…", event_id="$event-1")),
         ("user", render_msg_tag(sender="@bob:localhost", body="y" * 200, event_id="$event-2")),
-        ("assistant", "\n\nPrevious team reply"),
+        ("user", render_msg_tag(sender="@mindroom_team:localhost", body="Previous team reply", event_id="$event-3")),
     ]
 
 

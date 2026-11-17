@@ -45,6 +45,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.history.conversation_text import own_thread_message_text
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
@@ -954,7 +955,11 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         current_sender_id="@alice:localhost",
     )
 
-    assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
+    # The team's earlier answer reaches the leader as its own thread message, which is no assistant turn.
+    assert [(message.role, own_thread_message_text(message)) for message in prepared.turn.context] == [
+        ("user", None),
+        ("user", "Earlier team answer"),
+    ]
     sent = ModelRequest(messages=(*leader_system_messages, *prepared.turn.in_request_order()))
     # Persisted replay is fitted around a request holding the turn as sent; fallback replay records that request's size.
     sized = (
@@ -1543,17 +1548,17 @@ def test_context_media_messages_name_their_msgtype() -> None:
 
     # A body beside a different file name is a caption (MSC2530), which readers may show; a user turn's time prefix
     # does not make a file name a caption.
-    assert [message.provider_data for message in messages[:5]] == [
-        {MEDIA_MSGTYPE_KEY: "m.file"},
-        {MEDIA_MSGTYPE_KEY: "m.audio"},
-        {MEDIA_MSGTYPE_KEY: "m.file"},
+    assert [(message.provider_data or {}).get(MEDIA_MSGTYPE_KEY) for message in messages[:5]] == [
+        "m.file",
+        "m.audio",
+        "m.file",
         None,
         None,
     ]
 
 
 def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) -> None:
-    """An agent audio caption must not merge into its preceding assistant reply."""
+    """An agent audio caption is its own labeled thread message, apart from the reply before it."""
     voice_path = tmp_path / "voice.ogg"
     voice_path.write_bytes(b"OggS")
     record = register_local_attachment(
@@ -1591,10 +1596,15 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     ).in_request_order()
 
-    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
-    assert messages[0].content == "\n\nThe lab closes at 7:41 PM"
-    assert messages[1].content == (
-        '\n\n[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]'
+    assert [message.role for message in messages] == ["user", "user", "user"]
+    assert [own_thread_message_text(message) for message in messages[:2]] == [
+        "The lab closes at 7:41 PM",
+        '[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]',
+    ]
+    assert messages[1].content == render_msg_tag(
+        sender="@mindroom_team:localhost",
+        body='[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]',
+        event_id="$voice",
     )
 
 
@@ -1619,15 +1629,15 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         config=_config(),
     ).in_request_order()
 
-    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
-    assert [message.content for message in messages[:2]] == [
-        "\n\nThe lab closes at 7:41 PM",
-        "\n\n[audio message: Lab turnaround]",
+    assert [message.role for message in messages] == ["user", "user", "user"]
+    assert [own_thread_message_text(message) for message in messages[:2]] == [
+        "The lab closes at 7:41 PM",
+        "[audio message: Lab turnaround]",
     ]
 
 
-def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_path: Path) -> None:
-    """Unmapped assistant media keeps its caption bare while remaining self-delimiting."""
+def test_fallback_thread_history_names_agent_media_by_attachment_id(tmp_path: Path) -> None:
+    """A file the agent sent is its own thread message, whose caption names the attachment by ID and carries no media."""
     file_path = tmp_path / "report.pdf"
     file_path.write_bytes(b"%PDF-1.4")
     record = register_local_attachment(
@@ -1655,8 +1665,13 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     ).in_request_order()
 
-    assert messages[0].role == "assistant"
-    assert messages[0].content == '\n\nhere is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert messages[0].role == "user"
+    assert messages[0].content == render_msg_tag(
+        sender="@mindroom_team:localhost",
+        body='here is the report\n[attachments: att_report (file, "report.pdf")]',
+        event_id="$agent-file",
+    )
+    assert own_thread_message_text(messages[0]) == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
 
 
@@ -1784,7 +1799,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
     assert not messages[0].images
 
 
-def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:
+def test_fallback_thread_history_strips_visible_tool_markers_from_the_agents_own_messages() -> None:
     """Visible Matrix tool markers should not train the model to echo fake tool calls."""
     messages = _build_thread_history_messages_for_test(
         "Current request",
@@ -1806,8 +1821,8 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         config=_config(),
     ).in_request_order()
 
-    assert messages[0].role == "assistant"
-    assert messages[0].content == "\n\nChecking status.\n\nStill checking.\n\nDone."
+    assert messages[0].role == "user"
+    assert own_thread_message_text(messages[0]) == "Checking status.\n\nStill checking.\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1998,7 +2013,10 @@ def test_unseen_context_stops_at_current_thread_event() -> None:
 
 
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
-    """A self-sent Matrix event not known to persisted history should remain visible context."""
+    """A self-sent Matrix event persisted history does not hold stays visible, as a thread message from the agent.
+
+    It is no assistant turn: providers merge that into the answer before it, which the model would then continue.
+    """
     thread_history = [
         make_visible_message(
             sender="@mindroom_code:localhost",
@@ -2025,8 +2043,13 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
     messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$spawn-root"]
-    assert messages[0].role == "assistant"
-    assert messages[0].content == "\n\n@mindroom_missing_agent Please investigate this"
+    assert [message.role for message in messages] == ["user", "user"]
+    assert messages[0].content == render_msg_tag(
+        sender="@mindroom_code:localhost",
+        body="@mindroom_missing_agent Please investigate this",
+        event_id="$spawn-root",
+    )
+    assert own_thread_message_text(messages[0]) == "@mindroom_missing_agent Please investigate this"
 
 
 def test_unseen_context_keeps_other_agent_message_tagged() -> None:
@@ -2155,8 +2178,8 @@ def test_unseen_context_never_presents_own_hook_output_as_assistant_turns(source
     assert messages[1].content == _hook_context("round 2/4 · 0.88", "$round")
 
 
-def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> None:
-    """Full-thread replay keeps the agent's edited reply as its own turn and hook output as context."""
+def test_fallback_thread_history_keeps_hook_output_out_of_the_agents_own_messages() -> None:
+    """Full-thread replay keeps the agent's edited reply as its own message and hook output as context."""
     reply = make_visible_message(sender="@mindroom_code:localhost", body="Starting…", event_id="$answer")
     reply.apply_edit(
         body="Started a deep_research job.",
@@ -2173,9 +2196,10 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [
-        ("assistant", "\n\nStarted a deep_research job."),
+        ("user", render_msg_tag(sender="@mindroom_code:localhost", body="Started a deep_research job.", event_id="$answer")),
         ("user", _hook_context("deep_research done · confident · 2 rounds", "$done")),
     ]
+    assert [own_thread_message_text(message) for message in messages[:2]] == ["Started a deep_research job.", None]
 
 
 def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None:
