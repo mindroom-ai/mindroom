@@ -2759,7 +2759,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.request_messages"
 depends_on = [
-    "mindroom.history.interrupted_replay",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.history.run_visibility",
@@ -3008,7 +3007,6 @@ visibility = [
     "mindroom.reply_turn.enrichment",
     "mindroom.teams",
     "mindroom.history.conversation_text",
-    "mindroom.history.request_messages",
     "mindroom.response_turn",
 ]
 
@@ -7434,7 +7432,6 @@ expose = [
     "is_interrupted_replay_run",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
-    "recovered_runs_account",
     "render_stopped_attempt",
     "split_interrupted_tool_trace",
     "stored_turn_input",

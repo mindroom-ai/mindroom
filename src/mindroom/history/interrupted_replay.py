@@ -32,12 +32,6 @@ _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
 # The bound on the tool context a restarted attempt's prompt gets; a stored row holds every call whole.
 _MAX_RETAINED_TOOL_CONTEXT_CHARS = 32_000
-# Says why a recovered turn replays as an account, with the allowance ``reply_turn.enrichment`` gives for previews.
-_RECOVERED_ACCOUNT_INSTRUCTION = (
-    "Your previous turn was cut short before it finished, and its messages do not fit in this request, so this "
-    "shortened account of its tool calls stands in for them. Their effects stand: do not call a finished tool with "
-    "side effects again, though a read-only call whose shortened result is not enough may run again."
-)
 _INTERRUPTION_SUMMARIES = {
     RunStatus.error: "(turn failed before completion",
     RunStatus.paused: "(turn paused before completion",
@@ -282,20 +276,6 @@ def render_stopped_attempt(
         ),
         max_tool_context_chars=_MAX_RETAINED_TOOL_CONTEXT_CHARS,
     )
-
-
-def recovered_runs_account(runs: Sequence[AnyRunRecord]) -> Message:
-    """Return the history message that stands in for recovered ``runs`` whose own messages a request cannot hold.
-
-    It lists their tool calls as the bounded previews a restarted attempt's prompt gets (``render_stopped_attempt``).
-    """
-    completed, interrupted = split_interrupted_tool_trace([tool for run in runs for tool in run.tools or ()])
-    attempt = render_stopped_attempt(
-        partial_text="",
-        completed_tools=[replace(tool, call=None) for tool in completed],
-        interrupted_tools=[replace(tool, call=None) for tool in interrupted],
-    )
-    return Message(role="user", content=f"{_RECOVERED_ACCOUNT_INSTRUCTION}\n\n{attempt}", from_history=True)
 
 
 def _build_interrupted_replay_run(

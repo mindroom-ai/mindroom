@@ -11,7 +11,6 @@ from dataclasses import dataclass, replace
 from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
-from mindroom.history.interrupted_replay import recovered_runs_account
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import continued_from, replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
@@ -55,7 +54,6 @@ def scope_history_messages(
     num_history_runs: int | None,
     num_history_messages: int | None,
     max_tool_calls_from_history: int | None,
-    recovered_as_account: bool = False,
 ) -> list[Message]:
     """Return the stored history one request of ``scope`` replays, oldest first.
 
@@ -68,12 +66,11 @@ def scope_history_messages(
     Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
     item except the newest viewed images. The recovered runs at the end of the history (``history.run_checkpoint``)
     replay whole after what the limits keep: they are the turn the request continues, which only its answer ends.
-    With ``recovered_as_account``, one bounded account of their tool calls replays in their place.
     """
     replayed = [run for run in runs if replays_in_scope(run, scope)]
     # The recovered runs nothing follows are the turn this request continues, not earlier history: no limit trims them.
     earlier = continued_from(replayed)
-    continued = replayed[earlier:]
+    continued = replayable_messages(replayed[earlier:])
     replayed = replayed[:earlier]
     if num_history_runs is not None:
         replayed = replayed[-num_history_runs:] if num_history_runs > 0 else []
@@ -85,10 +82,7 @@ def scope_history_messages(
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
-    if recovered_as_account and continued:
-        history.append(recovered_runs_account(continued))
-    else:
-        history += [_history_copy(message) for message in replayable_messages(continued)]
+    history += [_history_copy(message) for message in continued]
     return project_history_media_for_replay(history)
 
 
@@ -101,7 +95,7 @@ def replayed_history(
     """Return the stored history a request of ``scope`` replays under ``plan``, and the scope summary it follows.
 
     A request without a scope or session sends its own messages only; one whose plan replays nothing still replays
-    the recovered runs it continues (``scope_history_messages``), in the form the plan gives them, without the summary.
+    the recovered runs it continues (``scope_history_messages``), without the summary.
     """
     if session is None or scope is None:
         return [], None
@@ -112,7 +106,6 @@ def replayed_history(
         num_history_runs=plan.num_history_runs if plan is not None and replays else 0,
         num_history_messages=plan.num_history_messages if plan is not None and replays else None,
         max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        recovered_as_account=plan is not None and plan.recovered_as_account,
     )
     return history, session.summary if replays else None
 

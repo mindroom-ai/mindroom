@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.history.request_messages import request_layout, scope_history_messages
@@ -50,14 +49,13 @@ def estimate_prompt_visible_history_tokens(
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
     model: ModelProvider,
-    recovered_as_account: bool = False,
 ) -> int:
     """Estimate the durable summary plus visible persisted history of the scope owning ``session`` for one run.
 
     The history is the selection a request under ``history_settings`` sends, estimated as ``model``'s route renders
-    it, with the recovered runs it continues in the form ``recovered_as_account`` names.
+    it.
     """
-    history = prompt_visible_history(session, history_settings, recovered_as_account=recovered_as_account)
+    history = prompt_visible_history(session, history_settings)
     return _added_tokens(model, request_layout(summary=session.summary, history=history))
 
 
@@ -70,12 +68,7 @@ def _added_tokens(model: ModelProvider, messages: Sequence[Message]) -> int:
     return with_messages - model.request_tokens(ModelRequest(messages=()))
 
 
-def prompt_visible_history(
-    session: ConversationSession,
-    history_settings: ResolvedHistorySettings,
-    *,
-    recovered_as_account: bool = False,
-) -> list[Message]:
+def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
     """Return the stored history a request under ``history_settings`` replays for the scope owning ``session``."""
     policy = history_settings.policy
     return scope_history_messages(
@@ -84,7 +77,6 @@ def prompt_visible_history(
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        recovered_as_account=recovered_as_account,
     )
 
 
@@ -148,15 +140,11 @@ def plan_replay_that_fits(
     available_history_budget: int,
     current_history_tokens: int,
     model: ModelProvider,
-    compacts_mid_turn: bool = False,
 ) -> ResolvedReplayPlan:
     """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget.
 
     ``current_history_tokens`` holds the summary, so a history that fits replays whole even when the summary's estimate,
-    padded by its margin, would not fit. No plan trims the recovered runs the request continues (``continued_from``),
-    so every plan's estimate holds them. When they exceed the budget beside the summary alone, a run that
-    ``compacts_mid_turn`` keeps them for the fold before its first request (``history.mid_turn_compaction``); any other
-    replays the bounded account of them, whatever room is left, and the earlier runs that fit beside it.
+    padded by its margin, would not fit.
     """
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
@@ -167,30 +155,6 @@ def plan_replay_that_fits(
     if summary_tokens > available_history_budget:
         raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
 
-    fitting_plan = partial(
-        _fitting_replay_plan,
-        session=session,
-        history_settings=history_settings,
-        available_history_budget=available_history_budget,
-        summary_tokens=summary_tokens,
-        model=model,
-    )
-    plan = fitting_plan(recovered_as_account=False)
-    if plan.estimated_tokens > available_history_budget and not compacts_mid_turn:
-        return fitting_plan(recovered_as_account=True)
-    return plan
-
-
-def _fitting_replay_plan(
-    *,
-    session: ConversationSession,
-    history_settings: ResolvedHistorySettings,
-    available_history_budget: int,
-    summary_tokens: int,
-    model: ModelProvider,
-    recovered_as_account: bool,
-) -> ResolvedReplayPlan:
-    """Return the plan that replays the most runs or messages within the budget, with the recovered runs in one form."""
     limit_mode, max_limit = _context_window_guard_limit_bounds(session=session, history_settings=history_settings)
     fitting_limit, fitting_tokens = _find_fitting_history_limit_for_budget(
         session=session,
@@ -199,7 +163,6 @@ def _fitting_replay_plan(
         limit_mode=limit_mode,
         max_limit=max_limit,
         model=model,
-        recovered_as_account=recovered_as_account,
     )
     if fitting_limit > 0:
         policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
@@ -209,21 +172,14 @@ def _fitting_replay_plan(
             add_history_to_context=True,
             num_history_runs=policy.num_history_runs,
             num_history_messages=policy.num_history_messages,
-            recovered_as_account=recovered_as_account,
         )
 
-    # Zero raw runs still replays history, which is what places the summary before the prompt, and the recovered runs.
-    recovered = prompt_visible_history(
-        session,
-        replace(history_settings, policy=HistoryPolicy(mode="runs", limit=0)),
-        recovered_as_account=recovered_as_account,
-    )
+    # Zero raw runs still replays history, which is what places the summary before the prompt.
     return ResolvedReplayPlan(
         mode="disabled",
-        estimated_tokens=summary_tokens + _added_tokens(model, recovered),
+        estimated_tokens=summary_tokens,
         add_history_to_context=True,
         num_history_runs=0,
-        recovered_as_account=recovered_as_account,
     )
 
 
@@ -247,7 +203,6 @@ def _find_fitting_history_limit_for_budget(
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
     model: ModelProvider,
-    recovered_as_account: bool,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -262,7 +217,6 @@ def _find_fitting_history_limit_for_budget(
             session=session,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
             model=model,
-            recovered_as_account=recovered_as_account,
         )
         if candidate_tokens <= available_history_budget:
             best = mid
@@ -293,7 +247,6 @@ def log_replay_plan(
             estimated_tokens=current_history_tokens,
             fitted_tokens=replay_plan.estimated_tokens,
             available_history_budget=available_history_budget,
-            recovered_as_account=replay_plan.recovered_as_account,
         )
         return
 
@@ -303,7 +256,6 @@ def log_replay_plan(
         estimated_tokens=current_history_tokens,
         fitted_tokens=replay_plan.estimated_tokens,
         available_history_budget=available_history_budget,
-        recovered_as_account=replay_plan.recovered_as_account,
     )
 
 
@@ -326,8 +278,6 @@ def has_effective_persisted_replay(*, session: ConversationSession, replay_plan:
     """Report whether a summary or permitted raw runs of the scope owning ``session`` will reach the model."""
     if current_summary_text(session) is not None:
         return True
-    if not replay_plan.add_history_to_context:
+    if not replay_plan.add_history_to_context or replay_plan.num_history_runs == 0:
         return False
-    visible = scope_visible_runs(session)
-    # A plan without earlier runs still replays the recovered runs the request continues.
-    return continued_from(visible) < len(visible) if replay_plan.num_history_runs == 0 else bool(visible)
+    return bool(scope_visible_runs(session))

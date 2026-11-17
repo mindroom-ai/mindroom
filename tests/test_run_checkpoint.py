@@ -17,7 +17,7 @@ from mindroom.ai import ai_response
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, ModelConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.run_checkpoint import (
     INTERRUPTED_CALL_RESULT,
@@ -39,7 +39,6 @@ from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, runtime_paths_for
 from tests.delegation_helpers import ScriptedAgents, _runtime_paths, native_delegation_config, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.fakes.summary_model import summary_model
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import PROBE_TOOL, ProbeTools, registered_probe_tools, stored_runs
 
@@ -258,76 +257,6 @@ async def test_no_history_limit_trims_the_recovered_turn_its_replay_continues(
         ("user", None),
     ]
     assert _wire(resumed)[:3] == _wire(last_sent)
-
-
-async def _resume_in_a_small_window(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    compaction: CompactionConfig,
-) -> tuple[ScriptedModel, ScriptedModel]:
-    """Crash a turn whose file read is larger than an 8,000-token window, then recover and resume it in that window.
-
-    Its provider reports no usage, so each request is sized by what it holds. Returns the model that answered the
-    resumed turn and the summary model ``compaction`` may name.
-    """
-    turns = [
-        calls(tool_call("read_file", "read", path="x" * 40_000)),
-        calls(tool_call("run_shell_command", "shell", cmd="sleep 60")),
-    ]
-    await _crash_mid_call(tmp_path, monkeypatch, turns)
-    crashed = _config(tmp_path / "crashed")
-    # A restart can come back on a model with a smaller window than the one the turn ran on.
-    crashed.models["default"].context_window = 8_000
-    crashed.models["summary"] = ModelConfig(provider="openai", id="summary-model", context_window=100_000)
-    crashed.defaults.compaction = compaction
-    assert _recover(crashed)
-    model, summarizer = ScriptedModel([answer("Finished")]), summary_model("SUMMARY")
-    install_model_providers(monkeypatch, {"default": model, "summary": summarizer})
-    await _respond(crashed)
-    return model, summarizer
-
-
-@pytest.mark.asyncio
-async def test_a_recovered_turn_the_window_cannot_hold_replays_as_an_account_of_its_calls(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Where nothing compacts, the resumed request stays within the window and still says which calls were made."""
-    model, summarizer = await _resume_in_a_small_window(
-        tmp_path,
-        monkeypatch,
-        CompactionConfig(enabled=False, reserve_tokens=1_000),
-    )
-
-    [request] = model.requests
-    assert model.request_tokens(request) <= 7_000
-    assert not summarizer.requests
-    account, prompt = [message for message in request.messages if message.role != "system"]
-    assert (account.role, prompt.role) == ("user", "user")
-    assert "Do the work" in str(prompt.content)
-    assert "The `read_file` tool finished with input preview" in str(account.content)
-    assert "The `run_shell_command` tool failed with input preview" in str(account.content)
-    assert "Interrupted before this call returned a result" in str(account.content)
-
-
-@pytest.mark.asyncio
-async def test_a_recovered_turn_the_window_cannot_hold_is_folded_where_the_run_compacts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run that compacts folds the recovered turn into the scope's summary before its first request."""
-    model, summarizer = await _resume_in_a_small_window(
-        tmp_path,
-        monkeypatch,
-        CompactionConfig(model="summary", reserve_tokens=1_000),
-    )
-
-    [request] = model.requests
-    assert model.request_tokens(request) <= 7_000
-    assert [message.role for message in request.messages if message.role == "tool"] == []
-    assert any("SUMMARY" in str(message.content) for message in request.messages)
-    [summary_request] = summarizer.requests
-    assert "run_shell_command" in str([message.content for message in summary_request.messages])
 
 
 @pytest.mark.asyncio
