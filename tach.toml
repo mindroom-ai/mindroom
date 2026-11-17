@@ -5764,8 +5764,10 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",
     "mindroom.origins",
+    "mindroom.reply_scope",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.invocation",
 ]
 
 [[modules]]

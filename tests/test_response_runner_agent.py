@@ -1729,6 +1729,7 @@ class TestAgentBot(AgentBotTestBase):
                 "tool_name": "run_shell_command",
                 "args_preview": "cmd=git status",
                 "result_preview": "clean",
+                "tool_call_id": "call-1",
             },
         ]
 
