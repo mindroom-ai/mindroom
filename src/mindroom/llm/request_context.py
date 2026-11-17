@@ -64,18 +64,17 @@ def json_safe(value: object) -> JSONValue:
     value_type = type(value)
     if value_type is str or value_type is int or value_type is float or value_type is bool or value is None:
         return cast("JSONValue", value)
-    normalized: object = value
     if value_type is not dict and value_type is not list and not isinstance(value, type) and is_dataclass(value):
-        normalized = asdict(value)
-    if isinstance(normalized, bytes):
-        return base64.b64encode(normalized).decode("ascii")
-    if isinstance(normalized, dict):
-        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", normalized).items()}
-    if isinstance(normalized, list | tuple | set | frozenset):
-        return [json_safe(item) for item in cast("Any", normalized)]
-    if isinstance(normalized, str | int | float | bool) or normalized is None:
-        return normalized
-    return repr(normalized)
+        value = asdict(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", value).items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [json_safe(item) for item in cast("Any", value)]
+    if isinstance(value, str | int | float | bool):
+        return value
+    return repr(value)
 
 
 def current_llm_request_log_context() -> dict[str, JSONValue]:

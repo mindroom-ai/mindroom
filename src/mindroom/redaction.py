@@ -781,6 +781,14 @@ _unchanged_texts_lock = threading.Lock()
 
 
 def _redact_remembering_unchanged(value: str, *, max_length: int | None, prose: bool) -> str:
+    # Only an exact str that redaction can return whole is remembered: a str subclass can redefine comparison and
+    # encoding, and a text over its length bound comes back cut, after a scan that reads only the start of it.
+    if (
+        len(value) < _UNCHANGED_TEXT_MIN_LENGTH
+        or type(value) is not str
+        or (max_length is not None and len(value) > max_length)
+    ):
+        return _redact_sensitive_text(value, max_length=max_length, prose=prose)
     key = (hashlib.sha256(value.encode("utf-8", "surrogatepass")).digest(), max_length, prose)
     with _unchanged_texts_lock:
         if key in _unchanged_texts:
@@ -797,14 +805,6 @@ def _redact_remembering_unchanged(value: str, *, max_length: int | None, prose: 
 
 def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
     try:
-        # Only exact text redaction can return whole is remembered: a str subclass can redefine comparison and encoding,
-        # and a text over its length bound comes back cut, after a scan that reads only the start of it.
-        if (
-            len(value) < _UNCHANGED_TEXT_MIN_LENGTH
-            or type(value) is not str
-            or (max_length is not None and len(value) > max_length)
-        ):
-            return _redact_sensitive_text(value, max_length=max_length, prose=prose)
         return _redact_remembering_unchanged(value, max_length=max_length, prose=prose)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)

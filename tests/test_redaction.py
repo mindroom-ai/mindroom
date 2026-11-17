@@ -1139,7 +1139,7 @@ def test_a_long_text_redaction_left_unchanged_is_not_scanned_again(monkeypatch: 
 
 def test_a_str_subclass_never_marks_a_text_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """A text type that redefines comparison cannot vouch for a text redaction changes."""
-    _record_text_scans(monkeypatch, cache_size=8)
+    monkeypatch.setattr(redaction, "_unchanged_texts", OrderedDict())
 
     class EqualToAnything(str):
         __slots__ = ()
@@ -1155,7 +1155,7 @@ def test_a_str_subclass_never_marks_a_text_unchanged(monkeypatch: pytest.MonkeyP
 
 
 def test_a_text_over_its_length_bound_is_not_hashed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A text cut to its bound never comes back unchanged, so redaction reads only the start of it, as before."""
+    """A text cut to its bound never comes back unchanged, so redaction reads only the start of it."""
     hashed: list[int] = []
 
     def recording_sha256(data: bytes) -> object:
