@@ -2,7 +2,8 @@
 
 Every read takes a limit. There is no API that materializes a whole room,
 because the only thing standing between a busy room and an unbounded query is
-whether such a call exists to be made.
+whether such a call exists to be made. A thread's fingerprint reads all of one
+thread's rows, but only their IDs and refresh tokens, never their content.
 """
 
 from __future__ import annotations

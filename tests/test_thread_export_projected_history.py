@@ -926,12 +926,10 @@ async def test_a_reply_a_pass_read_and_its_sender_deleted_since_leaves_the_expor
     exported: ExportedThreads = {}
     await workspace_pass(router, homeserver, tmp_path, exported)
     fingerprint = ExportProjectionView.thread_fingerprint
-    late = [raw("$late:example.org", "regret", ts=300, thread_id=ROOT)]
 
     async def admit_after_fingerprint(view: ExportProjectionView, **kwargs: str) -> object:
         taken = await fingerprint(view, **kwargs)
-        await admit_live(router, late)
-        late.clear()
+        await admit_live(router, [raw("$late:example.org", "regret", ts=300, thread_id=ROOT)])
         return taken
 
     with patch.object(ExportProjectionView, "thread_fingerprint", admit_after_fingerprint):

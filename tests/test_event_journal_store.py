@@ -9745,6 +9745,14 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "db.example" not in rendered
 
 
+def _plan_database(path: Path) -> sqlite3.Connection:
+    """Return an empty SQLite journal schema to ask for query plans."""
+    database = sqlite3.connect(path)
+    for statement in schema_statements(SQLITE_DIALECT):
+        database.execute(statement)
+    return database
+
+
 class TestHotQueriesAreIndexCovered:
     """Every scan a running bot repeats must come from an index, ordering included."""
 
@@ -9820,9 +9828,7 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
         """No hot query falls back to a table scan or a temporary sort."""
-        database = sqlite3.connect(tmp_path / "plans.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "plans.db")
 
         offenders = {}
         for name, sql in self._QUERIES.items():
@@ -9856,9 +9862,7 @@ class TestHotQueriesAreIndexCovered:
         appears nowhere in it, which is what makes this assertion fail the
         moment the spelling drifts back.
         """
-        database = sqlite3.connect(tmp_path / "cursor-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "cursor-plan.db")
         sql = self._QUERIES["projection page after a cursor"]
 
         plan = " | ".join(
@@ -9874,9 +9878,7 @@ class TestHotQueriesAreIndexCovered:
         sources joined that way are built for every principal, with an automatic
         index over them, on each page that has a pending row.
         """
-        database = sqlite3.connect(tmp_path / "pending-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "pending-plan.db")
         plans: list[str] = []
 
         class _PlanRecorder:
@@ -9908,9 +9910,7 @@ class TestHotQueriesAreIndexCovered:
         value in the window to size it, which is the cost sizing exists to
         avoid. ``octet_length`` marks its column read as length-only.
         """
-        database = sqlite3.connect(tmp_path / "size-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "size-plan.db")
         sql = (
             f"SELECT {reads._PAGE_SIZE_COLUMNS} FROM visible_messages "  # noqa: S608 - the production columns, not input
             "WHERE principal_id=? AND room_id=? AND thread_id=? "
@@ -9924,13 +9924,11 @@ class TestHotQueriesAreIndexCovered:
     async def test_a_thread_fingerprint_seeks_the_thread_instead_of_walking_the_room(self, tmp_path: Path) -> None:
         """Each read of a thread's fingerprint is entered on the thread or the root's ID, never on the room alone.
 
-        Ordered by `logical_event_id`, the thread's rows came from the primary key's room prefix filtered down to the
-        thread: the plan still said SEARCH and the test above passed, while every export pass read the whole room
-        once per thread, 8 s against 0.045 s for a room of 619 threads.
+        A plan entered on the primary key's room prefix and filtered down to the thread, which ordering the rows by
+        `logical_event_id` makes SQLite choose, still says SEARCH, so the scan and temporary sort test passes while
+        every export pass reads the whole room once per thread.
         """
-        database = sqlite3.connect(tmp_path / "fingerprint-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "fingerprint-plan.db")
         steps: list[str] = []
 
         class _PlanRecorder:
@@ -9964,9 +9962,7 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_room_activity_titles_load_by_primary_key(self, tmp_path: Path) -> None:
         """Roots and summary notices are loaded by their IDs, not by walking the room's index to find them."""
-        database = sqlite3.connect(tmp_path / "summary-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "summary-plan.db")
         sql = reads._rows_by_id_sql(3)
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
@@ -9981,9 +9977,7 @@ class TestHotQueriesAreIndexCovered:
         writer every bot shares. Entered on the primary key's room prefix alone,
         the plan still says SEARCH, so it has to name `edit_event_id`.
         """
-        database = sqlite3.connect(tmp_path / "redaction-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "redaction-plan.db")
         sql = "UPDATE unresolved_edits SET content_json = '{}' WHERE principal_id=? AND room_id=? AND edit_event_id=?"
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))
@@ -9992,9 +9986,7 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_a_redaction_deletes_its_questions_through_their_revision(self, tmp_path: Path) -> None:
         """A redaction finds the questions of the revision it deletes by that revision, not by every question held."""
-        database = sqlite3.connect(tmp_path / "question-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "question-plan.db")
         sql = "DELETE FROM interactive_questions WHERE principal_id=? AND room_id=? AND revision_event_id=?"
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))

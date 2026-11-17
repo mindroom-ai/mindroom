@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
@@ -1679,7 +1680,7 @@ async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_me
     tmp_path: Path,
     change: str,
 ) -> None:
-    """A renamed room or a changed set of trusted title senders re-exports a thread whose messages did not change."""
+    """A renamed room or a changed set of trusted title senders has a pass read a thread whose messages did not change."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
     exported: ExportedThreads = {}
@@ -1687,8 +1688,9 @@ async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_me
     await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
 
     if change == "room":
-        renamed = _ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Renamed")
+        renamed = replace(_REMEMBERED_ROOM, name="Renamed")
         _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint, renamed))
+        assert yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))["room"]["name"] == "Renamed"
     else:
         with patch(
             "mindroom.thread_export.execution.trusted_sender_ids_for_export",

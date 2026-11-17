@@ -445,6 +445,17 @@ def _open_room_directory(
     )
 
 
+def _open_existing_owned_room(output_dir: Path, room: ThreadExportRoom, *, trusted_root: Path | None) -> int | None:
+    """Open one room's directory under an owned export root without creating either, or return None if either is missing."""
+    root_fd = _open_owned_export_root(output_dir, create=False, trusted_root=trusted_root)
+    if root_fd is None:
+        return None
+    try:
+        return _open_room_directory(root_fd, output_dir, room, create=False)
+    finally:
+        os.close(root_fd)
+
+
 def _fsync_directory_fd(directory_fd: int) -> None:
     """Best-effort flush one already-pinned directory."""
     with suppress(OSError):
@@ -753,17 +764,7 @@ def write_room_index(
 
     ``written_entries`` are the entries ``write_thread_payload`` returned in this pass; files without one, or changed since, are parsed.
     """
-    root_fd = _open_owned_export_root(
-        output_dir,
-        create=False,
-        trusted_root=trusted_root,
-    )
-    if root_fd is None:
-        return
-    try:
-        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
-    finally:
-        os.close(root_fd)
+    room_fd = _open_existing_owned_room(output_dir, room, trusted_root=trusted_root)
     if room_fd is None:
         return
     try:
@@ -811,13 +812,7 @@ def thread_file_identities(
     trusted_root: Path | None = None,
 ) -> dict[str, FileIdentity]:
     """Return the identity of each recognizable regular thread file in one room's export directory, by name."""
-    root_fd = _open_owned_export_root(output_dir, create=False, trusted_root=trusted_root)
-    if root_fd is None:
-        return {}
-    try:
-        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
-    finally:
-        os.close(root_fd)
+    room_fd = _open_existing_owned_room(output_dir, room, trusted_root=trusted_root)
     if room_fd is None:
         return {}
     try:
@@ -933,17 +928,7 @@ def remove_stale_thread_exports(
     trusted_root: Path | None = None,
 ) -> bool:
     """Remove recognizable thread files absent from a complete enumeration."""
-    root_fd = _open_owned_export_root(
-        output_dir,
-        create=False,
-        trusted_root=trusted_root,
-    )
-    if root_fd is None:
-        return False
-    try:
-        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
-    finally:
-        os.close(root_fd)
+    room_fd = _open_existing_owned_room(output_dir, room, trusted_root=trusted_root)
     if room_fd is None:
         return False
     try:

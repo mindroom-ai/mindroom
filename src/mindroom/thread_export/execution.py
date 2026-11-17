@@ -219,10 +219,14 @@ async def _export_unless_unchanged(
         await write()
         return
     marker, rows = thread_fingerprint
+
+    def fingerprint(of_rows: frozenset[tuple[str, str, int | None]]) -> int:
+        return hash((marker, of_rows, room, trusted_sender_ids))
+
     previous = exported.get(key)
     if (
         previous is not None
-        and previous.fingerprint == hash((marker, rows, room, trusted_sender_ids))
+        and previous.fingerprint == fingerprint(rows)
         and all(
             (entry := previous.entries.get(accumulator.target.output_dir)) is not None
             and file_identities.get(id(accumulator), {}).get(entry.filename) == entry.file_identity
@@ -237,7 +241,7 @@ async def _export_unless_unchanged(
     # The rows come from what the export read, so one added during the read and deleted since cannot match.
     if (written := await write()) is not None:
         read_rows, entries = written
-        exported[key] = _ExportedThread(hash((marker, read_rows, room, trusted_sender_ids)), entries)
+        exported[key] = _ExportedThread(fingerprint(read_rows), entries)
 
 
 def _finish_room_exports_blocking(
@@ -390,14 +394,15 @@ async def _export_enumerated_room_threads(
     index_entries: dict[int, list[WrittenIndexEntry]] = {}
     # A thread is skipped only while each target still holds the file the pass that recorded it wrote.
     file_identities: dict[int, dict[str, FileIdentity]] = {}
-    for accumulator in authorized if exported is not None else ():
-        with suppress(OSError, RuntimeError):
-            file_identities[id(accumulator)] = await asyncio.to_thread(
-                thread_file_identities,
-                accumulator.target.output_dir,
-                room,
-                trusted_root=accumulator.target.trusted_root,
-            )
+    if exported is not None:
+        for accumulator in authorized:
+            with suppress(OSError, RuntimeError):
+                file_identities[id(accumulator)] = await asyncio.to_thread(
+                    thread_file_identities,
+                    accumulator.target.output_dir,
+                    room,
+                    trusted_root=accumulator.target.trusted_root,
+                )
 
     for thread_id in thread_ids:
         write = partial(
