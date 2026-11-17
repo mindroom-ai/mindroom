@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
@@ -19,6 +20,7 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
     queued_notice_after_tool_batch,
     queued_notice_on_resume_entry,
+    told_to_pause,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -2282,3 +2284,206 @@ async def test_without_mid_turn_any_newer_message_releases_a_job_wait(tmp_path: 
     finally:
         reply.job_done.set()
         await runtime.shutdown()
+
+
+def _acknowledgements(
+    *event_ids: str,
+) -> tuple[dict[str, asyncio.Event], Callable[[str], Awaitable[None]]]:
+    """Return one event per message, set once its defer reaction is attempted, and the reaction that sets them."""
+    attempted = {event_id: asyncio.Event() for event_id in event_ids}
+
+    async def acknowledge(event_id: str) -> None:
+        attempted[event_id].set()
+
+    return attempted, acknowledge
+
+
+@pytest.mark.asyncio
+async def test_queue_is_absent_from_judgment_notice_pause_and_wait_release() -> None:
+    """A Queue message is never judged, gives no notice or pause, and leaves even a reply only waiting on jobs waiting."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return False
+
+    attempted, acknowledge = _acknowledgements("$queued", "$later", "$last")
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER, on_defer=acknowledge)
+    answered = Message(role="assistant", content="Working on it")
+    # An earlier message's notice is still in the request, so only the queue decides whether it tells the reply to pause.
+    queue.add_waiting_human_message("$earlier", text="Stop", requester_id=_REQUESTER)
+    messages = _resumed_messages()
+    with queued_message_signal_context(queue):
+        await queued_notice_after_tool_batch(_NOTICE)(messages, ())
+        assert told_to_pause([*messages, answered])
+        queue.consume_waiting_human_message("$earlier")
+        queue.add_waiting_human_message("$queued", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+        assert not told_to_pause([*messages, answered])
+        await queued_notice_after_tool_batch(_NOTICE)(messages, ())
+        assert not _has_notice(messages)
+
+    queue.mid_turn_gate = gate
+    queue.calls.running = queue.calls.waiting = 1
+    assert queue.calls.only_waiting()
+    assert not await _wraps_up_after_tool_batch(queue)
+    with queued_message_signal_context(queue, mid_turn_gate=gate):
+        assert not _has_notice(await _ResumedRequests().send())
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$later", text="And Y", requester_id=_OTHER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$later"].wait(), JOB_TEST_TIMEOUT)
+    # The wait acknowledges a message on its next look at the queue, so this one shows the last look left it waiting.
+    queue.add_waiting_human_message("$last", text="And Z", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$last"].wait(), JOB_TEST_TIMEOUT)
+    assert not waiter.done()
+    assert judged == []
+    # An Auto message still releases a reply only waiting on jobs at once, without asking the judge.
+    queue.add_waiting_human_message("$auto", text="Thanks", requester_id=_REQUESTER)
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert judged == []
+    assert queue.pending_human_messages == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True], ids=["delivered", "delivery_error"])
+async def test_queue_defer_reaction_is_attempted_once(*, fails: bool) -> None:
+    """The configured defer reaction goes once onto a Queue message, however often the queue is looked at."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    reactions: list[tuple[str, str]] = []
+    second_attempted = asyncio.Event()
+    judged: list[JudgmentRequest] = []
+
+    async def react(reaction: str, event_id: str) -> None:
+        reactions.append((reaction, event_id))
+        if event_id == "$second":
+            second_attempted.set()
+        if fails:
+            msg = "Matrix unavailable"
+            raise RuntimeError(msg)
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_defer=partial(react, "⏳"),
+    )
+    queue.add_waiting_human_message("$queued", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    resumed = _ResumedRequests()
+    for _ in range(2):
+        assert not await _wraps_up_after_tool_batch(queue)
+        with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+            assert not _has_notice(await resumed.send())
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$second", text="And Y", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(second_attempted.wait(), JOB_TEST_TIMEOUT)
+    assert not await _wraps_up_after_tool_batch(queue)
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+    assert reactions == [("⏳", "$queued"), ("⏳", "$second")]
+    assert judged == []
+
+
+@pytest.mark.asyncio
+async def test_requester_steer_releases_wait_during_an_unresolved_auto_judgment() -> None:
+    """The requester's Steer ends a wait at once, while the judge still weighs an earlier Auto message.
+
+    The obsolete judgment is cancelled and drained before the wait returns, so it can publish no mark afterwards.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judging, answer_judgment, judgment_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judging.set()
+        try:
+            await answer_judgment.wait()
+        except asyncio.CancelledError:
+            judgment_cancelled.set()
+            raise
+        return False
+
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.mid_turn_gate = gate
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$auto", text="Stop, wrong file", requester_id=_REQUESTER)
+    await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+    queue.add_waiting_human_message(
+        "$steer",
+        text="Use the other file",
+        requester_id=_REQUESTER,
+        mode=MidTurnMode.STEER,
+    )
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert not answer_judgment.is_set()
+    assert judgment_cancelled.is_set()
+    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    answer_judgment.set()
+    gate.report_stop()
+    assert queue.stopped_reply_event_ids == set()
+    assert queue.requester_steer_event_ids == {"$steer"}
+
+
+@pytest.mark.asyncio
+async def test_other_requesters_steer_uses_auto_wait_policy() -> None:
+    """Another person's Steer is weighed as Auto: a judge that lets it wait leaves the wait blocked, with no bypass."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    attempted, acknowledge = _acknowledgements("$bob", "$later")
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_defer=acknowledge,
+        on_stop=queue.mark_stopped_reply,
+    )
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$bob", text="Stop, use mine", requester_id=_OTHER, mode=MidTurnMode.STEER)
+    bob = QueuedHumanNoticeReservation(queue, "$bob")
+    await asyncio.wait_for(attempted["$bob"].wait(), JOB_TEST_TIMEOUT)
+    # The wait acknowledges a message on its next look at the queue, so this one shows the verdict left it waiting.
+    queue.add_waiting_human_message("$later", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$later"].wait(), JOB_TEST_TIMEOUT)
+    assert not waiter.done()
+    assert len(judged) == 1
+    assert queue.requester_steer_snapshot() == ()
+    assert queue.requester_steer_event_ids == set()
+    queue.mid_turn_gate.report_stop()
+    assert not bob.stopped_reply
+    bob.release()
+    assert not bob.stopped_reply
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+
+
+def test_binding_a_requester_latches_only_their_waiting_steers() -> None:
+    """A reply that takes the lock, like an approval resuming, makes its requester's waiting Steers direct ones."""
+    queue = _QueuedMessageState()
+    queue.add_waiting_human_message("$mine", text="Use X", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
+    queue.add_waiting_human_message("$theirs", text="Use Y", requester_id=_OTHER, mode=MidTurnMode.STEER)
+    queue.add_waiting_human_message("$auto", text="Use Z", requester_id=_REQUESTER)
+    # Admitted while no reply holds the lock, a Steer is not yet anyone's direct one.
+    assert queue.requester_steer_event_ids == set()
+    assert queue.requester_steer_snapshot() == ()
+    queue.bind_active_requester(_REQUESTER)
+    assert queue.requester_steer_event_ids == {"$mine"}
+    assert [message.event_id for message in queue.requester_steer_snapshot()] == ["$mine"]
+    queue.bind_active_requester(None)
+    assert queue.requester_steer_snapshot() == ()
+    assert QueuedHumanNoticeReservation(queue, "$mine").stopped_reply

@@ -131,13 +131,17 @@ def always_owned(*_args: object, **_kwargs: object) -> bool:
 class NewerMessageWaits:
     """The reply's queue, which holds a newer message of its requester until the reply ends."""
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         """Say a newer message waits."""
         return True
 
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
         """Return the one newer message."""
         return (QueuedMessage("$newer", None),)
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Queue message."""
+        return ()
 
 
 def tool_job_journal(storage_root: Path) -> EventJournalStore:

@@ -37,9 +37,13 @@ EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try aga
 
 
 class _SupportsQueuedMessageState(Protocol):
-    def has_pending_human_messages(self) -> bool: ...
+    """The messages waiting for a reply; Queue ones never interrupt it, so they get no notice and no judgment."""
 
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]: ...
+    def has_interrupting_messages(self) -> bool: ...
+
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]: ...
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]: ...
 
 
 @dataclass
@@ -98,7 +102,7 @@ def _append_queued_notice_if_needed(
     if notice_context is None or (notice_context.mid_turn_gate is not None and not judged):
         return
     response_turn_id = notice_context.response_turn_id
-    waiting = notice_context.state is not None and notice_context.state.has_pending_human_messages()
+    waiting = notice_context.state is not None and notice_context.state.has_interrupting_messages()
     stored = next(
         (
             index
@@ -140,7 +144,7 @@ def told_to_pause(messages: Sequence[Message]) -> bool:
     subagent of a paused batch or a run whose queue emptied, is not told to pause by another run's notice or by history.
     """
     context = _queued_message_notice_context.get()
-    if context is None or context.state is None or not context.state.has_pending_human_messages():
+    if context is None or context.state is None or not context.state.has_interrupting_messages():
         return False
     for message in reversed(messages[:-1]):
         if message.role == "assistant":
@@ -182,14 +186,16 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
     if context is None or context.mid_turn_gate is None or context.state is None:
         return
     state = context.state
-    pending = state.pending_message_snapshot()
+    gate = context.mid_turn_gate
+    for message in state.queued_snapshot():
+        await gate.acknowledge_queued(message)
+    pending = state.interrupting_snapshot()
     if not pending:
         return
-    gate = context.mid_turn_gate
     if not context.notice_fired:
         outcome = await gate.decide(
             pending,
-            current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
+            current=lambda: not context.notice_fired and pending == state.interrupting_snapshot(),
         )
         if outcome is MidTurnOutcome.WAIT:
             return
@@ -228,7 +234,7 @@ def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
             return
         if context.mid_turn_gate is not None:
             await _judge_queued_notice(messages, notice_text=notice_text)
-        elif context.state is not None and context.state.has_pending_human_messages():
+        elif context.state is not None and context.state.has_interrupting_messages():
             _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
 
     return on_resume_entry

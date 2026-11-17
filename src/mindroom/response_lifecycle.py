@@ -178,6 +178,16 @@ def response_lifecycle_reservation_context(
         _current_response_lifecycle_reservation.reset(token)
 
 
+async def _first_of(task: asyncio.Task[bool], event: asyncio.Event) -> None:
+    """Wait until ``task`` finishes or ``event`` is set."""
+    setting = asyncio.ensure_future(event.wait())
+    try:
+        await asyncio.wait({task, setting}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        setting.cancel()
+        await asyncio.gather(setting, return_exceptions=True)
+
+
 @dataclass
 class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
@@ -190,6 +200,9 @@ class _QueuedMessageState:
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
     # Waiting messages the mid-turn judge said the running reply cannot wait for.
     stopped_reply_event_ids: set[str] = field(default_factory=set)
+    # The person the reply holding the lock answers, and the waiting messages that person chose to Steer it with.
+    active_requester_id: str | None = None
+    requester_steer_event_ids: set[str] = field(default_factory=set)
     calls: ReplyToolCalls = field(init=False)
 
     def __post_init__(self) -> None:
@@ -204,6 +217,33 @@ class _QueuedMessageState:
     def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
         """Snapshot queued text in admission order without consuming any event."""
         return tuple(self._pending_messages.values())
+
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Snapshot the waiting messages that may interrupt the running reply: all but Queue ones."""
+        return tuple(message for message in self._pending_messages.values() if message.mode is not MidTurnMode.QUEUE)
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Snapshot the waiting Queue messages, which never interrupt the running reply."""
+        return tuple(message for message in self._pending_messages.values() if message.mode is MidTurnMode.QUEUE)
+
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Snapshot the waiting Steer messages of the person the running reply answers now."""
+        return tuple(message for message in self._pending_messages.values() if self._steers_directly(message))
+
+    def has_interrupting_messages(self) -> bool:
+        return any(message.mode is not MidTurnMode.QUEUE for message in self._pending_messages.values())
+
+    def _steers_directly(self, message: QueuedMessage) -> bool:
+        return (
+            message.mode is MidTurnMode.STEER
+            and self.active_requester_id is not None
+            and message.requester_id == self.active_requester_id
+        )
+
+    def bind_active_requester(self, requester_id: str | None) -> None:
+        """Bind the person the reply now holding the lock answers; their waiting Steers keep that reason."""
+        self.active_requester_id = requester_id
+        self.requester_steer_event_ids.update(message.event_id for message in self.requester_steer_snapshot())
 
     @property
     def pending_human_messages(self) -> int:
@@ -235,14 +275,10 @@ class _QueuedMessageState:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(
-            source_event_id,
-            text,
-            progress,
-            requester_id,
-            mentions_nobody,
-            mode,
-        )
+        message = QueuedMessage(source_event_id, text, progress, requester_id, mentions_nobody, mode)
+        self._pending_messages[source_event_id] = message
+        if self._steers_directly(message):
+            self.requester_steer_event_ids.add(source_event_id)
         self._notify_changed()
         return True
 
@@ -252,7 +288,7 @@ class _QueuedMessageState:
         if message is None:
             return
         self._pending_messages[source_event_id] = replace(message, text=text, mentions_nobody=mentions_nobody)
-        # A verdict covered the text the judge read, not the edit.
+        # A verdict covered the text the judge read, not the edit; the mode chosen for the message still stands.
         self.stopped_reply_event_ids.discard(source_event_id)
         self._notify_changed()
 
@@ -267,6 +303,7 @@ class _QueuedMessageState:
             return
         del self._pending_messages[source_event_id]
         self.stopped_reply_event_ids.discard(source_event_id)
+        self.requester_steer_event_ids.discard(source_event_id)
         self._notify_changed()
 
     def _notify_changed(self) -> None:
@@ -280,28 +317,49 @@ class _QueuedMessageState:
         return self._active_response_turns > 0
 
     async def wait(self) -> None:
-        """Return once a queued message needs the reply's attention; the mid-turn judge can let messages wait."""
-        while True:
-            changed = self._changed
-            if await self._interrupts():
-                return
-            # The judgment can absorb this wait's cancellation (an HTTP client whose own timeout fires with it takes it
-            # for that timeout), so a cancelled wait stops here instead of waiting again.
-            if (task := asyncio.current_task()) is not None and task.cancelling():
-                raise asyncio.CancelledError
-            # A queue that changed while it was judged or acknowledged is judged again at once.
-            await changed.wait()
+        """Return once a queued message needs the reply's attention; the mid-turn judge can let messages wait.
+
+        The requester's Steer does not wait for a judgment still weighing the messages before it.
+        """
+        decision: asyncio.Task[bool] | None = None
+        judged = self._changed
+        try:
+            while True:
+                changed = self._changed
+                if decision is None:
+                    judged, decision = changed, asyncio.create_task(self._interrupts())
+                await _first_of(decision, changed)
+                if not decision.done():
+                    # The queue changed during the judgment; only the requester's Steer does not wait for it to finish.
+                    if self.requester_steer_snapshot():
+                        return
+                    continue
+                interrupts, decision = decision.result(), None
+                if interrupts:
+                    return
+                # A queue that changed while it was judged or acknowledged is judged again at once.
+                await judged.wait()
+        finally:
+            # An obsolete or cancelled judgment ends here, so it can never publish a decision for this wait.
+            if decision is not None:
+                decision.cancel()
+                await asyncio.gather(decision, return_exceptions=True)
 
     async def _interrupts(self) -> bool:
-        pending = self.pending_message_snapshot()
+        gate = self.mid_turn_gate
+        if gate is not None:
+            for message in self.queued_snapshot():
+                await gate.acknowledge_queued(message)
+        if self.requester_steer_snapshot():
+            return True
+        pending = self.interrupting_snapshot()
         if not pending:
             return False
-        gate = self.mid_turn_gate
         if gate is None:
             return True
 
         def still_queued() -> bool:
-            return pending == self.pending_message_snapshot()
+            return pending == self.interrupting_snapshot()
 
         # A decision counts only for the queue it judged. A reply that does nothing but wait on jobs answers at once.
         # The wait ends for a "cannot wait" and a pause alike; only the reply's wrap-up publishes the judge's marks.
@@ -320,6 +378,7 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
     _stopped_reply: bool = False
+    _explicit_steer: bool = False
 
     @property
     def active(self) -> bool:
@@ -328,15 +387,16 @@ class QueuedHumanNoticeReservation:
 
     @property
     def stopped_reply(self) -> bool:
-        """Return whether the mid-turn judge said the running response cannot wait for this message, kept on release."""
+        """Return whether the requester steered with this message or the judge said it cannot wait; kept on release."""
         if not self._active:
-            return self._stopped_reply
-        return self._source_event_id in self._state.stopped_reply_event_ids
+            return self._stopped_reply or self._explicit_steer
+        event_id = self._source_event_id
+        return event_id in self._state.stopped_reply_event_ids or event_id in self._state.requester_steer_event_ids
 
     def update(self, response_envelope: MessageEnvelope, *, mentions_nobody: bool) -> None:
         """Show the running response's judge an edit of this waiting message; a released one stays released.
 
-        No verdict covered the edited text, so a released message also loses the verdict it kept.
+        No verdict covered the edited text, so a released message also loses the verdict it kept, but not its Steer.
         """
         if not self._active:
             self._stopped_reply = False
@@ -352,7 +412,8 @@ class QueuedHumanNoticeReservation:
         if not self._active:
             return
         # A follow-up a requester split held back releases its notice before it dispatches, and still answers.
-        self._stopped_reply = self.stopped_reply
+        self._stopped_reply = self._source_event_id in self._state.stopped_reply_event_ids
+        self._explicit_steer = self._source_event_id in self._state.requester_steer_event_ids
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
 
@@ -697,6 +758,9 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
+                queued_signal.bind_active_requester(
+                    response_envelope.requester_id if self._should_signal_queued_message(response_envelope) else None,
+                )
                 if mid_turn_gate is not None:
                     mid_turn_gate.on_stop = queued_signal.mark_stopped_reply
                 with (
@@ -708,6 +772,8 @@ class ResponseLifecycleCoordinator:
                         return await locked_operation(target)
                     finally:
                         queued_signal.mid_turn_gate = None
+                        # The Steers it latched keep their reason for their own follow-ups.
+                        queued_signal.bind_active_requester(None)
             finally:
                 await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:
