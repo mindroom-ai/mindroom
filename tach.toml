@@ -3333,6 +3333,7 @@ depends_on = [
     "mindroom.plugin_lifecycle",
     "mindroom.response_activity",
     "mindroom.response_admission",
+    "mindroom.responder_selection",
     "mindroom.room_steward",
     "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
@@ -4744,6 +4745,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_steward"
 depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.responder_selection"
+depends_on = []
 
 [[modules]]
 path = "mindroom.room_modes"

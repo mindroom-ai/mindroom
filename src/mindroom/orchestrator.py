@@ -138,6 +138,7 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
+from .responder_selection import ResponderSelections
 from .room_steward import room_poster, room_steward
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
@@ -327,9 +328,11 @@ class _MultiAgentOrchestrator:
         repr=False,
     )
     agent_reply_membership_sync: AgentReplyMembershipSync = field(init=False, repr=False)
+    responder_selections: ResponderSelections = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the runtime's collaborators around its paths and published config."""
+        self.responder_selections = ResponderSelections(self.event_journal_store)
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
