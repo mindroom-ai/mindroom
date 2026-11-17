@@ -6,7 +6,7 @@ import json
 import re
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, urlsplit
 
 import aiohttp
 import pytest
@@ -837,8 +837,7 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
     """Membership changes in the owner's name: a room by ID or alias, an invitation, a new room."""
     homeserver.answers.update(
         {
-            DIRECTORY_PATH: {"room_id": ROOM, "servers": ["example.com"]},
-            f"{CLIENT}/join/{ROOM}": {"room_id": ROOM},
+            f"{CLIENT}/join/{ALIAS}": {"room_id": ROOM},
             f"{ROOM_PATH}/invite": {},
             f"{CLIENT}/rooms/{OTHER_ROOM}/leave": {},
             CREATE_PATH: {"room_id": "!trip:example.com"},
@@ -859,8 +858,7 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
         _ok("create_room", room_id="!trip:example.com"),
     ]
     assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
-        ("GET", DIRECTORY_PATH, None),
-        ("POST", f"{CLIENT}/join/{ROOM}", {}),
+        ("POST", f"{CLIENT}/join/{ALIAS}", {}),
         ("POST", f"{ROOM_PATH}/invite", {"user_id": BOB}),
         ("POST", f"{CLIENT}/rooms/{OTHER_ROOM}/leave", {}),
         ("POST", CREATE_PATH, {"name": "Trip", "preset": "private_chat", "invite": [BOB]}),
@@ -869,22 +867,41 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
 
 
 @pytest.mark.asyncio
+async def test_join_passes_an_alias_to_the_homeserver_as_it_is(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A join by room ID has no servers to try for a room elsewhere, so the alias itself goes to the homeserver."""
+    homeserver.answers.update(
+        {
+            DIRECTORY_PATH: {"room_id": ROOM, "servers": ["example.com"]},
+            f"{CLIENT}/join/{ALIAS}": {"room_id": OTHER_ROOM},
+        },
+    )
+
+    result = await _write(config, paths, homeserver, action="join", room_id=ALIAS)
+
+    assert result == _ok("join", room_id=OTHER_ROOM)
+    [join] = homeserver.requests
+    assert (join.method, urlsplit(join.url).path) == ("POST", f"{CLIENT}/join/{quote(ALIAS, safe='')}")
+    assert homeserver.requests_to(DIRECTORY_PATH) == []
+
+
+@pytest.mark.asyncio
 async def test_join_still_takes_an_alias_the_owner_is_not_in(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """An alias the lookup cannot resolve goes to the homeserver as it is, whose join resolves it."""
+    """An alias the directory would not resolve goes to the homeserver as it is, whose join resolves it."""
     alias = "#elsewhere:example.org"
     homeserver.answers[f"{CLIENT}/join/{alias}"] = {"room_id": OTHER_ROOM}
 
     result = await _write(config, paths, homeserver, action="join", room_id=alias)
 
     assert result == _ok("join", room_id=OTHER_ROOM)
-    assert [(request.method, request.path) for request in homeserver.requests] == [
-        ("GET", f"{CLIENT}/directory/room/{alias}"),
-        ("POST", f"{CLIENT}/join/{alias}"),
-    ]
+    assert [(request.method, request.path) for request in homeserver.requests] == [("POST", f"{CLIENT}/join/{alias}")]
 
 
 @pytest.mark.asyncio

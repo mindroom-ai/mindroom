@@ -207,17 +207,18 @@ def room_needed(action: str) -> str:
 async def room_named(client: nio.AsyncClient, room: str, runtime_paths: RuntimePaths, *, join: bool = False) -> str:
     """Return the ID of the room ``room`` names: its ID, an alias, or a configured room name.
 
-    Raises ``MatrixRequestError`` for a name of no room, and with the homeserver's answer to an alias it cannot resolve,
-    unless the room is one to ``join``: that alias is returned as it is, and the join's own answer says what came of it.
+    Raises ``MatrixRequestError`` for a name of no room, and with the homeserver's answer to an alias it cannot resolve.
+    An alias of a room to ``join`` is returned as it is, with no lookup: the homeserver's join finds the servers through
+    the alias, which a join by room ID cannot, and its own answer says what came of it.
     """
+    if join and room.startswith("#"):
+        return room
     resolved = await resolve_room_reference(client, room, runtime_paths)
     if isinstance(resolved, str):
         return resolved
     if resolved is None:
         msg = f"No room is known as {room}."
         raise MatrixRequestError(msg)
-    if join:
-        return room
     # nio's error answer holds the errcode and the error, not the HTTP status.
     raise _refusal(None, {"errcode": resolved.status_code, "error": resolved.message})
 
