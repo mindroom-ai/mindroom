@@ -1,22 +1,45 @@
-"""A fake homeserver for the `matrix_user` toolkit's tests: canned JSON per request path, at the client's HTTP session."""
+"""The `matrix_user` toolkit's tests: Alice's personal agent and its turn, and a fake homeserver at the client's session.
+
+The homeserver answers canned JSON per request path.
+"""
 
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
+from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.matrix_user import MatrixUserTools
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
+from mindroom.message_target import MessageTarget
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
+    from contextlib import AbstractContextManager
+    from pathlib import Path
 
     import nio
 
+    from mindroom.constants import RuntimePaths
+
+OWNER = "@alice:example.com"
+# Alice's personal agent.
+AGENT = "mind_alice"
+# The room of the agent's turn.
+ROOM = "!room:example.com"
+TOKEN = "as-user-secret-7f3a9c"  # noqa: S105
 SYNC_PATH = "/_matrix/client/v3/sync"
 # The time of every room event the helpers make, plus its ``minute``.
 NOON = int(datetime(2026, 11, 16, 12, 0, tzinfo=UTC).timestamp() * 1000)
@@ -162,6 +185,8 @@ class HomeserverRequest:
     query: dict[str, list[str]]
     body: object
     headers: dict[str, str]
+    # The bytes of an upload, whose body is a stream rather than JSON text.
+    uploaded: bytes | None = None
 
 
 @dataclass
@@ -178,9 +203,18 @@ class _Response:
     status: int
     headers: dict[str, str]
     content: _Content
+    # What nio reads besides the body.
+    content_type: str = "application/json"
+    content_disposition: None = None
 
     def release(self) -> None:
         return None
+
+    async def json(self) -> object:
+        return json.loads(self.content.body)
+
+    async def text(self) -> str:
+        return self.content.body.decode()
 
 
 @dataclass
@@ -188,7 +222,8 @@ class FakeHomeserver:
     """Stands in for a client's HTTP session and answers each request by its unquoted path.
 
     A path with a list of answers gives them in turn and then repeats the last; a path with an exception raises it, as
-    a failed transport does; a path with none is a 404 `M_NOT_FOUND`.
+    a failed transport does; a path with none is a 404 `M_NOT_FOUND`. A path ending in `*` answers every path it
+    starts that has no answer of its own, such as a send's, which ends in a new transaction ID.
     """
 
     answers: dict[str, Answer | list[Answer] | dict[str, object] | Exception] = field(default_factory=dict)
@@ -233,7 +268,9 @@ class FakeHomeserver:
         split = urlsplit(url)
         path = unquote(split.path)
         body = json.loads(data) if isinstance(data, str) else None
-        self.requests.append(HomeserverRequest(method, url, path, parse_qs(split.query), body, dict(headers)))
+        uploaded = b"".join([chunk async for chunk in data]) if isinstance(data, AsyncIterable) else None
+        query = parse_qs(split.query)
+        self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers), uploaded))
         if self.failure is not None:
             raise self.failure
         answer = self._answer(path)
@@ -242,6 +279,11 @@ class FakeHomeserver:
 
     def _answer(self, path: str) -> Answer:
         answer = self.answers.get(path)
+        if answer is None:
+            answer = next(
+                (found for key, found in self.answers.items() if key.endswith("*") and path.startswith(key[:-1])),
+                None,
+            )
         if answer is None:
             return matrix_error(404, "M_NOT_FOUND", "Not found")
         if isinstance(answer, Exception):
@@ -253,3 +295,69 @@ class FakeHomeserver:
     async def close(self) -> None:
         """Close the session, as the client does when it is done."""
         self.closed = True
+
+
+def owner_runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
+    """The primary runtime's paths, its process environment holding ``env``."""
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "https://matrix.example.com", "MINDROOM_NAMESPACE": "", **env},
+    )
+
+
+def owner_config(paths: RuntimePaths) -> Config:
+    """Alice's personal agent, made from a template that gives it `matrix_user`, with its Matrix account recorded."""
+    entry = PersonalAgentRosterEntry(
+        template="mind",
+        user_id=OWNER,
+        username="alice",
+        agent_name=AGENT,
+        matrix_username=None,
+        user_display_name="Alice",
+        source_room_id="!lobby:example.com",
+    )
+    roster_path = personal_agent_roster_path(paths)
+    roster_path.parent.mkdir(parents=True, exist_ok=True)
+    roster_path.write_text(PersonalAgentRoster(entries=[entry]).model_dump_json(), encoding="utf-8")
+    data = {
+        "models": {"default": {"provider": "openai", "id": "m"}},
+        "personal_agents": {
+            "mind": {
+                "agent": {"display_name": "{user_display_name}'s Mind", "model": "default", "tools": ["matrix_user"]},
+            },
+        },
+    }
+    config = Config.validate_with_runtime(data, paths)
+    persist_entity_accounts(config, paths, usernames={AGENT: "mind_alice"})
+    return config
+
+
+def owner_turn(
+    config: Config,
+    paths: RuntimePaths,
+    requester_id: str = OWNER,
+    agent_name: str = AGENT,
+    attachment_ids: tuple[str, ...] = (),
+) -> AbstractContextManager[None]:
+    """Enter a chat turn in ``ROOM`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
+
+    The turn holds the attachments ``attachment_ids`` name.
+    """
+    context = make_test_tool_runtime_context(
+        agent_name=agent_name,
+        target=MessageTarget.resolve(ROOM, None, "$event"),
+        requester_id=requester_id,
+        client=MagicMock(),
+        config=config,
+        runtime_paths=paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        attachment_ids=attachment_ids,
+    )
+    return tool_runtime_context(context)
+
+
+def owner_toolkit(config: Config, paths: RuntimePaths, agent_name: str = AGENT) -> MatrixUserTools:
+    """The toolkit as built for ``agent_name``."""
+    return MatrixUserTools(runtime_paths=paths, runtime_config=config, agent_name=agent_name)

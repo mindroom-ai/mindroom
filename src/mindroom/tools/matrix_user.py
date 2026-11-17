@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     icon="UserRound",
     icon_color="text-blue-500",
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user",
-    function_names=("matrix_user_read",),
+    function_names=("matrix_user_read", "matrix_user_write"),
     # The application-service token lets this toolkit act as anyone on the homeserver, so only the primary reads it.
     requires_primary_runtime=True,
     requires_room_context=False,

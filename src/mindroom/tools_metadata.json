@@ -330,7 +330,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "matrix_user_read"
+        "matrix_user_read",
+        "matrix_user_write"
       ],
       "helper_text": null,
       "icon": "UserRound",

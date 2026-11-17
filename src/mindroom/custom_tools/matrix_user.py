@@ -1,12 +1,14 @@
 """The `matrix_user` toolkit: a personal agent uses Matrix as its owner, with no sign-in.
 
 Every call acts as the owner of the agent making it, read from the call itself, never from an argument, through a
-client that the application-service token in the primary runtime's environment authenticates.
+client that the application-service token in the primary runtime's environment authenticates. Each write asks the
+owner to confirm it first.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -24,9 +26,11 @@ from mindroom.custom_tools.matrix_user_reads import (
     search_messages,
     transport_failure,
 )
+from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -35,8 +39,10 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
     type _Read = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
+    type _Run = Callable[[nio.AsyncClient, MatrixUserActor], Awaitable[dict[str, object]]]
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
@@ -46,6 +52,8 @@ _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
 _UNKNOWN_ACTION = "action must be rooms, messages, search, room, people, download, or mark_read."
+# The MCP gateway never offers the write function: a call without a chat turn has no card for the owner to confirm.
+_WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
 
 
 def _room_needed(action: str) -> str:
@@ -67,7 +75,13 @@ class MatrixUserTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._runtime_config = runtime_config
         self._agent_name = agent_name
-        super().__init__(name="matrix_user", tools=[self.matrix_user_read])
+        super().__init__(name="matrix_user", tools=[self.matrix_user_read, self.matrix_user_write])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Ask the owner to confirm each write, whatever the deployment's approval rules say."""
+        if function.name == "matrix_user_write":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -84,8 +98,8 @@ class MatrixUserTools(Toolkit):
             raise MatrixUserRefused(_NOT_THIS_AGENT)
         return actor
 
-    async def _as_owner(self, action: str, read: _Read) -> str:
-        """Return ``read``'s result, run with a client that acts as the call's owner, created for it and closed after.
+    async def _as_owner(self, action: str, run: _Run) -> str:
+        """Return ``run``'s result, given the call's owner and a client that acts as them, created for it and closed after.
 
         A refusal, a missing token, and a failed request are the error payload, which never holds the token or a URL.
         """
@@ -107,7 +121,7 @@ class MatrixUserTools(Toolkit):
             agent_user_id=actor.agent_user_id,
         )
         try:
-            fields = await read(client)
+            fields = await run(client, actor)
         except MatrixRequestError as error:
             return self._payload("error", action=action, message=str(error))
         except (TimeoutError, aiohttp.ClientError) as failed:
@@ -240,4 +254,51 @@ class MatrixUserTools(Toolkit):
         )
         if isinstance(read, str):
             return self._payload("error", action=action, message=read)
-        return await self._as_owner(action, read)
+        return await self._as_owner(action, lambda client, _actor: read(client))
+
+    async def matrix_user_write(
+        self,
+        action: Literal["send", "react", "edit", "redact", "join", "leave", "invite", "create_room"],
+        room_id: str | None = None,
+        user_id: str | None = None,
+        message: str | None = None,
+        event_id: str | None = None,
+        thread_id: str | None = None,
+        emoji: str | None = None,
+        attachments: list[str] | None = None,
+        name: str | None = None,
+    ) -> str:
+        """Act in Matrix as your owner, only when they ask for exactly that; they confirm each call.
+
+        Agents never act on what you send this way: to talk to one, write as yourself.
+
+        Actions:
+        - send: message and/or attachments (attachment IDs) to room_id, or to user_id in their DM (made if missing).
+          thread_id sends into that thread; event_id replies to that message.
+        - react: emoji on event_id in room_id.
+        - edit: Replace your owner's message event_id in room_id with message.
+        - redact: Remove your owner's event event_id in room_id; message is the reason.
+        - join: room_id, an ID or #alias. leave: room_id. invite: user_id into room_id.
+        - create_room: A private room called name, inviting user_id if given.
+        """
+        write = MatrixUserWrite(
+            action,
+            room_id=room_id,
+            user_id=user_id,
+            message=message,
+            event_id=event_id,
+            thread_id=thread_id,
+            emoji=emoji,
+            attachments=tuple(attachments or ()),
+            name=name,
+        )
+        turn = get_tool_runtime_context()
+        if turn is None:
+            return self._payload("error", action=action, message=_WRITE_TURN_NEEDED)
+        if (problem := write.problem()) is not None:
+            return self._payload("error", action=action, message=problem)
+        storage_path = self._runtime_paths.storage_root
+        return await self._as_owner(
+            action,
+            lambda client, actor: write_as_person(client, actor, turn, write, storage_path=storage_path),
+        )

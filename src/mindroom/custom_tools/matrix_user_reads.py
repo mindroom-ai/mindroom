@@ -45,10 +45,13 @@ __all__ = [
     "download_file",
     "mark_read",
     "matrix_json",
+    "optional_json",
+    "read_event",
     "read_messages",
     "read_people",
     "read_room",
     "read_rooms",
+    "room_encrypted",
     "search_messages",
     "transport_failure",
 ]
@@ -185,7 +188,7 @@ def transport_failure(failed: TimeoutError | aiohttp.ClientError) -> str:
     return _TIMED_OUT if isinstance(failed, TimeoutError) else _UNREACHABLE
 
 
-async def _optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
+async def optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
     """Return the answer to a GET of something that may not exist, None only when the homeserver says it does not."""
     try:
         return await matrix_json(client, "GET", path)
@@ -193,6 +196,14 @@ async def _optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] |
         if error.status == HTTPStatus.NOT_FOUND and error.errcode == "M_NOT_FOUND":
             return None
         raise
+
+
+async def room_encrypted(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether a room is encrypted: it is not only when the homeserver says the room has no encryption state.
+
+    Any other answer that is not the state raises, as ``matrix_json`` does.
+    """
+    return await optional_json(client, f"/rooms/{quote(room_id, safe='')}/state/m.room.encryption") is not None
 
 
 def _clamped(limit: int | None, default: int, maximum: int) -> int:
@@ -380,11 +391,11 @@ async def read_room(client: nio.AsyncClient, room_id: str, *, limit: int | None)
     """
     room = quote(room_id, safe="")
     joined = _mapping((await matrix_json(client, "GET", f"/rooms/{room}/joined_members")).get("joined"))
-    name = _mapping(await _optional_json(client, f"/rooms/{room}/state/m.room.name")).get("name")
-    topic = _mapping(await _optional_json(client, f"/rooms/{room}/state/m.room.topic")).get("topic")
-    encryption = await _optional_json(client, f"/rooms/{room}/state/m.room.encryption")
+    name = _mapping(await optional_json(client, f"/rooms/{room}/state/m.room.name")).get("name")
+    topic = _mapping(await optional_json(client, f"/rooms/{room}/state/m.room.topic")).get("topic")
+    encrypted = await room_encrypted(client, room_id)
     person = quote(client.user_id, safe="")
-    direct = _mapping(await _optional_json(client, f"/user/{person}/account_data/m.direct"))
+    direct = _mapping(await optional_json(client, f"/user/{person}/account_data/m.direct"))
     members = [
         _line(user_id, _text(_mapping(member).get("display_name"))) for user_id, member in sorted(joined.items())
     ]
@@ -392,7 +403,7 @@ async def read_room(client: nio.AsyncClient, room_id: str, *, limit: int | None)
         "room_id": room_id,
         "name": _text(name),
         "topic": topic if isinstance(topic, str) else None,
-        "encrypted": encryption is not None,
+        "encrypted": encrypted,
         "dm": room_id in _direct_partners(direct),
         "joined_members": len(joined),
         "members": members[: _clamped(limit, _MEMBERS_LIMIT, _MAX_MEMBERS_LIMIT)],
@@ -690,7 +701,7 @@ async def search_messages(
     return _messages_page(list(lines.values()), found.get("next_batch"))
 
 
-async def _room_event(client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, Any]:
+async def read_event(client: nio.AsyncClient, room_id: str, event_id: str) -> dict[str, Any]:
     """Return the event ``event_id`` of the room ``room_id``, refusing one that says it is in another room.
 
     A homeserver finds an event under a room only when the room holds it; the event's own room is checked too, so a
@@ -725,7 +736,7 @@ async def download_file(
 
     The download stops at the attachment store's size cap. Returns the attachment's ID, name, type, and size.
     """
-    event = await _room_event(client, room_id, event_id)
+    event = await read_event(client, room_id, event_id)
     if event.get("type") == "m.room.encrypted":
         raise MatrixRequestError(_ENCRYPTED)
     content, media = _content(event), parse_matrix_media_event_source(event)
@@ -774,7 +785,7 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
         if not isinstance(read_up_to, str):
             raise MatrixRequestError(_NOTHING_TO_MARK)
     else:
-        await _room_event(client, room_id, event_id)
+        await read_event(client, room_id, event_id)
         read_up_to = event_id
     markers = {"m.fully_read": read_up_to, "m.read.private": read_up_to}
     await matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)

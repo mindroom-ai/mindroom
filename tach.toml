@@ -2552,14 +2552,28 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.custom_tools.matrix_user_authority",
     "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.custom_tools.matrix_user_writes",
     "mindroom.matrix.user_masquerade",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_user_reads"
 depends_on = ["mindroom.bounded_bytes", "mindroom.constants", "mindroom.matrix.visible_body"]
+visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user_writes"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.guarded_rooms",
+    "mindroom.tool_system.runtime_context",
+]
 visibility = ["mindroom.custom_tools.matrix_user"]
 
 [[modules]]
@@ -2580,6 +2594,7 @@ visibility = [
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.matrix_user_writes",
 ]
 
 [[modules]]
@@ -4078,6 +4093,7 @@ path = "mindroom.matrix.guarded_rooms"
 depends_on = []
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.custom_tools.matrix_user_writes",
     "mindroom.ingress_validation",
     "mindroom.matrix.client_delivery",
     "mindroom.response_runner",
@@ -4125,6 +4141,7 @@ visibility = [
     "mindroom.interactive",
     "mindroom.stop",
     "mindroom.contacts.flow",
+    "mindroom.custom_tools.matrix_user_writes",
 ]
 
 [[modules]]

@@ -17,7 +17,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Read Matrix as a personal agent's owner: their rooms and DMs, messages and threads, search, files, a room's members, and people, and mark rooms read.
+- [`matrix_user`] - Use Matrix as a personal agent's owner: read their rooms and DMs, messages and threads, search, files, a room's members, and people, mark rooms read, and, with the owner's confirmation each time, send, react, edit, delete, and join, leave, invite, or create rooms as them.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -26,7 +26,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-Except [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
+Except the reads of [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
@@ -305,8 +305,8 @@ matrix_api(
 
 ## [`matrix_user`]
 
-`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in.
-It acts only for the agent's owner, in a chat with the agent or through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they confirm it.
+It acts only for the agent's owner, in a chat with the agent or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
 
 `matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
 
@@ -321,6 +321,21 @@ It acts only for the agent's owner, in a chat with the agent or through the [MCP
 | `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 Messages in encrypted rooms are not readable: they show as `[encrypted, not readable]`, and search does not find them.
+
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachments=None, name=None)` acts as the owner, and each call shows the owner an approval card first, whatever the [approval rules](https://docs.mindroom.chat/tool-approval/) say, so the MCP gateway does not offer it.
+
+| Action | Does |
+|--------|------|
+| `send` | Sends `message`, the conversation's `attachments` (attachment IDs), or both into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none; `thread_id` sends into that thread, and `event_id` replies to that message |
+| `react` | Reacts to the message `event_id` in `room_id` with `emoji` |
+| `edit` | Replaces the text of the owner's own message `event_id` in `room_id` with `message` |
+| `redact` | Deletes the owner's own message `event_id` in `room_id`, with `message` as the reason |
+| `join`, `leave` | Joins `room_id`, a room ID or alias, or leaves it |
+| `invite` | Invites `user_id` into `room_id` |
+| `create_room` | Creates a private room called `name`, inviting `user_id` if given |
+
+What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
+A message sent this way cannot start with `!` or `\`, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
 Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
