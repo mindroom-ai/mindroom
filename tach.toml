@@ -8348,6 +8348,7 @@ visibility = [
 [[modules]]
 path = "mindroom.delegation.recovery"
 depends_on = [
+    "mindroom.delegation.cost",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.delegation.background",

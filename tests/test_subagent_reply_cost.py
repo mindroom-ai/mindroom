@@ -20,8 +20,8 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY, subagent_sessions_dir
-from mindroom.delegation.cost import resumed_subagent_cost
-from mindroom.delegation.recovery import interrupt_child
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
+from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.providers.identity import model_identity
@@ -465,6 +465,52 @@ async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
         "usd": leader_usd,
         "subagents_usd": f"{mid_usd:g}",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_child_cancelled_in_its_parent_s_turn_keeps_its_own_subagent_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a paused child saves its run in the parent's context, which must not stamp the parent's cost on it."""
+    config = _approval_config("sibling_tool")
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    delegate = calls(
+        tool_call("run_subagent", "delegate", agent_name="mid", task="Work"),
+        tool_call("run_subagent", "sibling", agent_name="leaf", task="Work"),
+        metrics=_LEADER_REQUEST,
+    )
+    cheap = model_identity(config.models["cheap"])
+    child_add = calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)
+    ScriptedAgents(
+        {
+            "leader": ScriptedModel([delegate], identity=model_identity(config.models["default"])),
+            "mid": ScriptedModel([answer("Mid answer", _CHILD_REQUEST)], identity=cheap),
+            "leaf": ScriptedModel([child_add], identity=cheap),
+        },
+    ).install(monkeypatch)
+    paused = await respond("leader", "Delegate", config=config, runtime_paths=paths, identity=_IDENTITY, run_id="p")
+    assert isinstance(paused, PausedAttempt), paused
+
+    def leaf() -> DelegationChild:
+        return next(
+            child
+            for child in (
+                DelegationChild.from_dict(json.loads(path.read_text())["child"])
+                for path in subagent_sessions_dir(paths).glob("*.json")
+            )
+            if child.child_agent_name == "leaf"
+        )
+
+    before = leaf()
+    with receiving_subagent_cost(SubagentCost(0.5)):
+        await interrupt_child(before, config=config, runtime_paths=paths, reason="Stopped")
+
+    run = await read_child_run(before, config, paths)
+    assert run is not None
+    assert (run.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) is None
+    assert leaf().cost_usd == before.cost_usd
 
 
 @pytest.mark.asyncio

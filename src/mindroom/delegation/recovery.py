@@ -7,6 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import (
@@ -190,7 +191,9 @@ async def interrupt_child(
             stand_in = new_scope_session(session_id=child.session_id, scope=child_scope(child))
             storage.save_run(stand_in, response, record_usage=False)
 
-        await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
+        # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.
+        with receiving_subagent_cost(SubagentCost()):
+            await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
 
 
