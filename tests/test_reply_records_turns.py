@@ -42,7 +42,13 @@ from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, ProgressPermission, format_stream_error_note
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.streaming import (
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    ProgressPermission,
+    format_stream_error_note,
+)
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
@@ -1795,6 +1801,36 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         # The replay streams below what the restart stopped, though its requester is away.
         assert _sent_statuses(restarted) == ["streaming", "completed"]
         assert not await restarted._reply_runtime.store.is_pending("$event")
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_config_change(tmp_path: Path) -> None:
+    """A config reload replaces only the agent, so its successor's note says so rather than blaming a service restart."""
+    old = await _streaming_bot(tmp_path)
+    response = await _blocked_stream(old)
+    await old.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._take_over_replies()
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "The complete report."
+
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(restarted._response_runner).generate_response(
+                _plain_request(_target()),
+            )
+
+        note = CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE
+        assert _sent_bodies(restarted)[-1] == f"Partial\n\n{note}\n\nThe complete report."
     finally:
         response.cancel()
         with suppress(asyncio.CancelledError):

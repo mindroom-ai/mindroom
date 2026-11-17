@@ -287,6 +287,15 @@ class ClaimRefused(Enum):
 # its turn is forgotten.
 _FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 
+# Bot instances this process replaced to apply a config change. The process
+# kept running, so the notes of the replies they left name the config change.
+_REPLACED_FOR_CONFIG_CHANGE: set[str] = set()
+
+
+def replaced_for_config_change(generation: str | None) -> bool:
+    """Return whether this process replaced the bot instance ``generation`` to apply a config change."""
+    return generation in _REPLACED_FOR_CONFIG_CHANGE
+
 
 @dataclass
 class ReplyRuntime:
@@ -302,6 +311,8 @@ class ReplyRuntime:
     reply_stopped: Callable[[str], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
+    # Whether the instance whose replies this one took over was replaced to apply a config change.
+    took_over_config_change: bool = field(default=False, init=False)
     # Sources whose claim waited until the reply could be claimed, by reply.
     _waiting_claims: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
         default_factory=dict,
@@ -482,6 +493,10 @@ class ReplyRuntime:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
         await self.store.replies.write_generation(self.generation)
 
+    def retire_for_config_change(self) -> None:
+        """Record that a config reload replaces this instance, for the one taking over its replies."""
+        _REPLACED_FOR_CONFIG_CHANGE.add(self.generation)
+
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
@@ -489,6 +504,7 @@ class ReplyRuntime:
         sources are still pending, and the notes this owes are delivered by the
         outbox recovery after each room syncs.
         """
+        self.took_over_config_change = replaced_for_config_change(await self.store.replies.active_generation())
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
@@ -727,10 +743,14 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
     if span.kind is rl.SpanKind.APPROVAL_RESUME:
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=continued_by(canonical, span.span_id))
     # A replay continues below what the stopped attempt may have shown: its work, then the restart note.
-    restarted = after_restart(shown)
+    restarted = after_restart(shown, config_change=runtime.took_over_config_change)
     work = restarted.segments[0] if restarted.segments else None
     base = restarted if work is not None else replace(empty, segments=())
-    resumed = None if work is None else UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
+    resumed = (
+        None
+        if work is None
+        else UnfinishedStreamedReply(work.text, work.tool_trace, restart_note=restarted.segments[-1].text)
+    )
     return SpanHandle(
         runtime=runtime,
         span=span,

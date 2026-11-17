@@ -1731,6 +1731,8 @@ class AgentBot:
         """Stop the agent bot."""
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
+        elif shutdown_intent.stop_reason == "restart":
+            self._reply_runtime.retire_for_config_change()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
