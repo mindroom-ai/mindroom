@@ -477,7 +477,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
     for room_id in candidates:
         if await _only_the_two(client, room_id, person, them):
             if room_id not in listed:
-                await _record_direct_room(client, direct_path, {**direct, them: [*listed, room_id]}, person, them)
+                await _record_direct_room(client, direct_path, person, them, room_id)
             return room_id, False
     created = await matrix_json(
         client,
@@ -487,21 +487,28 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
     )
     room_id = _created_room(created)
     _UNRECORDED_DIRECT_ROOMS[(person, them)] = room_id
-    await _record_direct_room(client, direct_path, {**direct, them: [*listed, room_id]}, person, them)
+    await _record_direct_room(client, direct_path, person, them, room_id)
     return room_id, True
 
 
 async def _record_direct_room(
     client: nio.AsyncClient,
     direct_path: str,
-    direct: dict[str, Any],
     person: str,
     them: str,
+    room_id: str,
 ) -> None:
-    """Write ``direct`` as the person's `m.direct`, in which the last room listed for ``them`` is their new DM."""
-    room_id = direct[them][-1]
+    """Add ``room_id`` to the person's `m.direct` list for ``them``, as it is when this writes.
+
+    `m.direct` is written as a whole, and the person's own client may have changed it since it was first read, so it is
+    read again just before the write and that copy, not the early one, is written back.
+    """
     try:
-        await matrix_json(client, "PUT", direct_path, direct)
+        fresh = await optional_json(client, direct_path) or {}
+        listed = fresh.get(them)
+        listed = listed if isinstance(listed, list) else []
+        if room_id not in listed:
+            await matrix_json(client, "PUT", direct_path, {**fresh, them: [*listed, room_id]})
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
         msg = (
             f"{_made_dm(room_id, them)}, but could not record it as one ({request_failure(error).rstrip('.')}). "

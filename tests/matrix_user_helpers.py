@@ -226,7 +226,9 @@ class FakeHomeserver:
     starts that has no answer of its own, such as a send's, which ends in a new transaction ID.
     """
 
-    answers: dict[str, Answer | list[Answer] | dict[str, object] | Exception] = field(default_factory=dict)
+    answers: dict[str, Answer | list[Answer | dict[str, object]] | dict[str, object] | Exception] = field(
+        default_factory=dict,
+    )
     # Raised for each request instead of an answer, as a failed transport raises it.
     failure: Exception | None = None
     requests: list[HomeserverRequest] = field(default_factory=list)
@@ -289,7 +291,7 @@ class FakeHomeserver:
         if isinstance(answer, Exception):
             raise answer
         if isinstance(answer, list):
-            return answer.pop(0) if len(answer) > 1 else answer[0]
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
         return answer if isinstance(answer, Answer) else Answer(answer)
 
     async def close(self) -> None:

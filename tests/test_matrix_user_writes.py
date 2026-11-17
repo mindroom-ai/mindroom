@@ -476,10 +476,13 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     """A DM that could not be recorded sends nothing and says which room to send to; the next send to them uses it."""
     homeserver.answers.update(
         {
-            # The person has no DMs yet; the first record fails, the second works.
+            # The person has no DMs yet. Each send reads `m.direct`, then reads it again before recording: the first
+            # record fails, the second works.
             DIRECT_PATH: [
                 matrix_error(404, "M_NOT_FOUND", "No m.direct"),
+                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
                 matrix_error(500, "M_UNKNOWN", "Database unavailable"),
+                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
                 matrix_error(404, "M_NOT_FOUND", "No m.direct"),
                 Answer({}),
             ],
@@ -502,6 +505,59 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     [_, recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
     assert recorded.body == {BOB: [NEW_DM]}
     assert len(_sent(homeserver, NEW_DM)) == 1
+
+
+@pytest.mark.asyncio
+async def test_recording_a_new_dm_keeps_what_the_owner_changed_meanwhile(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """`m.direct` is written whole, so the copy written is the one read just before, not the one read at the start."""
+    dave = {"@dave:example.com": ["!d:example.com"]}
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: [
+                {CAROL: ["!c:example.com"]},
+                {CAROL: ["!c:example.com"], **dave},
+            ],
+            CREATE_PATH: {"room_id": NEW_DM},
+        },
+    )
+
+    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    assert result == _ok("send", room_id=NEW_DM, event_id="$dm")
+    [recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
+    assert recorded.body == {CAROL: ["!c:example.com"], **dave, BOB: [NEW_DM]}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_second_read_records_nothing_and_names_the_room(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """When `m.direct` cannot be read again before the write, the early copy is not written in its place."""
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: [
+                {CAROL: ["!c:example.com"]},
+                matrix_error(500, "M_UNKNOWN", "Database unavailable"),
+            ],
+            CREATE_PATH: {"room_id": NEW_DM},
+        },
+    )
+
+    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    assert result == _error(
+        "send",
+        f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
+        "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
+        f"Nothing was sent; to send there, use room_id {NEW_DM}.",
+    )
+    assert [request for request in _changes(homeserver) if request.path == DIRECT_PATH] == []
 
 
 @pytest.mark.asyncio
