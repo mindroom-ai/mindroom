@@ -2435,6 +2435,55 @@ async def test_requester_steer_releases_wait_during_an_unresolved_auto_judgment(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [False, True], ids=["cannot_wait", "can_wait"])
+async def test_a_judgment_that_absorbs_its_steer_cancellation_leaves_no_evidence(*, verdict: bool) -> None:
+    """A judgment the requester's Steer cancels commits nothing, even when its evaluator absorbs the cancellation.
+
+    An HTTP client whose own timeout fires with the cancellation can take it for that timeout and still answer.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judging, absorbed = asyncio.Event(), asyncio.Event()
+    judgments = 0
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        nonlocal judgments
+        judgments += 1
+        if judgments > 1:
+            return False
+        judging.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            absorbed.set()
+        return verdict
+
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.mid_turn_gate = gate
+    queue.add_waiting_human_message("$bob-auto", text="Stop, wrong file", requester_id=_OTHER)
+    waiter = asyncio.create_task(queue.wait())
+    await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+    queue.add_waiting_human_message("$alice-steer", text="Use mine", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert absorbed.is_set()
+    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    gate.report_stop()
+    assert queue.stopped_reply_event_ids == set()
+    steer = QueuedHumanNoticeReservation(queue, "$alice-steer")
+    steer.release()
+    assert steer.stopped_reply
+    # The judge is asked again, and its "cannot wait" names Bob's message, which no cancelled verdict let wait.
+    assert await _wraps_up_after_tool_batch(queue)
+    assert judgments == 2
+    assert queue.stopped_reply_event_ids == {"$bob-auto"}
+
+
+@pytest.mark.asyncio
 async def test_other_requesters_steer_uses_auto_wait_policy() -> None:
     """Another person's Steer is weighed as Auto: a judge that lets it wait leaves the wait blocked, with no bypass."""
     queue = _QueuedMessageState()

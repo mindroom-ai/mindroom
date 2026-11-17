@@ -221,6 +221,9 @@ class MidTurnGate:
                     else:
                         outcome = _verdict_outcome(verdict)
                         reason = "no_answer" if verdict is None else None
+                    # An evaluator can absorb its cancellation and still answer; a cancelled judgment commits nothing.
+                    if (task := asyncio.current_task()) is not None and task.cancelling():
+                        raise asyncio.CancelledError
             if reason is not None:
                 # Unjudged, the reply wraps up, unless only other people's messages to nobody in particular wait.
                 if judge and all(self._between_people(message) for message in pending):
