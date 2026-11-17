@@ -478,7 +478,11 @@ class ChatUITools(Toolkit):
         until your CSS sets them, and the theme variables are not defined. Set
         ``width`` to the viewport the design targets, such as 1440 for desktop or 390
         for a phone: the page renders at that width and is scaled down to fit the
-        conversation. The panel shows raw pages too, at the panel's own width.
+        conversation. The layout rules above do not apply to such a preview: a page
+        with ``raw`` or ``width`` shows in a browser window at most 16:10 of its width
+        tall (568 to 1080px), ``vh`` units resolve against that window as in a
+        browser, and taller content scrolls inside it. The panel shows raw pages too,
+        at the panel's own width.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
         and JavaScript. Fetch, XHR, and WebSocket requests are always blocked.
