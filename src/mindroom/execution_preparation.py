@@ -264,9 +264,10 @@ def _context_message_from_visible_message(
         body=body,
         event_id=event_id,
         display_name=member_display_names.get(sender),
+        sent_by_you=own,
     )
     if own:
-        # The agent's own message is a thread message from its Matrix ID, never an assistant turn: providers merge
+        # The agent's own message is a thread message marked as sent by it, never an assistant turn: providers merge
         # that into the answer before it, and the model then ends its answers with what it sent.
         return own_thread_message(content, media)
     return Message(role="user", content=content, provider_data=media)

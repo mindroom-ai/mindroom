@@ -12,6 +12,7 @@ from mindroom.constants import (
     PRIOR_USAGE_RUN_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
 )
+from mindroom.history.conversation_text import spoken_message
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
 from mindroom.history.request_messages import filter_tool_calls, replayable_messages
 from mindroom.llm.messages import stable_serialize
@@ -200,12 +201,13 @@ def _serialize_run_excerpt(
 def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
     """Return the run's messages a summary reads, windowed as replay windows them; the stored objects, not copies.
 
-    Turn context (``add_to_agent_memory=False``) replays but is not conversation, so a summary leaves it out.
+    Turn context (``add_to_agent_memory=False``) replays but is not conversation, so a summary leaves it out. The
+    agent's own thread message, a tagged user message in a request, is the one copy: the assistant's words.
     """
     messages = [message for message in replayable_messages([run]) if message.add_to_agent_memory]
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
-    return messages
+    return [spoken_message(message) for message in messages]
 
 
 def _excerpt_blocks(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:

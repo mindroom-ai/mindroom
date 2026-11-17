@@ -178,10 +178,16 @@ def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Messa
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["said", "reply", "runtime", "reply"]
 
 
-@pytest.mark.parametrize("metadata", [{}, {TURN_INTENT_RUN_METADATA_KEY: "job_follow_up"}], ids=["message", "follow-up"])
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {TURN_INTENT_RUN_METADATA_KEY: "job_follow_up"}],
+    ids=["message", "follow-up"],
+)
 def test_the_agents_own_thread_message_is_its_reply(metadata: dict[str, object]) -> None:
     """A turn's input holds the agent's earlier thread messages as tagged user messages; they stay the agent's words."""
-    own = own_thread_message(render_msg_tag(sender="@mindroom_mind:x", body="Here is the mockup.", event_id="$sent"))
+    own = own_thread_message(
+        render_msg_tag(sender="@mindroom_mind:x", body="Here is the mockup.", event_id="$sent", sent_by_you=True),
+    )
     run = _run(
         Message.from_dict(own.to_dict()),
         Message(role="user", content=render_msg_tag(sender="@alice:x", body="Did it work?")),
@@ -191,7 +197,11 @@ def test_the_agents_own_thread_message_is_its_reply(metadata: dict[str, object])
 
     asked = [] if metadata else [("said", "@alice:x", "Did it work?")]
     assert _kinds(run) == [("reply", None, "Here is the mockup."), *asked, ("reply", None, "Yes.")]
-    assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["reply", "runtime" if metadata else "said", "reply"]
+    assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == [
+        "reply",
+        "runtime" if metadata else "said",
+        "reply",
+    ]
 
 
 @pytest.mark.parametrize("agent_work", [False, True], ids=["conversation", "agent-work"])

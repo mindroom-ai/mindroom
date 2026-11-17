@@ -9,7 +9,7 @@ the agent's own thread messages its input carries (``own_thread_message``).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_loop.tools import is_media_follow_up
@@ -66,18 +66,29 @@ def _is_thread_context_note(message: Message) -> bool:
 def own_thread_message(content: str, provider_data: Mapping[str, object] | None = None) -> Message:
     """Return a user message holding ``content``, the ``<msg>`` tag of a thread message the agent itself sent.
 
-    The model reads its own earlier message as a thread message from its Matrix ID, never as an assistant turn:
+    The model reads its own earlier message as a thread message marked ``sent_by_you``, never as an assistant turn:
     providers merge consecutive assistant turns, so one would read as the end of the answer before it, and the model
-    then ends its answers the same way. A reader of stored turns still hears the agent (``own_thread_message_text``).
+    then ends its answers the same way. A reader of stored turns still hears the agent (``spoken_message``).
     """
     return Message(role="user", content=content, provider_data={**(provider_data or {}), _OWN_THREAD_MESSAGE_KEY: True})
 
 
+def is_own_thread_message(message: Message) -> bool:
+    """Return whether ``own_thread_message`` built ``message``, which is then no prompt of its turn."""
+    return (message.provider_data or {}).get(_OWN_THREAD_MESSAGE_KEY) is True and isinstance(message.content, str)
+
+
 def own_thread_message_text(message: Message) -> str | None:
     """Return what the agent said in a message ``own_thread_message`` built, or None for any other message."""
-    if (message.provider_data or {}).get(_OWN_THREAD_MESSAGE_KEY) is not True or not isinstance(message.content, str):
+    if not is_own_thread_message(message):
         return None
-    return "\n".join(body for _, _, body in parse_msg_tags(message.content, default_sender=""))
+    return "\n".join(body for _, _, body in parse_msg_tags(str(message.content), default_sender=""))
+
+
+def spoken_message(message: Message) -> Message:
+    """Return ``message`` as a reader of the conversation hears it: the agent's own thread message as its assistant text."""
+    own = own_thread_message_text(message)
+    return message if own is None else replace(message, role="assistant", content=own)
 
 
 def one_line(text: str) -> str:

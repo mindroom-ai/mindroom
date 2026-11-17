@@ -1605,6 +1605,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         sender="@mindroom_team:localhost",
         body='[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]',
         event_id="$voice",
+        sent_by_you=True,
     )
 
 
@@ -1670,6 +1671,7 @@ def test_fallback_thread_history_names_agent_media_by_attachment_id(tmp_path: Pa
         sender="@mindroom_team:localhost",
         body='here is the report\n[attachments: att_report (file, "report.pdf")]',
         event_id="$agent-file",
+        sent_by_you=True,
     )
     assert own_thread_message_text(messages[0]) == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
@@ -2048,6 +2050,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         sender="@mindroom_code:localhost",
         body="@mindroom_missing_agent Please investigate this",
         event_id="$spawn-root",
+        sent_by_you=True,
     )
     assert own_thread_message_text(messages[0]) == "@mindroom_missing_agent Please investigate this"
 
@@ -2196,7 +2199,15 @@ def test_fallback_thread_history_keeps_hook_output_out_of_the_agents_own_message
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [
-        ("user", render_msg_tag(sender="@mindroom_code:localhost", body="Started a deep_research job.", event_id="$answer")),
+        (
+            "user",
+            render_msg_tag(
+                sender="@mindroom_code:localhost",
+                body="Started a deep_research job.",
+                event_id="$answer",
+                sent_by_you=True,
+            ),
+        ),
         ("user", _hook_context("deep_research done · confident · 2 rounds", "$done")),
     ]
     assert [own_thread_message_text(message) for message in messages[:2]] == ["Started a deep_research job.", None]

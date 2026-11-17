@@ -582,12 +582,20 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
     await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
 
-    # Each thread message is capped at 200 characters; the team's own reply is a thread message from its Matrix ID,
-    # never an assistant turn, which a provider would merge into the answer before it.
+    # Each thread message is capped at 200 characters; the team's own reply is a thread message marked as sent by it,
+    # which needs no Matrix ID in the leader's prompt, never an assistant turn a provider would merge into an answer.
     assert _leader_turn_messages(team)[:-1] == [
         ("user", render_msg_tag(sender="@alice:localhost", body=f"{'x' * 199}…", event_id="$event-1")),
         ("user", render_msg_tag(sender="@bob:localhost", body="y" * 200, event_id="$event-2")),
-        ("user", render_msg_tag(sender="@mindroom_team:localhost", body="Previous team reply", event_id="$event-3")),
+        (
+            "user",
+            render_msg_tag(
+                sender="@mindroom_team:localhost",
+                body="Previous team reply",
+                event_id="$event-3",
+                sent_by_you=True,
+            ),
+        ),
     ]
 
 

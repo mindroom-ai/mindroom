@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.provider import ModelRequest
-    from mindroom.matrix.visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _ROOM = "!room:localhost"
 _THREAD = "$thread"
@@ -163,7 +163,13 @@ def _own_image(config: Config, agent_id: str, event_id: str) -> ResolvedVisibleM
     )
     assert record is not None
     content = {"msgtype": "m.image", "body": "mockup.png", ATTACHMENT_IDS_KEY: ["att_mockup"]}
-    return make_visible_message(sender=agent_id, body="mockup.png", event_id=event_id, content=content, thread_id=_THREAD)
+    return make_visible_message(
+        sender=agent_id,
+        body="mockup.png",
+        event_id=event_id,
+        content=content,
+        thread_id=_THREAD,
+    )
 
 
 def _sent(request: ModelRequest) -> list[tuple[str, str | None]]:
@@ -215,10 +221,13 @@ async def test_what_a_tool_call_posted_is_no_part_of_the_answer_the_next_turn_re
     assert sent[1:4] == [("assistant", None), ("tool", "$sent-1 $sent-2"), ("assistant", "Posted it.")]
     # Claude reads the answer alone as the last assistant turn, so nothing the model wrote ends with what it posted.
     assert _assistant_wire_text(model.requests[-1]) == ["", "Posted it."]
-    # The agent still reads both as its own messages, by its Matrix ID, with the image's attachment ID to act on.
+    # The agent still reads both as its own messages, marked as sent by it, with the image's attachment ID to act on.
     caption, image = (content or "" for _, content in sent[-3:-1])
-    assert caption == f'<msg event_id="$sent-1" from="{agent_id}"><![CDATA[{_CAPTION}]]></msg>'
-    assert image == f'<msg event_id="$sent-2" from="{agent_id}"><![CDATA[mockup.png\n{_ANNOTATION}]]></msg>'
+    assert caption == f'<msg event_id="$sent-1" from="{agent_id}" sent_by_you="true"><![CDATA[{_CAPTION}]]></msg>'
+    assert (
+        image
+        == f'<msg event_id="$sent-2" from="{agent_id}" sent_by_you="true"><![CDATA[mockup.png\n{_ANNOTATION}]]></msg>'
+    )
 
 
 @pytest.mark.asyncio
@@ -229,7 +238,7 @@ async def test_what_the_agent_posted_after_its_answer_was_stored_is_no_part_of_t
     """A message no run's tool call sent, as a background job posts one after its turn, is a thread message too."""
     config = _config(tmp_path)
     agent_id = entity_ids(config, runtime_paths_for(config))["general"].full_id
-    model = ScriptedModel([answer("The render is running."), answer("Yes.")])
+    model = ScriptedModel([answer("The render is running."), answer("Yes."), answer("Welcome.")])
     install_model_providers(monkeypatch, {"default": model})
 
     await _respond(config, "Render the mockup", "$question")
@@ -243,4 +252,16 @@ async def test_what_the_agent_posted_after_its_answer_was_stored_is_no_part_of_t
     sent = _sent(model.requests[-1])
     assert [role for role, _ in sent] == ["user", "assistant", "user", "user"]
     assert _assistant_wire_text(model.requests[-1]) == ["The render is running."]
-    assert sent[2] == ("user", f'<msg event_id="$late" from="{agent_id}"><![CDATA[mockup.png\n{_ANNOTATION}]]></msg>')
+    assert sent[2] == (
+        "user",
+        f'<msg event_id="$late" from="{agent_id}" sent_by_you="true"><![CDATA[mockup.png\n{_ANNOTATION}]]></msg>',
+    )
+
+    # The second turn stored the image with its input, so a third turn replays it once, where the second read it.
+    thread.append(make_visible_message(sender=_USER, body="Thanks", event_id="$third", thread_id=_THREAD))
+    await _respond(config, "Thanks", "$third", thread_history=thread)
+
+    replayed = _sent(model.requests[-1])
+    assert replayed[: len(sent)] == sent
+    assert [role for role, content in replayed if "$late" in (content or "")] == ["user"]
+    assert [role for role, _ in replayed[len(sent) :]] == ["assistant", "user"]

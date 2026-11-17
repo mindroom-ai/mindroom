@@ -19,11 +19,11 @@ from mindroom.attachments.storage import AttachmentRecord, format_attachment_ann
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
-from mindroom.history.conversation_text import own_thread_message
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
