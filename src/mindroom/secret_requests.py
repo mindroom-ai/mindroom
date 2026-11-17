@@ -205,6 +205,8 @@ def secret_request_content(
     label: str = "",
     url: str = "",
     placeholder: str = "",
+    response_event_id: str | None = None,
+    tool_call_id: str | None = None,
 ) -> dict[str, object]:
     """Return the `io.mindroom.secret_request` object: metadata only, never a value.
 
@@ -216,6 +218,10 @@ def secret_request_content(
 
     What the agent chose to show is there only when given: the `url` of the page that gives the secret, the
     `placeholder` of the empty field, and a temporary secret's `label` (a key card is named after its service).
+
+    A card asked by a reply's tool call names the reply's event (`response_event_id`) and the call (`tool_call_id`), so
+    a client can draw the card at the call's line; it names neither when the call was not made by a reply that shows
+    an event.
     """
     content: dict[str, object] = {"request_id": request.request_id, "requester_id": request.requester_id}
     target = request.target
@@ -228,6 +234,8 @@ def secret_request_content(
         content["replaces"] = True
     shown = {"label": label if isinstance(target, TemporaryTarget) else "", "url": url, "placeholder": placeholder}
     content |= {key: text for key, text in shown.items() if text}
+    if response_event_id is not None and tool_call_id is not None:
+        content |= {"response_event_id": response_event_id, "tool_call_id": tool_call_id}
     if isinstance(target, TemporaryTarget):
         content["keep"] = dict(TEMPORARY_SECRET_KEEP_SECONDS)
         if request.kept is not None:
