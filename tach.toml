@@ -4932,6 +4932,7 @@ depends_on = [
 path = "mindroom.conversation_state_writer"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.session_context",
     "mindroom.history.types",
     "mindroom.hooks",

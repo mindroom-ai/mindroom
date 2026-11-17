@@ -329,8 +329,8 @@ class ReplyRuntime:
         stored = await self.store.replies.tool_calls(span_ids)
         return tuple(deserialize_tool_trace([json.loads(entry) for entry in stored]))
 
-    async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
-        """Return the tool calls of the attempts this span takes over: the latest spans that left its turn unanswered.
+    async def interrupted_spans(self, handle: SpanHandle) -> tuple[str, ...]:
+        """Return the attempts this span takes over, oldest first: the latest spans that left its turn unanswered.
 
         A regeneration redoes its edit's turn, so it takes over only the earlier attempts of the same edit.
         """
@@ -344,7 +344,11 @@ class ReplyRuntime:
             ):
                 break
             interrupted.append(span.span_id)
-        return await self._span_tool_calls(tuple(reversed(interrupted)))
+        return tuple(reversed(interrupted))
+
+    async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
+        """Return the tool calls of the attempts this span takes over (``interrupted_spans``)."""
+        return await self._span_tool_calls(await self.interrupted_spans(handle))
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""

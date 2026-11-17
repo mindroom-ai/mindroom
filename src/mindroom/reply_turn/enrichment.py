@@ -44,9 +44,14 @@ _ATTEMPT_TOOL_CALLS_INSTRUCTION = (
     "finished tool with side effects again, though a read-only call whose shortened result is not enough may run "
     "again, and before repeating one that was still running, check whether it already took effect."
 )
-_RECORDED_ATTEMPT_INSTRUCTION = (
-    "Your previous attempt at replying to the current message was interrupted by a restart before it finished. "
-    f"{_ATTEMPT_TOOL_CALLS_INSTRUCTION}"
+# A recovered attempt's calls replay as its own messages, where a call cut short answers that it was interrupted.
+_RECOVERED_TOOL_CALLS_INSTRUCTION = (
+    "The tool calls it already made for the current message, and their results, are in the conversation above, and "
+    "their effects stand: do not call a finished tool with side effects again, and before repeating one whose "
+    "result says it was interrupted, check whether it already took effect."
+)
+_UNSHOWN_ATTEMPT_INSTRUCTION = (
+    "Your previous attempt at replying to the current message was interrupted by a restart before it finished."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
@@ -213,14 +218,18 @@ def interrupted_attempt_model_prompt(
     span_kind: rl.SpanKind,
     unfinished: UnfinishedStreamedReply | None,
     recorded: tuple[ToolTraceEntry, ...],
+    recovered: bool = False,
 ) -> str | None:
     """Return the model prompt telling a new attempt what its stopped attempts showed and which tool calls they made.
 
     ``unfinished`` is the stopped attempt a replay resumes in place, and ``recorded`` the tool calls the reply's
     records hold, the only account of its calls, since a stopped attempt's running calls no longer show as running;
-    an inline delegation leaves no record of its own. Returns None when there is nothing to tell.
+    an inline delegation leaves no record of its own. ``recovered`` says history replays the stopped attempt's own
+    messages, calls and results included, so the prompt points at them instead of listing ``recorded``'s previews.
+    Returns None when there is nothing to tell.
     """
-    completed_tools, interrupted_tools = _split_recorded_calls(recorded)
+    completed_tools, interrupted_tools = ([], []) if recovered else _split_recorded_calls(recorded)
+    calls_instruction = _RECOVERED_TOOL_CALLS_INSTRUCTION if recovered else _ATTEMPT_TOOL_CALLS_INSTRUCTION
     if unfinished is not None:
         attempt = render_stopped_attempt(
             partial_text=strip_team_display(unfinished.partial_text),
@@ -228,11 +237,13 @@ def interrupted_attempt_model_prompt(
             interrupted_tools=interrupted_tools,
         )
         head = (
-            f"{_INTERRUPTED_ATTEMPT_INSTRUCTION} {_ATTEMPT_TOOL_CALLS_INSTRUCTION}"
-            if recorded
+            f"{_INTERRUPTED_ATTEMPT_INSTRUCTION} {calls_instruction}"
+            if recorded or recovered
             else _INTERRUPTED_ATTEMPT_INSTRUCTION
         )
         instruction = f"{head}\n\n{attempt}"
+    elif recovered:
+        instruction = f"{_UNSHOWN_ATTEMPT_INSTRUCTION} {calls_instruction}"
     elif recorded:
         # It showed none of its work, but it recorded each tool call before the tool ran.
         attempt = render_stopped_attempt(
@@ -240,7 +251,7 @@ def interrupted_attempt_model_prompt(
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )
-        instruction = f"{_RECORDED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        instruction = f"{_UNSHOWN_ATTEMPT_INSTRUCTION} {calls_instruction}\n\n{attempt}"
     elif span_kind is rl.SpanKind.REPLAY:
         # The attempt showed nothing of its work, which is not proof it did none.
         instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
