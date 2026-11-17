@@ -30,6 +30,8 @@ from mindroom.delegation.cost import SubagentCost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.mid_turn_compaction import without_run_usage
+from mindroom.history.run_checkpoint import STOPPED_BY_USER_NOTE, is_recovered_run
+from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
@@ -77,7 +79,7 @@ from tests.scripted_agent_helpers import stop_turn, stored_runs
 from tests.usage_helpers import counted_total, counted_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Collection
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -960,6 +962,40 @@ async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_pause
         [],
         [(130, 8)],
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_attempt_after_an_approved_run_is_stored_as_its_own_messages_linked_to_its_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user's Stop of the attempt that continues an approved run keeps that attempt's run, linked to its reply."""
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("stopped-session")
+    script = [_add("approved", 10, 1), _continue_call("continue", usage(20, 2)), [TextDelta("The sum "), stop_turn()]]
+    install_model_providers(monkeypatch, {"default": _CheckedModel(script)})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    # The resume runs in the span of the reply it continues, which its user stopped.
+    monkeypatch.setattr(approval_execution_module, "current_span_stopped", lambda: True)
+    monkeypatch.setattr(approval_execution_module, "current_reply_event_id", lambda: "$reply")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    resumed, stopped = stored_runs(config, paths, identity.session_id)
+    assert resumed.run_id == paused.run_id
+    assert is_recovered_run(stopped)
+    assert not is_interrupted_replay_run(stopped)
+    assert stopped.messages[-1].content == f"The sum\n\n{STOPPED_BY_USER_NOTE}"
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    session = storage.load_session(identity.session_id)
+    assert session is not None
+
+    async def redacted(event_ids: Collection[str]) -> dict[str, None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    assert await remove_history_of_redacted_events(storage, session, redacted) == ["$reply"]
+    assert [run.run_id for run in stored_runs(config, paths, identity.session_id)] == [paused.run_id]
 
 
 def _usage_config(tmp_path: Path) -> tuple[RuntimePaths, Config]:

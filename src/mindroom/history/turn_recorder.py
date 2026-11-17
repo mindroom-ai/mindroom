@@ -38,7 +38,8 @@ class TurnRecorder:
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
     outcome: _TurnOutcome = "pending"
     original_status: RunStatus | None = None
-    # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves these calls out.
+    # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves these calls out. The stored
+    # folds name the attempt that made them, so only this set knows the folds of the turn's earlier attempts.
     folded_tool_call_ids: set[str] = field(default_factory=set)
     # The input around the prompt that an interrupted turn's run stores, which its record keeps.
     turn_input: TurnInput = NO_TURN_INPUT
