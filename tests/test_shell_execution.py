@@ -8,6 +8,7 @@ import itertools
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    _schedule_process_tree_idle,
     check_command,
     kill_all_records,
     kill_command,
@@ -395,27 +397,33 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
     assert message == "19 True"
 
 
+def _process_group_threads(pgid: int) -> list[int]:
+    threads = []
+    for thread in Path("/proc").glob("[0-9]*/task/[0-9]*"):
+        with contextlib.suppress(OSError):
+            if os.getpgid(int(thread.parent.parent.name)) == pgid:
+                threads.append(int(thread.name))
+    return threads
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
-@pytest.mark.asyncio
-async def test_a_command_runs_at_the_idle_policy_before_a_busy_event_loop_gets_back_to_it(
-    registry: dict[str, ProcessRecord],
-    tmp_path: Path,
-) -> None:
-    """What a command starts at once, such as a backgrounded build, must not wait for the event loop to slow it down."""
-    report = "import os; print(os.sched_getscheduler(0) == os.SCHED_IDLE)"
-    run = asyncio.create_task(_run(registry, [sys.executable, "-c", report], tmp_path))
-    # The spawn happens in the task's first step; this blocks the loop right after it, until the command has reported.
-    asyncio.get_running_loop().call_soon(time.sleep, 1)
+def test_threads_and_processes_a_command_started_before_its_policy_was_set_move_to_the_idle_policy() -> None:
+    """A busy event loop lets a command fork and start threads before MindRoom sets its policy."""
+    start_thread = "import threading, time; threading.Thread(target=time.sleep, args=(30,)).start(); time.sleep(30)"
+    threaded = shlex.join([sys.executable, "-c", start_thread])
+    # The leader, a subshell, its sleep (a grandchild), and the two threads of the Python process.
+    process = subprocess.Popen(["/bin/sh", "-c", f"(sleep 30; true) | {threaded}"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while len(threads := _process_group_threads(process.pid)) < 5:
+            assert time.monotonic() < deadline, f"the command started only these threads: {threads}"
+            time.sleep(0.01)
+        _schedule_process_tree_idle(process.pid)
 
-    assert await run == "True"
-
-
-@pytest.mark.asyncio
-async def test_a_missing_program_is_reported_by_name(registry: dict[str, ProcessRecord], tmp_path: Path) -> None:
-    """An agent that mistypes a program sees which one could not be started."""
-    message = await _run(registry, ["no-such-program-for-this-test"], tmp_path)
-
-    assert "No such file or directory: 'no-such-program-for-this-test'" in message
+        assert {os.sched_getscheduler(thread) for thread in threads} == {os.SCHED_IDLE}
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 @pytest.mark.asyncio

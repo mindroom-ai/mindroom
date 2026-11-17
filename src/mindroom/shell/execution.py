@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
@@ -50,22 +51,6 @@ _PROGRESS_INTERVAL_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 # Numbers every append to any output buffer, so a reader can tell which stream printed last.
 _APPEND_SEQUENCE = itertools.count(1)
-# On Linux each command starts behind this script, which moves itself to SCHED_IDLE and then becomes the command, so
-# everything the command starts inherits the policy. Nice 19 alone lowers a command's CPU share, but the kernel still
-# counts a CPU that runs it as busy when it places MindRoom's waking event loop; a CPU that runs only idle-policy threads
-# counts as free, and a waking normal thread preempts them at once. Setting the policy after spawn would miss whatever
-# the command starts before a busy event loop gets to it.
-_IDLE_POLICY_SCRIPT = """import os, sys
-try:
-    os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
-except OSError:
-    pass
-try:
-    os.execvp(sys.argv[1], sys.argv[1:])
-except OSError as error:
-    sys.exit(f"Error: {error}: {sys.argv[1]!r}")
-"""
-_IDLE_POLICY_PREFIX = (sys.executable, "-I", "-S", "-c", _IDLE_POLICY_SCRIPT) if sys.platform == "linux" else ()
 
 
 @dataclass
@@ -352,7 +337,6 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             capture = ShellOutputCapture(output_destination, cwd)
         started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
-            *_IDLE_POLICY_PREFIX,
             *argv,
             stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
@@ -373,6 +357,8 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
         os.setpriority(os.PRIO_PGRP, process.pid, 19)
+    if sys.platform == "linux":
+        _schedule_process_tree_idle(process.pid)
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
@@ -776,6 +762,25 @@ async def _await_reader_tasks_with_grace(
         for task in pending_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+
+def _schedule_process_tree_idle(pid: int) -> None:
+    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
+
+    Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
+    MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
+    preempts them at once.
+    A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
+    before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
+    thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
+    """
+    pending = [pid]
+    while pending:
+        with contextlib.suppress(OSError):
+            for thread in Path(f"/proc/{pending.pop()}/task").iterdir():
+                with contextlib.suppress(OSError):
+                    os.sched_setscheduler(int(thread.name), os.SCHED_IDLE, os.sched_param(0))
+                    pending.extend(int(child) for child in (thread / "children").read_text().split())
 
 
 def _kill_process_group(pid: int) -> None:
