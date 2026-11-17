@@ -47,10 +47,11 @@ Read from the source on 2026-11-16 (Codex `~/repos/external/codex`, Claude Code 
    Without a judge, Auto keeps today's pause notice.
    A message without the key is Auto.
    The pause notice stays only as Auto's fallback; whether to retire it is decided after Steer has been used for a while.
-8. **The continuation appears below the person's message.**
-   When a steer is appended, the reply finishes its current Matrix event (its text so far, its tool trace, `stream_status: completed`) and continues the same run in a new event sent after the person's message.
+8. **A steer ends the current reply message and starts a new one below the person's message.**
+   This is part of Steer itself, not a later polish: the thread must read in order, so the agent's continuation is never streamed into a message above the steering text.
+   When a steer is appended, the reply finishes its current Matrix event as it stands (its text so far, its tool trace, `stream_status: completed`) and continues the same run in a new event, sent after the person's message, as a normal reply in the thread.
    The reply's current event ID moves to the new event, so the 🛑 Stop reaction, approval cards, progress edits and visible-response reconciliation all follow the newest event; earlier events of the run are kept on the reply record for recovery.
-   This is the first time one run spans several events for a reason other than segmenting long content (`matrix/segmented_messages.py`); it ships as its own pull request after Steer works in one event.
+   This is the first time one run spans several events for a reason other than segmenting long content (`matrix/segmented_messages.py`).
 9. **MindRoom Chat: hold Send for a menu, set the default in settings.**
    - Holding the Send button (500 ms; touch and mouse, through a pointer-based variant of `lib/hooks/useLongPress.ts`) while an agent is replying in the thread opens a small menu above it: Steer, Queue, Auto, each with a one-line hint. Picking one sends the message with that mode.
    - A tap or Enter sends with the default from a new setting on the Chats page, "When an agent is replying, Send" (Steer, Queue or Auto; default Steer, as in Codex and Claude Code). The setting roams with the account, which needs `roamingSettings.ts` to accept this enum.
@@ -63,15 +64,14 @@ Read from the source on 2026-11-16 (Codex `~/repos/external/codex`, Claude Code 
 - **Steer as a forced pause.** Cheaper (the `judge=False` path exists), but the reply never reads the message, which is the problem Bas wants solved.
 - **A per-agent default mode in `config.yaml`.** Not needed while the client always sends the key; Element keeps today's behavior.
 - **Letting anyone steer.** In a shared thread one person could redirect another's task; Auto already lets the judge decide for them.
-- **Keeping the continuation in the original event.** It would put the reply's continuation above the person's message, so the thread reads out of order.
+- **Keeping the continuation in the original event, even as a first step.** It puts the reply's continuation above the person's message, so the thread reads out of order (Bas, 2026-11-16).
 
 ## Delivery
 
-Three pull requests, each usable on its own:
+Two pull requests:
 
-1. Backend: the `io.mindroom.mid_turn` key, Queue, Steer injection and consumption, Auto's judge steering, docs (decisions 1-7, 10). The continuation still streams into the original event.
-2. Backend: the event split at the steer point (decision 8).
-3. MindRoom Chat: the hold menu, the setting, and the key on outgoing messages (decision 9).
+1. Backend: the `io.mindroom.mid_turn` key, Queue, Steer (injection, consumption, and the new reply message below the steering text), Auto's judge steering, docs (decisions 1-8, 10). Steer never ships without the message split.
+2. MindRoom Chat: the hold menu, the setting, and the key on outgoing messages (decision 9).
 
 ## Testing
 
