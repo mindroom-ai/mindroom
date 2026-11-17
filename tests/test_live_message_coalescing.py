@@ -71,13 +71,13 @@ from mindroom.event_journal import (
     PendingTurnView,
 )
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.media import Audio
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
+from mindroom.llm.media import Audio
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event

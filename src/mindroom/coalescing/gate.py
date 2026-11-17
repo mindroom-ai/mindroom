@@ -677,7 +677,7 @@ class CoalescingGate:
         count = self._front_turn_length(gate, run_limit=run_limit)
         return submission_marker(gate.queue[count - 1].pending_event) if count else None
 
-    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
+    def _front_turn_complete(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
         """Return whether the front turn is complete: another turn's event follows it, or it ends a submission or text."""
         count = self._front_live_run_length(gate, run_limit=run_limit)
         if self._front_turn_length(gate, run_limit=run_limit) < count:
@@ -997,7 +997,7 @@ class CoalescingGate:
             or debounce_seconds <= 0
             or self._is_shutting_down()
             or gate.drain_all_requested
-            or self._front_normal_run_ends_with_text(gate, run_limit=limit)
+            or self._front_turn_complete(gate, run_limit=limit)
         ):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
@@ -1018,11 +1018,11 @@ class CoalescingGate:
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(
                     quiet_deadline=quiet_deadline,
-                    submission_timed_out=self._submission_timed_out(key, gate, run_limit=run_limit()),
+                    submission_timed_out=self._report_submission_timeout(key, gate, run_limit=run_limit()),
                 )
             limit = run_limit()
             debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
-            if not gate.queue or self._front_normal_run_ends_with_text(gate, run_limit=limit):
+            if not gate.queue or self._front_turn_complete(gate, run_limit=limit):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
@@ -1041,7 +1041,7 @@ class CoalescingGate:
             )
             gate.deadline = quiet_deadline
 
-    def _submission_timed_out(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> bool:
+    def _report_submission_timeout(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> bool:
         """Return and report whether a hold reached its bound with the front turn still saying more is coming."""
         submission = self._front_submission(gate, run_limit=run_limit)
         if submission is None or not submission.more:
