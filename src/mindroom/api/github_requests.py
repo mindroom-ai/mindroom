@@ -51,6 +51,8 @@ _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", 
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
 _PCHAR = r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})"
+# Logs name the segment after the repository only when it reads as an API resource, such as `pulls` or `check-runs`.
+_RESOURCE = re.compile(r"[a-z][a-z_-]{0,31}")
 _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
 
 
@@ -97,7 +99,10 @@ def _path_kind(path: str) -> str | None:
         return None
     if segments[0] == "graphql":
         return "/graphql"
-    return "/repos/{owner}/{repo}" + "".join(f"/{s}" for s in segments[3:4])
+    if len(segments) == 3:
+        return "/repos/{owner}/{repo}"
+    resource = segments[3] if _RESOURCE.fullmatch(segments[3]) else "{other}"
+    return f"/repos/{{owner}}/{{repo}}/{resource}"
 
 
 def _github_client() -> httpx.AsyncClient:

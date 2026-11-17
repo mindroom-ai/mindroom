@@ -713,6 +713,35 @@ def test_logs_name_the_call_but_never_its_token_or_bodies(
         assert secret not in logged
 
 
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("/repos/octo/hello", "/repos/{owner}/{repo}"),
+        ("/repos/octo/hello/check-runs/9", "/repos/{owner}/{repo}/check-runs"),
+        ("/repos/octo/hello/git/refs/heads/x", "/repos/{owner}/{repo}/git"),
+        ("/repos/octo/hello/level%3Dcritical%20event%3Dfake", "/repos/{owner}/{repo}/{other}"),
+        ("/repos/octo/hello/" + "%41" * 1000, "/repos/{owner}/{repo}/{other}"),
+        ("/repos/octo/hello/" + "a" * 33, "/repos/{owner}/{repo}/{other}"),
+        ("/repos/octo/hello/Pulls", "/repos/{owner}/{repo}/{other}"),
+        ("/graphql", "/graphql"),
+    ],
+)
+def test_logs_name_only_a_plain_resource(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    path: str,
+    kind: str,
+) -> None:
+    """The segment after the repository is logged only when it reads as an API resource name."""
+    connect(paths, ALICE)
+
+    with capture_logs() as logs:
+        ask(client, session(app, ALICE), path)
+
+    assert logs[-1]["path"] == kind
+
+
 def test_production_logs_name_neither_the_repository_nor_the_query(
     app: FastAPI,
     client: TestClient,
