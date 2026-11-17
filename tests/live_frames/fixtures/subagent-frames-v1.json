@@ -110,7 +110,8 @@
           {
             "type": "tool_call_started",
             "tool_name": "run_shell_command",
-            "args_preview": "command=git tag"
+            "args_preview": "command=git tag",
+            "started_at": 1762790001.2
           }
         ],
         "status": "streaming",
@@ -154,7 +155,8 @@
                 {
                   "type": "tool_call_started",
                   "tool_name": "run_shell_command",
-                  "args_preview": "command=git tag"
+                  "args_preview": "command=git tag",
+                  "started_at": 1762790001.2
                 }
               ]
             ]
@@ -171,7 +173,8 @@
           {
             "type": "tool_call_started",
             "tool_name": "run_shell_command",
-            "args_preview": "command=git tag"
+            "args_preview": "command=git tag",
+            "started_at": 1762790001.2
           }
         ],
         "status": "streaming",
@@ -184,7 +187,8 @@
           {
             "type": "tool_call_started",
             "tool_name": "run_shell_command",
-            "args_preview": "command=git tag"
+            "args_preview": "command=git tag",
+            "started_at": 1762790001.2
           }
         ],
         "status": "streaming",
@@ -221,7 +225,8 @@
             {
               "type": "tool_call_started",
               "tool_name": "run_shell_command",
-              "args_preview": "command=git tag"
+              "args_preview": "command=git tag",
+              "started_at": 1762790001.2
             }
           ],
           "status": "streaming",
@@ -239,7 +244,8 @@
           {
             "type": "tool_call_started",
             "tool_name": "run_shell_command",
-            "args_preview": "command=git tag"
+            "args_preview": "command=git tag",
+            "started_at": 1762790001.2
           }
         ],
         "status": "streaming",
@@ -253,7 +259,8 @@
             "type": "tool_call_completed",
             "tool_name": "run_shell_command",
             "args_preview": "command=git tag",
-            "result_preview": "v1.0\nv2.0"
+            "result_preview": "v1.0\nv2.0",
+            "started_at": 1762790001.2
           }
         ],
         "status": "pending",
@@ -292,7 +299,8 @@
               "type": "tool_call_completed",
               "tool_name": "run_shell_command",
               "args_preview": "command=git tag",
-              "result_preview": "v1.0\nv2.0"
+              "result_preview": "v1.0\nv2.0",
+              "started_at": 1762790001.2
             }
           ],
           "status": "pending",

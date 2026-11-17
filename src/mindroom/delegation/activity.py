@@ -49,6 +49,9 @@ class _SubagentItem:
     tool: ToolTraceEntry | None = None
     tool_call_id: str | None = None
     state: Literal["running", "done", "error"] | None = None
+    # kind "tool": Unix seconds when the call was first announced, kept when it resumes and completes; None for a row
+    # that only a completion made.
+    started_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,24 +204,33 @@ class _SubagentActivity:
             self.items_dropped += _cut_oldest_text(self._items, _CUT_TEXT_CHARACTERS + _REDACTION_MARGIN)
             self._hidden = None
 
-    def tool_started(self, event: ToolStarted) -> None:
-        """Add a running tool row; a call announced again, as a paused call is when it resumes, runs on in its row."""
+    def tool_started(self, event: ToolStarted, *, now: float) -> None:
+        """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start."""
         _, entry = format_tool_started_event(event.call)
-        self._set_tool(event.call.tool_call_id, _public_entry(entry), "running")
+        self._set_tool(event.call.tool_call_id, _public_entry(entry), "running", started_at=now)
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
         entry = _public_entry(format_tool_completed_event(event.call))
-        self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done")
+        self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done", started_at=None)
 
-    def _set_tool(self, tool_call_id: str, entry: ToolTraceEntry, state: Literal["running", "done", "error"]) -> None:
-        """Update the newest row of the call, else append one, dropping the oldest tool row past the cap."""
+    def _set_tool(
+        self,
+        tool_call_id: str,
+        entry: ToolTraceEntry,
+        state: Literal["running", "done", "error"],
+        *,
+        started_at: float | None,
+    ) -> None:
+        """Update the call's newest row, keeping its start, else append one; past the cap, drop the oldest tool row."""
         for index in range(len(self._items) - 1, -1, -1):
             item = self._items[index]
             if item.kind == "tool" and item.tool_call_id == tool_call_id:
                 self._items[index] = replace(item, tool=entry, state=state)
                 return
-        self._items.append(_SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state))
+        self._items.append(
+            _SubagentItem(kind="tool", tool=entry, tool_call_id=tool_call_id, state=state, started_at=started_at),
+        )
         tools = [index for index, item in enumerate(self._items) if item.kind == "tool"]
         if len(tools) > _MAX_TOOL_ITEMS:
             del self._items[tools[0]]
@@ -321,9 +333,9 @@ class ActivityFeed:
         self._activity.add_text(text)
         self._mark()
 
-    def tool_started(self, event: ToolStarted) -> None:
-        """Add a running tool row; it goes out with the next window's snapshot."""
-        self._activity.tool_started(event)
+    def tool_started(self, event: ToolStarted, *, now: float) -> None:
+        """Add a running tool row started at ``now``; it goes out with the next window's snapshot."""
+        self._activity.tool_started(event, now=now)
         self._mark()
 
     def tool_completed(self, event: ToolCompleted) -> None:

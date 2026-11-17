@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -441,8 +443,7 @@ def report_child_approval_wait(child: DelegationChild, *, awaiting: bool) -> Non
     _publish(child.delegation_id, lambda feed: feed.status("awaiting_approval" if awaiting else "running"))
 
 
-def _report_child_activity(observation: ChildRunObservation, event: TextDelta | ToolStarted) -> None:
-    text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
+def _report_child_activity(observation: ChildRunObservation, text: str) -> None:
     if text:
         observation.activity = cap_report(observation.activity + text)
         report_tool_progress(observation.activity)
@@ -460,16 +461,21 @@ async def observe_child_event(event: RunEvent) -> None:
         return
     delegation_id = observation.child.delegation_id
     if isinstance(event, TextDelta):
-        _report_child_activity(observation, event)
+        _report_child_activity(observation, event.text)
         _publish(delegation_id, lambda feed: feed.text(event.text))
     elif isinstance(event, ToolStarted):
-        _report_child_activity(observation, event)
-        _publish(delegation_id, lambda feed: feed.tool_started(event))
+        # One start for the caller's progress and the feed's row, the first announcement's for a call that resumes
+        # after a pause, so a caller can tell how long the call has run.
+        started_at = observation.child.tool_started_at.setdefault(event.call.tool_call_id, time.time())
+        started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+        _report_child_activity(observation, f"\nCalling {event.call.tool_name} (started {started} UTC)\n")
+        _publish(delegation_id, lambda feed: feed.tool_started(event, now=started_at))
     elif isinstance(event, RunFinished):
         if not observation.owns(record := event.record):
             return
         observation.response = record
     elif isinstance(event, ToolCompleted):
+        observation.child.tool_started_at.pop(event.call.tool_call_id, None)
         _publish(delegation_id, lambda feed: feed.tool_completed(event))
     else:
         return
