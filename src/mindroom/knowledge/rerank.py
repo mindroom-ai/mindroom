@@ -39,10 +39,10 @@ class Reranker(Protocol):
     """Scores how well each document answers a query; higher is better."""
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        """Return one relevance score in [0, 1] per document, in the documents' order; 0.0 for one it did not judge.
+        """Return one relevance score in [0, 1] per document, in the documents' order; ``-inf`` for one it could not judge.
 
         Ordering never depends on the scale, but a recall threshold does: ``retrieve`` falls back to the hybrid
-        selection when a score outside [0, 1] meets a threshold.
+        selection when a finite score outside [0, 1] meets a threshold. ``-inf`` ranks last and passes no threshold.
         """
         ...
 
@@ -64,7 +64,7 @@ class _CohereReranker:
                 json={"model": self.model, "query": query, "documents": list(documents), "top_n": len(documents)},
             )
         response.raise_for_status()
-        scores = [0.0] * len(documents)
+        scores = [float("-inf")] * len(documents)
         for result in response.json()["results"]:
             scores[int(result["index"])] = float(result["relevance_score"])
         return scores
@@ -97,7 +97,7 @@ class _VertexAIReranker:
                 )
                 for start in range(0, len(records), _VERTEX_AI_RECORDS_PER_REQUEST)
             ]
-        scores = [0.0] * len(documents)
+        scores = [float("-inf")] * len(documents)
         for request in requests:
             response = request.result()
             response.raise_for_status()

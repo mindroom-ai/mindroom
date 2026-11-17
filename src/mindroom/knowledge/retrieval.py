@@ -77,8 +77,9 @@ async def retrieve[T](
 ) -> list[Candidate[T]]:
     """Return the leading candidates ``selection`` keeps, in the reranker's order when one is set.
 
-    A reranker that raises, passes ``deadline_seconds``, or does not return one finite score per candidate leaves the
-    candidates in their given order, selected by their hybrid scores; so does a score outside [0, 1] when
+    A reranker that raises, passes ``deadline_seconds``, or does not return one score per candidate, each finite or
+    ``-inf`` (its mark for a candidate it could not judge, which ranks last and passes no threshold), leaves the
+    candidates in their given order, selected by their hybrid scores; so does a finite score outside [0, 1] when
     ``min_rerank_score`` reads the scores on that scale.
     """
     if reranker is None or not candidates:
@@ -86,8 +87,8 @@ async def retrieve[T](
     try:
         scores = await asyncio.wait_for(reranker.ascore(query, [c.text for c in candidates]), deadline_seconds)
         # A threshold reads the scores on the [0, 1] scale; an order alone reads any finite scale.
-        valid = _unit_interval if selection.min_rerank_score is not None else math.isfinite
-        if len(scores) != len(candidates) or not all(valid(score) for score in scores):
+        unit_interval = selection.min_rerank_score is not None
+        if len(scores) != len(candidates) or not all(_valid(score, unit_interval=unit_interval) for score in scores):
             msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or an invalid one"
             raise ValueError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
     except Exception:
@@ -97,8 +98,11 @@ async def retrieve[T](
     return _select(sorted(rescored, key=lambda candidate: -candidate.score), selection, reranked=True)
 
 
-def _unit_interval(score: float) -> bool:
-    return 0.0 <= score <= 1.0
+def _valid(score: float, *, unit_interval: bool) -> bool:
+    """Return whether ``score`` is ``-inf`` (unjudged) or on the scale the selection reads; NaN and +inf never are."""
+    if score == -math.inf:
+        return True
+    return 0.0 <= score <= 1.0 if unit_interval else math.isfinite(score)
 
 
 def _select[T](ranked: Sequence[Candidate[T]], selection: Selection, *, reranked: bool) -> list[Candidate[T]]:
@@ -107,7 +111,8 @@ def _select[T](ranked: Sequence[Candidate[T]], selection: Selection, *, reranked
     tokens = 0
     for candidate in ranked[: max(selection.limit, 0)]:
         if reranked:
-            if selection.min_rerank_score is not None and candidate.score < selection.min_rerank_score:
+            threshold = selection.min_rerank_score
+            if threshold is not None and (candidate.score < threshold or candidate.score == -math.inf):
                 break
         elif (
             selection.hybrid_score_gap is not None

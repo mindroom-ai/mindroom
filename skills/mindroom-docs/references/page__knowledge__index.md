@@ -282,7 +282,7 @@ The reranker sees the top 20 chunks of every base one search covers and returns 
 It applies to `search_knowledge_base`, and to file-memory searches only with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory); without it automatic memory search keeps the merged ranking and adds no latency to replies.
 If the reranker fails, the search returns its results in the merged order and logs a warning.
 
-Each provider scores a chunk from 0 to 1, and a chunk missing from the response scores 0.
+Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
