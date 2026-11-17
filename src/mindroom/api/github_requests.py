@@ -114,14 +114,17 @@ def _error(status_code: int, error: str) -> JSONResponse:
     return JSONResponse({"error": error}, status_code=status_code)
 
 
-def _credential_context(request: Request) -> OAuthCredentialContext:
-    """Return the session user's own GitHub connection, the one the `github` tool uses for them with any agent."""
+def _credential_context(request: Request) -> OAuthCredentialContext | None:
+    """Return the session user's own GitHub connection, the one the `github` tool uses for them with any agent.
+
+    None when the session resolves no person: such a context would name the unscoped store, which is no one's own.
+    """
     user_id = presented_session(request).user_id
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     paths = snapshot.runtime_paths
     # A requester-scoped provider keeps one connection per person whatever the agent; the name only fills the identity.
     identity = build_requester_execution_identity(agent_name="oauth", runtime_paths=paths, requester_id=user_id)
-    return resolve_oauth_credential_context(
+    context = resolve_oauth_credential_context(
         github_oauth_provider(),
         paths,
         get_runtime_credentials_manager(paths),
@@ -129,17 +132,20 @@ def _credential_context(request: Request) -> OAuthCredentialContext:
         execution_identity=identity,
         config=snapshot.runtime_config,
     )
+    return None if context.worker_target is None else context
 
 
-async def _usable_credentials(context: OAuthCredentialContext) -> dict[str, Any] | None:
+async def _usable_credentials(context: OAuthCredentialContext | None) -> dict[str, Any] | None:
     """Return the stored connection while it can authenticate, without refreshing it or creating a store."""
+    if context is None:
+        return None
     credentials = (await load_oauth_credentials_status(context, create_store=False)).credentials
     return credentials if oauth_credentials_usable(context.provider, context.runtime_paths, credentials) else None
 
 
-async def _access_token(context: OAuthCredentialContext) -> str | None:
+async def _access_token(context: OAuthCredentialContext | None) -> str | None:
     """Return a current access token, refreshing one about to expire, or None while the user is not connected."""
-    if await _usable_credentials(context) is None:
+    if context is None or await _usable_credentials(context) is None:
         return None
     try:
         credentials = await refresh_oauth_credentials(context)

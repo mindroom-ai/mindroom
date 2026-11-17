@@ -376,6 +376,35 @@ def test_without_a_connection_nothing_is_sent_even_with_shared_tokens(
     assert github.requests == []
 
 
+def test_a_session_without_a_user_never_reaches_the_global_connection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A session naming no user resolves no person's connection, so the unscoped store's account is never used."""
+    provider = github_oauth_provider()
+    publish_oauth_credentials(
+        provider,
+        {
+            "token": "gho-global",
+            "refresh_token": "global-refresh",
+            "client_id": "github-client-id",
+            "token_uri": "https://github.com/login/oauth/access_token",
+            "scopes": [],
+            "expires_at": 4_102_444_800.0,
+            "_source": "oauth",
+            "_oauth_provider": "github",
+        },
+        credentials_manager=get_runtime_credentials_manager(paths),
+        worker_target=None,
+    )
+
+    assert client.get("/api/github/status", headers=session(app, "")).json() == {"connected": False}
+    assert ask(client, session(app, "")).json() == {"error": "github_not_connected"}
+    assert github.requests == []
+
+
 def test_without_an_oauth_client_the_user_is_not_connected(
     app: FastAPI,
     client: TestClient,
