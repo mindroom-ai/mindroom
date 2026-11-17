@@ -15,6 +15,9 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
@@ -29,7 +32,14 @@ from mindroom.response_payload_preparation import STEER_CONTINUATION_LINE, steer
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
-from tests.conftest import install_model_providers, make_visible_message, message_origin, unwrap_extracted_collaborator
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    handle_card_response_for_test,
+    install_model_providers,
+    make_visible_message,
+    message_origin,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.response_runner_helpers import _envelope, _plain_request, _target
 from tests.scripted_agent_helpers import registered_toolkit
@@ -68,6 +78,9 @@ _FIRST_BATCH = calls(tool_call("echo", "call-1", text="hi"), content="Looking. "
 # The judge's question is whether the reply should stop for the queue.
 _WAIT = '{"decision": false}'
 _CANNOT_WAIT = '{"decision": true}'
+_APPROVAL_WAIT = "Waiting for approval: `echo`"
+# What a resume that ends with no text of its own shows, so its approval finishes through its acknowledged FINAL.
+_APPROVAL_FALLBACK = "Tool approval continuation completed"
 
 
 class _Tools(Toolkit):
@@ -105,12 +118,13 @@ async def _flow(
     scripts: Mapping[str, Sequence[Sequence[ScriptStep]]],
     show_tool_calls: bool = True,
     judge: bool = False,
+    streaming: bool = True,
 ) -> _Turn:
     """Build the bot, its agent answering in the room, with a mid-turn judge playing the ``judge`` script if asked."""
     turn = await _turn(
         tmp_path,
         monkeypatch,
-        streaming=True,
+        streaming=streaming,
         show_tool_calls=show_tool_calls,
         tools=[_TOOL],
         scripts=scripts,
@@ -161,6 +175,34 @@ def _first_request() -> ResponseRequest:
         is_full_history=True,
     )
     return replace(_plain_request(_target()), thread_history=history)
+
+
+async def _respond_person_approved(turn: _Turn, request: ResponseRequest) -> None:
+    """Answer ``request``, whose ``echo`` call waits for a person: the requester approves its card and the reply resumes.
+
+    The pause shows its waiting text, unlike one a policy grants at once. The approved source then runs again, as its
+    woken source does, and the resume runs inside that response.
+    """
+    _require_echo_approval(turn)
+    try:
+        await turn.runner.generate_response(request)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=turn.bot._runtime_view)
+        assert (await _reply(turn, _SOURCE)).state is rl.ReplyState.PAUSED
+        assert (turn.homeserver.bodies[-1], turn.homeserver.statuses[-1]) == (_APPROVAL_WAIT, "approval_pending")
+        approved = await handle_card_response_for_test(
+            approval_manager.get_approval_store(),
+            room_id=_ROOM,
+            sender_id=_REQUESTER,
+            card_event_id="$approval-card",
+            status="approved",
+            authorize_responder=lambda _entity_name: True,
+        )
+        assert approved.consumed
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=turn.bot._runtime_view)
+        await turn.runner.generate_response(request)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=turn.bot._runtime_view)
+    finally:
+        await shutdown_approval_runtime()
 
 
 def _room() -> nio.MatrixRoom:
@@ -590,3 +632,69 @@ async def test_hidden_tool_only_steer_whose_stream_failed_keeps_its_failure(
     assert old_reply.event_id not in [call.args[1] for call in turn.bot.client.room_redact.await_args_list]
     assert turn.homeserver.statuses[-1] == "error"
     assert "Failed to edit streaming message" in turn.homeserver.bodies[-1]
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+async def test_hidden_tool_only_steer_of_a_person_approved_resume_ends_with_its_completion_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: type[_Tools],
+    streaming: bool,
+) -> None:
+    """Pins the accepted exception: a Steer that ends an approval resume with nothing to show keeps its completion text.
+
+    A reply an approval holds ends only through an acknowledged FINAL, so its message is not removed as an ordinary
+    turn's placeholder is: it completes with the text every tool-only approval resume shows, never a failure note.
+    Its run is stored completed with its call and result, its source settles, and the Steer's reply carries on once.
+    """
+    turn = await _flow(
+        tmp_path,
+        monkeypatch,
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("Carried on.")]},
+        show_tool_calls=False,
+        streaming=streaming,
+    )
+    notices = _queue_while_tool_runs(turn, tools, mode=MidTurnMode.STEER)
+
+    await _respond_person_approved(turn, _first_request())
+
+    [notice] = notices
+    assert notice.stopped_reply
+    model = turn.models["default"]
+    # One request: the Steer ended the resumed run after its approved call, so nothing asked the model again.
+    assert len(model.requests) == 1
+    [run] = turn.agent_runs()
+    assert run.status is RunStatus.completed
+    assert [(m.role, m.content) for m in run.messages if m.role in {"assistant", "tool"}] == [
+        ("assistant", None),
+        ("tool", "echoed hi"),
+    ]
+    old_reply = await _reply(turn, _SOURCE)
+    assert old_reply.state is rl.ReplyState.COMPLETED
+    assert old_reply.event_id == "$sent0"
+    assert old_reply.event_id not in [call.args[1] for call in turn.bot.client.room_redact.await_args_list]
+    assert set(turn.homeserver.bodies) == {"Thinking...", _APPROVAL_WAIT, _APPROVAL_FALLBACK}
+    assert turn.homeserver.bodies[-1] == _APPROVAL_FALLBACK
+    assert _last_edit(turn, old_reply.event_id)[STREAM_STATUS_KEY] == "completed"
+    assert "error" not in turn.homeserver.statuses
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    await _assert_settled(turn, _SOURCE)
+
+    await _dispatch(turn, notice)
+
+    # The follow-up replies once, to the Steer, with the cut-off run's call and result and one carry-on line.
+    _first, follow_up = model.requests
+    assert [(m.role, m.content) for m in follow_up.messages if m.role == "tool"] == [("tool", "echoed hi")]
+    text = str(follow_up.messages[-1].content)
+    assert sum(content.count(_STEER_TEXT) for content in _contents(follow_up)) == 1
+    assert sum(content.count(STEER_CONTINUATION_LINE) for content in _contents(follow_up)) == 1
+    assert text.index(_STEER_TEXT) < text.index(STEER_CONTINUATION_LINE)
+    new_reply = await _reply(turn, _STEER)
+    assert new_reply.reply_id != old_reply.reply_id
+    assert new_reply.state is rl.ReplyState.COMPLETED
+    assert _answered_sources(turn) == [_SOURCE, _STEER]
+    assert turn.homeserver.bodies[-1] == "Carried on."
+    assert _last_edit(turn, new_reply.event_id)[STREAM_STATUS_KEY] == "completed"
+    assert "error" not in turn.homeserver.statuses
+    assert len(turn.agent_runs()) == 2
+    await _assert_settled(turn, _STEER)
