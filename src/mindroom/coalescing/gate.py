@@ -12,6 +12,7 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
+from mindroom.constants import SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
@@ -205,6 +206,8 @@ class _DebounceWaitResult:
     """Boundary discovered during one debounce wait."""
 
     quiet_deadline: float
+    # The wait ended at the submission bound with the front turn still saying more is coming.
+    submission_timed_out: bool = False
 
 
 class CoalescingGate:
@@ -311,10 +314,12 @@ class CoalescingGate:
                 relation = original_content.get("m.relates_to")
                 if relation is not None:
                     content["m.relates_to"] = relation
-                # The message keeps the mid-turn mode it was sent with, so an edit cannot steer or queue it anew.
-                content.pop(MID_TURN_MODE_KEY, None)
-                if MID_TURN_MODE_KEY in original_content:
-                    content[MID_TURN_MODE_KEY] = original_content[MID_TURN_MODE_KEY]
+                # The message keeps the mid-turn mode and composer submission it was sent with, so an edit can
+                # neither steer or queue it anew nor move it into, out of, or within a submission.
+                for kept_key in (MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY):
+                    content.pop(kept_key, None)
+                    if kept_key in original_content:
+                        content[kept_key] = original_content[kept_key]
                 pending_event.event = replace(
                     event,
                     body=body,
@@ -662,16 +667,23 @@ class CoalescingGate:
         normal_count = CoalescingGate._front_live_run_length(gate, run_limit=run_limit)
         return normal_count < len(gate.queue)
 
-    def _front_submission(self, gate: _GateEntry, *, run_limit: int | None) -> SubmissionMarker | None:
-        """Return the composer submission marker on the claimable front run's last event, if it carries one."""
+    def _front_turn_length(self, gate: _GateEntry, *, run_limit: int | None) -> int:
+        """Return how many front events the next claim takes: the live run up to its first run or addressing change."""
         count = self._front_live_run_length(gate, run_limit=run_limit)
+        return self._front_same_run_identity_length(gate, count) if count else 0
+
+    def _front_submission(self, gate: _GateEntry, *, run_limit: int | None) -> SubmissionMarker | None:
+        """Return the composer submission marker on the front turn's last event, if it carries one."""
+        count = self._front_turn_length(gate, run_limit=run_limit)
         return submission_marker(gate.queue[count - 1].pending_event) if count else None
 
     def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
-        """Return whether the claimable front run is complete: it ends a submission or ends in a text-like utterance."""
+        """Return whether the front turn is complete: another turn's event follows it, or it ends a submission or text."""
+        count = self._front_live_run_length(gate, run_limit=run_limit)
+        if self._front_turn_length(gate, run_limit=run_limit) < count:
+            return True
         if (submission := self._front_submission(gate, run_limit=run_limit)) is not None:
             return not submission.more
-        count = self._front_live_run_length(gate, run_limit=run_limit)
         return (
             count > 0
             and pending_event_is_text(gate.queue[count - 1].pending_event)
@@ -1004,8 +1016,10 @@ class CoalescingGate:
         while True:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
-                self._log_submission_timed_out(key, gate, run_limit=run_limit())
-                return _DebounceWaitResult(quiet_deadline=quiet_deadline)
+                return _DebounceWaitResult(
+                    quiet_deadline=quiet_deadline,
+                    submission_timed_out=self._submission_timed_out(key, gate, run_limit=run_limit()),
+                )
             limit = run_limit()
             debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
             if not gate.queue or self._front_normal_run_ends_with_text(gate, run_limit=limit):
@@ -1027,20 +1041,21 @@ class CoalescingGate:
             )
             gate.deadline = quiet_deadline
 
-    def _log_submission_timed_out(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> None:
-        """Report a submission hold that reached its bound with its last event still saying more is coming."""
+    def _submission_timed_out(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> bool:
+        """Return and report whether a hold reached its bound with the front turn still saying more is coming."""
         submission = self._front_submission(gate, run_limit=run_limit)
         if submission is None or not submission.more:
-            return
+            return False
         logger.warning(
             "coalescing_gate_submission_timed_out",
             room_id=key.room_id,
             thread_id=key.thread_id,
             requester_user_id=coalescing_owner_log_label(key.owner),
             submission_id=submission.submission_id,
-            pending_count=self._front_live_run_length(gate, run_limit=run_limit),
+            pending_count=self._front_turn_length(gate, run_limit=run_limit),
             wait_seconds=_SUBMISSION_WAIT_SECONDS,
         )
+        return True
 
     async def _wait_for_front_split_reply(self, gate: _GateEntry) -> bool:
         """Wait while the split reply leading the queue misses segments, and return whether one leads it."""
@@ -1298,8 +1313,9 @@ class CoalescingGate:
     ) -> None:
         # Follow-up owners have no receipt lane; only requester-owned bursts
         # wait for same-sender lane work still resolving inside the window.
+        # A submission that reached its bound answers what was admitted, so it waits for no later lane work.
         lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
-        if lane_key is not None:
+        if lane_key is not None and not debounce_result.submission_timed_out:
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 lane_key,

@@ -1653,14 +1653,19 @@ async def test_final_marked_media_dispatches_without_debounce(thread_id: str | N
 @pytest.mark.asyncio
 async def test_open_submission_dispatches_what_arrived_at_its_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     """A submission whose last event never arrives holds only until the bound, then what came answers, logged."""
-    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.4)
     gate, batches = _recording_gate(60.0)
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
 
     with capture_logs() as logs:
         await _admit_ready(gate, key, _image_pending("$one:localhost", 1_000_000, submission=_open()))
-        await _admit_ready(gate, key, _image_pending("$two:localhost", 1_000_400, submission=_open()))
-        await _wait_for(lambda: len(batches) == 1)
+        await asyncio.sleep(0.25)
+        await _admit_ready(gate, key, _image_pending("$two:localhost", 1_000_250, submission=_open()))
+        # Past the first event's bound (0.4 s), before the second's (0.65 s): the bound slides with each event.
+        await asyncio.sleep(0.25)
+        assert batches == []
+        assert not [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+        await _wait_for(lambda: len(batches) == 1, deadline_seconds=1.0)
 
     assert list(batches[0].handled_turn.source_event_ids) == ["$one:localhost", "$two:localhost"]
     timed_out = [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
@@ -1768,6 +1773,126 @@ async def test_text_dispatches_immediately_while_the_senders_other_submission_is
 
     await _admit_ready(gate, upload_key, _image_pending("$upload:localhost", 1_000_000, submission=_open()))
     await _admit_ready(gate, text_key, _pending(_text_event("$text:localhost", "unrelated", 1_000_500)))
+
+    await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$text:localhost"]])
+    assert gate.has_pending_source_event("$upload:localhost")
+    await gate.drain_all()
+    assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [
+        ["$text:localhost"],
+        ["$upload:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_edited_queued_caption_stays_in_its_submission() -> None:
+    """Editing a submission's queued caption keeps it with its upload, at room level across a wide origin gap."""
+    gate, batches = _recording_gate(0.05)
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
+
+    await _admit_ready(gate, key, _image_pending("$root:localhost", 1_000_000, submission=_open()))
+    await asyncio.sleep(0.1)
+    caption = _text_event("$caption:localhost", "caption", 1_003_200, submission=_final())
+    await _admit_ready(gate, key, _pending(caption))
+    assert gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$caption:localhost",
+        sender="@user:localhost",
+        body="edited caption",
+        new_content={"msgtype": "m.text", "body": "edited caption"},
+        for_another_participant=None,
+    )
+
+    await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+    (batch,) = batches
+    assert list(batch.handled_turn.source_event_ids) == ["$root:localhost", "$caption:localhost"]
+    assert batch.handled_turn.source_event_prompts["$caption:localhost"] == "edited caption"
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_marker", [None, {"id": "upload-1", "more": False}])
+@pytest.mark.parametrize("edited_marker", [None, {"id": "upload-2", "more": True}])
+async def test_an_edit_of_a_queued_message_keeps_its_original_submission_marker(
+    original_marker: dict[str, object] | None,
+    edited_marker: dict[str, object] | None,
+) -> None:
+    """An edit can neither add, remove, nor change the submission a queued message was sent in."""
+    gate, _batches = _recording_gate(60.0)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+    await _admit_ready(
+        gate,
+        key,
+        _pending(_text_event("$queued:localhost", "hi", 1_000_000, submission=original_marker)),
+    )
+    edited: dict[str, object] = {"msgtype": "m.text", "body": "hello"}
+    if edited_marker is not None:
+        edited[SUBMISSION_CONTENT_KEY] = edited_marker
+
+    assert gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$queued:localhost",
+        sender="@user:localhost",
+        body="hello",
+        new_content=edited,
+        for_another_participant=None,
+    )
+    (pending,) = gate.queued_pending_events(key)
+    assert pending.event.body == "hello"
+    assert pending.event.source["content"].get(SUBMISSION_CONTENT_KEY) == original_marker
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_thread_id", [None, "$other-thread:localhost"])
+async def test_an_expired_submission_does_not_wait_for_later_lane_work(
+    monkeypatch: pytest.MonkeyPatch,
+    later_thread_id: str | None,
+) -> None:
+    """At its bound a submission answers what was admitted, without waiting on the sender's later unresolved events."""
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    key = CoalescingKey("!room:localhost", "$thread:localhost", owner)
+    release = asyncio.Event()
+
+    with capture_logs() as logs:
+        await _admit_ready(gate, key, _image_pending("$upload:localhost", 1_000_000, submission=_open()))
+        await asyncio.sleep(0.02)
+        later_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=owner.requester_user_id))
+        if later_thread_id is not None:
+            # A later upload in another thread whose normalization has not finished.
+            later = _image_pending("$later:localhost", 1_000_020)
+            gate.submit_lane_slot(
+                later_slot,
+                key=CoalescingKey("!room:localhost", later_thread_id, owner),
+                source_event_id="$later:localhost",
+                ready_task=asyncio.create_task(_ready_after(release, later)),
+            )
+        # Otherwise the later event's conversation is still being looked up.
+        await _wait_for(
+            lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$upload:localhost"]],
+        )
+
+    assert not later_slot.settled.is_set()
+    assert len([log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]) == 1
+    if later_thread_id is None:
+        gate.release_lane_slot(later_slot)
+    release.set()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_plain_text_is_not_held_by_an_open_upload_for_another_participant() -> None:
+    """Text for this agent queued just before an open upload for another participant is its own turn and answers at once."""
+    gate, batches = _recording_gate(60.0)
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+    text = _pending(_text_event("$text:localhost", "hello", 1_000_000))
+    text.event = replace(text.event, for_another_participant=False)
+    upload = _image_pending("$upload:localhost", 1_000_100, submission=_open())
+    upload.event = replace(upload.event, for_another_participant=True)
+
+    await _admit_ready(gate, key, text)
+    await _admit_ready(gate, key, upload)
 
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$text:localhost"]])
     assert gate.has_pending_source_event("$upload:localhost")
