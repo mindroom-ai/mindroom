@@ -34,6 +34,7 @@ from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
+    CUT_OFF_TEXT_KEY,
     REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
@@ -499,7 +500,9 @@ async def _stream_turn(
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
     already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
-    before whatever ended the stream reaches the run's terminal handling. A turn that completed but was never taken
+    before whatever ended the stream reaches the run's terminal handling. The message has no content, so no request
+    sends it; the text the stream yielded, which a reply showed, is kept in its ``CUT_OFF_TEXT_KEY``, and a stream
+    that reported no usage leaves the message for that text alone. A turn that completed but was never taken
     by the consumer, such as one cancelled while a pipeline stage finishes the stream, is cut off the same way with
     the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that usage instead.
     """
@@ -507,11 +510,15 @@ async def _stream_turn(
     turn: TurnCompleted | None = None
     handed_off = False
     reported = ReportedUsage()
+    shown: list[str] = []
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                if isinstance(event, TextDelta | ReasoningDelta):
+                if isinstance(event, TextDelta):
+                    shown.append(event.text)
+                    yield event
+                elif isinstance(event, ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
                     reported.observe(event)
@@ -532,17 +539,41 @@ async def _stream_turn(
             # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
             # plus a partial none replaced.
             billed = turn.message.metrics if turn is not None else reported.received
-            if billed is not None and billed.reported:
-                provider_data = model_provenance(identity.id, identity.provider)
-                # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
-                sums_attempts = (
-                    usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
-                )
-                if sums_attempts:
-                    # Usage that sums retried attempts must not read as one request's.
-                    provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
-                messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
-                _count_request(metrics, billed, identity)
+            # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
+            sums_attempts = (
+                usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
+            )
+            _keep_cut_off(messages, metrics, identity, billed, "".join(shown), sums_attempts=sums_attempts)
+
+
+def _keep_cut_off(
+    messages: list[Message],
+    metrics: RunMetrics,
+    identity: ModelIdentity,
+    billed: MessageMetrics | None,
+    shown: str,
+    *,
+    sums_attempts: bool,
+) -> None:
+    """Append the message that stands for a cut-off request, if it reported usage or streamed text.
+
+    It holds the usage the request ``billed``, counted once in ``metrics``, and the text it had ``shown``.
+    """
+    if billed is not None and not billed.reported:
+        billed = None
+    if billed is None and not shown:
+        return
+    provider_data = model_provenance(identity.id, identity.provider)
+    if shown:
+        provider_data[CUT_OFF_TEXT_KEY] = shown
+    if sums_attempts:
+        # Usage that sums retried attempts must not read as one request's.
+        provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
+    message = Message(role="assistant", provider_data=provider_data)
+    messages.append(message)
+    if billed is not None:
+        message.metrics = billed
+        _count_request(metrics, billed, identity)
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:
