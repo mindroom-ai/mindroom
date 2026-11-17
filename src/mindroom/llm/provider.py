@@ -195,8 +195,8 @@ class ReasoningDelta:
     """A piece of the assistant's reasoning text."""
 
     text: str
-    # When the model began this reasoning, on the ``time.monotonic`` clock, from a provider that sends reasoning only
-    # once the model has finished it; None when reasoning arrives while the model produces it.
+    # When the model began this reasoning, on the ``time.monotonic`` clock, from a provider that may send reasoning
+    # only once the model has finished it; None starts the thought when its first piece arrives.
     started_at: float | None = None
 
 
