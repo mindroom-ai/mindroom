@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
@@ -17,6 +18,7 @@ from mindroom.api import config_lifecycle, github_requests
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
+from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -38,6 +40,7 @@ BOB = "@bob:example.org"
 CLIENT_ORIGIN = "https://chat.example.org"
 ALICE_TOKEN = "gho-alice-access"  # noqa: S105
 SHARED_TOKEN = "ghp-shared-token"  # noqa: S105
+ALICE_PAT = "github_pat_alice-personal"  # noqa: S105
 DEFAULT_ACCEPT = "application/vnd.github+json"
 
 type Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
@@ -105,7 +108,7 @@ def test_the_github_client_follows_no_redirect_and_times_out() -> None:
 def app(paths: RuntimePaths, github: GitHubPeer) -> FastAPI:
     """App serving the GitHub routes behind the real CORS middleware."""
     del github
-    api = FastAPI()
+    api = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
     ensure_app_state(api).api_state = config_lifecycle.ApiState(
         threading.Lock(),
         config_lifecycle.ApiSnapshot(1, paths, runtime_config=Config()),
@@ -209,6 +212,7 @@ def test_status_reports_the_users_own_connection_and_login(
 
     assert client.get("/api/github/status", headers=session(app, ALICE)).json() == {
         "connected": True,
+        "via": "app",
         "login": "alice-gh",
     }
     assert client.get("/api/github/status", headers=session(app, BOB)).json() == {"connected": False}
@@ -218,7 +222,7 @@ def test_status_without_a_verified_login_names_none(app: FastAPI, client: TestCl
     """A connection without a verified login reports no login."""
     connect(paths, ALICE, login=None)
 
-    assert client.get("/api/github/status", headers=session(app, ALICE)).json() == {"connected": True}
+    assert client.get("/api/github/status", headers=session(app, ALICE)).json() == {"connected": True, "via": "app"}
 
 
 def test_status_reads_stored_state_only(
@@ -1043,3 +1047,299 @@ def test_a_client_on_an_allowed_origin_may_call_the_routes(client: TestClient) -
     assert "access-control-allow-credentials" not in preflight.headers
     status = client.get("/api/github/status", headers={"Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in status.headers
+
+
+def user_answer(login: str = "pat-gh") -> Handler:
+    """Answer `GET /user` as GitHub does for a token of ``login``, and anything else with a JSON 200."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": login, "id": 1, "email": "login-lookup-secret@example.org"})
+        return httpx.Response(200, json={"ok": True})
+
+    return handler
+
+
+def save_token(client: TestClient, auth: dict[str, str], token: object = ALICE_PAT) -> httpx.Response:
+    """Save ``token`` as the session user's GitHub token."""
+    return client.put("/api/github/token", json={"token": token}, headers=auth)
+
+
+def stored_token(paths: RuntimePaths, user_id: str) -> dict[str, Any] | None:
+    """The token document kept in ``user_id``'s own primary-only store, the one their GitHub App connection uses."""
+    manager = get_runtime_credentials_manager(paths).for_primary_runtime_scope(user_id, None)
+    return manager.load_credentials("github_user_token")
+
+
+def test_a_saved_token_is_checked_with_github_and_stored_for_the_user_only(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """GitHub confirms the token's login before it is stored in the user's own store, never the shared ones."""
+    github.handler = user_answer()
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (200, {"connected": True, "via": "token", "login": "pat-gh"})
+    [check] = github.requests
+    assert (check.method, str(check.url)) == ("GET", "https://api.github.com/user")
+    assert check.headers["authorization"] == f"Bearer {ALICE_PAT}"
+    assert check.headers["accept"] == DEFAULT_ACCEPT
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+    manager = get_runtime_credentials_manager(paths)
+    assert manager.load_credentials("github") == {"access_token": SHARED_TOKEN}
+    assert manager.load_credentials("github_user_token") is None
+    assert load_oauth_credentials_snapshot_sync(tool_context(paths, ALICE)).credentials is None
+    assert client.get("/api/github/status", headers=session(app, BOB)).json() == {"connected": False}
+
+
+def test_a_saved_token_is_used_without_the_github_app(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A token works on its own, even with no GitHub App client saved, and its 401 is relayed with the token kept."""
+    get_runtime_credentials_manager(paths).delete_credentials("github_oauth_client")
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+    github.handler = lambda _request: httpx.Response(401, json={"message": "Bad credentials"})
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    response = ask(client, session(app, ALICE))
+
+    assert status.json() == {"connected": True, "via": "token", "login": "pat-gh"}
+    assert response.json() == {"status": 401, "body": {"message": "Bad credentials"}, "headers": {}}
+    assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+
+
+def test_a_token_wins_over_the_app_connection_until_it_is_removed(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """The token answers while it is saved, and removing it falls back to the GitHub App connection."""
+    connect(paths, ALICE)
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    ask(client, session(app, ALICE))
+    removed = client.delete("/api/github/token", headers=session(app, ALICE))
+    ask(client, session(app, ALICE))
+    removed_again = client.delete("/api/github/token", headers=session(app, ALICE))
+
+    assert status.json() == {"connected": True, "via": "token", "login": "pat-gh", "app_connected": True}
+    assert [r.headers["authorization"] for r in github.requests[1:]] == [f"Bearer {ALICE_PAT}", f"Bearer {ALICE_TOKEN}"]
+    assert (removed.status_code, removed.json()) == (200, {"connected": True, "via": "app", "login": "alice-gh"})
+    assert (removed_again.status_code, removed_again.json()) == (200, removed.json())
+    assert stored_token(paths, ALICE) is None
+
+
+def test_removing_the_only_connection_leaves_none(
+    app: FastAPI,
+    client: TestClient,
+    github: GitHubPeer,
+) -> None:
+    """Removing a token without an App connection behind it answers not connected, and removing none is fine."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    assert client.delete("/api/github/token", headers=session(app, ALICE)).json() == {"connected": False}
+    assert client.delete("/api/github/token", headers=session(app, BOB)).json() == {"connected": False}
+    assert ask(client, session(app, ALICE)).status_code == 409
+
+
+def test_a_token_is_used_when_the_app_connection_cannot_be_read(
+    app: FastAPI,
+    client: TestClient,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store failure of the GitHub App connection does not hide a saved token."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    async def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "store busy"
+        raise OAuthProviderError(msg)
+
+    monkeypatch.setattr(github_requests, "load_oauth_credentials_status", fail)
+
+    assert client.get("/api/github/status", headers=session(app, ALICE)).json() == {
+        "connected": True,
+        "via": "token",
+        "login": "pat-gh",
+    }
+    assert ask(client, session(app, ALICE)).json()["status"] == 200
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_a_token_github_refuses_is_not_stored(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    status_code: int,
+) -> None:
+    """GitHub's 401 or 403 answers 400 and keeps whatever was saved before."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(status_code, json={"message": "Bad credentials"})
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (400, {"error": "github_token_rejected"})
+    assert stored_token(paths, ALICE) is None
+    assert client.get("/api/github/status", headers=session(app, ALICE)).json()["via"] == "app"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(500, json={"message": "Server Error"}),
+        httpx.Response(502),
+        httpx.Response(301, headers={"location": "https://evil.example/user"}),
+        httpx.Response(200, json={"id": 1}),
+        httpx.Response(200, text="not json"),
+    ],
+)
+def test_a_token_check_without_a_login_is_a_bad_gateway(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    answer: httpx.Response,
+) -> None:
+    """A failing GitHub, a redirect, which is never followed, or an answer naming no login stores nothing."""
+    github.handler = lambda _request: answer
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_unreachable"})
+    assert len(github.requests) == 1
+    assert stored_token(paths, ALICE) is None
+
+
+def test_an_unreachable_or_slow_github_stores_no_token(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A network failure or a check slower than its timeout answers 502."""
+    assert github_requests._TOKEN_CHECK_TIMEOUT_SECONDS == 10.0
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        msg = "down"
+        raise httpx.ConnectError(msg, request=request)
+
+    github.handler = fail
+    unreachable = save_token(client, session(app, ALICE))
+    monkeypatch.setattr(github_requests, "_TOKEN_CHECK_TIMEOUT_SECONDS", 0.05)
+
+    async def slow(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(200, json={"login": "pat-gh"})
+
+    github.handler = slow
+    timed_out = save_token(client, session(app, ALICE))
+
+    assert (unreachable.status_code, unreachable.json()) == (502, {"error": "github_unreachable"})
+    assert (timed_out.status_code, timed_out.json()) == (502, {"error": "github_unreachable"})
+    assert stored_token(paths, ALICE) is None
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "a" * 513, "ghp_with space", "ghp_tab\t", "ghp_newline\n", "ghp_nul\x00", "ghp_del\x7f", "ghp_é", 5, None],
+    ids=["empty", "513-chars", "space", "tab", "newline", "nul", "del", "non-ascii", "number", "null"],
+)
+def test_a_malformed_token_is_refused_unsent_and_unechoed(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    token: object,
+) -> None:
+    """A token that is empty, over 512 characters, or holds a space or control character answers 422."""
+    response = save_token(client, session(app, ALICE), token)
+
+    assert response.status_code == 422
+    if isinstance(token, str) and token:
+        assert token not in response.text
+    assert github.requests == []
+    assert stored_token(paths, ALICE) is None
+
+
+def test_a_token_of_512_characters_is_accepted(app: FastAPI, client: TestClient, github: GitHubPeer) -> None:
+    """The longest token allowed is checked with GitHub."""
+    github.handler = user_answer()
+
+    assert save_token(client, session(app, ALICE), "a" * 512).status_code == 200
+
+
+def test_a_session_without_a_user_cannot_save_a_token(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A session naming no user has no store of its own, so nothing is checked or stored, not even globally."""
+    github.handler = user_answer()
+    before = sorted(p for p in paths.storage_root.rglob("*") if p.is_file())
+
+    saved = save_token(client, session(app, ""))
+    removed = client.delete("/api/github/token", headers=session(app, ""))
+
+    assert (saved.status_code, saved.json()) == (409, {"error": "github_not_connected"})
+    assert (removed.status_code, removed.json()) == (200, {"connected": False})
+    assert github.requests == []
+    assert sorted(p for p in paths.storage_root.rglob("*") if p.is_file()) == before
+
+
+def test_the_token_routes_need_a_client_session(client: TestClient, github: GitHubPeer) -> None:
+    """Without a live client session saving and removing a token answer 401 and nothing reaches GitHub."""
+    assert save_token(client, {}).status_code == 401
+    assert client.delete("/api/github/token").status_code == 401
+    assert github.requests == []
+
+
+def test_without_a_token_nothing_is_sent_even_with_another_users_token_or_shared_tokens(
+    app: FastAPI,
+    client: TestClient,
+    github: GitHubPeer,
+) -> None:
+    """Bob gets neither Alice's saved token nor the shared tokens the environment and the `github` tool hold."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    response = ask(client, session(app, BOB))
+
+    assert (response.status_code, response.json()) == (409, {"error": "github_not_connected"})
+    assert len(github.requests) == 1
+
+
+def test_logs_never_carry_a_token_or_its_login_lookup(
+    app: FastAPI,
+    client: TestClient,
+    github: GitHubPeer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Saving, failing to save, and using a token log neither the token nor what GitHub said about it."""
+    caplog.set_level("DEBUG")
+    with capture_logs() as logs:
+        github.handler = lambda _request: httpx.Response(401, json={"message": "Bad credentials"})
+        save_token(client, session(app, ALICE), "ghp_rejected-token")
+        save_token(client, session(app, ALICE), "ghp_bad token")
+        github.handler = user_answer()
+        save_token(client, session(app, ALICE))
+        ask(client, session(app, ALICE))
+
+    logged = repr(logs) + caplog.text
+    for secret in (ALICE_PAT, "ghp_rejected-token", "ghp_bad token", "pat-gh", "login-lookup-secret", "Bad credentials"):
+        assert secret not in logged
