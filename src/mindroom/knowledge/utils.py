@@ -42,6 +42,7 @@ __all__ = [
     "KnowledgeAccessSupport",
     "KnowledgeAvailabilityDetail",
     "KnowledgeBaseAccessResolution",
+    "configured_reranker",
     "format_knowledge_availability_notice",
     "knowledge_runtime_identity",
     "resolve_agent_knowledge_access",
@@ -298,7 +299,7 @@ def resolve_agent_knowledge_access(
         agent_name,
         base_ids,
         resolved_bases,
-        reranker=_configured_reranker(config, runtime_paths),
+        reranker=configured_reranker(config, runtime_paths),
     )
 
 
@@ -344,18 +345,18 @@ async def resolve_agent_knowledge_access_async(
         agent_name,
         base_ids,
         resolved_bases,
-        reranker=await asyncio.to_thread(_configured_reranker, config, runtime_paths),
+        reranker=await asyncio.to_thread(configured_reranker, config, runtime_paths),
     )
 
 
-def _configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
-    """Return the configured knowledge reranker, or None when none is configured or it cannot be built."""
-    if config.knowledge_reranker is None:
+def configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
+    """Return the configured reranker, or None when none is configured or it cannot be built."""
+    if config.reranker is None:
         return None
     try:
-        return create_reranker(config.knowledge_reranker, runtime_paths)
+        return create_reranker(config.reranker, runtime_paths)
     except Exception:
-        logger.warning("Knowledge reranker unavailable; searches keep their ranking", exc_info=True)
+        logger.warning("Reranker unavailable; searches keep their ranking", exc_info=True)
         return None
 
 

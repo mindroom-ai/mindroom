@@ -78,20 +78,27 @@ async def retrieve[T](
     """Return the leading candidates ``selection`` keeps, in the reranker's order when one is set.
 
     A reranker that raises, passes ``deadline_seconds``, or does not return one finite score per candidate leaves the
-    candidates in their given order, selected by their hybrid scores.
+    candidates in their given order, selected by their hybrid scores; so does a score outside [0, 1] when
+    ``min_rerank_score`` reads the scores on that scale.
     """
     if reranker is None or not candidates:
         return _select(candidates, selection, reranked=False)
     try:
         scores = await asyncio.wait_for(reranker.ascore(query, [c.text for c in candidates]), deadline_seconds)
-        if len(scores) != len(candidates) or not all(math.isfinite(score) for score in scores):
-            msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or a non-finite one"
+        # A threshold reads the scores on the [0, 1] scale; an order alone reads any finite scale.
+        valid = _unit_interval if selection.min_rerank_score is not None else math.isfinite
+        if len(scores) != len(candidates) or not all(valid(score) for score in scores):
+            msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or an invalid one"
             raise ValueError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
     except Exception:
         logger.warning("Reranking failed; keeping search order", exc_info=True)
         return _select(candidates, selection, reranked=False)
     rescored = [replace(candidate, score=score) for candidate, score in zip(candidates, scores, strict=True)]
     return _select(sorted(rescored, key=lambda candidate: -candidate.score), selection, reranked=True)
+
+
+def _unit_interval(score: float) -> bool:
+    return 0.0 <= score <= 1.0
 
 
 def _select[T](ranked: Sequence[Candidate[T]], selection: Selection, *, reranked: bool) -> list[Candidate[T]]:

@@ -17,6 +17,7 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.config.resolution import entity_timezone, memory_search
 from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
+from mindroom.knowledge.utils import configured_reranker
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.rerank import Reranker
     from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -795,18 +797,39 @@ def _agent_keyword_results(scope: MemoryScope, query: str, limit: int) -> list[M
     return _keyword_results(scope, query, limit)
 
 
-# Semantic hits the per-turn recall fetches for `_RECALL_SELECTION` to choose from. The store fuses
-# `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of a
-# three-hit search.
+# Semantic hits the per-turn recall, and a reranked search, fetch for their selection to choose from. The store
+# fuses `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of
+# a three-hit search.
 _RECALL_SEARCH_LIMIT = 20
 #: The semantic hits one turn's recall injects: within 0.05 of the best hybrid score, at most 5, 800 o200k tokens.
 _RECALL_SELECTION = Selection(limit=5, token_budget=800, hybrid_score_gap=0.05)
+#: Seconds the per-turn recall waits for its reranker before keeping the hybrid selection.
+_RECALL_RERANK_DEADLINE_SECONDS = 2.0
 
 
-async def _retrieve_memories(query: str, results: Sequence[MemoryResult], selection: Selection) -> list[MemoryResult]:
-    """Return the ``results`` that ``selection`` keeps, judged by their memory text and score (0 when unscored)."""
+async def _retrieve_memories(
+    query: str,
+    results: Sequence[MemoryResult],
+    selection: Selection,
+    *,
+    reranker: Reranker | None = None,
+    deadline_seconds: float | None = None,
+) -> list[MemoryResult]:
+    """Return the ``results`` that ``selection`` keeps, judged by their memory text and score (0 when unscored).
+
+    A result the reranker scored carries the reranker's score.
+    """
     candidates = [Candidate(result, result.get("memory", ""), result.get("score", 0.0)) for result in results]
-    return [candidate.item for candidate in await retrieve(query, candidates, selection)]
+    kept = await retrieve(query, candidates, selection, reranker=reranker, deadline_seconds=deadline_seconds)
+    return [_rescored(candidate.item, candidate.score) for candidate in kept]
+
+
+def _rescored(result: MemoryResult, score: float) -> MemoryResult:
+    if result.get("score", 0.0) == score:
+        return result
+    rescored = result.copy()
+    rescored["score"] = score
+    return rescored
 
 
 @timed("system_prompt_assembly.memory_search.file.team_scope")
@@ -862,6 +885,11 @@ class FileMemoryBackend:
         are not comparable, each only if it fits the token budget the
         semantic hits left. Keyword matches, a fallback's included, rank as
         in any search.
+
+        With ``memory.search.rerank`` and a configured reranker, semantic
+        hits are reranked from a wider search; recall then keeps those at or
+        above the reranker's threshold, and keeps the hybrid selection if
+        reranking fails or takes over two seconds.
         """
         agent_scope, *teams = await asyncio.to_thread(
             _visible_scopes,
@@ -875,7 +903,9 @@ class FileMemoryBackend:
         results: list[MemoryResult] | None = None
         search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
-        if search_config.mode == "semantic" and not editable:
+        semantic_search = search_config.mode == "semantic" and not editable
+        rerank = semantic_search and search_config.rerank and config.reranker is not None
+        if semantic_search:
             try:
                 results = await search_semantic_file_memories(
                     query,
@@ -884,7 +914,7 @@ class FileMemoryBackend:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,
-                    limit=_RECALL_SEARCH_LIMIT if recall else limit,
+                    limit=_RECALL_SEARCH_LIMIT if recall or rerank else limit,
                     execution_identity=execution_identity,
                 )
             except SemanticFileMemoryIndexUnavailableError as exc:
@@ -908,7 +938,18 @@ class FileMemoryBackend:
         if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
         else:
-            results = await _retrieve_memories(query, results, _RECALL_SELECTION if recall else Selection(limit))
+            reranker = await asyncio.to_thread(configured_reranker, config, self.runtime_paths) if rerank else None
+            if recall:
+                threshold = config.reranker.threshold if config.reranker else None
+                results = await _retrieve_memories(
+                    query,
+                    results,
+                    replace(_RECALL_SELECTION, min_rerank_score=threshold),
+                    reranker=reranker,
+                    deadline_seconds=_RECALL_RERANK_DEADLINE_SECONDS,
+                )
+            else:
+                results = await _retrieve_memories(query, results, Selection(limit), reranker=reranker)
 
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
         if semantic and recall:

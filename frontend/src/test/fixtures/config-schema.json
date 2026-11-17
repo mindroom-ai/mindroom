@@ -691,6 +691,19 @@
           "default": null,
           "description": "Per-agent MEMORY.md indexing override",
           "title": "Include Entrypoint"
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent memory reranking override",
+          "title": "Rerank"
         }
       },
       "title": "AgentMemorySearchConfig",
@@ -3009,7 +3022,7 @@
     },
     "KnowledgeRerankerConfig": {
       "additionalProperties": false,
-      "description": "Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query.",
+      "description": "Reranker that reorders search results by how well each one answers the query.",
       "properties": {
         "provider": {
           "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally; 'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials",
@@ -3067,6 +3080,14 @@
           "default": null,
           "description": "Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
           "title": "Credentials Service"
+        },
+        "threshold": {
+          "default": 0.5,
+          "description": "Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
         }
       },
       "required": [
@@ -3860,7 +3881,8 @@
               "memory/**/*.md"
             ],
             "exclude": [],
-            "include_entrypoint": false
+            "include_entrypoint": false,
+            "rerank": false
           },
           "description": "Search behavior for file-backed memory"
         },
@@ -3933,6 +3955,12 @@
           "default": false,
           "description": "When true, include MEMORY.md in file-memory semantic search",
           "title": "Include Entrypoint",
+          "type": "boolean"
+        },
+        "rerank": {
+          "default": false,
+          "description": "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps only hits that score at least its threshold",
+          "title": "Rerank",
           "type": "boolean"
         }
       },
@@ -6068,7 +6096,8 @@
             "memory/**/*.md"
           ],
           "include_entrypoint": false,
-          "mode": "keyword"
+          "mode": "keyword",
+          "rerank": false
         },
         "auto_flush": {
           "batch": {
@@ -6123,7 +6152,7 @@
       "title": "Knowledge Bases",
       "type": "object"
     },
-    "knowledge_reranker": {
+    "reranker": {
       "anyOf": [
         {
           "$ref": "#/$defs/KnowledgeRerankerConfig"
@@ -6133,7 +6162,7 @@
         }
       ],
       "default": null,
-      "description": "Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one"
+      "description": "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; searches keep hybrid ranking without one"
     },
     "mcp_servers": {
       "additionalProperties": {

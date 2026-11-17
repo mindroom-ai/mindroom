@@ -224,3 +224,23 @@ async def test_min_rerank_score_selects_nothing_below_threshold() -> None:
     assert _items(kept) == ["c", "a"]
 
     assert await retrieve("query", _GAP_CANDIDATES, selection, reranker=_Reranker([0.79, 0.5, 0.1])) == []
+
+
+@pytest.mark.asyncio
+async def test_a_rerank_threshold_needs_scores_in_the_unit_interval() -> None:
+    """A threshold reads reranker scores as [0, 1]; a score outside it keeps the hybrid selection.
+
+    Without a threshold only the order counts, so raw logits, such as a Cohere-compatible endpoint may return, rerank.
+    """
+    logits = _Reranker([-2.0, 3.5, 0.7])
+
+    thresholded = await retrieve(
+        "query",
+        _GAP_CANDIDATES,
+        replace(_GAP_SELECTION, min_rerank_score=0.5),
+        reranker=logits,
+    )
+    ordered = await retrieve("query", _GAP_CANDIDATES, Selection(limit=2), reranker=logits)
+
+    assert thresholded == list(_GAP_CANDIDATES[:2])
+    assert _items(ordered) == ["b", "c"]

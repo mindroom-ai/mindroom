@@ -39,7 +39,11 @@ class Reranker(Protocol):
     """Scores how well each document answers a query; higher is better."""
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        """Return one relevance score per document, in the documents' order."""
+        """Return one relevance score in [0, 1] per document, in the documents' order; 0.0 for one it did not judge.
+
+        Ordering never depends on the scale, but a recall threshold does: ``retrieve`` falls back to the hybrid
+        selection when a score outside [0, 1] meets a threshold.
+        """
         ...
 
 
@@ -60,7 +64,7 @@ class _CohereReranker:
                 json={"model": self.model, "query": query, "documents": list(documents), "top_n": len(documents)},
             )
         response.raise_for_status()
-        scores = [float("-inf")] * len(documents)
+        scores = [0.0] * len(documents)
         for result in response.json()["results"]:
             scores[int(result["index"])] = float(result["relevance_score"])
         return scores
@@ -93,7 +97,7 @@ class _VertexAIReranker:
                 )
                 for start in range(0, len(records), _VERTEX_AI_RECORDS_PER_REQUEST)
             ]
-        scores = [float("-inf")] * len(documents)
+        scores = [0.0] * len(documents)
         for request in requests:
             response = request.result()
             response.raise_for_status()
@@ -143,7 +147,11 @@ _cross_encoder_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rera
 
 @dataclass(frozen=True)
 class _CrossEncoderReranker:
-    """Scores query and document pairs with a sentence-transformers cross-encoder in process."""
+    """Scores query and document pairs with a sentence-transformers cross-encoder in process.
+
+    ``CrossEncoder.predict`` applies the model's activation, a sigmoid by default for a one-label model such as
+    ``BAAI/bge-reranker-v2-m3``, so its scores are already in [0, 1] and get no second sigmoid.
+    """
 
     model: str
 

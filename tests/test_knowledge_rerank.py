@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -21,8 +22,10 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
+
+    from mindroom.knowledge.rerank import Reranker
 
 
 class _Index:
@@ -290,3 +293,68 @@ async def test_local_reranking_does_not_need_the_shared_default_executor(
         release.set()
         await blocked
         busy.shutdown()
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, respond: Callable[[httpx.Request], httpx.Response]) -> None:
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        rerank_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+
+
+def _cohere_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
+    _serve(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200,
+            json={"results": [{"index": 1, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.2}]},
+        ),
+    )
+    config = KnowledgeRerankerConfig(provider="cohere", model="m", url="https://rerank.test", api_key="k")
+    return create_reranker(config, test_runtime_paths(tmp_path))
+
+
+def _vertex_ai_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
+    _serve(
+        monkeypatch,
+        lambda _request: httpx.Response(200, json={"records": [{"id": "1", "score": 0.9}, {"id": "0", "score": 0.2}]}),
+    )
+    monkeypatch.setattr(
+        rerank_module,
+        "load_ambient_google_credentials",
+        lambda: (_GoogleCredentials(token=None), "project"),
+    )
+    rerank_module._google_credentials.cache_clear()
+    return create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+
+
+def _cross_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
+    class _Encoder:
+        """Answers as `CrossEncoder.predict` does for a one-label model: its default activation is a sigmoid."""
+
+        def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
+            return [1 / (1 + math.exp(-logit)) for logit in (-1.4, 2.2, -9.0)[: len(sentences)]]
+
+    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
+    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
+    return create_reranker(config, test_runtime_paths(tmp_path))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build", [_cohere_leaving_out_the_last, _vertex_ai_leaving_out_the_last, _cross_encoder])
+async def test_scores_are_in_unit_interval(
+    build: Callable[[pytest.MonkeyPatch, Path], Reranker],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every provider scores each document in [0, 1], and a document missing from the response scores 0.0."""
+    scores = await build(monkeypatch, tmp_path).ascore("q", ["first", "second", "third"])
+
+    assert len(scores) == 3
+    assert all(0.0 <= score <= 1.0 for score in scores)
+    assert scores[1] > scores[0] > scores[2]
+    if build is not _cross_encoder:
+        assert scores == [0.2, 0.9, 0.0]

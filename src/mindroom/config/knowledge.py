@@ -18,7 +18,7 @@ def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[st
 
 
 class KnowledgeRerankerConfig(BaseModel):
-    """Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query."""
+    """Reranker that reorders search results by how well each one answers the query."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -46,6 +46,13 @@ class KnowledgeRerankerConfig(BaseModel):
     credentials_service: CredentialServiceName | None = Field(
         default=None,
         description="Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
+    )
+    threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
     )
 
 

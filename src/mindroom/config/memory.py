@@ -75,6 +75,13 @@ class MemorySearchConfig(BaseModel):
         default=False,
         description="When true, include MEMORY.md in file-memory semantic search",
     )
+    rerank: bool = Field(
+        default=False,
+        description=(
+            "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps "
+            "only hits that score at least its threshold"
+        ),
+    )
 
 
 class AgentMemorySearchConfig(BaseModel):
@@ -92,6 +99,7 @@ class AgentMemorySearchConfig(BaseModel):
         description="Per-agent excluded memory-search glob patterns",
     )
     include_entrypoint: bool | None = Field(default=None, description="Per-agent MEMORY.md indexing override")
+    rerank: bool | None = Field(default=None, description="Per-agent memory reranking override")
 
 
 class _MemoryEmbedderConfig(BaseModel):

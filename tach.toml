@@ -3843,6 +3843,7 @@ depends_on = [
     "mindroom.atomic_file",
     "mindroom.embeddings.errors",
     "mindroom.knowledge.retrieval",
+    "mindroom.knowledge.utils",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",

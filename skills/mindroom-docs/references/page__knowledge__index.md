@@ -257,10 +257,12 @@ A strong reranker improves on the merged ranking, but a small one can make it wo
 Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
-knowledge_reranker:
+reranker:
   provider: cohere                 # or sentence_transformers, vertex_ai
   model: rerank-v3.5
 ```
+
+Earlier releases named this setting `knowledge_reranker`; that name still loads, but a config that sets both fails.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -269,6 +271,7 @@ knowledge_reranker:
 | `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
 | `api_key` | string | `null` | API key for `cohere` |
 | `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+| `threshold` | number from 0 to 1 | `0.5` | Minimum score of a memory that per-turn recall adds with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) |
 
 `vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
 Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
@@ -276,8 +279,12 @@ That project needs the `discoveryengine.googleapis.com` API, and the identity ne
 The ranking API reads the first 1024 tokens of each chunk with its default models, 512 with older ones; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
 
 The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
-It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.
+It applies to `search_knowledge_base`, and to file-memory searches only with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory); without it automatic memory search keeps the merged ranking and adds no latency to replies.
 If the reranker fails, the search returns its results in the merged order and logs a warning.
+
+Each provider scores a chunk from 0 to 1, and a chunk missing from the response scores 0.
+`sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 ### Contextual Chunk Headers
 
