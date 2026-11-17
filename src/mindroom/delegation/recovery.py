@@ -161,6 +161,8 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
+        # What the saved turn cost so far stands too; a settlement below adds only what it settles.
+        child.cost_usd, child.subagents_cost_usd = retained.cost_usd, retained.subagents_cost_usd
         if retained.status in TERMINAL_CHILD_STATUSES:
             # A settlement saved before a crash stands; only finish projecting it.
             child.status, child.result = retained.status, retained.result

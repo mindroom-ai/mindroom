@@ -20,6 +20,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, subagent_sessions_dir
+from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.providers.identity import model_identity
@@ -169,13 +170,16 @@ class _Conversation:
             )
         return collected[AI_RUN_METADATA_KEY]
 
-    def saved_costs(self) -> dict[str, float | None]:
-        """Return the cost each subagent's saved turn records, by agent name."""
-        children = (
+    def saved_children(self) -> list[DelegationChild]:
+        """Return each subagent's saved latest turn."""
+        return [
             DelegationChild.from_dict(json.loads(path.read_text())["child"])
             for path in subagent_sessions_dir(self.paths).glob("*.json")
-        )
-        return {child.child_agent_name: child.cost_usd for child in children}
+        ]
+
+    def saved_costs(self) -> dict[str, float | None]:
+        """Return the cost each subagent's saved turn records, by agent name."""
+        return {child.child_agent_name: child.cost_usd for child in self.saved_children()}
 
     async def close(self) -> None:
         if self.runtime is not None:
@@ -278,17 +282,20 @@ async def test_a_background_subagent_counts_on_the_reply_that_waited_for_its_res
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conversation", ["job"], indirect=True)
-async def test_a_subagent_resumed_after_an_approval_counts_the_subagents_it_runs_then(
+@pytest.mark.parametrize("nested", ["before", "after"])
+async def test_a_subagent_that_waited_for_an_approval_counts_the_subagents_it_ran_before_and_after(
     conversation: _Conversation,
     monkeypatch: pytest.MonkeyPatch,
+    nested: Literal["before", "after"],
 ) -> None:
-    """A background subagent that waited for an approval still counts the subagent it runs once it resumes."""
+    """A background subagent that waited for an approval counts the subagent it ran ``nested`` its pause."""
+    report = calls(tool_call("write_report", "report"), metrics=_CHILD_REQUEST)
+    delegate = calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST)
     with registered_report_tool():
         await conversation.open(
             mid_tools=("report",),
             mid=[
-                calls(tool_call("write_report", "report"), metrics=_CHILD_REQUEST),
-                calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST),
+                *((delegate, report) if nested == "before" else (report, delegate)),
                 answer("Mid answer", _CHILD_REQUEST),
             ],
             leaf=[answer("Leaf answer", _CHILD_REQUEST)],
@@ -316,6 +323,28 @@ async def test_a_subagent_resumed_after_an_approval_counts_the_subagents_it_runs
     # Mid's three requests and leaf's one.
     assert conversation.saved_costs() == pytest.approx({"mid": 4 * _CHILD_USD, "leaf": _CHILD_USD})
     assert waited["cost"] == {"usd": _LEADER_USD, "subagents_usd": f"{4 * _CHILD_USD:g}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation", ["direct"], indirect=True)
+async def test_recovery_keeps_the_cost_a_settled_subagent_saved(conversation: _Conversation) -> None:
+    """Recovering a child from a snapshot taken before it settled keeps the cost its saved settlement holds."""
+    await conversation.open(
+        mid=[
+            calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST),
+            answer("Mid answer", _CHILD_REQUEST),
+        ],
+        leaf=[answer("Leaf answer", _CHILD_REQUEST)],
+    )
+    await conversation.reply(_delegate("delegate", "mid"), answer("Parent done", _LEADER_REQUEST))
+    [settled] = [child for child in conversation.saved_children() if child.child_agent_name == "mid"]
+    # What a job's saved adapter holds of the child it admitted, before the child settled.
+    snapshot = replace(settled, status="running", result=None, cost_usd=None, subagents_cost_usd=None)
+
+    await interrupt_child(snapshot, config=conversation.config, runtime_paths=conversation.paths, reason="Restarted")
+
+    assert (snapshot.cost_usd, snapshot.subagents_cost_usd) == pytest.approx((3 * _CHILD_USD, _CHILD_USD))
+    assert conversation.saved_costs() == pytest.approx({"mid": 3 * _CHILD_USD, "leaf": _CHILD_USD})
 
 
 @pytest.mark.asyncio
@@ -408,9 +437,11 @@ def test_a_child_snapshot_keeps_its_cost_and_one_saved_without_it_reads_as_unkno
         requested_model_name="cheap",
         persona=None,
         cost_usd=0.25,
+        subagents_cost_usd=0.125,
     )
     snapshot = asdict(child)
 
     assert DelegationChild.from_dict(snapshot) == child
-    del snapshot["cost_usd"]
-    assert DelegationChild.from_dict(snapshot).cost_usd is None
+    del snapshot["cost_usd"], snapshot["subagents_cost_usd"]
+    legacy = DelegationChild.from_dict(snapshot)
+    assert (legacy.cost_usd, legacy.subagents_cost_usd) == (None, None)

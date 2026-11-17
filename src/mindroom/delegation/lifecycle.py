@@ -224,7 +224,6 @@ async def settle_child_response(
     config: Config,
     runtime_paths: RuntimePaths,
     approval_calls: Sequence[ApprovalCall] = (),
-    subagents_usd: float | None = None,
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
@@ -232,7 +231,8 @@ async def settle_child_response(
     recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
     completion note. A finished turn's usage is the run's with that of the turn's earlier runs, which its record
     carries (``prior_usage_of``), however many pauses and restarts lay between them. The child's cost prices that
-    usage and adds ``subagents_usd``, what the subagent turns whose results the run received cost.
+    usage and adds what the subagent turns whose results the turn received cost (``subagents_cost_usd``), so settling
+    the same run again sets the same cost.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
@@ -243,7 +243,7 @@ async def settle_child_response(
         model_id=response.model,
         prices=model_prices(config),
     )
-    known = [usd for usd in (own_usd, subagents_usd) if usd is not None]
+    known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
     if response.status == RunStatus.completed:
@@ -402,7 +402,9 @@ async def child_run_context(
     # always hides its calls, so the nested child takes its parent's previews instead.
     context = get_tool_runtime_context()
     previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
-    observation = ChildRunObservation(child, audit, parent=parent, previews=previews)
+    # The attempt goes on collecting from what the turn's earlier attempts, before its pauses, received.
+    received = SubagentCost(child.subagents_cost_usd)
+    observation = ChildRunObservation(child, audit, parent=parent, previews=previews, subagent_cost=received)
     _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)
     # What an attempt that settles no outcome is published with; the text its caller is handed for the same exit.
@@ -425,15 +427,10 @@ async def child_run_context(
             await flush_child_audit(audit)
         finally:
             try:
+                child.subagents_cost_usd = received.usd
                 response = observation.current_record()
                 if response is not None:
-                    await settle_child_response(
-                        child,
-                        response,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        subagents_usd=observation.subagent_cost.usd,
-                    )
+                    await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
                 _publish_exit(child, cancelled=cancelled, reason=reason)
