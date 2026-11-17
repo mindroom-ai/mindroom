@@ -473,11 +473,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> tuple
     two of them; one made earlier that could not be added there comes first. A room made now is added there.
     Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
     """
-    lock = _DIRECT_ROOM_LOCKS.get(person)
-    if lock is None:
-        lock = asyncio.Lock()
-        _DIRECT_ROOM_LOCKS[person] = lock
-    async with lock:
+    async with _DIRECT_ROOM_LOCKS.setdefault(person, asyncio.Lock()):
         direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
         direct = await optional_json(client, direct_path) or {}
         listed = direct.get(them)
