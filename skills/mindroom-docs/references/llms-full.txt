@@ -15717,7 +15717,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls, each as a line such as `Calling run_shell_command (started 14:03:27 UTC)`, so you can tell how long a call has been running.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.

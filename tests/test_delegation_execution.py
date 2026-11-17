@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from collections import defaultdict
 from copy import deepcopy
@@ -472,7 +473,7 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
-    assert reports[-1] == "\nCalling write_report\nchild result"
+    assert re.fullmatch(r"\nCalling write_report \(started \d\d:\d\d:\d\d UTC\)\nchild result", reports[-1])
 
 
 @pytest.mark.asyncio
