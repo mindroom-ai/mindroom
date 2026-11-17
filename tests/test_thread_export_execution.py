@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
@@ -1609,11 +1610,16 @@ async def test_a_pass_restores_an_export_file_changed_since_it_wrote_it(tmp_path
     output_dir = tmp_path / "exports"
     source = _remembering_source({}, AsyncMock(return_value=1))
     await _remembering_pass(config, output_dir, source)
-    exported = yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))
+    path = _remembered_file(output_dir)
+    exported = yaml.safe_load(path.read_text(encoding="utf-8"))
     if change == "edit":
-        _remembered_file(output_dir).write_text("messages: []\n", encoding="utf-8")
+        # The same size in the same file, so only the modification time tells the edit apart.
+        status = path.stat()
+        path.write_bytes(path.read_bytes().replace(b"Stable content", b"Edited content"))
+        os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns + 1_000_000_000))
+        assert (path.stat().st_ino, path.stat().st_size) == (status.st_ino, status.st_size)
     else:
-        _remembered_file(output_dir).unlink()
+        path.unlink()
 
     _, fetch = await _remembering_pass(config, output_dir, source)
 

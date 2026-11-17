@@ -9938,8 +9938,17 @@ class TestHotQueriesAreIndexCovered:
                 rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
                 steps.extend(row[-1] for row in rows)
 
-            def fetchone(self, sql: str, params: Sequence[object] = ()) -> None:
+            def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object]:
                 self._plan(sql, params)
+                # A standing hydration marker, so the thread's rows are read too.
+                return {
+                    "hydrated_epoch": 1,
+                    "current_epoch": 1,
+                    "walk_version": reads._THREAD_WALK_VERSION,
+                    "recovery_state": None,
+                    "complete": 1,
+                    "attempted_policy_rank": 1,
+                }
 
             def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
                 self._plan(sql, params)

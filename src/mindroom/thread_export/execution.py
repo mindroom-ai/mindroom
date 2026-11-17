@@ -213,6 +213,9 @@ async def _export_unless_unchanged(
         for accumulator in accumulators:
             accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
         return
+    if thread_fingerprint is None:
+        await write()
+        return
     fingerprint = hash((thread_fingerprint, room, trusted_sender_ids))
     previous = exported.get(key)
     if (

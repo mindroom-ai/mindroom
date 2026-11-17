@@ -461,8 +461,8 @@ class ExportProjectionView(ConversationReadView, HydrationView):
         """Return whether this conversation's hydration walk reached its end."""
         return await self._read(reads.conversation_is_complete, room_id=room_id, thread_id=thread_id)
 
-    async def thread_fingerprint(self, *, room_id: str, thread_id: str) -> int:
-        """Return a value that changes whenever a strict read of one thread could return something else."""
+    async def thread_fingerprint(self, *, room_id: str, thread_id: str) -> int | None:
+        """Return a value that changes whenever a strict read of one thread could return something else, if hydrated."""
         return await self._read(reads.thread_fingerprint, room_id=room_id, thread_id=thread_id)
 
 
