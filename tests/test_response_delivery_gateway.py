@@ -1948,6 +1948,31 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert kept["segments"] == segments[:2]
         assert kept["text"] == expected_text
 
+    async def test_cut_at_a_segment_start_drops_that_segment(self) -> None:
+        """A cut that keeps none of a segment's text drops the segment, even though the cut text ends in a marker."""
+        client = MagicMock(spec=nio.AsyncClient)
+        lead = "a" * 1000 + "\n\n"
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": 1002, "after_tool": 1, "duration_ms": 5},
+        ]
+        content = {"msgtype": "m.text", "body": "answer"}
+        size_limit = calculate_event_size(
+            {**content, "io.mindroom.reasoning": {"text": lead + "…", "duration_ms": 9, "segments": segments}},
+        )
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {**content, "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments}},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert kept["text"] == lead + "…"
+        assert kept["segments"] == segments[:1]
+
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
         tmp_path: Path,

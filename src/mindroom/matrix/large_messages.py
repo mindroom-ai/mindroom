@@ -653,13 +653,13 @@ def fit_reasoning_to_ordinary_event(
     if not fits(base):
         return content
 
-    def with_text(text: str) -> dict[str, Any]:
+    def with_text(kept_text: str, marker: str = "") -> dict[str, Any]:
         fitted = dict(base)
         target = dict(fitted["m.new_content"]) if isinstance(new_content, dict) else fitted
-        target[REASONING_CONTENT_KEY] = {**reasoning, "text": text}
+        target[REASONING_CONTENT_KEY] = {**reasoning, "text": kept_text + marker}
         segments = reasoning.get("segments")
         if isinstance(segments, list):
-            end = utf16_length(text)
+            end = utf16_length(kept_text)
             target[REASONING_CONTENT_KEY]["segments"] = [segment for segment in segments if segment["start"] < end]
         if isinstance(new_content, dict):
             fitted["m.new_content"] = target
@@ -668,8 +668,8 @@ def fit_reasoning_to_ordinary_event(
     full_text = reasoning["text"]
     if fits(with_text(full_text)):
         return with_text(full_text)
-    kept = _largest_fitting_limit(len(full_text), lambda length: fits(with_text(f"{full_text[:length]}…")))
-    return with_text(f"{full_text[:kept]}…") if kept else base
+    kept = _largest_fitting_limit(len(full_text), lambda length: fits(with_text(full_text[:length], "…")))
+    return with_text(full_text[:kept], "…") if kept else base
 
 
 async def upload_json_sidecar(
