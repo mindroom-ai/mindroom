@@ -366,6 +366,53 @@ def test_a_diff_answers_with_text(app: FastAPI, client: TestClient, paths: Runti
     assert github.requests[0].headers["accept"] == "application/vnd.github.diff"
 
 
+def test_an_error_answer_to_a_diff_request_is_json(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """The answer's own media type decides the body, so GitHub's JSON error to a diff request is an object."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(
+        404,
+        content=b'{"message":"Not Found"}',
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+
+    response = ask(client, session(app, ALICE), "/repos/octo/hello/pulls/7", accept="application/vnd.github.diff")
+
+    assert response.json()["body"] == {"message": "Not Found"}
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    [
+        (b'{"number": 1}', "text/plain"),
+        (b"not json", "application/json"),
+        (b'{"x": NaN}', "application/json"),
+        (b"[Infinity]", "application/vnd.github+json"),
+        (b"[1e999]", "application/json"),
+    ],
+)
+def test_an_answer_that_is_not_json_is_text(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    content: bytes,
+    content_type: str,
+) -> None:
+    """An answer GitHub does not mark as JSON, or that is not strict JSON, comes back as its text."""
+    connect(paths, ALICE)
+    github.handler = lambda _request: httpx.Response(200, content=content, headers={"content-type": content_type})
+
+    response = ask(client, session(app, ALICE))
+
+    assert response.status_code == 200
+    assert response.json()["body"] == content.decode()
+
+
 def test_githubs_refusal_is_answered_as_its_status(
     app: FastAPI,
     client: TestClient,

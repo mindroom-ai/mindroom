@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 from urllib.parse import unquote
 
 import httpx
@@ -47,7 +48,6 @@ _TIMEOUT_SECONDS = 30.0
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 # Far longer than any GitHub API path a client builds, and far below the longest URL httpx sends.
 _MAX_PATH_LENGTH = 4096
-_DIFF = "application/vnd.github.diff"
 _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
@@ -219,19 +219,33 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     logger.info("github_request", method=payload.method, path=kind, status=response.status_code)
     return {
         "status": response.status_code,
-        "body": _answer_body(bytes(body), diff=payload.accept == _DIFF),
+        "body": _answer_body(bytes(body), response.headers.get("content-type", "")),
         "headers": {name: response.headers[name] for name in _PASSED_HEADERS if name in response.headers},
     }
 
 
-def _answer_body(body: bytes, *, diff: bool) -> JsonValue:
-    """Return GitHub's JSON, or its text for a diff or an answer that is not JSON, or None when it sent nothing."""
+def _answer_body(body: bytes, content_type: str) -> JsonValue:
+    """Return GitHub's JSON when its media type says JSON, else its text, or None when it sent nothing.
+
+    An answer holding a number that is not finite, such as `NaN`, which no JSON answer can carry, is text too.
+    """
     if not body:
         return None
     text = body.decode(errors="replace")
-    if diff:
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type != "application/json" and not media_type.endswith("+json"):
         return text
     try:
-        return json.loads(text)
+        return json.loads(text, parse_constant=_not_finite, parse_float=_finite_float)
     except ValueError:
         return text
+
+
+def _not_finite(number: str) -> NoReturn:
+    msg = f"{number} is not a finite number"
+    raise ValueError(msg)
+
+
+def _finite_float(number: str) -> float:
+    value = float(number)
+    return value if math.isfinite(value) else _not_finite(number)
