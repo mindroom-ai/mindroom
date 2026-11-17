@@ -38,6 +38,7 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.delegation.cost import SubagentCost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -1305,6 +1306,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             progress=publish,
             system_enrichment_items=(),
             quiet=False,
+            subagent_cost=SubagentCost(),
         )
 
     def stored_runs() -> list[dict]:

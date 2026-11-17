@@ -1061,6 +1061,8 @@ HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 # Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
+# Run metadata key holding what the subagent turns whose results the run's turn received cost so far, in USD.
+SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_subagent_cost_usd"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"

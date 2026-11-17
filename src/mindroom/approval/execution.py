@@ -22,6 +22,7 @@ from mindroom.approval.tool_owners import (
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
@@ -190,8 +191,12 @@ async def _continue_persisted_agent(
     model_name: str,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    subagent_cost: SubagentCost,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Resume a persisted agent with event streaming so presentation order is retained."""
+    """Resume a persisted agent with event streaming so presentation order is retained.
+
+    ``subagent_cost`` collects what the resumed turn's subagents cost, and its reply reports it.
+    """
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -279,6 +284,7 @@ async def _continue_persisted_agent(
         progress=progress,
         system_enrichment_items=system_enrichment_items,
         quiet=quiet,
+        subagent_cost=subagent_cost,
     )
 
 
@@ -319,6 +325,7 @@ async def _stream_continuation_turn(
     resume: TurnResume,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    subagent_cost: SubagentCost,
     reusable_build: AgentBuild | None = None,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
@@ -354,7 +361,11 @@ async def _stream_continuation_turn(
         ),
         runtime_paths,
         config,
-        sinks=TurnSinks(run_metadata_collector=run_metadata, on_completed=completed.append),
+        sinks=TurnSinks(
+            run_metadata_collector=run_metadata,
+            on_completed=completed.append,
+            subagent_cost=subagent_cost,
+        ),
         resume=resume,
     )
     try:
@@ -492,11 +503,13 @@ class AgentApprovalExecution:
             storage_factory=storage_factory,
         )
         storage = scope_run_storage(scope_context)
+        # The resumed turn goes on from what its subagents had cost before the pause.
+        subagent_cost = resumed_subagent_cost(persisted.metadata)
         try:
             with helper_usage_context(scope_context):
                 if cli_call is not None:
                     expected_worker_target = tool_context.resolve_worker_target()
-                    with tool_runtime_context(tool_context):
+                    with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
                         recovered = await continue_cli_approval(
                             build,
                             continuation,
@@ -535,6 +548,7 @@ class AgentApprovalExecution:
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
                             quiet=quiet,
+                            subagent_cost=subagent_cost,
                         )
                 # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds each
                 # approval to the toolkit it was granted for before the agent's tools are reached.
@@ -543,7 +557,7 @@ class AgentApprovalExecution:
                     approved_calls,
                     pending_approval_requirements(persisted),
                 )
-                with tool_runtime_context(tool_context):
+                with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
                     return await _continue_persisted_agent(
                         build,
                         continuation,
@@ -560,6 +574,7 @@ class AgentApprovalExecution:
                         model_name=model.model_name,
                         system_enrichment_items=system_enrichment_items,
                         quiet=quiet,
+                        subagent_cost=subagent_cost,
                     )
         finally:
             await finalize_consumption()

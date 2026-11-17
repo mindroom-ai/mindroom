@@ -476,7 +476,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
         return BackgroundOutcome("completed", result, result_payload=encode_result_payload(ToolResultPayload(result)))
 
     try:
-        adapter = {"child": {"subagent_id": "child", "result": None}} if kind == "delegation" else {}
+        adapter = completed_delegation_job().adapter if kind == "delegation" else {}
         await start_job(
             runtime,
             "large",
@@ -712,7 +712,8 @@ async def _collect_in_a_run(
             tool_name=f"tool_{job_id}",
             depth=0,
             kind=kind,
-            adapter={},
+            # A subagent job is known by the child it runs.
+            adapter=completed_delegation_job().adapter if kind == "delegation" else {},
             owner=owner,
             operation=operation,
         )

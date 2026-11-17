@@ -789,6 +789,7 @@ depends_on = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.turn_model",
     "mindroom.config.resolution",
+    "mindroom.delegation.cost",
 ]
 
 [[modules]]
@@ -819,6 +820,7 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.turn_continuation",
+    "mindroom.delegation.cost",
 ]
 visibility = [
     "mindroom.agent_cli.delegation",
@@ -847,6 +849,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.model_usage",
     "mindroom.llm",
+    "mindroom.delegation.cost",
 ]
 
 [[modules]]
@@ -1140,6 +1143,7 @@ visibility = [
 path = "mindroom.session_storage.store"
 depends_on = [
     "mindroom.constants",
+    "mindroom.delegation.cost",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.session_storage.codec",
@@ -1343,6 +1347,7 @@ depends_on = [
     "mindroom.agent_cli.approval",
     "mindroom.turn_model",
     "mindroom.session_storage.lanes",
+    "mindroom.delegation.cost",
 ]
 visibility = ["mindroom.approval.continuation_runner"]
 
@@ -1655,6 +1660,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_schema",
+    "mindroom.delegation.cost",
 ]
 
 [[modules]]
@@ -3591,6 +3597,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
     "mindroom.turn_model",
+    "mindroom.delegation.cost",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -7956,6 +7963,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
+    "mindroom.delegation.cost",
 ]
 
 [[modules]]
@@ -8299,6 +8307,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.cost"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.ai_run_metadata",
@@ -8318,6 +8330,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.turn_model",
     "mindroom.tool_system.registry",
+    "mindroom.delegation.cost",
 ]
 visibility = [
     "mindroom.ai",
@@ -8335,6 +8348,7 @@ visibility = [
 [[modules]]
 path = "mindroom.delegation.recovery"
 depends_on = [
+    "mindroom.delegation.cost",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.delegation.background",
@@ -8943,6 +8957,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.tool_jobs.consumption",
 ]
 
 [[modules]]
@@ -9095,6 +9110,8 @@ depends_on = [
     "mindroom.tool_jobs.results",
     "mindroom.tool_system.tool_function",
     "mindroom.session_storage.lanes",
+    "mindroom.delegation.cost",
+    "mindroom.delegation.background",
 ]
 visibility = [
     "mindroom.approval.execution",
