@@ -1558,7 +1558,7 @@ async def list_scheduled_tasks(  # noqa: C901
         return "No scheduled tasks found."
 
     if not tasks and tasks_in_other_threads and not new_thread_tasks:
-        return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
+        return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use /list_schedules in those threads to see details."
 
     # Sort by execution time (one-time tasks) or put recurring tasks at the end
     def _sort_key(r: ScheduledTaskRecord) -> tuple[bool, datetime]:
@@ -1604,7 +1604,7 @@ async def list_scheduled_tasks(  # noqa: C901
     if tasks_in_other_threads:
         lines.append("")
         lines.append(
-            f"📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details.",
+            f"📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use /list_schedules in those threads to see details.",
         )
 
     return "\n".join(lines)

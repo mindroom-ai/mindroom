@@ -248,7 +248,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
     message = get_user_friendly_error_message(raised.value, "helper")
     assert f"Error: {reason}. " in message
     # A minimal subagent's caller starts a standard child; a conversation switches mode.
-    assert ("Start a new subagent without minimal." if delegation_depth else "!mode helper standard") in message
+    assert ("Start a new subagent without minimal." if delegation_depth else "/mode helper standard") in message
     assert raised.value.__cause__ is failure
 
     standard = agents.create_agent(
@@ -533,7 +533,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                 with pytest.raises(MinimalModeUnavailableError) as raised:
                     await _run_attempt(build, runtime, session, "Restricted request", store=store)
                 assert "`run_shell_command` shell permission" in str(raised.value)
-                assert "!mode helper standard" in str(raised.value)
+                assert "/mode helper standard" in str(raised.value)
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
                 assert stored_runs()[: len(history)] == history
@@ -589,7 +589,7 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
             with pytest.raises(MinimalModeUnavailableError) as raised:
                 await _run_attempt(build, runtime, _session(runtime), "Hello")
             assert "Run MindRoom with its API server" in str(raised.value)
-            assert "!mode helper standard" in str(raised.value)
+            assert "/mode helper standard" in str(raised.value)
             # No grant is issued for a shell that cannot reach MindRoom.
             assert lifetime.owner is None
     assert provider.requests == []

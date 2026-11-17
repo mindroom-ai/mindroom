@@ -41,7 +41,7 @@ _NOTICE_LEDGER_MAX_ENTRIES = 1000
 _SEEN_EVENT_IDS_MAX = 4096
 _DECRYPT_FAILURE_NOTICE_BODY = (
     "⚠️ I couldn't decrypt your last message — please send it again. "
-    "If this keeps happening, run `!e2ee` for diagnostics."
+    "If this keeps happening, run `/e2ee` for diagnostics."
 )
 
 

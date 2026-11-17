@@ -190,7 +190,7 @@ def test_auto_approve_command_parsing_and_help() -> None:
         assert command.type is CommandType.AUTO_APPROVE
         assert command.args == {"args_text": args_text}
     assert "**Auto-Approve Command**" in get_command_help("auto_approve")
-    assert "!auto_approve" in get_command_help()
+    assert "/auto_approve" in get_command_help()
 
 
 @dataclass(frozen=True)

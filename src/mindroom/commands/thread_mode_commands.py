@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _VALID_MODES: frozenset[str] = frozenset(get_args(RoomThreadMode))
-_USAGE = "Usage: `!thread_mode [room|thread|reset|show]`"
+_USAGE = "Usage: `/thread_mode [room|thread|reset|show]`"
 
 
 def _show_room_thread_mode(runtime_paths: RuntimePaths, room_id: str) -> str:
@@ -28,7 +28,7 @@ def _show_room_thread_mode(runtime_paths: RuntimePaths, room_id: str) -> str:
             "Agents use their configured `thread_mode` and `room_thread_modes` values.\n\n"
             f"{_USAGE}"
         )
-    return f"This room uses the `{mode}` thread mode override.\n\nUse `!thread_mode reset` to restore configured modes."
+    return f"This room uses the `{mode}` thread mode override.\n\nUse `/thread_mode reset` to restore configured modes."
 
 
 async def handle_thread_mode_command(
@@ -67,7 +67,7 @@ async def handle_thread_mode_command(
         current = await change_room_thread_mode(client, config, runtime_paths, room_id, mode)
         reply = (
             f"This room now uses `{mode}` thread mode for future agent replies.\n\n"
-            "Use `!thread_mode reset` to restore configured modes."
+            "Use `/thread_mode reset` to restore configured modes."
         )
     if current:
         return f"✅ {reply}"

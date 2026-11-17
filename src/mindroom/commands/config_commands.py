@@ -220,7 +220,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     if operation == "get":
         if not args:
             return (
-                "❌ Please specify a configuration path to get\nExample: `!config get agents.analyst.display_name`",
+                "❌ Please specify a configuration path to get\nExample: `/config get agents.analyst.display_name`",
                 None,
             )
 
@@ -235,7 +235,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     elif operation == "set":
         if len(args) < 2:
             return (
-                '❌ Please specify a path and value\nExample: `!config set agents.analyst.display_name "New Name"`',
+                '❌ Please specify a path and value\nExample: `/config set agents.analyst.display_name "New Name"`',
                 None,
             )
 
@@ -250,7 +250,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             field_path = ".".join((config_path_str, *marker_location))
             return (
                 f"❌ `{field_path}` contains the redaction marker `{REDACTED}` or a masked URL password, which "
-                "`!config show` and `!config get` print in place of a hidden value. "
+                "`/config show` and `/config get` print in place of a hidden value. "
                 "Set that field to its real value instead."
                 f"\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
             ), None
@@ -306,7 +306,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             '• For JSON arrays/objects, use matching quotes: `["item1", "item2"]`\n'
             "• Or use single quotes consistently: `['item1', 'item2']`\n\n"
             "**Example:**\n"
-            '`!config set agents.analyst.tools ["tool1", "tool2"]`'
+            '`/config set agents.analyst.tools ["tool1", "tool2"]`'
         ), None
 
     else:
@@ -314,7 +314,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         return (
             f"❌ Unknown operation: '{operation}'\n"
             f"Available operations: {', '.join(available_ops)}\n\n"
-            "Try `!help config` for usage examples."
+            "Try `/help config` for usage examples."
         ), None
 
 

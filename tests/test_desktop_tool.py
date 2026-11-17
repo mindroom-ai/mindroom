@@ -142,7 +142,7 @@ async def test_unconfigured_normal_desktop_tool_advertises_chat_pairing(tmp_path
 
     payload = json.loads(result.content)
     assert payload["status"] == "setup_required"
-    assert "!desktop setup" in payload["message"]
+    assert "/desktop setup" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -152,7 +152,7 @@ async def test_unconfigured_private_user_agent_tool_advertises_chat_pairing() ->
 
     result = await tool.desktop("status")
 
-    assert "!desktop setup" in json.loads(result.content)["message"]
+    assert "/desktop setup" in json.loads(result.content)["message"]
 
 
 @pytest.mark.asyncio

@@ -175,7 +175,7 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
     runtime = _runtime_context(tmp_path)
     build = _minimal_build(runtime)
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
-    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="!mode helper standard"):
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="/mode helper standard"):
         await prepare_minimal_catalog(
             build,
             run=RunContext(run_id="run", user_id="@mallory:example.test", session=session),
@@ -222,4 +222,4 @@ async def test_a_catalog_whose_toolkits_fail_names_why_before_the_recovery_comma
             storage=RunStorage(None, session, None),
             delegation_depth=0,
         )
-    assert str(raised.value) == f"{text}. Return to standard mode with `!mode helper standard`."
+    assert str(raised.value) == f"{text}. Return to standard mode with `/mode helper standard`."
