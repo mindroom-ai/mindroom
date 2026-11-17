@@ -507,7 +507,7 @@ class ChatStream:
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     _think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
     # When the call was sent or last sent text. OpenRouter sends a call's reasoning in one burst once the model has
-    # finished it, so its reasoning carries this as the thought's start.
+    # finished it, so its reasoning carries this as the thought's start; other routes stream reasoning as it is written.
     _output_at: float = field(default_factory=time.monotonic)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
@@ -549,7 +549,8 @@ class ChatStream:
         if not isinstance(reasoning, str):
             return []
         self._reasoning.append(reasoning)
-        return [ReasoningDelta(reasoning, started_at=self._output_at)] if reasoning else []
+        started_at = self._output_at if self.wire.route == "openrouter" else None
+        return [ReasoningDelta(reasoning, started_at=started_at)] if reasoning else []
 
     def _add_call_delta(self, call: Any, position: int) -> None:  # noqa: ANN401 - SDK tool-call delta model
         """Fold one call delta into the call at its index; a server that sends no index places it by its position."""

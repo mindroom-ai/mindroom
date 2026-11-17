@@ -618,6 +618,15 @@ def test_chat_reasoning_carries_when_its_call_or_last_text_began() -> None:
     assert created <= second.started_at <= text_sent
 
 
+def test_chat_reasoning_streamed_as_written_starts_when_it_arrives() -> None:
+    """Routes other than OpenRouter stream reasoning as the model writes it, so a thought starts at its first piece."""
+    stream = ChatStream(ChatWire(route="deepseek", system_role="system"))
+
+    [event] = stream.add(ChatCompletionChunk.model_validate(_chunk({"reasoning_content": "Plan."})["data"]))
+
+    assert event == ReasoningDelta("Plan.")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_config",
