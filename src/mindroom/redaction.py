@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
+import threading
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
@@ -766,9 +769,36 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     return _truncate_text(redacted, max_length, cut=cut)
 
 
+# Each model call in a turn resends the whole conversation, and the LLM request log redacts every request, so the same
+# long texts reach redaction again and again, and nearly all of them come back unchanged. The SHA-256 digests of the
+# latest long texts redaction left unchanged are kept, never the texts, so an identical text is not scanned again.
+# A text redaction changes is scanned every time.
+_UNCHANGED_TEXT_MIN_LENGTH = 256
+_UNCHANGED_TEXT_CACHE_SIZE = 65536
+_unchanged_texts: OrderedDict[tuple[bytes, int | None, bool], None] = OrderedDict()
+_unchanged_texts_lock = threading.Lock()
+
+
+def _redact_remembering_unchanged(value: str, *, max_length: int | None, prose: bool) -> str:
+    key = (hashlib.sha256(value.encode("utf-8", "surrogatepass")).digest(), max_length, prose)
+    with _unchanged_texts_lock:
+        if key in _unchanged_texts:
+            _unchanged_texts.move_to_end(key)
+            return value
+    redacted = _redact_sensitive_text(value, max_length=max_length, prose=prose)
+    if redacted == value:
+        with _unchanged_texts_lock:
+            _unchanged_texts[key] = None
+            if len(_unchanged_texts) > _UNCHANGED_TEXT_CACHE_SIZE:
+                _unchanged_texts.popitem(last=False)
+    return redacted
+
+
 def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
     try:
-        return _redact_sensitive_text(value, max_length=max_length, prose=prose)
+        if len(value) < _UNCHANGED_TEXT_MIN_LENGTH:
+            return _redact_sensitive_text(value, max_length=max_length, prose=prose)
+        return _redact_remembering_unchanged(value, max_length=max_length, prose=prose)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
 

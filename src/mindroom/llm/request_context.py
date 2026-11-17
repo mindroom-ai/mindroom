@@ -29,6 +29,7 @@ __all__ = [
 
 type _JSONScalar = str | int | float | bool | None
 type JSONValue = _JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+_JSON_SCALAR_TYPES = frozenset({str, int, float, bool, type(None)})
 
 _REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 _REQUEST_HEADERS: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
@@ -60,9 +61,13 @@ def json_safe(value: object) -> JSONValue:
     Dataclasses become dicts, bytes become base64 text as the provider SDKs send media, and other unknown values
     become their ``repr``.
     """
+    # The request log converts every value of every request, so plain JSON values skip the checks for other types.
+    value_type = type(value)
+    if value_type in _JSON_SCALAR_TYPES:
+        return cast("JSONValue", value)
     normalized: object = value
-    if not isinstance(normalized, type) and is_dataclass(normalized):
-        normalized = asdict(normalized)
+    if value_type is not dict and value_type is not list and not isinstance(value, type) and is_dataclass(value):
+        normalized = asdict(value)
     if isinstance(normalized, bytes):
         return base64.b64encode(normalized).decode("ascii")
     if isinstance(normalized, dict):

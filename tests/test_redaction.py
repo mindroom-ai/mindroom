@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -18,6 +19,7 @@ from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
+    redact_config_text,
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
@@ -1095,6 +1097,50 @@ def test_a_length_bound_shorter_than_the_truncation_marker_is_kept(max_length: i
     assert redact_sensitive_text("x" * 50, max_length=max_length) == expected
     assert len(redact_sensitive_text("x" * 70_000, max_length=max_length)) <= max_length
     assert truncate_review_text("x" * 50, max_length) == expected
+
+
+def _record_text_scans(monkeypatch: pytest.MonkeyPatch, cache_size: int) -> list[str]:
+    """Return the texts redaction scans from now on, with an empty unchanged-text cache of ``cache_size``."""
+    scanned: list[str] = []
+    scan = redaction._redact_sensitive_text
+
+    def recording_scan(value: str, *, max_length: int | None, prose: bool = False) -> str:
+        scanned.append(value)
+        return scan(value, max_length=max_length, prose=prose)
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_text", recording_scan)
+    monkeypatch.setattr(redaction, "_unchanged_texts", OrderedDict())
+    monkeypatch.setattr(redaction, "_UNCHANGED_TEXT_CACHE_SIZE", cache_size)
+    return scanned
+
+
+def test_a_long_text_redaction_left_unchanged_is_not_scanned_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each model call resends the conversation to the request log, so an unchanged long text is scanned only once."""
+    scanned = _record_text_scans(monkeypatch, cache_size=8)
+    prose = "A long paragraph of ordinary words that holds no credential at all. " * 5
+    secret = f"export PASSWORD=hunter2\n{prose}"
+
+    first = redact_sensitive_data({"messages": [{"content": prose}, {"content": secret}]})
+
+    assert redact_sensitive_data({"messages": [{"content": prose}, {"content": secret}]}) == first
+    assert first == {"messages": [{"content": prose}, {"content": f"export PASSWORD={REDACTED}\n{prose}"}]}
+    assert scanned == [prose, secret, secret]
+    # What was left unchanged holds only for the length bound and the mode it was scanned with.
+    assert redact_sensitive_text(prose, max_length=40).endswith("... [truncated]")
+    kebab_name = f"{prose}Install sk-learn first."
+    assert redact_config_text(kebab_name) == kebab_name
+    assert redact_sensitive_text(kebab_name) == f"{prose}Install {REDACTED} first."
+
+
+def test_the_unchanged_text_cache_keeps_the_latest_texts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full cache forgets the text least recently seen, so a text seen again stays."""
+    scanned = _record_text_scans(monkeypatch, cache_size=2)
+    first, second, third = (f"{name} " + "ordinary words, nothing secret. " * 10 for name in ("one", "two", "three"))
+
+    for text in (first, second, first, third, first, second):
+        assert redact_sensitive_text(text) == text
+
+    assert scanned == [first, second, third, second]
 
 
 def _count_key_normalizations(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:

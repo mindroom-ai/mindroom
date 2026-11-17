@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
+
 import pytest
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-from mindroom.llm.request_context import RequestAttribution, current_llm_request_log_context
+from mindroom.llm.request_context import RequestAttribution, current_llm_request_log_context, json_safe
 from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 
 
@@ -24,6 +27,40 @@ def test_debug_config_parses() -> None:
         Config.model_validate({"models": {"default": {"provider": "openai", "id": "test-model"}}}).debug
         == DebugConfig()
     )
+
+
+def test_json_safe_gives_every_value_a_json_view() -> None:
+    """Keys become text, other sequences lists, bytes base64, dataclasses dicts, and unknown values their repr."""
+
+    @dataclass
+    class Part:
+        kind: str
+        data: bytes
+
+    class Mode(StrEnum):
+        FAST = "fast"
+
+    class Opaque:
+        def __repr__(self) -> str:
+            return "<opaque>"
+
+    value = {
+        "text": "hi",
+        7: 2.5,
+        (1, 2): Mode.FAST,
+        None: [False, ("a", frozenset({"b"}))],
+        "part": Part(kind="image", data=b"\x00\x01"),
+        "nested": {"list": [1, {"raw": b"ab"}], "other": Opaque()},
+    }
+
+    assert json_safe(value) == {
+        "text": "hi",
+        "7": 2.5,
+        "(1, 2)": "fast",
+        "None": [False, ["a", ["b"]]],
+        "part": {"kind": "image", "data": "AAE="},
+        "nested": {"list": [1, {"raw": "YWI="}], "other": "<opaque>"},
+    }
 
 
 def test_request_context_names_each_source_event_once() -> None:
