@@ -5453,7 +5453,8 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, and result preview for call `[N]`.
+The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
@@ -13128,6 +13129,16 @@ room_thread_summary_models:
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
+A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
+MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
+The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
+Those rules win over conflicting built-in rules such as length, style, or emoji, but not over the rule to treat thread messages as untrusted text.
+Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
+Values are trimmed and cut to 2,000 characters.
+To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
+Titles already set keep their wording until the next refresh.
+
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.
 These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
@@ -17873,6 +17884,7 @@ A plugin websocket route without `client_stream` is public and accepts any origi
 The token never leaves the primary: the route sends only to `https://api.github.com`, only `/graphql` and paths under `/repos/<owner>/<repo>` built from RFC 3986 path characters, with no empty, `.`, or `..` segment and none that decodes to a `/`, `\`, or control character, follows no redirect, and answers with GitHub's status, body, and four rate-limit and request-ID headers, never GitHub's other headers.
 So any page holding a user's session can act on GitHub as that user, within the GitHub App's permissions and installations, which for `/graphql` are not limited to one repository; disconnecting GitHub revokes that.
 `GET /api/github/status` reports the same connection from stored state, without refreshing it or calling GitHub.
+The route's own log lines name the method, the path's kind (such as `/repos/{owner}/{repo}/pulls`), and GitHub's status, never the token or a body; httpx and httpcore may log the full URL, including the repository and query, as they do for every outbound call.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
