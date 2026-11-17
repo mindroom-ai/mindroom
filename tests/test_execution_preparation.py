@@ -536,6 +536,52 @@ async def test_a_fork_divider_survives_its_fork_point_being_filtered(persisted_r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+@pytest.mark.parametrize("parent", ["interrupted-own-root", "unavailable"])
+async def test_a_fork_divider_stays_when_no_parent_message_survives(persisted_replay: bool, parent: str) -> None:
+    """With nothing of the parent left to replay, the fork's first turn still learns it is a fork."""
+
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    history = [
+        make_visible_message(
+            body="carry on",
+            event_id="$f",
+            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$p", "event_id": "$p"}},
+        ),
+    ]
+    if parent == "interrupted-own-root":
+        history.insert(
+            0,
+            make_visible_message(
+                sender="@mindroom_code:localhost",
+                body="partial answer",
+                event_id="$p",
+                content={"body": "partial answer", STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+            ),
+        )
+    config = Config.model_validate(
+        {"prompts": {"THREAD_FORK_MARKER_TEMPLATE": "[forked from {parent_thread_id} after {fork_point_event_id}]"}},
+    )
+    prepared = await _prepare_common(
+        prepare_scope_history,
+        make_turn_context(reply_to_event_id="$f"),
+        scope_context=None,
+        prompt="carry on",
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+        current_event_id="$f",
+        config=config,
+        timezone="UTC",
+    )
+
+    assert [str(message.content) for message in prepared.turn.context] == ["[forked from $p after $p]"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
 @pytest.mark.parametrize("numeric_selection", [True, False], ids=["numeric", "reaction"])
 async def test_interactive_selection_keeps_context_after_question(
     persisted_replay: bool,

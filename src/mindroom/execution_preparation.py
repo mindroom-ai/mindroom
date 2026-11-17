@@ -535,10 +535,11 @@ def _build_thread_history_messages(
             member_display_names=member_display_names,
         )
 
-    if not thread_history:
+    # A fork's divider renders even when none of its parent's messages are left to replay.
+    if not thread_history and not fork_dividers.notes:
         return with_context()
     context_messages = _context_messages_from_visible_messages(
-        thread_history,
+        thread_history or (),
         response_sender_id=response_sender_id,
         max_messages=max_messages,
         max_message_length=max_message_length,
