@@ -62,16 +62,17 @@ def test_config_accepts_thread_summary_enrichment_prompt_fields() -> None:
     )
 
 
-def test_config_rejects_unsupported_thread_summary_prompt_field() -> None:
-    """The summary prompt rejects placeholders absent from its call site."""
+@pytest.mark.parametrize(
+    ("name", "template"),
+    [
+        ("THREAD_SUMMARY_USER_PROMPT_TEMPLATE", "{conversation} {room_id}"),
+        ("THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE", "{instructions} {conversation}"),
+    ],
+)
+def test_config_rejects_unsupported_thread_summary_prompt_field(name: str, template: str) -> None:
+    """The summary prompts reject placeholders absent from their call sites."""
     with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
-        Config.model_validate(
-            {
-                "prompts": {
-                    "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": "{conversation} {room_id}",
-                },
-            },
-        )
+        Config.model_validate({"prompts": {name: template}})
 
 
 def test_config_rejects_unknown_prompt_override() -> None:

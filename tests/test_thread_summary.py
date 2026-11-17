@@ -889,6 +889,22 @@ class TestMaybeGenerateThreadSummary:
         assert request.messages[0].get_content_string() == THREAD_SUMMARY_INSTRUCTIONS.strip()
         assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
 
+    async def test_room_title_rules_render_through_prompt_overrides(self) -> None:
+        """A room setting renders the overridden room template around the overridden base instructions."""
+        self.room_state.title_rules = {"value": "Use at most 4 words"}
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+        prompts = {
+            "THREAD_SUMMARY_INSTRUCTIONS": "Title the thread.",
+            "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE": "<base>{instructions}</base><room>{room_instructions}</room>",
+        }
+
+        await self._provisional(config=Config(prompts=prompts))
+
+        [request] = model.requests
+        expected = "<base>Title the thread.</base><room>Use at most 4 words</room>"
+        assert request.messages[0].get_content_string() == expected
+
     async def test_room_title_rules_are_capped(self) -> None:
         """A room setting over 2,000 characters is cut to 2,000."""
         self.room_state.title_rules = {"value": " " + "x" * 2500}
