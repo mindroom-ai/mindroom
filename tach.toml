@@ -7041,6 +7041,7 @@ expose = [
     "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",
+    "send_file_message_outcome",
     "send_message_outcome",
     "send_message_result",
     "send_room_event_result",

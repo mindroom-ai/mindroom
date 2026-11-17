@@ -89,6 +89,7 @@ DM_NOT_RECORDED = (
     f"Nothing was sent; to send there, use room_id {NEW_DM}."
 )
 CONTACT_ROOM_REFUSED = "Nothing is written as your owner into a contact room."
+UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
 def _send_path(room_id: str = ROOM, event_type: str = "m.room.message") -> str:
@@ -1570,14 +1571,104 @@ async def test_each_action_names_what_it_is_missing(
     assert homeserver.requests == []
 
 
+def _event_write_arguments(kind: str, record: AttachmentRecord) -> dict[str, str]:
+    """Return the arguments of a write of ``kind`` into ``ROOM`` that sends one event; a file's is ``record``."""
+    return {
+        "text": {"action": "send", "message": "Lunch?"},
+        "file": {"action": "send", "attachment": record.attachment_id},
+        "react": {"action": "react", "event_id": "$own", "emoji": "👍"},
+        "edit": {"action": "edit", "event_id": "$own", "message": "Hello"},
+    }[kind]
+
+
+async def _write_with_send_answer(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    kind: str,
+    answer: Answer | Exception,
+) -> dict:
+    """Make a write of ``kind`` into ``ROOM`` whose event's send the homeserver answers with ``answer``."""
+    record = _notes(paths, tmp_path, mime_type="text/plain")
+    homeserver.answers.update(
+        {
+            OWN_EVENT_PATH: text_message("$own", "Helo", sender=OWNER),
+            UPLOAD_PATH: {"content_uri": "mxc://example.com/notes"},
+            f"{_send_path()}*": answer,
+            f"{_send_path(event_type='m.reaction')}*": answer,
+        },
+    )
+    return await _write(
+        config,
+        paths,
+        homeserver,
+        attachment_ids=(record.attachment_id,),
+        room_id=ROOM,
+        **_event_write_arguments(kind, record),
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_file_that_failed_to_go_out_is_named(
+@pytest.mark.parametrize("kind", ["text", "file", "react", "edit"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # The connection dropped while the answer was read, after the request had gone out.
+        aiohttp.ClientPayloadError("Response payload is not completed"),
+        matrix_error(500, "M_UNKNOWN", "Internal server error"),
+        matrix_error(502, "M_UNKNOWN", "Bad gateway"),
+        Answer("The upstream server timed out", status=504),
+    ],
+    ids=["lost-answer", "500", "502", "504-not-json"],
+)
+async def test_a_send_the_homeserver_did_not_confirm_says_it_may_have_been_sent(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    kind: str,
+    answer: Answer | Exception,
+) -> None:
+    """A send without the homeserver's own refusal may be in the room, and sending again would post it twice."""
+    result = await _write_with_send_answer(config, paths, homeserver, tmp_path, kind, answer)
+
+    assert result == error_result(_event_write_arguments(kind, _notes(paths, tmp_path))["action"], UNCONFIRMED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["text", "file", "react", "edit"])
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (matrix_error(403, "M_FORBIDDEN", "You cannot post here"), "RoomSendError: M_FORBIDDEN You cannot post here"),
+        (matrix_error(413, "M_TOO_LARGE", "Event too large"), "Event too large"),
+    ],
+    ids=["403", "413"],
+)
+async def test_a_send_the_homeserver_refused_says_nothing_was_sent(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    kind: str,
+    answer: Answer,
+    why: str,
+) -> None:
+    """A refusal with a 4xx status is the homeserver saying it took nothing, so the send can be made again."""
+    result = await _write_with_send_answer(config, paths, homeserver, tmp_path, kind, answer)
+
+    assert result["message"] == f"Nothing was sent: {why}."
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_could_not_be_uploaded_says_nothing_was_sent(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     tmp_path: Path,
 ) -> None:
-    """A file the homeserver did not take is named in the error."""
+    """A file whose upload failed never became an event, so nothing was sent."""
     record = _notes(paths, tmp_path, mime_type="text/plain")
     homeserver.answers[UPLOAD_PATH] = matrix_error(413, "M_TOO_LARGE", "Too large")
 
@@ -1591,26 +1682,8 @@ async def test_a_file_that_failed_to_go_out_is_named(
         attachment=record.attachment_id,
     )
 
-    assert result == error_result("send", f"Attachment {record.attachment_id} could not be sent.")
-    assert _sent(homeserver) == []
-
-
-@pytest.mark.asyncio
-async def test_an_unconfirmed_send_says_it_may_have_been_sent(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A send whose answer was lost may be in the room, and sending it again would post it twice as the owner."""
-    # The connection dropped while the answer was read, after the request had gone out.
-    homeserver.answers[f"{_send_path()}*"] = aiohttp.ClientPayloadError("Response payload is not completed")
-    unconfirmed = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Lunch?")
-    homeserver.answers[f"{_send_path()}*"] = matrix_error(403, "M_FORBIDDEN", "You cannot post here")
-    refused = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Lunch?")
-
-    assert unconfirmed == error_result(
+    assert result == error_result(
         "send",
-        "The homeserver did not confirm the message. It may have been sent: read the room before sending again.",
+        f"Nothing was sent: attachment {record.attachment_id} could not be uploaded.",
     )
-    assert refused["message"].startswith("Nothing was sent: ")
-    assert len(_sent(homeserver)) == 2
+    assert _sent(homeserver) == []

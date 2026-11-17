@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from aiohttp import ClientResponse
+
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.constants import resolve_runtime_paths
@@ -219,6 +221,9 @@ class _Content:
 
 @dataclass
 class _Response:
+    # The delivery helpers read an answer's status only from aiohttp's response, which this stands in for.
+    __class__ = ClientResponse
+
     status: int
     headers: dict[str, str]
     content: _Content

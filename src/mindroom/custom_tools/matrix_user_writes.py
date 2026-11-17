@@ -43,7 +43,7 @@ from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailureKind,
     build_edit_event_content,
-    send_file_message,
+    send_file_message_outcome,
     send_message_outcome,
 )
 from mindroom.matrix.guarded_rooms import send_refused
@@ -85,6 +85,15 @@ _ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an e
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
 _CONTACT_ROOM = "Nothing is written as your owner into a contact room."
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
+# The send failures that prove nothing was sent: each is known before the event is requested, or, for one too large,
+# may also be the homeserver's refusal of it.
+_PROVES_NOTHING_SENT = frozenset(
+    {
+        MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+        MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE,
+        MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE,
+    },
+)
 
 
 def _user_problem(user_id: str | None) -> str | None:
@@ -313,10 +322,15 @@ async def _require_unencrypted(client: nio.AsyncClient, room_id: str) -> None:
 
 
 def _delivered(outcome: MatrixSendOutcome) -> str:
+    """Return the ID of the event a send delivered, saying that nothing was sent only when its failure proves it.
+
+    A failure before the request, and the homeserver's own refusal, which has a 4xx status, prove it. After any other
+    failure the request may have reached the homeserver, and a retry is a new transaction: a second message.
+    """
     if isinstance(outcome, DeliveredMatrixEvent):
         return outcome.event_id
-    if outcome.kind is MatrixDeliveryFailureKind.SEND_EXCEPTION:
-        # The request may have reached the homeserver, and a retry is a new transaction: a second message.
+    refused = outcome.status is not None and HTTPStatus.BAD_REQUEST <= outcome.status < HTTPStatus.INTERNAL_SERVER_ERROR
+    if outcome.kind not in _PROVES_NOTHING_SENT and not refused:
         raise MatrixRequestError(_UNCONFIRMED)
     msg = f"Nothing was sent: {outcome.detail.rstrip('.')}."
     raise MatrixRequestError(msg)
@@ -346,7 +360,7 @@ async def _send(
         raise MatrixRequestError(msg) from None
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
     if file is not None:
-        written.event_id = await send_file_message(
+        outcome = await send_file_message_outcome(
             client,
             room_id,
             file.local_path,
@@ -356,9 +370,10 @@ async def _send(
             mimetype=file.mime_type,
             extra_content=marker,
         )
-        if written.event_id is None:
-            msg = f"Attachment {file.attachment_id} could not be sent."
+        if outcome is None:
+            msg = f"Nothing was sent: attachment {file.attachment_id} could not be uploaded."
             raise MatrixRequestError(msg)
+        written.event_id = _delivered(outcome)
         return {"room_id": room_id, "event_id": written.event_id}
     content = format_message_with_mentions(
         turn.config,

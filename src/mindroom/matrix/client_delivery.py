@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
+from aiohttp import ClientResponse
 from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
@@ -57,6 +58,8 @@ class MatrixDeliveryFailure:
 
     kind: MatrixDeliveryFailureKind
     detail: str
+    # The HTTP status of the homeserver's answer to the send, when it answered: a 4xx is its refusal.
+    status: int | None = None
 
 
 type MatrixSendOutcome = DeliveredMatrixEvent | MatrixDeliveryFailure
@@ -481,9 +484,13 @@ async def _send_resolved_message(
         return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
     failure_kind = MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
     failure_detail = str(response)
-    if isinstance(response, nio.RoomSendError) and response.status_code == "M_TOO_LARGE":
-        failure_kind = MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-        failure_detail = response.message
+    status = None
+    if isinstance(response, nio.RoomSendError):
+        transport = response.transport_response
+        status = transport.status if isinstance(transport, ClientResponse) else None
+        if response.status_code == "M_TOO_LARGE":
+            failure_kind = MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+            failure_detail = response.message
     emit_timing_event(
         "Matrix send timing",
         phase="send_finish",
@@ -499,10 +506,7 @@ async def _send_resolved_message(
         error=str(response),
         cache_bypass=cache_bypass,
     )
-    return MatrixDeliveryFailure(
-        failure_kind,
-        failure_detail,
-    )
+    return MatrixDeliveryFailure(failure_kind, failure_detail, status)
 
 
 async def send_message_result(
@@ -665,7 +669,7 @@ async def _send_uploaded_media(
     extra_content: dict[str, Any] | None,
     thread_id: str | None,
     latest_thread_event_id: str | None,
-) -> str | None:
+) -> MatrixSendOutcome:
     """Send one media event from an upload that already matches the room's encryption."""
     encrypted_file = upload_payload.get("file")
     content = _media_message_content(
@@ -678,7 +682,7 @@ async def _send_uploaded_media(
         thread_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )
-    outcome = await _send_resolved_message(
+    return await _send_resolved_message(
         client,
         room_id,
         content,
@@ -686,10 +690,9 @@ async def _send_uploaded_media(
         message_type="m.room.message",
         operation="send_message",
     )
-    return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
-async def send_file_message(
+async def send_file_message_outcome(
     client: nio.AsyncClient,
     room_id: str,
     file_path: str | Path,
@@ -699,9 +702,10 @@ async def send_file_message(
     filename: str | None = None,
     mimetype: str | None = None,
     extra_content: dict[str, Any] | None = None,
-) -> str | None:
-    """Upload a file and send it with the appropriate Matrix message type.
+) -> MatrixSendOutcome | None:
+    """Upload a file and send it with the appropriate Matrix message type, returning what came of the event's send.
 
+    None means the file was not uploaded, so no event was requested.
     ``filename`` names the upload for recipients and defaults to the file's own name.
     ``mimetype`` defaults to a guess from the file's own name.
     """
@@ -735,6 +739,31 @@ async def send_file_message(
         thread_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )
+
+
+async def send_file_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    file_path: str | Path,
+    *,
+    thread_id: str | None = None,
+    latest_thread_event_id: str | None = None,
+    filename: str | None = None,
+    mimetype: str | None = None,
+    extra_content: dict[str, Any] | None = None,
+) -> str | None:
+    """Upload a file and send it as ``send_file_message_outcome`` does, returning the event's ID only when it was sent."""
+    outcome = await send_file_message_outcome(
+        client,
+        room_id,
+        file_path,
+        thread_id=thread_id,
+        latest_thread_event_id=latest_thread_event_id,
+        filename=filename,
+        mimetype=mimetype,
+        extra_content=extra_content,
+    )
+    return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 async def send_runtime_encrypted_media_message(
@@ -797,7 +826,7 @@ async def send_audio_message(
     if audio_details is not None:
         upload_payload["info"]["duration"] = audio_details["duration"]
         voice_content = {"org.matrix.msc3245.voice": {}, "org.matrix.msc1767.audio": audio_details}
-    return await _send_uploaded_media(
+    outcome = await _send_uploaded_media(
         client,
         room_id,
         mxc_uri,
@@ -809,6 +838,7 @@ async def send_audio_message(
         thread_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )
+    return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 def build_edit_event_content(
@@ -903,6 +933,7 @@ __all__ = [
     "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",
+    "send_file_message_outcome",
     "send_message_outcome",
     "send_message_result",
     "send_room_event_result",
