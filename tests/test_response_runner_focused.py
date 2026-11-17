@@ -1969,8 +1969,8 @@ async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_be
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
     assert "their effects stand: do not call a finished tool with side effects again" in account
     assert "conversation above" not in account
-    # The turn's runs name the recovered run they continue.
-    assert (replayed.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == (["run-1"] if natively else None)
+    # The turn's runs name its earlier attempt, recovered or not, so the answer links it.
+    assert (replayed.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == ["run-1"]
 
 
 @pytest.mark.asyncio

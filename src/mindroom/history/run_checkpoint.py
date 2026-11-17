@@ -171,32 +171,33 @@ def recover_interrupted_turn(
     *,
     natively: bool,
 ) -> list[str]:
-    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the turn's recovered runs.
+    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the turn's unlinked attempts.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
-    attempt starts from the conversation before the turn. Every recovered run is returned either way, so the turn's
-    answer links it too (``link_response_event``): a summary can still hold its work, from a later compaction or from
-    the run's own mid-turn fold.
+    attempt starts from the conversation before the turn. Either way, every attempt at the turn no answer links yet is
+    returned, whatever recovery did with it, so the turn's answer links it (``link_response_event``): a summary can
+    hold its work, from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
     """
     session = store.load_session(session_id)
     if session is None:
         return []
     loaded = {run.run_id for run in session.runs}
-    recovered: list[str] = []
+    attempts: list[str] = []
     # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
     for run in store.list_runs(session_id):
         if run.parent_run_id is not None or not run_in_scope(run, scope):
             continue
         if not source_event_ids(run.metadata).intersection(event_ids):
             continue
-        if not is_recovered_run(run) and not (natively and recover_interrupted_run(store, session, run)):
-            continue
-        if not natively and is_model_history_visible_run(run) and run.run_id in loaded:
+        if natively:
+            recover_interrupted_run(store, session, run)
+        elif is_recovered_run(run) and is_model_history_visible_run(run) and run.run_id in loaded:
             store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
-        recovered.append(run.run_id)
-    return recovered
+        if MATRIX_RESPONSE_EVENT_ID_METADATA_KEY not in (run.metadata or {}):
+            attempts.append(run.run_id)
+    return attempts
 
 
 def link_response_event(store: ConversationStore, session_id: str, run_id: str, response_event_id: str) -> None:

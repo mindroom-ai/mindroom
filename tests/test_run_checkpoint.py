@@ -385,11 +385,11 @@ async def test_a_checkpoint_never_recovered_stays_out_of_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crashed turn nothing recovers, as one past the limit, replays none of its messages."""
+    """A crashed turn nothing recovers, as one past the limit, replays none of its messages; its answer links it."""
     await _crash_mid_call(tmp_path, monkeypatch, _crashing_turns())
     crashed = _config(tmp_path / "crashed")
 
-    assert not _recover(crashed, natively=False)
+    assert _recover(crashed, natively=False) == [_only_run(crashed).run_id]
 
     assert _only_run(crashed).status is RunStatus.cancelled
     model = ScriptedModel([answer("Started over")])
@@ -549,7 +549,7 @@ async def test_redacting_a_reply_removes_the_recovered_attempt_a_compaction_fold
 
     continued = _recover(config, natively=natively)
 
-    assert continued == ["attempt-1", *(["attempt-2"] if second_attempt_stored and natively else [])]
+    assert continued == ["attempt-1", *(["attempt-2"] if second_attempt_stored else [])]
     session = store.load_session(_SESSION)
     assert session is not None
     store.save_run(session, _stored_attempt("final", RunStatus.completed, continued), record_usage=False)
