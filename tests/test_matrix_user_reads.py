@@ -32,6 +32,7 @@ from tests.matrix_user_helpers import (
     message_line,
     reaction,
     room_event,
+    search_answer,
     state_event,
     sync_answer,
     text_message,
@@ -898,7 +899,7 @@ async def test_a_thread_reply_names_its_thread(client: nio.AsyncClient, homeserv
     homeserver.answers.update(
         {
             MESSAGES_PATH: {"chunk": [reply, root]},
-            SEARCH_PATH: {"search_categories": {"room_events": {"results": [{"result": {**reply, "room_id": ROOM}}]}}},
+            SEARCH_PATH: search_answer({**reply, "room_id": ROOM}),
         },
     )
 
@@ -948,18 +949,11 @@ async def test_an_event_comes_with_the_messages_around_it(
 async def test_search_covers_joined_rooms_or_one_room(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
     """A search covers every joined room unless it names one; each hit names its room, and a token continues it."""
     other = "!other:example.com"
-    homeserver.answers[SEARCH_PATH] = {
-        "search_categories": {
-            "room_events": {
-                "results": [
-                    {"rank": 2.0, "result": text_message("$due", "Budget is due", minute=1, room_id=ROOM)},
-                    {"rank": 1.0, "result": text_message("$plan", "Budget plan", sender=CAROL, room_id=other)},
-                ],
-                "count": 2,
-                "next_batch": "b1",
-            },
-        },
-    }
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        text_message("$due", "Budget is due", minute=1, room_id=ROOM),
+        text_message("$plan", "Budget plan", sender=CAROL, room_id=other),
+        next_batch="b1",
+    )
 
     everywhere = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
     one_room = await search_messages(client, "budget", room_id=ROOM, page_token="b1", limit=80)  # noqa: S106
@@ -1006,17 +1000,11 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
         room_id=ROOM,
         unsigned={"redacted_because": {"type": "m.room.redaction", "sender": "@bob:example.com"}},
     )
-    homeserver.answers[SEARCH_PATH] = {
-        "search_categories": {
-            "room_events": {
-                "results": [
-                    {"result": edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM)},
-                    {"result": redacted},
-                    {"result": edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=4, room_id=ROOM)},
-                ],
-            },
-        },
-    }
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM),
+        redacted,
+        edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=4, room_id=ROOM),
+    )
 
     result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
 
@@ -1039,10 +1027,8 @@ async def test_search_prefers_the_original_hit_over_its_edit_hit(
     """A page with both a message and an edit of it shows the message, with its latest edit, whatever their order."""
     fix = edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM)
     original = text_message("$typo", "budget is due fridya", room_id=ROOM, unsigned={"m.relations": {"m.replace": fix}})
-    hits = [{"result": original}, {"result": fix}]
-    homeserver.answers[SEARCH_PATH] = {
-        "search_categories": {"room_events": {"results": hits if original_first else hits[::-1]}},
-    }
+    hits = [original, fix]
+    homeserver.answers[SEARCH_PATH] = search_answer(*(hits if original_first else hits[::-1]))
 
     result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
 

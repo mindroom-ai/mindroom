@@ -28,16 +28,20 @@ from tests.matrix_user_helpers import (
     AGENT,
     OWNER,
     ROOM,
+    ROOM_NEEDED,
     SYNC_PATH,
     TOKEN,
     Answer,
     FakeHomeserver,
+    error_result,
     joined_room,
+    ok_result,
     owner_config,
     owner_runtime_paths,
     owner_toolkit,
     owner_turn,
     room_event,
+    search_answer,
     sync_answer,
 )
 
@@ -51,7 +55,6 @@ if TYPE_CHECKING:
 
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
-ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
@@ -83,13 +86,7 @@ async def test_the_owner_reads_their_rooms(config: Config, paths: RuntimePaths, 
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_read(action="rooms")
 
-    assert json.loads(result) == {
-        "status": "ok",
-        "tool": "matrix_user",
-        "action": "rooms",
-        "rooms": [f"{ROOM} | Planning | unread 2"],
-        "left_out": 0,
-    }
+    assert json.loads(result) == ok_result("rooms", rooms=[f"{ROOM} | Planning | unread 2"], left_out=0)
     [request] = homeserver.requests
     assert request.query["user_id"] == [OWNER]
     assert request.headers["Authorization"] == f"Bearer {TOKEN}"
@@ -117,7 +114,7 @@ async def test_a_refused_caller_gets_the_refusal_and_no_request_is_made(
     with owner_turn(config, paths, requester_id), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths, agent_name).matrix_user_read(action="rooms")
 
-    assert json.loads(result) == {"status": "error", "tool": "matrix_user", "action": "rooms", "message": message}
+    assert json.loads(result) == error_result("rooms", message)
     assert homeserver.requests == []
 
 
@@ -147,7 +144,7 @@ async def test_without_a_token_the_tool_says_it_is_not_set_up(
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_read(action="rooms")
 
-    assert json.loads(result) == {"status": "error", "tool": "matrix_user", "action": "rooms", "message": message}
+    assert json.loads(result) == error_result("rooms", message)
     assert homeserver.requests == []
 
 
@@ -167,15 +164,10 @@ async def test_the_token_never_appears_in_a_result_or_an_error(
 
     with owner_turn(config, paths), homeserver.serving_the_toolkit(), capture_logs() as logs:
         found = await owner_toolkit(config, paths).matrix_user_read(action="rooms")
-        homeserver.failure = refused
+        homeserver.answers[SYNC_PATH] = refused
         failed = await owner_toolkit(config, paths).matrix_user_read(action="rooms")
 
-    assert json.loads(failed) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": "rooms",
-        "message": "The Matrix homeserver could not be reached.",
-    }
+    assert json.loads(failed) == error_result("rooms", "The Matrix homeserver could not be reached.")
     assert str(refused) not in failed
     # The client logs the failure with its cause; that line too must not hold the token.
     assert [entry["error_type"] for entry in logs if entry["event"] == "matrix_request_transport_failed"] == [
@@ -199,17 +191,12 @@ async def test_a_timeout_says_the_homeserver_took_too_long(
     timed_out: Exception,
 ) -> None:
     """A homeserver that does not answer in time is reported as slow, not as unreachable."""
-    homeserver.failure = timed_out
+    homeserver.answers[SYNC_PATH] = timed_out
 
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_read(action="rooms")
 
-    assert json.loads(result) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": "rooms",
-        "message": "The homeserver took too long to answer.",
-    }
+    assert json.loads(result) == error_result("rooms", "The homeserver took too long to answer.")
     assert homeserver.closed
 
 
@@ -250,12 +237,7 @@ async def test_each_action_names_the_arguments_it_is_missing(
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_read(**arguments)
 
-    assert json.loads(result) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": arguments["action"],
-        "message": message,
-    }
+    assert json.loads(result) == error_result(arguments["action"], message)
     assert homeserver.requests == []
 
 
@@ -271,12 +253,7 @@ async def test_a_missing_argument_is_named_before_the_caller_or_the_token_is_che
     with owner_turn(config, paths, STRANGER), homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_read(action="room")
 
-    assert json.loads(result) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": "room",
-        "message": f"room {ROOM_NEEDED}",
-    }
+    assert json.loads(result) == error_result("room", f"room {ROOM_NEEDED}")
     assert homeserver.requests == []
 
 
@@ -301,7 +278,7 @@ async def test_a_blank_read_argument_is_left_out(
     homeserver = FakeHomeserver(
         {
             f"/_matrix/client/v3/rooms/{ROOM}/messages": {"chunk": []},
-            "/_matrix/client/v3/search": {"search_categories": {"room_events": {"results": []}}},
+            "/_matrix/client/v3/search": search_answer(),
         },
     )
     toolkit = owner_toolkit(config, paths)
@@ -359,7 +336,7 @@ async def test_a_search_in_a_room_named_by_alias_searches_the_room_it_names(
     homeserver = FakeHomeserver(
         {
             DIRECTORY_PATH: {"room_id": ALIASED_ROOM, "servers": ["example.com"]},
-            search_path: {"search_categories": {"room_events": {"results": []}}},
+            search_path: search_answer(),
         },
     )
 
@@ -500,12 +477,10 @@ async def test_the_write_function_takes_no_user_to_act_as(
         "attachments",
         "name",
     ]
-    assert json.loads(result) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": arguments["action"],
-        "message": "user_id is whom to message or invite, never your owner.",
-    }
+    assert json.loads(result) == error_result(
+        arguments["action"],
+        "user_id is whom to message or invite, never your owner.",
+    )
     assert homeserver.requests == []
 
 
@@ -549,12 +524,7 @@ async def test_a_write_without_a_chat_turn_is_refused(
     with homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_write(action="leave", room_id=ROOM)
 
-    assert json.loads(result) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": "leave",
-        "message": "matrix_user_write works only in a chat with the agent.",
-    }
+    assert json.loads(result) == error_result("leave", "matrix_user_write works only in a chat with the agent.")
     assert homeserver.requests == []
 
 
@@ -584,15 +554,13 @@ async def test_a_downloaded_file_is_an_attachment_of_the_turn(
         context = get_tool_runtime_context()
 
     fields = json.loads(result)
-    assert fields == {
-        "status": "ok",
-        "tool": "matrix_user",
-        "action": "download",
-        "attachment_id": fields["attachment_id"],
-        "name": "notes.txt",
-        "mime_type": "text/plain",
-        "size_bytes": 17,
-    }
+    assert fields == ok_result(
+        "download",
+        attachment_id=fields["attachment_id"],
+        name="notes.txt",
+        mime_type="text/plain",
+        size_bytes=17,
+    )
     assert context is not None
     assert context.runtime_attachment_ids == [fields["attachment_id"]]
     record = load_attachment(paths.storage_root, fields["attachment_id"])
@@ -633,12 +601,7 @@ async def test_download_without_a_turn_is_refused_before_any_request(
         )
 
     assert "error" not in result
-    assert json.loads(result["result"]) == {
-        "status": "error",
-        "tool": "matrix_user",
-        "action": "download",
-        "message": message,
-    }
+    assert json.loads(result["result"]) == error_result("download", message)
     assert homeserver.requests == []
 
 

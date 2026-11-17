@@ -40,6 +40,7 @@ AGENT = "mind_alice"
 # The room of the agent's turn.
 ROOM = "!room:example.com"
 TOKEN = "as-user-secret-7f3a9c"  # noqa: S105
+ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 SYNC_PATH = "/_matrix/client/v3/sync"
 # The time of every room event the helpers make, plus its ``minute``.
 NOON = int(datetime(2026, 11, 16, 12, 0, tzinfo=UTC).timestamp() * 1000)
@@ -118,6 +119,14 @@ def sync_answer(
     if direct is not None:
         body["account_data"] = {"events": [{"type": "m.direct", "content": direct}]}
     return body
+
+
+def search_answer(*events: dict[str, object], next_batch: str | None = None) -> dict[str, object]:
+    """Return a `/search` body whose hits are ``events``, continued by ``next_batch`` when given."""
+    room_events: dict[str, object] = {"results": [{"result": event} for event in events]}
+    if next_batch is not None:
+        room_events["next_batch"] = next_batch
+    return {"search_categories": {"room_events": room_events}}
 
 
 def state_event(
@@ -229,8 +238,6 @@ class FakeHomeserver:
     answers: dict[str, Answer | list[Answer | dict[str, object]] | dict[str, object] | Exception] = field(
         default_factory=dict,
     )
-    # Raised for each request instead of an answer, as a failed transport raises it.
-    failure: Exception | None = None
     requests: list[HomeserverRequest] = field(default_factory=list)
     closed: bool = False
 
@@ -266,15 +273,13 @@ class FakeHomeserver:
         headers: dict[str, str],
         **_kwargs: object,
     ) -> _Response:
-        """Record the request and answer it, or raise the transport failure."""
+        """Record the request and answer it, or raise the transport failure its path answers."""
         split = urlsplit(url)
         path = unquote(split.path)
         body = json.loads(data) if isinstance(data, str) else None
         uploaded = b"".join([chunk async for chunk in data]) if isinstance(data, AsyncIterable) else None
         query = parse_qs(split.query)
         self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers), uploaded))
-        if self.failure is not None:
-            raise self.failure
         answer = self._answer(path)
         content = answer.body if isinstance(answer.body, bytes) else json.dumps(answer.body).encode()
         return _Response(answer.status, answer.headers, _Content(content))
@@ -297,6 +302,16 @@ class FakeHomeserver:
     async def close(self) -> None:
         """Close the session, as the client does when it is done."""
         self.closed = True
+
+
+def error_result(action: str, message: str) -> dict[str, str]:
+    """Return the fields of a `matrix_user` call of ``action`` that failed with ``message``."""
+    return {"status": "error", "tool": "matrix_user", "action": action, "message": message}
+
+
+def ok_result(action: str, **fields: object) -> dict[str, object]:
+    """Return the fields of a `matrix_user` call of ``action`` that worked, with its other ``fields``."""
+    return {"status": "ok", "tool": "matrix_user", "action": action, **fields}
 
 
 def owner_runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
@@ -331,7 +346,7 @@ def owner_config(paths: RuntimePaths) -> Config:
         },
     }
     config = Config.validate_with_runtime(data, paths)
-    persist_entity_accounts(config, paths, usernames={AGENT: "mind_alice"})
+    persist_entity_accounts(config, paths, usernames={AGENT: AGENT})
     return config
 
 

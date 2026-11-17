@@ -23,13 +23,17 @@ from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, register_tool_runtime_media_attachment
 from tests.matrix_user_helpers import (
+    AGENT,
     OWNER,
     ROOM,
+    ROOM_NEEDED,
     TOKEN,
     Answer,
     FakeHomeserver,
     HomeserverRequest,
+    error_result,
     matrix_error,
+    ok_result,
     owner_config,
     owner_runtime_paths,
     owner_toolkit,
@@ -61,7 +65,6 @@ THREAD_PATH = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
 # An alias, which the homeserver's directory resolves.
 ALIAS = "#planning:example.com"
 DIRECTORY_PATH = f"{CLIENT}/directory/room/{ALIAS}"
-ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
@@ -129,7 +132,7 @@ def config(paths: RuntimePaths) -> Config:
 def agent_id(config: Config, paths: RuntimePaths) -> str:
     """The Matrix ID of Alice's personal agent, which marks every event it sends as hers."""
     del config
-    return current_entity_id("mind_alice", paths).full_id
+    return current_entity_id(AGENT, paths).full_id
 
 
 @pytest.fixture
@@ -150,14 +153,6 @@ async def _write(config: Config, paths: RuntimePaths, homeserver: FakeHomeserver
         return json.loads(await owner_toolkit(config, paths).matrix_user_write(**arguments))
 
 
-def _error(action: str, message: str) -> dict[str, str]:
-    return {"status": "error", "tool": "matrix_user", "action": action, "message": message}
-
-
-def _ok(action: str, **fields: object) -> dict[str, object]:
-    return {"status": "ok", "tool": "matrix_user", "action": action, **fields}
-
-
 @pytest.mark.asyncio
 async def test_send_formats_and_stamps_the_message(
     config: Config,
@@ -168,7 +163,7 @@ async def test_send_formats_and_stamps_the_message(
     """The text is formatted as the agent's own messages are, marked as the agent's, and sent as the owner."""
     result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="See **this**")
 
-    assert result == _ok("send", room_id=ROOM, event_id="$sent")
+    assert result == ok_result("send", room_id=ROOM, event_id="$sent")
     [content] = _sent(homeserver)
     assert content["msgtype"] == "m.text"
     assert content["body"] == "See **this**"
@@ -195,8 +190,8 @@ async def test_a_long_message_uploads_its_full_text_with_the_marker(
     sent = await _write(config, paths, homeserver, action="send", room_id=ROOM, message=text)
     edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message=text)
 
-    assert sent == _ok("send", room_id=ROOM, event_id="$sent")
-    assert edited == _ok("edit", room_id=ROOM, event_id="$sent")
+    assert sent == ok_result("send", room_id=ROOM, event_id="$sent")
+    assert edited == ok_result("edit", room_id=ROOM, event_id="$sent")
     [message_upload, edit_upload] = homeserver.requests_to(UPLOAD_PATH)
     assert message_upload.uploaded is not None
     full = json.loads(message_upload.uploaded)
@@ -291,7 +286,7 @@ async def test_send_with_an_attachment(
             attachments=[record.attachment_id],
         )
 
-    assert json.loads(result) == _ok("send", room_id=ROOM, event_id="$text", event_ids=["$text", "$file"])
+    assert json.loads(result) == ok_result("send", room_id=ROOM, event_id="$text", event_ids=["$text", "$file"])
     [upload] = homeserver.requests_to(UPLOAD_PATH)
     assert upload.uploaded == b"Remember the milk"
     assert upload.query["user_id"] == [OWNER]
@@ -312,7 +307,7 @@ async def test_an_attachment_the_turn_does_not_hold_is_refused_before_any_reques
     """Only the turn's own files can be sent."""
     result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachments=["att_elsewhere"])
 
-    assert result == _error("send", "Attachment ID is not available in this context: att_elsewhere")
+    assert result == error_result("send", "Attachment ID is not available in this context: att_elsewhere")
     assert homeserver.requests == []
 
 
@@ -344,7 +339,10 @@ async def test_an_ephemeral_attachment_is_named_as_such(
             attachments=["att_media"],
         )
 
-    assert json.loads(result) == _error("send", "Ephemeral attachment att_media can be sent but has no local file.")
+    assert json.loads(result) == error_result(
+        "send",
+        "Ephemeral attachment att_media can be sent but has no local file.",
+    )
     assert homeserver.requests == []
 
 
@@ -373,7 +371,7 @@ async def test_a_command_like_file_name_is_refused(
             attachments=[record.attachment_id],
         )
 
-    assert json.loads(result) == _error(
+    assert json.loads(result) == error_result(
         "send",
         f"Attachment {record.attachment_id}'s file name is sent as its text. {COMMAND_LIKE}",
     )
@@ -410,7 +408,7 @@ async def test_a_file_downloaded_in_a_turn_is_sent_in_that_turn(
             await toolkit.matrix_user_write(action="send", room_id=ROOM, attachments=[fetched["attachment_id"]]),
         )
 
-    assert sent == _ok("send", room_id=ROOM, event_id="$sent")
+    assert sent == ok_result("send", room_id=ROOM, event_id="$sent")
     [upload] = homeserver.requests_to(UPLOAD_PATH)
     assert upload.uploaded == b"Remember the milk"
     assert upload.query["user_id"] == [OWNER]
@@ -436,7 +434,7 @@ async def test_send_to_a_person_uses_their_newest_dm(config: Config, paths: Runt
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == _ok("send", room_id=newer, event_id="$dm")
+    assert result == ok_result("send", room_id=newer, event_id="$dm")
     assert [content["body"] for content in _sent(homeserver, newer)] == ["Lunch?"]
     # The oldest is not looked at, and nothing is made or recorded.
     assert homeserver.requests_to(_members_path(old)) == []
@@ -461,7 +459,7 @@ async def test_send_to_a_person_without_a_dm_creates_one_and_records_it(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == _ok("send", room_id=NEW_DM, event_id="$dm")
+    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm")
     [created, recorded, sent] = _changes(homeserver)
     assert created.body == {"preset": "trusted_private_chat", "is_direct": True, "invite": [BOB]}
     assert (recorded.method, recorded.path) == ("PUT", DIRECT_PATH)
@@ -496,13 +494,13 @@ async def test_a_failed_dm_record_names_the_created_room_and_a_retry_reuses_it(
     failed = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
     retried = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert failed == _error(
+    assert failed == error_result(
         "send",
         f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
         "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
         f"Nothing was sent; to send there, use room_id {NEW_DM}.",
     )
-    assert retried == _ok("send", room_id=NEW_DM, event_id="$dm")
+    assert retried == ok_result("send", room_id=NEW_DM, event_id="$dm")
     assert len(homeserver.requests_to(CREATE_PATH)) == 1
     [_, recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
     assert recorded.body == {BOB: [NEW_DM]}
@@ -529,7 +527,7 @@ async def test_recording_a_new_dm_keeps_what_the_owner_changed_meanwhile(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == _ok("send", room_id=NEW_DM, event_id="$dm")
+    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm")
     [recorded] = [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
     assert recorded.body == {CAROL: ["!c:example.com"], **dave, BOB: [NEW_DM]}
 
@@ -553,7 +551,7 @@ async def test_a_failed_second_read_records_nothing_and_names_the_room(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == _error(
+    assert result == error_result(
         "send",
         f"Made the DM {NEW_DM} with {BOB}, but could not record it as one "
         "(Matrix answered 500 M_UNKNOWN: Database unavailable). "
@@ -619,7 +617,7 @@ async def test_two_first_sends_to_one_person_at_once_make_one_dm(config: Config,
         {"action": "send", "user_id": BOB, "message": "At one?"},
     )
 
-    assert results == [_ok("send", room_id=NEW_DM, event_id="$dm")] * 2
+    assert results == [ok_result("send", room_id=NEW_DM, event_id="$dm")] * 2
     assert len(homeserver.requests_to(CREATE_PATH)) == 1
     assert homeserver.direct == {BOB: [NEW_DM]}
     assert sorted(content["body"] for content in _sent(homeserver, NEW_DM)) == ["At one?", "Lunch?"]
@@ -646,8 +644,8 @@ async def test_first_sends_to_two_people_at_once_record_both_dms(config: Config,
     )
 
     assert results == [
-        _ok("send", room_id=NEW_DM, event_id="$dm"),
-        _ok("send", room_id=carol_dm, event_id="$carol"),
+        ok_result("send", room_id=NEW_DM, event_id="$dm"),
+        ok_result("send", room_id=carol_dm, event_id="$carol"),
     ]
     assert homeserver.direct == {BOB: [NEW_DM], CAROL: [carol_dm]}
 
@@ -669,7 +667,7 @@ async def test_a_new_dm_that_is_encrypted_names_the_room_it_made(
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
 
-    assert result == _error("send", f"Made the DM {NEW_DM} with {BOB}. {ENCRYPTED}")
+    assert result == error_result("send", f"Made the DM {NEW_DM} with {BOB}. {ENCRYPTED}")
     assert [request.path for request in _changes(homeserver)] == [CREATE_PATH, DIRECT_PATH]
     assert _sent(homeserver, NEW_DM) == []
 
@@ -696,7 +694,7 @@ async def test_nothing_is_sent_into_an_encrypted_room(
 
     result = await _write(config, paths, homeserver, room_id=ROOM, **arguments)
 
-    assert result == _error(arguments["action"], ENCRYPTED)
+    assert result == error_result(arguments["action"], ENCRYPTED)
     assert _changes(homeserver) == []
 
 
@@ -735,8 +733,8 @@ async def test_a_joined_room_is_still_checked_for_encryption_before_a_send(
     joined = await _write(config, paths, homeserver, action="join", room_id=ROOM)
     sent = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Hi")
 
-    assert joined == _ok("join", room_id=ROOM)
-    assert sent == _error("send", ENCRYPTED)
+    assert joined == ok_result("join", room_id=ROOM)
+    assert sent == error_result("send", ENCRYPTED)
     assert homeserver.paths() == [f"{CLIENT}/join/{ROOM}", ENCRYPTION_PATH]
 
 
@@ -759,7 +757,7 @@ async def test_a_command_like_message_is_refused(
     """
     result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message=text)
 
-    assert result == _error(action, COMMAND_LIKE)
+    assert result == error_result(action, COMMAND_LIKE)
     assert homeserver.requests == []
 
 
@@ -772,7 +770,7 @@ async def test_a_message_with_an_exclamation_mark_elsewhere_is_sent(
     """Only the start of a message makes a command."""
     result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Ship it! !now")
 
-    assert result == _ok("send", room_id=ROOM, event_id="$sent")
+    assert result == ok_result("send", room_id=ROOM, event_id="$sent")
     assert [content["body"] for content in _sent(homeserver)] == ["Ship it! !now"]
 
 
@@ -793,7 +791,7 @@ async def test_edit_and_redact_refuse_another_persons_event(
 
     result = await _write(config, paths, homeserver, room_id=ROOM, event_id="$theirs", **arguments)
 
-    assert result == _error(
+    assert result == error_result(
         arguments["action"],
         f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
     )
@@ -824,7 +822,7 @@ async def test_a_room_setting_cannot_be_redacted_or_edited(
 
     result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message="Hello")
 
-    assert result == _error(
+    assert result == error_result(
         action,
         f"Only messages and reactions can be changed this way, and $own is room state of type {state['type']}.",
     )
@@ -844,11 +842,11 @@ async def test_only_a_message_can_be_edited(
     homeserver.answers[f"{ROOM_PATH}/redact/$own/*"] = {"event_id": "$redaction"}
 
     edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message="Hello")
-    assert edited == _error("edit", "Only messages can be edited, and $own is of type m.reaction.")
+    assert edited == error_result("edit", "Only messages can be edited, and $own is of type m.reaction.")
     assert _changes(homeserver) == []
 
     redacted = await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id="$own")
-    assert redacted == _ok("redact", room_id=ROOM, event_id="$redaction")
+    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
 
 
 @pytest.mark.asyncio
@@ -870,10 +868,10 @@ async def test_a_reaction_must_be_one_short_emoji(
 
     reacted = [content["m.relates_to"]["key"] for content in _sent(homeserver, event_type="m.reaction")]
     if refused:
-        assert result == _error("react", REACTION_KEY)
+        assert result == error_result("react", REACTION_KEY)
         assert homeserver.requests == []
     else:
-        assert result == _ok("react", room_id=ROOM, event_id="$reaction")
+        assert result == ok_result("react", room_id=ROOM, event_id="$reaction")
         assert reacted == [emoji]
 
 
@@ -900,9 +898,9 @@ async def test_react_edit_redact_send_their_events(
         message="Sent by mistake",
     )
 
-    assert reacted == _ok("react", room_id=ROOM, event_id="$reaction")
-    assert edited == _ok("edit", room_id=ROOM, event_id="$sent")
-    assert redacted == _ok("redact", room_id=ROOM, event_id="$redaction")
+    assert reacted == ok_result("react", room_id=ROOM, event_id="$reaction")
+    assert edited == ok_result("edit", room_id=ROOM, event_id="$sent")
+    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
     assert _sent(homeserver, event_type="m.reaction") == [
         {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$own", "key": "👍"}, AGENT_AUTHORED_KEY: agent_id},
     ]
@@ -1000,10 +998,10 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
     ]
 
     assert results == [
-        _ok("join", room_id=ROOM),
-        _ok("invite", room_id=ROOM),
-        _ok("leave", room_id=OTHER_ROOM),
-        _ok("create_room", room_id="!trip:example.com"),
+        ok_result("join", room_id=ROOM),
+        ok_result("invite", room_id=ROOM),
+        ok_result("leave", room_id=OTHER_ROOM),
+        ok_result("create_room", room_id="!trip:example.com"),
     ]
     assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
         ("POST", f"{CLIENT}/join/{ALIAS}", {}),
@@ -1030,7 +1028,7 @@ async def test_join_passes_an_alias_to_the_homeserver_as_it_is(
 
     result = await _write(config, paths, homeserver, action="join", room_id=ALIAS)
 
-    assert result == _ok("join", room_id=OTHER_ROOM)
+    assert result == ok_result("join", room_id=OTHER_ROOM)
     [join] = homeserver.requests
     assert (join.method, urlsplit(join.url).path) == ("POST", f"{CLIENT}/join/{quote(ALIAS, safe='')}")
     assert homeserver.requests_to(DIRECTORY_PATH) == []
@@ -1048,7 +1046,7 @@ async def test_join_still_takes_an_alias_the_owner_is_not_in(
 
     result = await _write(config, paths, homeserver, action="join", room_id=alias)
 
-    assert result == _ok("join", room_id=OTHER_ROOM)
+    assert result == ok_result("join", room_id=OTHER_ROOM)
     assert [(request.method, request.path) for request in homeserver.requests] == [("POST", f"{CLIENT}/join/{alias}")]
 
 
@@ -1078,15 +1076,15 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
     with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(OTHER_ROOM):
         guarded = json.loads(await owner_toolkit(config, paths).matrix_user_write(room_id=ALIAS, **arguments))
 
-    assert result == _ok(action, room_id=OTHER_ROOM, event_id="$sent")
-    assert guarded == _error(action, "Nothing is written as your owner into a contact room.")
+    assert result == ok_result(action, room_id=OTHER_ROOM, event_id="$sent")
+    assert guarded == error_result(action, "Nothing is written as your owner into a contact room.")
     lookup, encryption, *_, sent, guarded_lookup = homeserver.requests
     assert (lookup.method, lookup.path, lookup.query["user_id"]) == ("GET", DIRECTORY_PATH, [OWNER])
     assert (encryption.method, encryption.path) == ("GET", f"{CLIENT}/rooms/{OTHER_ROOM}/state/m.room.encryption")
     assert sent.path.startswith(f"{CLIENT}/rooms/{OTHER_ROOM}/send/")
     assert all(OTHER_ROOM in request.path for request in homeserver.requests[1:-1])
     assert guarded_lookup.path == DIRECTORY_PATH
-    assert set(matrix_user_writes._RECENT_WRITES) == {("mind_alice", OWNER, OTHER_ROOM)}
+    assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, OTHER_ROOM)}
 
 
 @pytest.mark.asyncio
@@ -1114,7 +1112,7 @@ async def test_a_contact_room_is_refused_before_any_request(
     with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(ROOM):
         result = await owner_toolkit(config, paths).matrix_user_write(action="send", room_id=ROOM, message="Hi")
 
-    assert json.loads(result) == _error("send", "Nothing is written as your owner into a contact room.")
+    assert json.loads(result) == error_result("send", "Nothing is written as your owner into a contact room.")
     assert homeserver.requests == []
 
 
@@ -1151,14 +1149,14 @@ async def test_the_rate_limit_counts_per_agent_person_and_room(
         )
 
     assert {result["status"] for result in allowed} == {"ok"}
-    rate_limited = _error("send", "Rate limit exceeded for matrix_user writes (12 per 30s).")
+    rate_limited = error_result("send", "Rate limit exceeded for matrix_user writes (12 per 30s).")
     assert with_file == rate_limited
     assert twelfth["status"] == "ok"
     assert thirteenth == {**rate_limited, "action": "react"}
-    assert elsewhere == _ok("react", room_id=OTHER_ROOM, event_id="$elsewhere")
+    assert elsewhere == ok_result("react", room_id=OTHER_ROOM, event_id="$elsewhere")
     assert homeserver.requests_to(UPLOAD_PATH) == []
     # Each count belongs to the agent, the person it acts for, and the room.
-    assert set(matrix_user_writes._RECENT_WRITES) == {("mind_alice", OWNER, ROOM), ("mind_alice", OWNER, OTHER_ROOM)}
+    assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, ROOM), (AGENT, OWNER, OTHER_ROOM)}
 
 
 @pytest.mark.asyncio
@@ -1180,7 +1178,7 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
         ]
 
     assert {result["status"] for result in results[:12]} == {"ok"}
-    assert results[12] == _error("create_room", "Rate limit exceeded for matrix_user writes (12 per 30s).")
+    assert results[12] == error_result("create_room", "Rate limit exceeded for matrix_user writes (12 per 30s).")
 
 
 @pytest.mark.asyncio
@@ -1219,7 +1217,7 @@ async def test_a_stray_attachment_on_react_counts_for_nothing(
             attachments=["att_missing"],
         )
 
-    assert result == _ok("react", room_id=ROOM, event_id="$reaction")
+    assert result == ok_result("react", room_id=ROOM, event_id="$reaction")
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
     assert audit["attachments"] == 0
 
@@ -1240,7 +1238,7 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
     assert sent == {
         "event": "matrix_user_write_audit",
         "log_level": "warning",
-        "agent": "mind_alice",
+        "agent": AGENT,
         "person": OWNER,
         "room_id": ROOM,
         "action": "send",
@@ -1386,7 +1384,7 @@ async def test_each_action_names_what_it_is_missing(
     """A write without what it needs says what is missing and asks nothing of the homeserver."""
     result = await _write(config, paths, homeserver, **arguments)
 
-    assert result == _error(str(arguments["action"]), message)
+    assert result == error_result(str(arguments["action"]), message)
     assert homeserver.requests == []
 
 
@@ -1412,7 +1410,7 @@ async def test_a_failed_attachment_names_what_was_already_sent(
             attachments=[record.attachment_id],
         )
 
-    assert json.loads(result) == _error(
+    assert json.loads(result) == error_result(
         "send",
         f"Attachment {record.attachment_id} could not be sent; already sent into {ROOM}: $sent.",
     )
@@ -1431,7 +1429,7 @@ async def test_an_unconfirmed_send_says_it_may_have_been_sent(
     homeserver.answers[f"{_send_path()}*"] = matrix_error(403, "M_FORBIDDEN", "You cannot post here")
     refused = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Lunch?")
 
-    assert unconfirmed == _error(
+    assert unconfirmed == error_result(
         "send",
         "The homeserver did not confirm the message. It may have been sent: read the room before sending again.",
     )
