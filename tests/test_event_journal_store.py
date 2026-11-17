@@ -9921,6 +9921,38 @@ class TestHotQueriesAreIndexCovered:
 
         assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
 
+    async def test_a_thread_fingerprint_seeks_the_thread_instead_of_walking_the_room(self, tmp_path: Path) -> None:
+        """Each read of a thread's fingerprint is entered on the thread or the root's ID, never on the room alone.
+
+        Ordered by `logical_event_id`, the thread's rows came from the primary key's room prefix filtered down to the
+        thread: the plan still said SEARCH and the test above passed, while every export pass read the whole room
+        once per thread, 8 s against 0.045 s for a room of 619 threads.
+        """
+        database = sqlite3.connect(tmp_path / "fingerprint-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        steps: list[str] = []
+
+        class _PlanRecorder:
+            def _plan(self, sql: str, params: Sequence[object]) -> None:
+                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                steps.extend(row[-1] for row in rows)
+
+            def fetchone(self, sql: str, params: Sequence[object] = ()) -> None:
+                self._plan(sql, params)
+
+            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                self._plan(sql, params)
+                return ()
+
+        reads.thread_fingerprint(cast("Transaction", _PlanRecorder()), "principal", room_id=ROOM, thread_id="$t")
+
+        visible = [step for step in steps if "visible_messages" in step]
+        assert any("thread_id=?" in step for step in visible), steps
+        assert any("logical_event_id=?" in step for step in visible), steps
+        assert all("thread_id=?" in step or "logical_event_id=?" in step for step in visible), steps
+        assert not any(marker in step for step in steps for marker in ("SCAN ", "TEMP B-TREE")), steps
+
     async def test_room_activity_titles_load_by_primary_key(self, tmp_path: Path) -> None:
         """Roots and summary notices are loaded by their IDs, not by walking the room's index to find them."""
         database = sqlite3.connect(tmp_path / "summary-plan.db")

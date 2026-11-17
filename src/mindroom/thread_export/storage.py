@@ -65,14 +65,14 @@ _WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str]] = set()
 # A thread's last message timestamp, which orders the room index, and its entry there.
 type _ThreadIndexEntry = tuple[int, dict[str, object]]
 # A file's inode, size, and modification time, which replacing the file or an ordinary edit of it changes.
-type _FileIdentity = tuple[int, int, int]
+type FileIdentity = tuple[int, int, int]
 
 
 class WrittenIndexEntry(NamedTuple):
     """The room index pair built from the payload a pass exported to one thread file, and that file's identity right after."""
 
     filename: str
-    file_identity: _FileIdentity
+    file_identity: FileIdentity
     pair: _ThreadIndexEntry
 
 
@@ -581,7 +581,7 @@ def _yaml_node_count(value: object) -> int:
     return 1
 
 
-def _file_identity(status: os.stat_result) -> _FileIdentity:
+def _file_identity(status: os.stat_result) -> FileIdentity:
     """Return the parts of a file's status that replacing the file or an ordinary edit of it changes."""
     return status.st_ino, status.st_size, status.st_mtime_ns
 
@@ -800,6 +800,28 @@ def room_has_thread_exports(
         return False
     try:
         return _contains_thread_export_file(room_fd)
+    finally:
+        os.close(room_fd)
+
+
+def thread_file_identities(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    trusted_root: Path | None = None,
+) -> dict[str, FileIdentity]:
+    """Return the identity of each recognizable regular thread file in one room's export directory, by name."""
+    root_fd = _open_owned_export_root(output_dir, create=False, trusted_root=trusted_root)
+    if root_fd is None:
+        return {}
+    try:
+        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
+    finally:
+        os.close(root_fd)
+    if room_fd is None:
+        return {}
+    try:
+        return {filename: _file_identity(status) for filename, status in _thread_files_newest_first(room_fd)}
     finally:
         os.close(room_fd)
 

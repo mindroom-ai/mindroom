@@ -17,7 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
-from mindroom.thread_export import ThreadExportTarget
+from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.thread_export import ThreadExportStats
+    from mindroom.thread_export.execution import ExportedThreads
 
 
 async def _export_threads_for_client(
@@ -1515,3 +1516,168 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
     assert stats.rooms_exported == 1
     assert stats.failures == 1
     assert stats.failed_items[0].room_key == "lobby"
+
+
+_REMEMBERED_ROOM = _ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+_REMEMBERED_THREAD = "$stable:localhost"
+_REMEMBERED_HISTORY = (
+    ResolvedVisibleMessage.synthetic(
+        sender="@alice:localhost",
+        body="Stable content",
+        timestamp=1_700_000_000_000,
+        event_id=_REMEMBERED_THREAD,
+    ),
+)
+
+
+def _remembering_source(
+    exported: ExportedThreads,
+    fingerprint: AsyncMock,
+    room: _ThreadExportRoom = _REMEMBERED_ROOM,
+) -> ThreadExportSource:
+    """Return a workspace source whose journal answers ``fingerprint`` for every thread."""
+    reader = Mock()
+    reader.completeness.thread_fingerprint = fingerprint
+    return ThreadExportSource(
+        client=Mock(),
+        reader=reader,
+        rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+        exported=exported,
+    )
+
+
+async def _remembering_pass(
+    config: Config,
+    output_dir: Path,
+    source: ThreadExportSource,
+    history: Sequence[ResolvedVisibleMessage] = _REMEMBERED_HISTORY,
+) -> tuple[ThreadExportStats, AsyncMock]:
+    """Run one workspace pass over the remembered thread, and return its stats and the thread read it made."""
+    fetch = AsyncMock(return_value=copy.deepcopy(list(history)))
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([_REMEMBERED_THREAD], False)),
+        ),
+        patch("mindroom.thread_export.execution.fetch_projected_thread_history", new=fetch),
+    ):
+        (stats,) = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+            full_pass=False,
+        )
+    return stats, fetch
+
+
+def _remembered_file(output_dir: Path) -> Path:
+    return output_dir / "lobby" / f"{quote(_REMEMBERED_THREAD, safe='')}.yaml"
+
+
+@pytest.mark.asyncio
+async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_path: Path) -> None:
+    """A thread whose journal fingerprint has not moved is neither read nor written, and stays in the room index."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    fingerprint = AsyncMock(return_value=1)
+    source = _remembering_source({}, fingerprint)
+
+    await _remembering_pass(config, output_dir, source)
+    written = _remembered_file(output_dir).read_bytes()
+    unchanged, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_not_awaited()
+    assert (unchanged.threads_exported, unchanged.threads_unchanged, unchanged.failures) == (1, 1, 0)
+    assert _remembered_file(output_dir).read_bytes() == written
+    index = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))
+    assert [entry["thread_id"] for entry in index["threads"]] == [_REMEMBERED_THREAD]
+
+    fingerprint.return_value = 2
+    _, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["edit", "delete"])
+async def test_a_pass_restores_an_export_file_changed_since_it_wrote_it(tmp_path: Path, change: str) -> None:
+    """A thread file someone edited or deleted is read and written again, even though the thread did not change."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    source = _remembering_source({}, AsyncMock(return_value=1))
+    await _remembering_pass(config, output_dir, source)
+    exported = yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))
+    if change == "edit":
+        _remembered_file(output_dir).write_text("messages: []\n", encoding="utf-8")
+    else:
+        _remembered_file(output_dir).unlink()
+
+    _, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+    restored = yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))
+    assert restored["messages"] == exported["messages"]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_titled_by_a_person_is_read_on_every_pass(tmp_path: Path) -> None:
+    """A title a person set holds only while room membership authorizes them, so its thread is never skipped."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    pin = ResolvedVisibleMessage.synthetic(
+        sender="@alice:localhost",
+        body="Person title",
+        event_id="$pin:localhost",
+        timestamp=1_700_000_001_000,
+        content={
+            "msgtype": "m.notice",
+            "body": "Person title",
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": "Person title",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "model": "manual",
+                "pinned": True,
+            },
+        },
+        thread_id=_REMEMBERED_THREAD,
+    )
+    source = _remembering_source({}, AsyncMock(return_value=1))
+
+    with patch("mindroom.thread_export.execution.human_summary_authorizer", return_value=lambda _sender: True):
+        await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
+        _, fetch = await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
+
+    fetch.assert_awaited_once()
+    assert (
+        yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))["thread"]["summary"] == "Person title"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["room", "trusted_senders"])
+async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_messages_changes(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    """A renamed room or a changed set of trusted title senders re-exports a thread whose messages did not change."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    exported: ExportedThreads = {}
+    fingerprint = AsyncMock(return_value=1)
+    await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
+
+    if change == "room":
+        renamed = _ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Renamed")
+        _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint, renamed))
+    else:
+        with patch(
+            "mindroom.thread_export.execution.trusted_sender_ids_for_export",
+            return_value=frozenset({"@mindroom_new:localhost"}),
+        ):
+            _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
+
+    fetch.assert_awaited_once()

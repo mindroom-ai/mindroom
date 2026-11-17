@@ -790,6 +790,49 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     assert bodies(messages) == ["root", "first", "second"]
 
 
+async def test_a_thread_fingerprint_moves_with_every_change_its_export_shows(router: PrincipalStore) -> None:
+    """A thread's fingerprint holds while nothing its export shows changes, and moves with every change that does.
+
+    A workspace pass skips a thread whose fingerprint has not moved since the pass that wrote it, so a change this
+    missed would leave an export showing what the thread no longer says.
+    """
+    homeserver = FakeHomeserver()
+    root = raw(ROOT, "root", ts=100)
+    original = raw("$b:example.org", "v1", ts=200, thread_id=ROOT)
+    serve_thread(homeserver, root, [original])
+    reader = reader_for(router, homeserver)
+    await export(reader)
+    seen = [await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT)]
+
+    async def moved() -> bool:
+        fingerprint = await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT)
+        new = fingerprint not in seen
+        seen.append(fingerprint)
+        return new
+
+    await admit_live(router, [raw("$other:example.org", "elsewhere", ts=150, thread_id="$elsewhere:example.org")])
+    assert not await moved()
+    await admit_live(router, [raw("$edit:example.org", "v2", ts=300, replaces="$b:example.org")])
+    assert await moved()
+    reply = raw("$c:example.org", "reply", ts=350, thread_id=ROOT)
+    await admit_live(router, [reply])
+    assert await moved()
+    await admit_live(router, [raw("$root-edit:example.org", "root v2", ts=360, replaces=ROOT)])
+    assert await moved()
+    # Redacting the visible edit withholds the body until a strict read refetches the original.
+    homeserver.relations["$b:example.org"] = []
+    await admit_live(router, [redaction("$r:example.org", "$edit:example.org", ts=400)])
+    assert await moved()
+    await export(reader)
+    assert await moved()
+    await admit_live(router, [redaction("$r2:example.org", "$c:example.org", ts=500)])
+    assert await moved()
+    # A rejoin ends the hydration marker, so the next strict read walks the thread again.
+    await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(router, ROOM, "join")
+    assert await moved()
+
+
 async def test_a_thread_whose_root_the_server_lost_fails_rather_than_exporting_replies(
     router: PrincipalStore,
 ) -> None:

@@ -704,6 +704,33 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and row["recovery_state"] is None
 
 
+def thread_fingerprint(transaction: Transaction, principal_id: str, *, room_id: str, thread_id: str) -> int:
+    """Return a value that changes whenever a strict read of one thread could return something else, loading no content.
+
+    Every write to a visible message adds or removes its row, installs another revision, or sets or clears its refresh
+    token, which a redaction sets to its own receipt order. A strict read walks again only when the hydration marker no
+    longer stands, so the marker is part of the value. The root is stored in the room conversation and is read with it.
+    """
+    marker = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    rows = transaction.fetchall(
+        """
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        UNION ALL
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        """,
+        (principal_id, room_id, encode_thread_id(thread_id), principal_id, room_id, thread_id),
+    )
+    marker_columns = ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")
+    return hash(
+        (
+            None if marker is None else tuple(marker[column] for column in marker_columns),
+            frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
+        ),
+    )
+
+
 def conversation_hydration_coverage(
     transaction: Transaction,
     principal_id: str,

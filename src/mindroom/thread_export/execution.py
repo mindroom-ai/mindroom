@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 import nio
@@ -24,23 +27,39 @@ from mindroom.thread_export.storage import (
     remove_room_export,
     remove_stale_thread_exports,
     room_has_thread_exports,
+    thread_file_identities,
     thread_payload,
     write_room_index,
     write_thread_payload,
 )
-from mindroom.thread_summary.state import current_thread_summary_from_history
+from mindroom.thread_summary.state import human_summary_authorizer, summary_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.projected_history import ProjectedThreadReader
-    from mindroom.thread_export.storage import WrittenIndexEntry
+    from mindroom.thread_export.storage import FileIdentity, WrittenIndexEntry
 
-type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], str | None]
+# A thread's summary, and whether it follows from the thread's messages and trusted senders alone.
+type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], tuple[str | None, bool]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExportedThread:
+    """What one pass wrote for a thread, so a later pass can skip it while nothing it was built from changed."""
+
+    # The thread's journal fingerprint, its room, and the senders whose titles are trusted, hashed together.
+    fingerprint: int
+    entries: dict[Path, WrittenIndexEntry]
+
+
+# One source's exported threads by room and thread ID.
+type ExportedThreads = dict[tuple[str, str], _ExportedThread]
 
 
 logger = get_logger(__name__)
@@ -73,20 +92,22 @@ async def _fetch_thread_payload(
     thread_id: str,
     *,
     current_summary: _CurrentSummary,
-) -> dict[str, object]:
-    """Fetch and build one thread payload independently of export destinations."""
+) -> tuple[dict[str, object], bool]:
+    """Fetch and build one thread payload independently of export destinations, and whether its summary lasts."""
     messages = await fetch_projected_thread_history(
         reader,
         room_id=room.room_id,
         thread_id=thread_id,
     )
-    return thread_payload(
+    summary, summary_lasts = current_summary(room.room_id, thread_id, messages)
+    payload = thread_payload(
         room=room,
         thread_id=thread_id,
         messages=messages,
         exported_at=datetime.now(UTC),
-        summary=current_summary(room.room_id, thread_id, messages),
+        summary=summary,
     )
+    return payload, summary_lasts
 
 
 async def _authorized_room_accumulators(
@@ -133,10 +154,10 @@ async def _write_thread_to_targets(
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
     index_entries: dict[int, list[WrittenIndexEntry]],
-) -> None:
-    """Fetch one thread once and write it independently to each target."""
+) -> dict[Path, WrittenIndexEntry] | None:
+    """Fetch one thread once and write it to each target; return their index entries if all took it and its summary lasts."""
     try:
-        payload = await _fetch_thread_payload(
+        payload, summary_lasts = await _fetch_thread_payload(
             reader,
             room,
             thread_id,
@@ -145,8 +166,9 @@ async def _write_thread_to_targets(
     except Exception as exc:
         for accumulator in accumulators:
             accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
-        return
+        return None
 
+    entries: dict[Path, WrittenIndexEntry] = {}
     for accumulator in accumulators:
         try:
             written = await asyncio.to_thread(
@@ -163,10 +185,55 @@ async def _write_thread_to_targets(
         accumulator.threads_exported += 1
         if written.index_entry is not None:
             index_entries.setdefault(id(accumulator), []).append(written.index_entry)
+            entries[accumulator.target.output_dir] = written.index_entry
         if written.replaced:
             changed_accumulator_ids.add(id(accumulator))
         else:
             accumulator.threads_unchanged += 1
+    return entries if summary_lasts and len(entries) == len(accumulators) else None
+
+
+async def _export_unless_unchanged(
+    write: Callable[[], Awaitable[dict[Path, WrittenIndexEntry] | None]],
+    *,
+    reader: ProjectedThreadReader,
+    room: ThreadExportRoom,
+    thread_id: str,
+    accumulators: Sequence[ThreadExportAccumulator],
+    index_entries: dict[int, list[WrittenIndexEntry]],
+    exported: ExportedThreads,
+    file_identities: dict[int, dict[str, FileIdentity]],
+    trusted_sender_ids: frozenset[str],
+) -> None:
+    """Count a thread unchanged when nothing it was built from changed and every target still holds its file, else write it."""
+    key = (room.room_id, thread_id)
+    try:
+        thread_fingerprint = await reader.completeness.thread_fingerprint(room_id=room.room_id, thread_id=thread_id)
+    except Exception as exc:
+        for accumulator in accumulators:
+            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
+        return
+    fingerprint = hash((thread_fingerprint, room, trusted_sender_ids))
+    previous = exported.get(key)
+    if (
+        previous is not None
+        and previous.fingerprint == fingerprint
+        and all(
+            (entry := previous.entries.get(accumulator.target.output_dir)) is not None
+            and file_identities.get(id(accumulator), {}).get(entry.filename) == entry.file_identity
+            for accumulator in accumulators
+        )
+    ):
+        for accumulator in accumulators:
+            accumulator.threads_exported += 1
+            accumulator.threads_unchanged += 1
+            index_entries.setdefault(id(accumulator), []).append(previous.entries[accumulator.target.output_dir])
+        return
+    # The fingerprint was taken before the read, so a change during the read shows on the next pass.
+    if (entries := await write()) is not None:
+        exported[key] = _ExportedThread(fingerprint, entries)
+    else:
+        exported.pop(key, None)
 
 
 def _finish_room_exports_blocking(
@@ -232,6 +299,7 @@ async def export_threads_for_targets_for_client(
     rooms: Sequence[ThreadExportRoom],
     targets: Sequence[ThreadExportTarget],
     max_thread_roots: int = 2000,
+    exported: ExportedThreads | None = None,
 ) -> tuple[ThreadExportAccumulator, ...]:
     """Fetch each Matrix thread once and fan it out to authorized destinations.
 
@@ -242,19 +310,26 @@ async def export_threads_for_targets_for_client(
     """
     trusted_sender_ids = trusted_sender_ids_for_export(config, runtime_paths)
 
-    def current_summary(room_id: str, thread_id: str, messages: Sequence[ResolvedVisibleMessage]) -> str | None:
-        current = current_thread_summary_from_history(
-            client,
-            room_id,
-            thread_id,
+    def current_summary(
+        room_id: str,
+        thread_id: str,
+        messages: Sequence[ResolvedVisibleMessage],
+    ) -> tuple[str | None, bool]:
+        # A title a person set stands only while room membership authorizes them, which the thread alone does not show.
+        authorize = human_summary_authorizer(client, room_id, config, runtime_paths, entity_name, membership_index)
+        asked: list[str] = []
+
+        def authorize_human(sender: str) -> bool:
+            asked.append(sender)
+            return authorize(sender)
+
+        state = summary_state(
             messages,
-            config=config,
-            runtime_paths=runtime_paths,
-            entity_name=entity_name,
-            membership_index=membership_index,
+            thread_id=thread_id,
             trusted_sender_ids=trusted_sender_ids,
+            authorize_human=authorize_human,
         )
-        return None if current is None else current.summary
+        return (None if state is None else state.summary), not asked
 
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
 
@@ -288,6 +363,8 @@ async def export_threads_for_targets_for_client(
             truncated=truncated,
             current_summary=current_summary,
             authorized=authorized,
+            exported=exported,
+            trusted_sender_ids=trusted_sender_ids,
         )
 
     return accumulators
@@ -301,13 +378,26 @@ async def _export_enumerated_room_threads(
     truncated: bool,
     current_summary: _CurrentSummary,
     authorized: Sequence[ThreadExportAccumulator],
+    exported: ExportedThreads | None,
+    trusted_sender_ids: frozenset[str],
 ) -> None:
     """Export one enumerated room's threads to every authorized accumulator."""
     changed_accumulator_ids: set[int] = set()
     index_entries: dict[int, list[WrittenIndexEntry]] = {}
+    # A thread is skipped only while each target still holds the file the pass that recorded it wrote.
+    file_identities: dict[int, dict[str, FileIdentity]] = {}
+    for accumulator in authorized if exported is not None else ():
+        with suppress(OSError, RuntimeError):
+            file_identities[id(accumulator)] = await asyncio.to_thread(
+                thread_file_identities,
+                accumulator.target.output_dir,
+                room,
+                trusted_root=accumulator.target.trusted_root,
+            )
 
     for thread_id in thread_ids:
-        await _write_thread_to_targets(
+        write = partial(
+            _write_thread_to_targets,
             reader=reader,
             room=room,
             thread_id=thread_id,
@@ -315,6 +405,20 @@ async def _export_enumerated_room_threads(
             accumulators=authorized,
             changed_accumulator_ids=changed_accumulator_ids,
             index_entries=index_entries,
+        )
+        if exported is None:
+            await write()
+            continue
+        await _export_unless_unchanged(
+            write,
+            reader=reader,
+            room=room,
+            thread_id=thread_id,
+            accumulators=authorized,
+            index_entries=index_entries,
+            exported=exported,
+            file_identities=file_identities,
+            trusted_sender_ids=trusted_sender_ids,
         )
 
     await asyncio.to_thread(
