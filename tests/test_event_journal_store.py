@@ -60,6 +60,7 @@ from mindroom.event_journal import (
     SemanticConsumer,
     approval_arguments_digest,
     delivery_transaction_id,
+    journal,
     reads,
     replacement_target,
     sqlite_backend,
@@ -9753,10 +9754,6 @@ class TestHotQueriesAreIndexCovered:
     # index that matches only the prefix of an ORDER BY cannot satisfy it, on
     # either backend.
     _QUERIES: ClassVar[dict[str, str]] = {
-        "worker pending scan": (
-            "SELECT * FROM journal_events WHERE principal_id=? AND state='pending' "
-            "AND receipt_order>? ORDER BY receipt_order LIMIT 50"
-        ),
         "replay guard thread scan": (
             "SELECT * FROM journal_events WHERE principal_id=? AND room_id=? AND thread_id=? "
             "AND state='pending' AND origin_server_ts>? AND event_id<>?"
@@ -9869,6 +9866,39 @@ class TestHotQueriesAreIndexCovered:
         )
 
         assert "created_ts" in plan, plan
+
+    async def test_a_pending_page_reads_only_the_holds_on_its_own_rows(self, tmp_path: Path) -> None:
+        """The worker's pending page looks up the continuations holding its rows, not every held source there is.
+
+        SQLite cannot flatten a join on the right of a LEFT JOIN, so held
+        sources joined that way are built for every principal, with an automatic
+        index over them, on each page that has a pending row.
+        """
+        database = sqlite3.connect(tmp_path / "pending-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        plans: list[str] = []
+
+        class _PlanRecorder:
+            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                plans.append(" | ".join(row[-1] for row in rows))
+                return ()
+
+        for room_id in (None, ROOM):
+            for after_receipt_order in (None, 1):
+                journal.pending(
+                    cast("Transaction", _PlanRecorder()),
+                    "principal",
+                    limit=50,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                )
+
+        assert len(plans) == 4
+        for plan in plans:
+            assert "held_source USING INDEX reply_span_sources_event (principal_id=? AND event_id=?)" in plan, plan
+            assert not any(step in plan for step in ("SCAN ", "TEMP B-TREE", "AUTOMATIC", "MATERIALIZE")), plan
 
     @pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43), reason="octet_length arrived in SQLite 3.43")
     async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:
