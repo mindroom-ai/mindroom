@@ -254,6 +254,14 @@ class MidTurnGate:
             if len({message.requester_id for message in fresh}) == 1:
                 self._stopping.update(fresh)
 
+    def cannot_wait_stands(self, waiting: tuple[QueuedMessage, ...]) -> bool:
+        """Return whether the last judgment said its queue cannot wait, and each message it judged still waits as read.
+
+        A message that arrived since leaves the verdict standing; an edit or removal of a judged message ends it.
+        """
+        checked = self._checked
+        return self._outcome is MidTurnOutcome.CANNOT_WAIT and bool(checked) and set(checked or ()) <= set(waiting)
+
     def report_stop(self) -> None:
         """Hand ``on_stop`` the messages, as the judge read them, that this reply's verdicts say it cannot wait for."""
         if self.on_stop is not None and self._stopping:

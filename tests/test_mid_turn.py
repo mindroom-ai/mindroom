@@ -2748,3 +2748,77 @@ async def test_unresolved_batch_is_not_steered_before_resume(pause: str, reason:
     assert len(judgments) == (1 if reason == "cannot_wait" else 0)
     assert [message.event_id for message in queue.pending_message_snapshot()] == ["$new"]
     assert QueuedHumanNoticeReservation(queue, "$new").stopped_reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "ends", "judged"),
+    [("none", True, 1), ("appended", True, 1), ("edited", False, 2), ("deleted", False, 1)],
+)
+async def test_owner_ends_at_its_batch_for_a_verdict_its_child_paused_for(
+    change: str,
+    *,
+    ends: bool,
+    judged: int,
+) -> None:
+    """A "cannot wait" a delegated child got the pause notice for still ends the owning parent at its resumed batch.
+
+    The child keeps its notice and wraps up; the parent, once its batch records the child's result, ends on the same
+    cached verdict without another judgment, notice, or request, and the correction keeps its mark. A message
+    appended meanwhile leaves the verdict standing; an edit or a deletion takes it away, so the parent goes on.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        # The judge says the correction cannot wait, and that its edit can.
+        return len(judgments) > 1
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+
+    def child_work() -> str:
+        """Do the child's part."""
+        queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER)
+        return "Child work"
+
+    def delegate() -> str:
+        """Hand the subtask to a child."""
+        return "Child result"
+
+    parent_model = ScriptedModel([calls(tool_call("delegate", "child")), answer("Parent went on")])
+    child_model = ScriptedModel([calls(tool_call("child_work", "work")), answer("Child paused")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        paused = await _run_turn(parent_model, external(delegate), hooks=_STEERING_HOOKS)
+        assert paused.status == RunStatus.paused
+        # The delegated child runs with the notice behavior it always had.
+        child = await _run_turn(child_model, toolkit(child_work))
+        assert child.status == RunStatus.completed
+        assert _has_notice(child_model.requests[-1].messages)
+        stop = QueuedHumanNoticeReservation(queue, "$stop")
+        assert stop.stopped_reply
+        if change == "appended":
+            queue.add_waiting_human_message("$bob", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+        elif change == "edited":
+            queue.update_waiting_human_message("$stop", text="Never mind, keep going", mentions_nobody=False)
+        elif change == "deleted":
+            queue.consume_waiting_human_message("$stop")
+        record = await _resume_turn(
+            parent_model,
+            paused,
+            external(delegate),
+            external_results={"child": "Child paused"},
+            hooks=_STEERING_HOOKS,
+        )
+    assert record.status == RunStatus.completed
+    assert answer_of(record, "child").content == "Child paused"
+    assert len(parent_model.requests) == (1 if ends else 2)
+    assert not any(_has_notice(request.messages) for request in parent_model.requests)
+    assert len(judgments) == judged
+    assert stop.stopped_reply is ends

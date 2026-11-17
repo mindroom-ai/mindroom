@@ -235,3 +235,59 @@ async def test_delegated_child_keeps_owner_steer_for_parent_batch(tmp_path: Path
         assert await leader.after_tool_batch[0](_batch("leader-work", answered=True), ()) is True
     assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
     assert QueuedHumanNoticeReservation(queue, "$steer").stopped_reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["after_tool_batch", "on_resume_entry"])
+async def test_a_childs_pause_notice_leaves_the_owner_its_cannot_wait(tmp_path: Path, boundary: str) -> None:
+    """A child told to pause for a "cannot wait" leaves the verdict to its owner, whose completed batch it ends.
+
+    The owner reuses the verdict the child's judgment cached: no second judgment, no notice of its own, results intact.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
+        runtime_paths,
+    )
+    model = ScriptedModel([])
+    turn = HookTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        model_name="default",
+        storage=None,
+        replay_plan=None,
+        prompt_id=None,
+    )
+    build = _agent_build(model)
+    parent = agent_loop_hooks(build, turn, steering=True)
+    child = agent_loop_hooks(replace(build, tool_jobs=JobActor(name="general", team=False, depth=1, tools={})), turn)
+    queue = _QueuedMessageState()
+    queue.bind_active_requester("@alice:localhost")
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return False
+
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id="@alice:localhost",
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.mid_turn_gate = gate
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id="@alice:localhost")
+    with queued_message_signal_context(queue, mid_turn_gate=gate):
+        child_batch = _batch("child-work", answered=True)
+        assert await child.after_tool_batch[0](child_batch, ()) is not True
+        assert child_batch[-1].role == "user"
+        owner_batch = _batch("delegate", answered=True)
+        hook = parent.after_tool_batch[0] if boundary == "after_tool_batch" else parent.on_resume_entry[0]
+        assert await hook(owner_batch, owner_batch[-1:]) is True
+    assert [(message.role, message.content) for message in owner_batch] == [
+        ("user", "Do the task"),
+        ("assistant", None),
+        ("tool", "Done"),
+    ]
+    assert len(judged) == 1
+    assert QueuedHumanNoticeReservation(queue, "$stop").stopped_reply

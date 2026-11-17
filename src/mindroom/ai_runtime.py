@@ -213,20 +213,20 @@ async def _judge_queued_notice(
     pending = state.interrupting_snapshot()
     if not pending:
         return None
-    if not context.notice_fired:
-        outcome = await gate.decide(
-            pending,
-            current=lambda: not context.notice_fired and pending == state.interrupting_snapshot(),
-        )
-        steered = steering and _requester_steers(context)
-        if outcome is MidTurnOutcome.WAIT and not steered:
-            return None
+    # A run told to pause is not judged again; an owner still is, since a child's notice told only that child.
+    if steering or not context.notice_fired:
+        # A verdict that still stands, such as one a delegated child was told to pause for, is not asked again.
+        if not (steering and gate.cannot_wait_stands(pending)):
+            outcome = await gate.decide(
+                pending,
+                current=lambda: (steering or not context.notice_fired) and pending == state.interrupting_snapshot(),
+            )
+            if outcome is MidTurnOutcome.WAIT and not (steering and _requester_steers(context)):
+                return None
         # The reply wraps up here, for a "cannot wait" and a pause alike, also when a newer message arrived during the
         # judgment, so a later verdict on a reply that kept waiting cannot leave a mark behind.
         gate.report_stop()
-        if steered or (
-            steering and outcome is MidTurnOutcome.CANNOT_WAIT and set(pending) <= set(state.interrupting_snapshot())
-        ):
+        if steering and (_requester_steers(context) or gate.cannot_wait_stands(state.interrupting_snapshot())):
             return True
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
     return None
