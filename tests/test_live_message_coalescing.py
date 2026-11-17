@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -75,6 +76,7 @@ from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
+    InboundTurnNormalizer,
     _BatchMediaAttachmentResult,
 )
 from mindroom.llm.media import Audio
@@ -1067,9 +1069,10 @@ async def test_marked_room_root_video_and_late_thread_caption_dispatch_once(tmp_
     assert calls == [(["$video", "$caption"], "$video")]
 
 
+@pytest.mark.parametrize("fallback", ["prepared", "text_only"])
 @pytest.mark.asyncio
-async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_path: Path) -> None:
-    """A voice message keeps its submission marker through transcription, so its late caption joins it."""
+async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_path: Path, fallback: str) -> None:
+    """A voice message keeps its submission marker through preparation, so its late caption joins it."""
     bot = _make_bot(tmp_path, debounce_ms=50)
     room = _make_room()
     voice = _audio_event(event_id="$voice", server_timestamp=1000, submission={"id": "upload-1", "more": True})
@@ -1098,11 +1101,22 @@ async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_
             ),
         )
 
+    failing_raw_audio = AsyncMock(side_effect=RuntimeError("registration failed"))
+    both_preparations_fail = (
+        patch.multiple(
+            InboundTurnNormalizer,
+            prepare_voice_event=AsyncMock(side_effect=RuntimeError("stt failed")),
+            prepare_raw_voice_fallback_event=failing_raw_audio,
+        )
+        if fallback == "text_only"
+        else nullcontext()
+    )
     with (
         patch(
             "mindroom.voice.handler._download_audio",
             new=AsyncMock(return_value=Audio(content=b"voice-bytes", mime_type="audio/ogg")),
         ),
+        both_preparations_fail,
         patch.object(
             TurnDispatcher,
             "dispatch_turn",
@@ -1116,6 +1130,7 @@ async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_
         await _wait_for(lambda: len(calls) == 1)
         await bot._coalescing_gate.drain_all()
 
+    assert failing_raw_audio.await_count == (1 if fallback == "text_only" else 0)
     assert calls == [(["$voice", "$caption"], "$voice")]
 
 

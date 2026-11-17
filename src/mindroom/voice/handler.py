@@ -21,7 +21,6 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
-    SUBMISSION_CONTENT_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -35,7 +34,13 @@ from mindroom.llm.messages import ModelProvenance
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
-from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.matrix.media import (
+    AudioMessageEvent,
+    carried_media_content,
+    download_media_bytes,
+    extract_media_caption,
+    media_mime_type,
+)
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.providers import registry as provider_registry
@@ -351,19 +356,14 @@ def _build_prepared_voice_message(
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     else:
         extra_content[VOICE_TRANSCRIPT_KEY] = True
-    original_content = event.source.get("content") if isinstance(event.source, dict) else None
-    inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
-    if isinstance(inherited_mentions, dict):
-        extra_content["m.mentions"] = inherited_mentions
-    if isinstance(original_content, dict) and SUBMISSION_CONTENT_KEY in original_content:
-        extra_content[SUBMISSION_CONTENT_KEY] = original_content[SUBMISSION_CONTENT_KEY]
+    carried = carried_media_content(event)
+    relates_to = carried.pop("m.relates_to", None)
+    extra_content.update(carried)
 
     source = dict(event.source) if isinstance(event.source, dict) else {}
     content: dict[str, Any] = {}
-    if isinstance(original_content, dict):
-        relates_to = original_content.get("m.relates_to")
-        if isinstance(relates_to, dict):
-            content["m.relates_to"] = relates_to
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
     content.update(
         format_message_with_mentions(
             config,
