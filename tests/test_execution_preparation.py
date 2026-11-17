@@ -504,6 +504,27 @@ def test_scheduled_limit_zero_disables_replay_plan() -> None:
     assert capped.replay_plan == ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False)
 
 
+def test_scheduled_limit_zero_keeps_the_form_the_recovered_runs_replay_in() -> None:
+    """The recovered runs a scheduled turn continues still replay, so they stay the account its plan made of them."""
+    plan = ResolvedReplayPlan(
+        mode="disabled",
+        estimated_tokens=500,
+        add_history_to_context=True,
+        num_history_messages=5,
+        recovered_as_account=True,
+    )
+    prepared = PreparedHistoryState(replay_plan=plan, replays_persisted_history=True, native_history=None)
+
+    capped = _prepared_history_with_scheduled_limit(prepared, 0)
+
+    assert capped.replay_plan == ResolvedReplayPlan(
+        mode="disabled",
+        estimated_tokens=0,
+        add_history_to_context=False,
+        recovered_as_account=True,
+    )
+
+
 def test_scheduled_limit_caps_larger_plans_only() -> None:
     """A positive limit adds a message cap unless one is already tighter."""
     runs_plan = PreparedHistoryState(
