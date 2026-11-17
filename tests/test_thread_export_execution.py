@@ -1531,6 +1531,14 @@ _REMEMBERED_HISTORY = (
 )
 
 
+_MARKER = (1, 1, 1, None)
+
+
+def _journal_answer() -> AsyncMock:
+    """Return the journal's fingerprint of the remembered thread: a standing marker and its one unedited row."""
+    return AsyncMock(return_value=(_MARKER, frozenset({(_REMEMBERED_THREAD, _REMEMBERED_THREAD, None)})))
+
+
 def _remembering_source(
     exported: ExportedThreads,
     fingerprint: AsyncMock,
@@ -1583,7 +1591,7 @@ async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_pa
     """A thread whose journal fingerprint has not moved is neither read nor written, and stays in the room index."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    fingerprint = AsyncMock(return_value=1)
+    fingerprint = _journal_answer()
     source = _remembering_source({}, fingerprint)
 
     await _remembering_pass(config, output_dir, source)
@@ -1596,7 +1604,7 @@ async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_pa
     index = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))
     assert [entry["thread_id"] for entry in index["threads"]] == [_REMEMBERED_THREAD]
 
-    fingerprint.return_value = 2
+    fingerprint.return_value = (_MARKER, frozenset({(_REMEMBERED_THREAD, "$edit:localhost", None)}))
     _, fetch = await _remembering_pass(config, output_dir, source)
 
     fetch.assert_awaited_once()
@@ -1608,7 +1616,7 @@ async def test_a_pass_restores_an_export_file_changed_since_it_wrote_it(tmp_path
     """A thread file someone edited or deleted is read and written again, even though the thread did not change."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    source = _remembering_source({}, AsyncMock(return_value=1))
+    source = _remembering_source({}, _journal_answer())
     await _remembering_pass(config, output_dir, source)
     path = _remembered_file(output_dir)
     exported = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -1651,7 +1659,7 @@ async def test_a_thread_titled_by_a_person_is_read_on_every_pass(tmp_path: Path)
         },
         thread_id=_REMEMBERED_THREAD,
     )
-    source = _remembering_source({}, AsyncMock(return_value=1))
+    source = _remembering_source({}, _journal_answer())
 
     with patch("mindroom.thread_export.execution.human_summary_authorizer", return_value=lambda _sender: True):
         await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
@@ -1673,7 +1681,7 @@ async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_me
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
     exported: ExportedThreads = {}
-    fingerprint = AsyncMock(return_value=1)
+    fingerprint = _journal_answer()
     await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
 
     if change == "room":
@@ -1694,7 +1702,7 @@ async def test_a_room_whose_thread_files_cannot_be_listed_is_exported_as_on_a_fi
     """When the room's export files cannot be listed, every thread is read and written as if nothing was remembered."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    source = _remembering_source({}, AsyncMock(return_value=1))
+    source = _remembering_source({}, _journal_answer())
     await _remembering_pass(config, output_dir, source)
 
     with patch("mindroom.thread_export.execution.thread_file_identities", side_effect=RuntimeError("unsafe room")):

@@ -704,12 +704,21 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and row["recovery_state"] is None
 
 
-def thread_fingerprint(transaction: Transaction, principal_id: str, *, room_id: str, thread_id: str) -> int | None:
-    """Return a value that changes whenever a strict read of one thread could return something else, loading no content.
+# A thread's hydration marker, and each of its rows' logical ID, visible revision, and refresh token.
+type ThreadFingerprint = tuple[tuple[object, ...], frozenset[tuple[str, str, int | None]]]
+
+
+def thread_fingerprint(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> ThreadFingerprint | None:
+    """Return what a strict read of one thread depends on, loading no content, or None while no marker stands.
 
     Every write to a visible message adds or removes its row, installs another revision, or sets or clears its refresh
-    token, which a redaction sets to its own receipt order. The root is stored in the room conversation and is read
-    with it. Without a standing hydration marker a strict read walks the server again, so there is no value to give.
+    token, which a redaction sets to its own receipt order. Without a marker a strict read walks the server again.
     """
     marker = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
     if marker is None:
@@ -724,12 +733,9 @@ def thread_fingerprint(transaction: Transaction, principal_id: str, *, room_id: 
         """,
         (principal_id, room_id, encode_thread_id(thread_id), principal_id, room_id, thread_id),
     )
-    marker_columns = ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")
-    return hash(
-        (
-            tuple(marker[column] for column in marker_columns),
-            frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
-        ),
+    return (
+        tuple(marker[column] for column in ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")),
+        frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
     )
 
 

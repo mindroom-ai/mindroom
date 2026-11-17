@@ -53,13 +53,15 @@ type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], tu
 class _ExportedThread:
     """What one pass wrote for a thread, so a later pass can skip it while nothing it was built from changed."""
 
-    # The thread's journal fingerprint, its room, and the senders whose titles are trusted, hashed together.
+    # The thread's hydration marker and the rows the export read, its room, and the trusted title senders, hashed.
     fingerprint: int
     entries: dict[Path, WrittenIndexEntry]
 
 
 # One source's exported threads by room and thread ID.
 type ExportedThreads = dict[tuple[str, str], _ExportedThread]
+# The rows a strict read returned, as `thread_fingerprint` gives them: the read leaves no refresh owed.
+type _ReadRows = frozenset[tuple[str, str, None]]
 
 
 logger = get_logger(__name__)
@@ -92,8 +94,8 @@ async def _fetch_thread_payload(
     thread_id: str,
     *,
     current_summary: _CurrentSummary,
-) -> tuple[dict[str, object], bool]:
-    """Fetch and build one thread payload independently of export destinations, and whether its summary lasts."""
+) -> tuple[dict[str, object], _ReadRows | None]:
+    """Fetch and build one thread payload, and the rows it was read from unless its summary needs more than the thread."""
     messages = await fetch_projected_thread_history(
         reader,
         room_id=room.room_id,
@@ -107,7 +109,7 @@ async def _fetch_thread_payload(
         exported_at=datetime.now(UTC),
         summary=summary,
     )
-    return payload, summary_lasts
+    return payload, frozenset((m.event_id, m.latest_event_id, None) for m in messages) if summary_lasts else None
 
 
 async def _authorized_room_accumulators(
@@ -154,10 +156,10 @@ async def _write_thread_to_targets(
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
     index_entries: dict[int, list[WrittenIndexEntry]],
-) -> dict[Path, WrittenIndexEntry] | None:
-    """Fetch one thread once and write it to each target; return the index entries it got if its summary lasts."""
+) -> tuple[_ReadRows, dict[Path, WrittenIndexEntry]] | None:
+    """Fetch one thread once and write it to each target; return the rows read and the index entries, if remembered."""
     try:
-        payload, summary_lasts = await _fetch_thread_payload(
+        payload, rows = await _fetch_thread_payload(
             reader,
             room,
             thread_id,
@@ -190,11 +192,11 @@ async def _write_thread_to_targets(
             changed_accumulator_ids.add(id(accumulator))
         else:
             accumulator.threads_unchanged += 1
-    return entries if summary_lasts else None
+    return None if rows is None else (rows, entries)
 
 
 async def _export_unless_unchanged(
-    write: Callable[[], Awaitable[dict[Path, WrittenIndexEntry] | None]],
+    write: Callable[[], Awaitable[tuple[_ReadRows, dict[Path, WrittenIndexEntry]] | None]],
     *,
     reader: ProjectedThreadReader,
     room: ThreadExportRoom,
@@ -216,11 +218,11 @@ async def _export_unless_unchanged(
     if thread_fingerprint is None:
         await write()
         return
-    fingerprint = hash((thread_fingerprint, room, trusted_sender_ids))
+    marker, rows = thread_fingerprint
     previous = exported.get(key)
     if (
         previous is not None
-        and previous.fingerprint == fingerprint
+        and previous.fingerprint == hash((marker, rows, room, trusted_sender_ids))
         and all(
             (entry := previous.entries.get(accumulator.target.output_dir)) is not None
             and file_identities.get(id(accumulator), {}).get(entry.filename) == entry.file_identity
@@ -232,9 +234,10 @@ async def _export_unless_unchanged(
             accumulator.threads_unchanged += 1
             index_entries.setdefault(id(accumulator), []).append(previous.entries[accumulator.target.output_dir])
         return
-    # The fingerprint was taken before the read, so a change during the read shows on the next pass.
-    if (entries := await write()) is not None:
-        exported[key] = _ExportedThread(fingerprint, entries)
+    # The rows come from what the export read, so one added during the read and deleted since cannot match.
+    if (written := await write()) is not None:
+        read_rows, entries = written
+        exported[key] = _ExportedThread(hash((marker, read_rows, room, trusted_sender_ids)), entries)
 
 
 def _finish_room_exports_blocking(
