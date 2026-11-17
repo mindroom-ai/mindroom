@@ -9,6 +9,7 @@ from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentC
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_provider, get_api_key_for_service
 from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
 from mindroom.judgment.typesafe import SYSTEM_ONE
@@ -21,11 +22,14 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.judgment.answers import ChoiceDecision, JudgmentResult
+    from mindroom.judgment.execution import JudgmentCapacity
     from mindroom.judgment.state import JudgmentRequest
 
 logger = get_logger(__name__)
 
 type _JudgmentEvaluator[T] = Callable[[JudgmentRequest], Awaitable[JudgmentResult[T]]]
+# A batch has one question id per question, so its logs name the batch instead.
+_BATCH = "batch"
 
 
 def create_judgment_evaluator(
@@ -65,11 +69,30 @@ def create_choice_evaluator(
     )
 
 
+def create_batch_evaluator(
+    settings: ProbabilityJudgmentConfig,
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    capacity: JudgmentCapacity,
+) -> _JudgmentEvaluator[tuple[float | None, ...]] | None:
+    """Bind a probability backend's batched predicates under their own capacity."""
+    client = _probability_client(settings, runtime_paths, question_id=_BATCH, capacity=capacity)
+    if client is None:
+        return None
+    return _logged_evaluator(
+        partial(client.judge_many, owner=owner, allow_network=True),
+        settings,
+        question_id=_BATCH,
+    )
+
+
 def _probability_client(
     settings: ProbabilityJudgmentConfig,
     runtime_paths: RuntimePaths,
     *,
     question_id: str,
+    capacity: JudgmentCapacity = SHARED_CAPACITY,
 ) -> JudgmentClient | None:
     credentials_service = None
     if isinstance(settings, OpenAIDecisionsJudgmentConfig):
@@ -97,6 +120,7 @@ def _probability_client(
         wire=wire,
         threshold=settings.threshold,
         timeout_seconds=settings.timeout_seconds,
+        capacity=capacity,
     )
 
 

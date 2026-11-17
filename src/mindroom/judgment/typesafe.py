@@ -24,7 +24,6 @@ _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 
 def _encode(payload: dict[str, Any]) -> dict[str, object]:
-    question = payload["question"]
     return {
         "model": _PINNED_MODEL,
         "state": payload["state"],
@@ -33,33 +32,48 @@ def _encode(payload: dict[str, Any]) -> dict[str, object]:
                 "type": "choice" if question.get("type") == "choice" else "noul",
                 "instructions": {"question": question["instructions"], "guidance": payload["guidance"]},
                 "criteria": question["criteria"],
-            },
+            }
+            for question in payload.get("questions") or [payload["question"]]
         },
     }
 
 
-def _answer(root: object, question_id: str, keys: set[str], answer_type: str) -> tuple[TokenUsage, dict[str, object]]:
-    """Validate the exact envelope, model pin, and answer keys before reading values."""
+def _answers(
+    root: object,
+    question_ids: tuple[str, ...],
+    keys: set[str],
+    answer_type: str,
+) -> tuple[TokenUsage, tuple[dict[str, object], ...]]:
+    """Validate the exact envelope, model pin, and answer keys before reading values, in question order."""
     body = exact_keys(root, {"model", "answers", "usage"}, "body")
     if body["model"] != _PINNED_MODEL:
         msg = "response model does not match the pinned model"
         raise JudgmentModelDriftError(msg)
     usage = token_usage(exact_keys(body["usage"], {"input_tokens", "output_tokens"}, "usage"))
-    answers = exact_keys(body["answers"], {question_id}, "question map")
-    answer = exact_keys(answers[question_id], keys, "judgment answer")
-    if answer["type"] != answer_type:
+    answers = exact_keys(body["answers"], set(question_ids), "question map")
+    ordered = tuple(exact_keys(answers[question_id], keys, "judgment answer") for question_id in question_ids)
+    if any(answer["type"] != answer_type for answer in ordered):
         msg = f"response answer type is not {answer_type}"
         raise InvalidJudgmentResponseError(msg)
-    return usage, answer
+    return usage, ordered
 
 
-def _decode_probability(root: object, question_id: str) -> WireAnswer[float]:
-    usage, answer = _answer(root, question_id, {"type", "noul"}, "noul")
-    return WireAnswer(_PINNED_MODEL, usage, probability(answer["noul"], "judgment probability"))
+def _decode_probabilities(root: object, question_ids: tuple[str, ...]) -> WireAnswer[tuple[float | None, ...]]:
+    usage, answers = _answers(root, question_ids, {"type", "noul"}, "noul")
+    return WireAnswer(
+        _PINNED_MODEL,
+        usage,
+        tuple(probability(answer["noul"], "judgment probability") for answer in answers),
+    )
 
 
 def _decode_choice(root: object, question_id: str) -> WireAnswer[WireChoice]:
-    usage, answer = _answer(root, question_id, {"type", "choice", "confidence", "probabilities"}, "choice")
+    usage, (answer,) = _answers(
+        root,
+        (question_id,),
+        {"type", "choice", "confidence", "probabilities"},
+        "choice",
+    )
     choice, raw = answer["choice"], answer["probabilities"]
     if not isinstance(choice, str) or not isinstance(raw, dict):
         msg = "response choice is malformed"
@@ -77,6 +91,6 @@ def _decode_choice(root: object, question_id: str) -> WireAnswer[WireChoice]:
 SYSTEM_ONE = JudgmentWire(
     endpoint=_ENDPOINT,
     encode=_encode,
-    decode_probability=_decode_probability,
+    decode_probabilities=_decode_probabilities,
     decode_choice=_decode_choice,
 )

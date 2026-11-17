@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -12,9 +13,16 @@ from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
-from mindroom.judgment.evaluator import create_choice_evaluator, create_judgment_evaluator
+from mindroom.judgment.evaluator import create_batch_evaluator, create_choice_evaluator, create_judgment_evaluator
+from mindroom.judgment.execution import JudgmentCapacity
 from mindroom.judgment.openai_decisions import _ENDPOINT, OPENAI_DECISIONS
-from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.judgment.state import (
+    ChoiceQuestion,
+    JudgmentMessage,
+    JudgmentQuestion,
+    build_batch_request,
+    build_judgment_request,
+)
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from tests.conftest import test_runtime_paths
 
@@ -366,3 +374,83 @@ async def test_named_credentials_service_replaces_the_openai_credential(
     assert evaluate is not None
     assert (await evaluate(_request())).decision is True
     assert calls == ["direct-key"]
+
+
+_CANDIDATES = tuple(
+    JudgmentQuestion(
+        id=f"c{index}",
+        instructions=f"Does passage {index} help answer the message?",
+        when_true="Relevant.",
+        when_false="Irrelevant.",
+    )
+    for index in range(3)
+)
+
+
+def _batch_request() -> JudgmentRequest:
+    return build_batch_request(_CANDIDATES, "Where do I park?", instructions="")
+
+
+def _batch(*answers: dict[str, Any]) -> dict[str, Any]:
+    return {**_body(answers[0]), "answers": list(answers)}
+
+
+def _named(name: str, probability: float) -> dict[str, Any]:
+    return {"type": "predicate", "name": name, "probability": probability}
+
+
+async def test_batch_decodes_in_question_order() -> None:
+    """Answers are matched by name, so a shuffled answer list keeps the question order."""
+    seen: list[httpx.Request] = []
+    body = _batch(_named("c1", 0.5), _named("c2", 0.75), _named("c0", 0.25))
+    result = await _client(body, seen).judge_many(_batch_request(), owner="rerank", allow_network=True)
+
+    assert result.failure is None
+    assert result.decision == (0.25, 0.5, 0.75)
+    assert result.model_id == OPENAI_DECISIONS_MODEL
+    posted = json.loads(seen[0].content)
+    assert posted["input"] == [{"role": "user", "content": "user: Where do I park?"}]
+    assert [question["name"] for question in posted["questions"]] == ["c0", "c1", "c2"]
+    assert posted["questions"][2] == {
+        "type": "predicate",
+        "name": "c2",
+        "instructions": (
+            f"{json.loads(_batch_request().body or b'')['questions'][2]['instructions']}\n"
+            "True when: Relevant.\nFalse when: Irrelevant."
+        ),
+    }
+
+
+async def test_batch_refusal_is_none() -> None:
+    """One refused question reads as None while the others keep their probabilities."""
+    body = _batch(_named("c0", 0.25), {"type": "refusal", "name": "c1"}, _named("c2", 0.75))
+    result = await _client(body).judge_many(_batch_request(), owner="rerank", allow_network=True)
+    assert result.failure is None
+    assert result.decision == (0.25, None, 0.75)
+
+
+async def test_batch_evaluator_uses_its_own_capacity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent batches of one owner share the capacity they were given, not the one-per-owner default."""
+    paths = test_runtime_paths(tmp_path)
+    settings = OpenAIDecisionsJudgmentConfig(provider="openai_decisions", timeout_seconds=2)
+    capacity = JudgmentCapacity(max_concurrent=2, max_per_owner=2)
+    assert create_batch_evaluator(settings, paths, owner="root:rerank", capacity=capacity) is None
+
+    get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
+    both_running = asyncio.Event()
+    running = 0
+    response = json.dumps(_batch(_named("c0", 0.25), _named("c1", 0.5), _named("c2", 0.75))).encode()
+
+    async def post(_self: JudgmentClient, _request_body: bytes) -> bytes:
+        nonlocal running
+        running += 1
+        if running == 2:
+            both_running.set()
+        await both_running.wait()
+        return response
+
+    monkeypatch.setattr(JudgmentClient, "_post", post)
+    evaluate = create_batch_evaluator(settings, paths, owner="root:rerank", capacity=capacity)
+    assert evaluate is not None
+    results = await asyncio.gather(evaluate(_batch_request()), evaluate(_batch_request()))
+    assert [result.decision for result in results] == [(0.25, 0.5, 0.75)] * 2

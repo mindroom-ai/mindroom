@@ -18,6 +18,7 @@ from mindroom.judgment.client import (
     _MAX_RESPONSE_BYTES,
     InvalidJudgmentResponseError,
     JudgmentClient,
+    JudgmentWire,
     _accept_probability,
     _parse_json,
 )
@@ -28,9 +29,11 @@ from mindroom.judgment.state import (
     JudgmentMessage,
     JudgmentQuestion,
     JudgmentRequest,
+    build_batch_request,
     build_judgment_request,
 )
 from mindroom.judgment.typesafe import _ENDPOINT, _PINNED_MODEL, SYSTEM_ONE
+from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.participation import PARTICIPATION_QUESTION
 
 if TYPE_CHECKING:
@@ -68,7 +71,9 @@ def _response_body(
 
 
 def _decode(body: bytes) -> JudgmentResponse[bool]:
-    return _accept_probability(SYSTEM_ONE.decode_probability(_parse_json(body), "participation"), 0.8)
+    answer = SYSTEM_ONE.decode_probabilities(_parse_json(body), ("participation",))
+    value = None if answer.answer is None else answer.answer[0]
+    return _accept_probability(replace(answer, answer=value), 0.8)
 
 
 async def test_client_posts_exact_contract_and_retains_probability() -> None:
@@ -484,3 +489,94 @@ async def test_single_question_request_bytes_unchanged(
         judge = client.judge_choice if isinstance(question, ChoiceQuestion) else client.judge
         await judge(request, owner="golden", allow_network=True)
         assert [hashlib.sha256(body).hexdigest() for body in seen] == [expected]
+
+
+def _batch_request(count: int = 3, text: str = "Passage.") -> JudgmentRequest:
+    questions = tuple(
+        JudgmentQuestion(
+            id=f"c{index}",
+            instructions=f"Does this passage help? {text}",
+            when_true="Relevant.",
+            when_false="Irrelevant.",
+        )
+        for index in range(count)
+    )
+    return build_batch_request(questions, "How do I install the package?", instructions="")
+
+
+def _batch_body(wire: JudgmentWire, answers: list[tuple[str, float]]) -> bytes:
+    if wire is SYSTEM_ONE:
+        return json.dumps(
+            {
+                "model": _PINNED_MODEL,
+                "answers": {name: {"type": "noul", "noul": value} for name, value in answers},
+                "usage": {"input_tokens": 90, "output_tokens": 0},
+            },
+        ).encode()
+    return json.dumps(
+        {
+            "model": OPENAI_DECISIONS_MODEL,
+            "answers": [{"type": "predicate", "name": name, "probability": value} for name, value in answers],
+            "usage": {"input_tokens": 90, "output_tokens": 0},
+        },
+    ).encode()
+
+
+def _batch_client(wire: JudgmentWire, body: bytes, seen: list[httpx.Request] | None = None) -> JudgmentClient:
+    def respond(outbound: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(outbound)
+        return httpx.Response(200, content=body)
+
+    return JudgmentClient(api_key="k", wire=wire, transport=httpx.MockTransport(respond))
+
+
+async def test_batch_decodes_in_question_order() -> None:
+    """System One answers arrive as a map, so each probability is read by its question id."""
+    seen: list[httpx.Request] = []
+    body = _batch_body(SYSTEM_ONE, [("c2", 0.75), ("c0", 0.25), ("c1", 0.5)])
+    result = await _batch_client(SYSTEM_ONE, body, seen).judge_many(
+        _batch_request(),
+        owner="rerank",
+        allow_network=True,
+    )
+
+    assert result.failure is None
+    assert result.decision == (0.25, 0.5, 0.75)
+    assert (result.model_id, result.input_tokens) == (_PINNED_MODEL, 90)
+    posted = json.loads(seen[0].content)
+    assert list(posted["questions"]) == ["c0", "c1", "c2"]
+    assert {question["type"] for question in posted["questions"].values()} == {"noul"}
+    assert posted["state"] == {"conversation": [{"role": "user", "text": "How do I install the package?"}]}
+
+
+@pytest.mark.parametrize("wire", [SYSTEM_ONE, OPENAI_DECISIONS], ids=["typesafe", "openai"])
+@pytest.mark.parametrize(
+    "names",
+    [["c0", "c2"], ["c0", "c1", "c2", "c3"], ["c0", "c0", "c2"], ["c0", "c1", "other"]],
+    ids=["missing", "extra", "duplicate", "unknown"],
+)
+async def test_batch_missing_or_extra_answer_is_invalid_response(wire: JudgmentWire, names: list[str]) -> None:
+    """A batch answer set that is not exactly the requested questions never yields scores."""
+    body = _batch_body(wire, [(name, 0.5) for name in names])
+    result = await _batch_client(wire, body).judge_many(_batch_request(), owner="rerank", allow_network=True)
+    assert result.failure == "invalid_response"
+    assert result.decision is None
+
+
+async def test_judge_many_accepts_batch_sized_requests() -> None:
+    """A batch above the single-question byte limit still reaches the provider."""
+    request = _batch_request(count=10, text="The package installs with pip. " * 60)
+    assert request.complete
+    assert request.state_bytes > 16_000
+    body = _batch_body(SYSTEM_ONE, [(f"c{index}", 0.5) for index in range(10)])
+    result = await _batch_client(SYSTEM_ONE, body).judge_many(request, owner="rerank", allow_network=True)
+    assert result.failure is None
+    assert result.decision == (0.5,) * 10
+
+
+async def test_judge_refuses_a_batch_request() -> None:
+    """A single boolean judgment cannot silently read one question of a batch."""
+    body = _batch_body(SYSTEM_ONE, [("c0", 0.9)])
+    result = await _batch_client(SYSTEM_ONE, body).judge(_batch_request(count=1), owner="rerank", allow_network=True)
+    assert result.failure == "invalid_request"

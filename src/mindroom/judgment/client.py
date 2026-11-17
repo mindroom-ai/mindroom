@@ -19,6 +19,7 @@ from mindroom.judgment.answers import (
     TokenUsage,
 )
 from mindroom.judgment.execution import SHARED_CAPACITY, JudgmentCapacity, run_judgment
+from mindroom.judgment.state import MAX_BATCH_REQUEST_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -64,7 +65,7 @@ class JudgmentWire:
 
     endpoint: str
     encode: Callable[[dict[str, Any]], dict[str, object]]
-    decode_probability: Callable[[object, str], WireAnswer[float]]
+    decode_probabilities: Callable[[object, tuple[str, ...]], WireAnswer[tuple[float | None, ...]]]
     decode_choice: Callable[[object, str], WireAnswer[WireChoice]]
 
 
@@ -234,24 +235,42 @@ class JudgmentClient:
             finally:
                 await response.aclose()
 
-    def _wire_body(self, request: JudgmentRequest, *, choice: bool) -> tuple[dict[str, Any], bytes]:
+    def _wire_body(
+        self,
+        request: JudgmentRequest,
+        *,
+        choice: bool,
+        batch: bool = False,
+    ) -> tuple[list[dict[str, Any]], bytes]:
         assert request.body is not None
         payload = json.loads(request.body)
-        question = payload["question"]
-        if (question.get("type") == "choice") != choice:
+        # A single judgment never reads one question of a batch, and a batch never reads a single question.
+        questions = payload.get("questions") if batch else [payload.get("question")]
+        if not questions or any(
+            not isinstance(question, dict) or (question.get("type") == "choice") != choice for question in questions
+        ):
             raise JudgmentError(failure="invalid_request")
         # The validated request bounds the wire, which only reframes the same rubric and messages.
         body = json.dumps(self._wire.encode(payload), ensure_ascii=False, separators=(",", ":")).encode()
-        return question, body
+        return questions, body
 
-    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
-        question, body = self._wire_body(request, choice=False)
+    async def _probabilities(self, request: JudgmentRequest, *, batch: bool) -> WireAnswer[tuple[float | None, ...]]:
+        questions, body = self._wire_body(request, choice=False, batch=batch)
         with _closed_failures():
             root = _parse_json(await self._post(body))
-            return _accept_probability(self._wire.decode_probability(root, question["id"]), self._threshold)
+            return self._wire.decode_probabilities(root, tuple(question["id"] for question in questions))
+
+    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
+        answer = await self._probabilities(request, batch=False)
+        value = None if answer.answer is None else answer.answer[0]
+        return _accept_probability(WireAnswer(answer.model, answer.usage, value), self._threshold)
+
+    async def _evaluate_many(self, request: JudgmentRequest) -> JudgmentResponse[tuple[float | None, ...]]:
+        answer = await self._probabilities(request, batch=True)
+        return JudgmentResponse(model=answer.model, decision=answer.answer, probability=None, usage=answer.usage)
 
     async def _evaluate_choice(self, request: JudgmentRequest) -> JudgmentResponse[ChoiceDecision]:
-        question, body = self._wire_body(request, choice=True)
+        [question], body = self._wire_body(request, choice=True)
         with _closed_failures():
             root = _parse_json(await self._post(body))
             return _accept_choice(
@@ -275,6 +294,24 @@ class JudgmentClient:
             timeout_seconds=self._timeout_seconds,
             allow_network=allow_network,
             capacity=self._capacity,
+        )
+
+    async def judge_many(
+        self,
+        request: JudgmentRequest,
+        *,
+        owner: str,
+        allow_network: bool = False,
+    ) -> JudgmentResult[tuple[float | None, ...]]:
+        """Return every question's probability in question order, None where the provider refused it."""
+        return await run_judgment(
+            request,
+            self._evaluate_many,
+            owner=owner,
+            timeout_seconds=self._timeout_seconds,
+            allow_network=allow_network,
+            capacity=self._capacity,
+            max_request_bytes=MAX_BATCH_REQUEST_BYTES,
         )
 
     async def judge_choice(
