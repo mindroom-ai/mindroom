@@ -17,6 +17,7 @@ from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_dec
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import child_snapshot, delegation_job, delegation_outcome
+from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
@@ -1084,6 +1085,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+    # The turn the parent call's answer reaches receives what the child cost.
+    receive_subagent_cost(child.cost_usd)
     result = resolve_result(
         _finalize_delegation_output(_child_result_text(child, receipt), output_request),
         failed=child.status != "completed",

@@ -146,6 +146,17 @@ class DelegationChild:
     # Whether the child's worker-routed calls run in a worker of its own, and the resource profile that worker gets.
     dedicated_worker: bool = False
     worker_resource_profile: ScriptResourceProfileName | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a settled child kept its cost.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `cost_usd`.
+    # Last legacy release: v2026.11.361; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as of unknown cost, so the turn that receives its result adds nothing
+    # for it, as those releases' replies reported no subagent cost. It stays on the model for the reason above.
+    # Coverage: tests/test_subagent_reply_cost.py::test_a_child_snapshot_keeps_its_cost_and_one_saved_without_it_reads_as_unknown,
+    # tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # What the settled turn cost: its own priced usage plus that of the subagent turns it received, None while unsettled
+    # or when none of it used a priced model. The turn that receives the child's result adds it to its reply's.
+    cost_usd: float | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:
