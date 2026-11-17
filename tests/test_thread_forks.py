@@ -12,6 +12,7 @@ from mindroom.matrix.thread_forks import (
     _MAX_FORK_DEPTH,
     _ThreadForkReference,
     fork_parent_thread_ids,
+    fork_points,
     thread_fork_reference,
     with_fork_prefix,
 )
@@ -83,6 +84,8 @@ async def test_fork_of_fork_resolves_the_chain() -> None:
     fork = _thread("$f", [], ("$p", "$p1"))
     result = await with_fork_prefix(fork, room_id=_ROOM, thread_id="$f", read_thread=read, logger=MagicMock())
     assert _ids(result) == ["$g", "$g1", "$p", "$p1", "$f"]
+    # Each fork point is where one parent's messages end, so each gets its own divider.
+    assert fork_points(result) == {"$g1": "$g", "$p1": "$p"}
 
 
 @pytest.mark.asyncio

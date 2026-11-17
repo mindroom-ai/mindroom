@@ -57,6 +57,16 @@ def is_thread_fork_root(content: Mapping[str, Any]) -> bool:
     return thread_fork_reference(content) is not None
 
 
+def fork_points(history: Sequence[ResolvedVisibleMessage]) -> dict[str, str]:
+    """Map the last parent message of each fork a resolved history holds to the parent thread it was forked from."""
+    return {
+        reference.event_id: reference.thread_id
+        for message in history
+        if message.thread_id in (None, message.event_id)
+        and (reference := thread_fork_reference(message.content)) is not None
+    }
+
+
 def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:
     """Return the parent threads whose messages a fork's resolved history holds, none for a plain thread."""
     thread_ids = {thread_id}

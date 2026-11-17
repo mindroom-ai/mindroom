@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    FORK_CONTENT_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -430,6 +431,59 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         body="older context",
         event_id="$older",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+@pytest.mark.parametrize("current_event_id", ["$f", "$f2"], ids=["fork-first-turn", "later-fork-turn"])
+async def test_a_forks_replayed_parent_messages_end_at_a_fork_divider(
+    persisted_replay: bool,
+    current_event_id: str,
+) -> None:
+    """The model reads where the parent thread's messages end and the fork's own begin, whatever the fork's turn."""
+
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    fork_root = make_visible_message(
+        body="carry on",
+        event_id="$f",
+        content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$p", "event_id": "$p1"}},
+    )
+    history = [
+        make_visible_message(body="question", event_id="$p"),
+        make_visible_message(sender="@mindroom_code:localhost", body="answer", event_id="$p1", thread_id="$p"),
+        fork_root,
+        make_visible_message(sender="@mindroom_code:localhost", body="forked answer", event_id="$f1", thread_id="$f"),
+        make_visible_message(body="next", event_id="$f2", thread_id="$f"),
+    ]
+    history = history[: [m.event_id for m in history].index(current_event_id) + 1]
+    # A short divider leaves the whole thread inside the 100-token fallback budget.
+    config = Config.model_validate(
+        {"prompts": {"THREAD_FORK_MARKER_TEMPLATE": "[forked from {parent_thread_id} after {fork_point_event_id}]"}},
+    )
+    prepared = await _prepare_common(
+        prepare_scope_history,
+        make_turn_context(reply_to_event_id=current_event_id),
+        scope_context=None,
+        prompt=history[-1].body,
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+        current_event_id=current_event_id,
+        config=config,
+        timezone="UTC",
+    )
+
+    divider = config.render_prompt("THREAD_FORK_MARKER_TEMPLATE", parent_thread_id="$p", fork_point_event_id="$p1")
+    contents = [str(message.content) for message in prepared.turn.context]
+    assert prepared.prepared_history.replays_persisted_history is persisted_replay
+    assert contents.count(divider) == 1
+    assert "answer" in contents[contents.index(divider) - 1]
+    assert all("$f" not in content for content in contents[: contents.index(divider)])
+    assert current_event_id == "$f" or 'event_id="$f"' in contents[contents.index(divider) + 1]
+    assert divider == "[forked from $p after $p1]"
 
 
 @pytest.mark.asyncio
