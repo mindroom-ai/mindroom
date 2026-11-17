@@ -21,10 +21,10 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.run_checkpoint import (
     INTERRUPTED_CALL_RESULT,
-    is_recovered_run,
     recover_interrupted_run,
     recover_interrupted_turn,
 )
+from mindroom.history.run_visibility import is_recovered_run
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolCallReady, TurnCompleted, UsageReported
@@ -223,6 +223,40 @@ async def test_a_recovered_turn_replays_the_bytes_the_crashed_run_sent(
     }
     assert after[1]["content"][0]["content"] == INTERRUPTED_CALL_RESULT
     assert prompt in after[1]["content"][-1]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limit",
+    [{"max_tool_calls_from_history": 0}, {"num_history_messages": 1}, {"num_history_runs": 1}],
+    ids=lambda limit: next(iter(limit)),
+)
+async def test_no_history_limit_trims_the_recovered_turn_its_replay_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: dict[str, int],
+) -> None:
+    """The agent's limits on earlier history leave the turn's own recovered calls and results in its request."""
+    last_sent = await _crash_mid_call(tmp_path, monkeypatch, _crashing_turns())
+    crashed = _config(tmp_path / "crashed")
+    for name, value in limit.items():
+        setattr(crashed.agents["general"], name, value)
+    assert _recover(crashed)
+    model = ScriptedModel([answer("Finished")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    await _respond(crashed)
+
+    [resumed] = model.requests
+    assert [(message.role, message.tool_call_id) for message in resumed.messages if message.role != "system"] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "read"),
+        ("assistant", None),
+        ("tool", "shell"),
+        ("user", None),
+    ]
+    assert _wire(resumed)[:3] == _wire(last_sent)
 
 
 @pytest.mark.asyncio

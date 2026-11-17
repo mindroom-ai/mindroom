@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -25,11 +26,12 @@ from mindroom.history.request_messages import (
     build_request,
     build_resume_request,
     filter_tool_calls,
+    replayed_history,
     scope_history_messages,
 )
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope, ResolvedReplayPlan, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, model_provenance
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
@@ -43,6 +45,7 @@ from tests.session_storage.goldens import LEGACY_AGNO3, loaded_sessions
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.history.types import ResolvedHistorySettings
     from mindroom.session_storage.store import ConversationStore
 
 _HISTORY = LEGACY_AGNO3 / "history"
@@ -316,6 +319,51 @@ def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_resul
     assert _contents(_replay(runs, num_history_runs=1, num_history_messages=5)) == _contents(tool_turn)
     assert _replay(runs, num_history_runs=0) == []
     assert _replay(runs, num_history_messages=0) == []
+
+
+def test_the_recovered_runs_a_request_continues_replay_whole_whatever_limits_trim_earlier_history() -> None:
+    """Runs recovery finished last are the request's own turn so far; once a run follows them, they are history."""
+    call = {"id": "call", "type": "function", "function": {"name": "add", "arguments": "{}"}}
+    cut_short = [
+        Message(role="user", content="add"),
+        Message(role="assistant", tool_calls=[call]),
+        Message(role="tool", tool_call_id="call", content="5"),
+    ]
+    recovered = replace(_agent_run("recovered", messages=cut_short), metadata={"mindroom_recovered_run": True})
+    runs: list[AnyRunRecord] = [_agent_run("old"), recovered]
+
+    for limits in (
+        {"num_history_runs": 0},
+        {"num_history_messages": 0},
+        {"max_tool_calls_from_history": 0},
+    ):
+        assert _contents(_replay(runs, **limits))[-3:] == _contents(cut_short), limits
+    assert _contents(_replay(runs, num_history_runs=0)) == _contents(cut_short)
+    assert _contents(_replay(runs, num_history_runs=1)) == ["old question", "old answer", *_contents(cut_short)]
+    assert all(message.from_history for message in _replay(runs, num_history_runs=0))
+    # The turn's answer follows the recovered run, which then replays under the limits as any run does.
+    answered = [*runs, _agent_run("answer")]
+    assert _contents(_replay(answered, num_history_runs=1)) == ["answer question", "answer answer"]
+    assert _contents(_replay(answered, max_tool_calls_from_history=0)) == [
+        "old question",
+        "old answer",
+        "add",
+        "answer question",
+        "answer answer",
+    ]
+
+
+def test_a_plan_that_replays_no_history_still_sends_the_recovered_runs_the_request_continues() -> None:
+    cut_short = [Message(role="user", content="add"), Message(role="assistant", content="Adding.")]
+    recovered = replace(_agent_run("recovered", messages=cut_short), metadata={"mindroom_recovered_run": True})
+    session = new_scope_session(session_id="session", scope=_AGENT)
+    session.runs, session.summary = [_agent_run("old"), recovered], _SUMMARY
+    settings = cast("ResolvedHistorySettings", SimpleNamespace(max_tool_calls_from_history=None))
+    disabled = ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False)
+
+    for plan in (None, disabled):
+        history, summary = replayed_history(session, _AGENT, settings, plan)
+        assert (_contents(history), summary) == (_contents(cut_short), None)
 
 
 def test_turn_context_replays_where_it_was_sent_but_takes_no_slot_in_a_message_window() -> None:

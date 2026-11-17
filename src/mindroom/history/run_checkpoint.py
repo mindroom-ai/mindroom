@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import (
+    RECOVERED_RUN_KEY,
+    is_model_history_visible_run,
+    is_recovered_run,
+    run_in_scope,
+)
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
@@ -37,8 +42,6 @@ INTERRUPTED_CALL_RESULT = (
     "Interrupted before this call returned a result, so it may have partly run. "
     "Check whether it took effect before repeating a call with side effects."
 )
-# Set in the metadata of a run recovery finished, which did not end on its own.
-_RECOVERED_RUN_KEY = "mindroom_recovered_run"
 _CRASH_LOOP_ERROR = "Left out of history: the turn kept being interrupted while it continued from this run."
 
 
@@ -94,11 +97,6 @@ def checkpoint_hooks(storage: RunStorage | None) -> CheckpointHooks | None:
     return CheckpointHooks(before_request, before_dispatch)
 
 
-def is_recovered_run(run: AnyRunRecord) -> bool:
-    """Return whether recovery finished ``run``, which was cut short and did not complete on its own."""
-    return bool((run.metadata or {}).get(_RECOVERED_RUN_KEY))
-
-
 def recover_interrupted_run(store: ConversationStore, session: ConversationSession, run: AnyRunRecord) -> bool:
     """Finish the cancelled top-level ``run`` of ``session`` as a turn history replays; return whether it is one now.
 
@@ -150,7 +148,7 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
         tools=tools,
         status=RunStatus.completed,
         error=None,
-        metadata={**(run.metadata or {}), _RECOVERED_RUN_KEY: True},
+        metadata={**(run.metadata or {}), RECOVERED_RUN_KEY: True},
     )
     return store.save_run(session, recovered, record_usage=True) == "written"
 
@@ -193,7 +191,6 @@ __all__ = [
     "INTERRUPTED_CALL_RESULT",
     "CheckpointHooks",
     "checkpoint_hooks",
-    "is_recovered_run",
     "recover_interrupted_run",
     "recover_interrupted_turn",
     "save_run_checkpoint",

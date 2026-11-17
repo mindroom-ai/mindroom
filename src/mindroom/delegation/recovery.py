@@ -25,7 +25,8 @@ from mindroom.delegation.state import (
     child_scope,
 )
 from mindroom.delegation.storage import delegation_storage_config
-from mindroom.history.run_checkpoint import is_recovered_run, recover_interrupted_run
+from mindroom.history.run_checkpoint import recover_interrupted_run
+from mindroom.history.run_visibility import is_recovered_run
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope

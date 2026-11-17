@@ -29,7 +29,8 @@ from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run, save_run_checkpoint
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, save_run_checkpoint
+from mindroom.history.run_visibility import is_recovered_run
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
