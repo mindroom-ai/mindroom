@@ -148,6 +148,32 @@ def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: P
     assert entity_models(fork_id) == {}
 
 
+@pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
+def test_copy_thread_model_override_leaves_a_store_it_cannot_read_alone(tmp_path: Path, damage: str) -> None:
+    """A fork's copy never replaces a store it cannot read, which would drop every thread's selections."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    path = _store_path(runtime_paths)
+    if damage == "corrupt":
+        path.write_text(path.read_text(encoding="utf-8")[:-2], encoding="utf-8")
+    before = path.read_bytes()
+    if damage == "unreadable":
+        path.chmod(0)
+    try:
+        copy_thread_model_override(runtime_paths, THREAD_ID, "$fork-root:localhost")
+    finally:
+        path.chmod(0o600)
+
+    assert path.read_bytes() == before
+
+
 _FORK_ID = "$fork-root:localhost"
 
 

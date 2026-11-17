@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from mindroom.durable_write import (
     write_bounded_override_records,
 )
 from mindroom.file_locks import advisory_file_lock
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 _THREAD_MODELS_FILENAME = "thread_models.json"
 _MAX_TRACKED_THREADS = 1000
@@ -59,6 +63,16 @@ def _is_valid_override(_thread_id: str, record: dict[object, object]) -> bool:
 def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
     """Load persisted overrides, treating a missing or unreadable file as empty."""
     return load_cached_override_records(path, _is_valid_override)
+
+
+def _store_is_unreadable(path: Path) -> bool:
+    """Return whether the store exists but cannot be read as records, which ``_load_overrides`` reads as empty."""
+    try:
+        return not isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
 
 
 def _save_thread_record(
@@ -201,6 +215,10 @@ def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: st
     """
     path = _store_path(runtime_paths)
     with _store_lock(path):
+        # Saving over a store read as empty would drop every thread's selections, so a fork copies nothing then.
+        if _store_is_unreadable(path):
+            logger.warning("Thread model store is unreadable; the fork does not inherit", thread_id=target_thread_id)
+            return
         overrides = _load_overrides(path)
         if target_thread_id in overrides:
             return
