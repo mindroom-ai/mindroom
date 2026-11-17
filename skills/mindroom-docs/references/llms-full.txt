@@ -7781,6 +7781,7 @@ The welcome is sent once, and changing `welcome` or `welcome_dispatch` later doe
 `auto_join_requester: true` requires the router's Matrix account to be allowed to use the homeserver's Synapse-compatible admin join API.
 It applies only when MindRoom creates the room, and never joins someone who already joined, left, or was banned.
 When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the router's account is not a homeserver admin.
+If the homeserver joins the owner itself within two seconds, as Tuwunel does with `rooms.invites.auto_accept`, a refused admin join is no failure and onboarding finishes on the first attempt.
 
 ## Onboarding Behavior
 

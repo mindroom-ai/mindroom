@@ -87,6 +87,10 @@ _ROUTER_REMOVAL_ADVICE = " To keep {router} here, ask an operator to list it in 
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 _ROUTER_INVITE_TIMEOUT_SECONDS = 10.0
+# A homeserver that accepts invites itself joins the owner about 100 ms after the invite; Tuwunel retries a failed
+# acceptance after 1 s, so this covers its first attempt and one retry.
+_OWNER_JOIN_WAIT_SECONDS = 2.0
+_OWNER_JOIN_POLL_SECONDS = 0.1
 
 
 def _pronoun(names: list[str]) -> str:
@@ -415,7 +419,9 @@ class PersonalRoomService:
         ):
             assert record.room_id is not None
             failure = await admin_join_room_user_failure(source_client, record.room_id, record.user_id)
-            if failure is not None:
+            # A homeserver that accepts invites itself may join the owner just after this attempt's invite.
+            invited_now = initial_owner_membership is None
+            if failure is not None and not (invited_now and await self._owner_joins_within_wait(record)):
                 msg = f"Personal-room initial join failed: the router's admin join {failure}"
                 raise RuntimeError(msg)
             human_joined = True
@@ -424,6 +430,26 @@ class PersonalRoomService:
         record.initial_join_pending = False
         await run_blocking_until_complete(write_personal_room, path, record)
         return human_joined
+
+    async def _owner_joins_within_wait(self, record: PersonalRoomRecord) -> bool:
+        """Return whether the owner's membership becomes `join` within a short wait, slow reads included."""
+        assert record.room_id is not None
+        try:
+            async with asyncio.timeout(_OWNER_JOIN_WAIT_SECONDS):
+                while True:
+                    response = await self._client().room_get_state_event(
+                        record.room_id,
+                        "m.room.member",
+                        record.user_id,
+                    )
+                    if (
+                        isinstance(response, nio.RoomGetStateEventResponse)
+                        and response.content.get("membership") == "join"
+                    ):
+                        return True
+                    await asyncio.sleep(_OWNER_JOIN_POLL_SECONDS)
+        except TimeoutError:
+            return False
 
     def _ownership(self, user_id: str) -> dict[str, str]:
         return {"user_id": user_id, "agent_user_id": self._client().user_id}
