@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
 import pytest
@@ -23,6 +23,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import setup_logging
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials, serve_token_endpoint
 
@@ -572,7 +573,31 @@ def test_a_failed_refresh_can_be_retried(
     response = ask(client, session(app, ALICE))
 
     assert response.status_code == 503
-    assert response.json() == {"error": "github_refresh_failed"}
+    assert response.json() == {"error": "github_connection_unavailable"}
+    assert github.requests == []
+
+
+def test_a_connection_store_that_fails_can_be_retried(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the stored connection cannot be read for a passing reason, both routes answer 503."""
+    connect(paths, ALICE)
+
+    async def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "store busy"
+        raise OAuthProviderError(msg)
+
+    monkeypatch.setattr(github_requests, "load_oauth_credentials_status", fail)
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    request = ask(client, session(app, ALICE))
+
+    assert (status.status_code, status.json()) == (503, {"error": "github_connection_unavailable"})
+    assert (request.status_code, request.json()) == (503, {"error": "github_connection_unavailable"})
     assert github.requests == []
 
 

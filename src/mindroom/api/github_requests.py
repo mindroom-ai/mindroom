@@ -48,6 +48,8 @@ _TIMEOUT_SECONDS = 30.0
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 # Far longer than any GitHub API path a client builds, and far below the longest URL httpx sends.
 _MAX_PATH_LENGTH = 4096
+# The stored connection could not be read or refreshed for a reason a retry may fix.
+_UNAVAILABLE = "github_connection_unavailable"
 _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
@@ -168,10 +170,14 @@ async def _access_token(context: OAuthCredentialContext | None) -> str | None:
     return token if isinstance(token, str) and token else None
 
 
-@router.get("/status")
-async def github_status(request: Request) -> dict[str, object]:
+@router.get("/status", response_model=None)
+async def github_status(request: Request) -> dict[str, object] | JSONResponse:
     """Say whether the session's user has a usable GitHub connection and its login, from stored state only."""
-    credentials = await _usable_credentials(_credential_context(request))
+    context = _credential_context(request)
+    try:
+        credentials = await _usable_credentials(context)
+    except OAuthProviderError:
+        return _error(503, _UNAVAILABLE)
     if credentials is None:
         return {"connected": False}
     login = oauth_verified_claim(credentials, "login")
@@ -191,7 +197,7 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     try:
         token = await _access_token(context)
     except OAuthProviderError:
-        return _error(503, "github_refresh_failed")
+        return _error(503, _UNAVAILABLE)
     if token is None:
         return _error(409, "github_not_connected")
     headers = {
