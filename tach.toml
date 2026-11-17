@@ -1346,6 +1346,7 @@ depends_on = [
     "mindroom.agent_cli.approval",
     "mindroom.turn_model",
     "mindroom.session_storage.lanes",
+    "mindroom.delegation.cost",
 ]
 visibility = ["mindroom.approval.continuation_runner"]
 
@@ -1384,7 +1385,7 @@ visibility = ["mindroom.ai", "mindroom.approval.resume", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.run_storage"
-depends_on = ["mindroom.llm", "mindroom.session_storage.store"]
+depends_on = ["mindroom.llm", "mindroom.session_storage.store", "mindroom.delegation.cost"]
 visibility = [
     "mindroom.ai",
     "mindroom.api.openai_compat",
@@ -3595,6 +3596,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
     "mindroom.turn_model",
+    "mindroom.delegation.cost",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -8305,7 +8307,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.cost"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.delegation.lifecycle"

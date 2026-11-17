@@ -24,7 +24,7 @@ from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.providers.identity import model_identity
-from mindroom.response_turn import TurnSinks, collect_streamed_response_content
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, TurnSinks, collect_streamed_response_content
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -35,7 +35,19 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.conftest import make_turn_context
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _deferred_call,
+    _delegate_runtime_context,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    registered_report_tool,
+    respond,
+    respond_team,
+    resume,
+    resume_team,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
 from tests.team_turn_helpers import collect_team_reply
@@ -345,6 +357,162 @@ async def test_recovery_keeps_the_cost_a_settled_subagent_saved(conversation: _C
 
     assert (snapshot.cost_usd, snapshot.subagents_cost_usd) == pytest.approx((3 * _CHILD_USD, _CHILD_USD))
     assert conversation.saved_costs() == pytest.approx({"mid": 3 * _CHILD_USD, "leaf": _CHILD_USD})
+
+
+# Where a reply pauses for an approval: on a call its subagent makes (``child_tool``), on its own call after its subagent
+# ended (``own_tool``), or on its ``run_subagent`` call itself (``delegation``), which a default config runs as a job.
+type _Pause = Literal["child_tool", "own_tool", "delegation"]
+_DEFERRED_ADD = {"calculator": {"defer": True}}
+
+
+def _approval_config(pause: _Pause) -> Config:
+    """The leader delegates to ``mid``; the call ``pause`` names asks for approval."""
+    config = _config(jobs=pause == "delegation", mid_tools=[])
+    config.agents["leader"] = AgentConfig(
+        display_name="Leader",
+        tools=[_DEFERRED_ADD] if pause == "own_tool" else [],
+        delegate_to=["mid"],
+    )
+    config.agents["mid"] = AgentConfig(
+        display_name="Mid",
+        model="cheap",
+        tools=[_DEFERRED_ADD] if pause == "child_tool" else [],
+    )
+    with_responder_access(config, "mid", users=[DELEGATING_REQUESTER])
+    rule = "run_subagent" if pause == "delegation" else "add"
+    config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match=rule, action="require_approval")])
+    return config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pause", "leader_usd", "mid_usd"),
+    [
+        # The leader's two requests; mid's request that paused and the one after it.
+        ("child_tool", _LEADER_USD, 2 * _CHILD_USD),
+        # The leader's three requests, two before its pause; mid's one.
+        ("own_tool", "0.0159", _CHILD_USD),
+        ("delegation", _LEADER_USD, _CHILD_USD),
+    ],
+)
+async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pause: _Pause,
+    leader_usd: str,
+    mid_usd: float,
+) -> None:
+    """A reply that waited for an approval reports its subagent's cost, received before the pause or after it."""
+    config = _approval_config(pause)
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    runtime = None
+    if pause == "delegation":
+        pin_background_tool_jobs(config, paths)
+        runtime = await tool_job_runtime(paths.storage_root)
+        register_background_runtime(paths, runtime)
+    delegate = calls(tool_call("run_subagent", "delegate", agent_name="mid", task="Work"), metrics=_LEADER_REQUEST)
+    own_add = calls(_deferred_call("own-add", "add", a=2, b=3), metrics=_LEADER_REQUEST)
+    leader = [delegate, *([own_add] if pause == "own_tool" else []), answer("Done", _LEADER_REQUEST)]
+    child_add = calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)
+    mid = [*([child_add] if pause == "child_tool" else []), answer("Mid answer", _CHILD_REQUEST)]
+    ScriptedAgents(
+        {
+            "leader": ScriptedModel(leader, identity=model_identity(config.models["default"])),
+            "mid": ScriptedModel(mid, identity=model_identity(config.models["cheap"])),
+        },
+    ).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": _IDENTITY}
+    try:
+        paused = await respond("leader", "Delegate", **options, run_id="paused")
+        assert isinstance(paused, PausedAttempt), paused
+        approvals = approval_calls_for(
+            paused,
+            default_agent="mid" if pause == "child_tool" else "leader",
+            toolkit_names={"add": "calculator", "run_subagent": "delegate"},
+        )
+        resumed = await resume(
+            approval_executor(config, paths),
+            paused,
+            approvals,
+            agent_name="leader",
+            **options,
+            decisions={call.tool_call_id: True for call in approvals},
+        )
+    finally:
+        if runtime is not None:
+            await runtime.shutdown()
+
+    assert isinstance(resumed, CompletedApprovalRun), resumed
+    assert resumed.metadata_content[AI_RUN_METADATA_KEY]["cost"] == {
+        "usd": leader_usd,
+        "subagents_usd": f"{mid_usd:g}",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pause", "mid_usd"), [("own_tool", _CHILD_USD), ("child_tool", 2 * _CHILD_USD)])
+async def test_a_team_reply_resumed_after_an_approval_reports_its_member_s_subagent_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pause: Literal["own_tool", "child_tool"],
+    mid_usd: float,
+) -> None:
+    """A team reply that waited for an approval reports its member's subagent's cost, received before or after it."""
+    config = _approval_config(pause)
+    config.teams = {"squad": TeamConfig(display_name="Squad", role="Delegates.", agents=["leader"], mode="coordinate")}
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    priced = model_identity(config.models["default"])
+    ScriptedAgents(
+        {
+            "leader": ScriptedModel(
+                [
+                    calls(tool_call("run_subagent", "delegate", agent_name="mid", task="Work")),
+                    *([calls(_deferred_call("own-add", "add", a=2, b=3))] if pause == "own_tool" else []),
+                    answer("Member done"),
+                ],
+                identity=priced,
+            ),
+            "mid": ScriptedModel(
+                [
+                    *(
+                        [calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)]
+                        * (pause == "child_tool")
+                    ),
+                    answer("Mid answer", _CHILD_REQUEST),
+                ],
+                identity=model_identity(config.models["cheap"]),
+            ),
+        },
+        team=ScriptedModel(
+            [
+                calls(tool_call("delegate_task_to_member", "member", member_id="leader", task="Delegate")),
+                answer("Team done", _LEADER_REQUEST),
+            ],
+            identity=priced,
+        ),
+    ).install(monkeypatch)
+    identity = replace(_IDENTITY, agent_name="squad")
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    paused = await respond_team("squad", "Delegate", **options, run_id="paused")
+    assert isinstance(paused, PausedAttempt), paused
+    approvals = approval_calls_for(
+        paused,
+        default_agent="mid" if pause == "child_tool" else "leader",
+        toolkit_names={"add": "calculator"},
+    )
+    resumed = await resume_team(
+        "squad",
+        paused,
+        approvals,
+        **options,
+        decisions={call.tool_call_id: True for call in approvals},
+    )
+
+    assert isinstance(resumed, CompletedApprovalRun), resumed
+    assert resumed.metadata_content[AI_RUN_METADATA_KEY]["cost"]["subagents_usd"] == f"{mid_usd:g}"
 
 
 @pytest.mark.asyncio

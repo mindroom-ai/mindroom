@@ -9,7 +9,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -46,3 +48,18 @@ def received_subagent_cost_usd() -> float | None:
     """Return what the subagent turns the turn running in this context received cost, None for none of known cost."""
     cost = _RECEIVING.get()
     return None if cost is None else cost.usd
+
+
+def with_received_subagent_cost(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the metadata a run's record stores: ``metadata``, with what its turn received so far, if anything.
+
+    A turn that resumes the run after a pause goes on from it (``resumed_subagent_cost``).
+    """
+    usd = received_subagent_cost_usd()
+    return metadata if usd is None else {**(metadata or {}), SUBAGENT_COST_RUN_METADATA_KEY: usd}
+
+
+def resumed_subagent_cost(metadata: dict[str, Any] | None) -> SubagentCost:
+    """Return the holder of a turn that resumes a stored run, starting from what the run's turn had received."""
+    stored = (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY)
+    return SubagentCost(stored if isinstance(stored, float) else None)
