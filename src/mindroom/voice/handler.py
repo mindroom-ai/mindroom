@@ -21,6 +21,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
+    SUBMISSION_CONTENT_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -354,6 +355,8 @@ def _build_prepared_voice_message(
     inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
     if isinstance(inherited_mentions, dict):
         extra_content["m.mentions"] = inherited_mentions
+    if isinstance(original_content, dict) and SUBMISSION_CONTENT_KEY in original_content:
+        extra_content[SUBMISSION_CONTENT_KEY] = original_content[SUBMISSION_CONTENT_KEY]
 
     source = dict(event.source) if isinstance(event.source, dict) else {}
     content: dict[str, Any] = {}

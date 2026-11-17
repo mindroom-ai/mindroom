@@ -71,6 +71,7 @@ from mindroom.event_journal import (
     PendingTurnView,
 )
 from mindroom.hooks import MessageEnvelope
+from mindroom.llm.media import Audio
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,
@@ -639,6 +640,29 @@ def _video_event(*, event_id: str, server_timestamp: int, submission: dict[str, 
     )
 
 
+def _audio_event(*, event_id: str, server_timestamp: int, submission: dict[str, object]) -> nio.RoomMessageAudio:
+    """Build a synthetic inbound room-root audio event sent as part of one composer submission."""
+    return cast(
+        "nio.RoomMessageAudio",
+        nio.RoomMessageAudio.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.audio",
+                    "body": "voice.ogg",
+                    "url": "mxc://localhost/test-audio",
+                    "info": {"mimetype": "audio/ogg"},
+                    SUBMISSION_CONTENT_KEY: submission,
+                },
+            },
+        ),
+    )
+
+
 def _prepared_dispatch(
     *,
     event_id: str,
@@ -1041,6 +1065,58 @@ async def test_marked_room_root_video_and_late_thread_caption_dispatch_once(tmp_
         await bot._coalescing_gate.drain_all()
 
     assert calls == [(["$video", "$caption"], "$video")]
+
+
+@pytest.mark.asyncio
+async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_path: Path) -> None:
+    """A voice message keeps its submission marker through transcription, so its late caption joins it."""
+    bot = _make_bot(tmp_path, debounce_ms=50)
+    room = _make_room()
+    voice = _audio_event(event_id="$voice", server_timestamp=1000, submission={"id": "upload-1", "more": True})
+    caption = _text_event(
+        event_id="$caption",
+        body="what do you make of this?",
+        server_timestamp=4200,
+        thread_id=voice.event_id,
+        submission={"id": "upload-1", "more": False},
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        coalescing_key: CoalescingKey | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append(
+            (
+                _handled_turn_source_event_ids(handled_turn),
+                coalescing_key.thread_id if coalescing_key is not None else None,
+            ),
+        )
+
+    with (
+        patch(
+            "mindroom.voice.handler._download_audio",
+            new=AsyncMock(return_value=Audio(content=b"voice-bytes", mime_type="audio/ogg")),
+        ),
+        patch.object(
+            TurnDispatcher,
+            "dispatch_turn",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
+    ):
+        await bot._turn_ingress.handle_media_event(room, voice)
+        await asyncio.sleep(0.2)
+        assert calls == []
+        await bot._turn_ingress.handle_text_event(room, caption)
+        await _wait_for(lambda: len(calls) == 1)
+        await bot._coalescing_gate.drain_all()
+
+    assert calls == [(["$voice", "$caption"], "$voice")]
 
 
 @pytest.mark.parametrize("caption_in_upload_thread", [True, False])
