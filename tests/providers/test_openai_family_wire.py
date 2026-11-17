@@ -625,6 +625,7 @@ async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp
     claude = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
     summary = {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 0}
     sealed = {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 1}
+    redacted = {"type": "reasoning.encrypted", "format": "anthropic-claude-v1", "index": 0}
     text = {"type": "reasoning.text", "format": "unknown"}
     stored = {
         "Two signed thoughts.": [
@@ -641,6 +642,7 @@ async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
         ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
         "Summaries of two ids.": [
             {**summary, "id": "rs_1", "summary": "Rain"},
             {**summary, "id": "rs_1", "summary": " ahead."},
@@ -676,6 +678,7 @@ async def test_a_reply_v2026_11_385_stored_sends_its_reasoning_details_whole(tmp
             {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
             {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
         ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
         "Summaries of two ids.": [
             {**summary, "id": "rs_1", "summary": "Rain ahead."},
             {**summary, "id": "rs_2", "summary": "Sun later."},
