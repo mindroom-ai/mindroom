@@ -770,11 +770,12 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
 
 
 # Each model call in a turn resends the whole conversation, and the LLM request log redacts every request, so the same
-# long texts reach redaction again and again, and nearly all of them come back unchanged. The SHA-256 digests of the
-# latest long texts redaction left unchanged are kept, never the texts, so an identical text is not scanned again.
-# A text redaction changes is scanned every time.
+# long texts reach redaction again and again, nearly all of them unchanged. The SHA-256 digests of the latest long texts
+# redaction left unchanged are kept, never the texts, so an identical text is not scanned again; a text redaction
+# changes is scanned every time. Short texts are cheap to scan and would crowd the long ones out. The digests take
+# about 3.5 MiB when the cache is full.
 _UNCHANGED_TEXT_MIN_LENGTH = 256
-_UNCHANGED_TEXT_CACHE_SIZE = 65536
+_UNCHANGED_TEXT_CACHE_SIZE = 16384
 _unchanged_texts: OrderedDict[tuple[bytes, int | None, bool], None] = OrderedDict()
 _unchanged_texts_lock = threading.Lock()
 
