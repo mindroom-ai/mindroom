@@ -90,7 +90,7 @@ class MatrixUserTools(Toolkit):
         runtime_paths: RuntimePaths,
         # Decides a call without a chat turn, such as the MCP gateway's; every build passes it.
         runtime_config: Config,
-        agent_name: str | None = None,
+        agent_name: str | None,
     ) -> None:
         # The primary's own paths: the token's variables are in no worker's or tool request's view of the environment.
         self._runtime_paths = runtime_paths
