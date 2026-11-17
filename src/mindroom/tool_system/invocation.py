@@ -27,6 +27,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
+from mindroom.matrix.sent_events import recording_sent_events
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -295,7 +296,7 @@ async def run_tool_call(
     A vendor tool's Agno ``ToolResult`` comes back, and reaches the middleware, as its ``ToolValue``, and a stream as
     its drained value. Runners outside the model loop answer their callers from the result; one that hands the tool's
     value to a client reads it through ``client_tool_result``. An exception the call raises becomes a failed result;
-    cancellation propagates.
+    cancellation propagates. The Matrix events the call sends join its turn's ``sent_event_ids``.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -307,7 +308,10 @@ async def run_tool_call(
         return CallResult("failed", error=ValueError(msg))
     token = _CURRENT_CALL.set(call)
     try:
-        with tool_runtime_model_context(context.model_name):
+        with (
+            tool_runtime_model_context(context.model_name),
+            recording_sent_events(runtime.sent_event_ids if runtime is not None else None),
+        ):
             value = await _run_chain(call, middleware)
     except Exception as error:
         return CallResult("failed", error=error)
