@@ -8,18 +8,20 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import nio
 import pytest
 from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.coalescing.batch import requester_coalescing_key
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.llm.runs import RunStatus
 from mindroom.message_target import MessageTarget
@@ -28,6 +30,7 @@ from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
     clear_thread_model_override,
+    copy_thread_model_override,
     set_thread_model_override,
 )
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -38,6 +41,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.turn_record import TurnRecord
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     isolated_membership_index,
@@ -50,8 +54,10 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_hook_sender import _agent_bot, _dispatch_context
 from tests.test_model_selection_commands import OTHER, resolved_thread_models, restricted_config
 from tests.test_model_selection_scope import ROOM, USER
+from tests.turn_dispatch_helpers import make_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,6 +108,78 @@ def test_store_roundtrip(tmp_path: Path) -> None:
     assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is True
     assert _stored_model(runtime_paths, THREAD_ID) is None
     assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is False
+
+
+def test_copy_thread_model_override_copies_once_and_never_overwrites(tmp_path: Path) -> None:
+    """A fork takes its parent's whole record only while it has none of its own."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    fork_id = "$fork-root:localhost"
+
+    copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
+    assert _get_thread_model_override(runtime_paths, fork_id) is None
+
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("test_agent", "router"),
+        config=config,
+    )
+    copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
+    assert _get_thread_model_override(runtime_paths, fork_id) == _get_thread_model_override(runtime_paths, THREAD_ID)
+
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=fork_id,
+        model_name="default",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    copy_thread_model_override(runtime_paths, THREAD_ID, fork_id)
+    assert _stored_model(runtime_paths, fork_id) == "default"
+    assert _stored_model(runtime_paths, THREAD_ID) == "large"
+
+
+@pytest.mark.asyncio
+async def test_a_forks_first_turn_inherits_the_parent_thread_model_before_dispatch(tmp_path: Path) -> None:
+    """The fork's first message copies the parent's thread model, so its first reply already runs on it."""
+    bot = _agent_bot(tmp_path)
+    runtime_paths = bot._turn_dispatcher.deps.runtime_paths
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("code",),
+        config=bot.config,
+    )
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$fork-root:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "@mindroom_code:localhost carry on",
+                FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"},
+            },
+        },
+    )
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    turn = make_test_turn(
+        room,
+        event,
+        "@user:localhost",
+        coalescing_key=requester_coalescing_key(ROOM_ID, event.event_id, "@user:localhost"),
+        handled_turn=TurnRecord.create([event.event_id]),
+    )
+
+    await bot._turn_dispatcher._prepare_dispatch(turn)
+
+    record = _get_thread_model_override(runtime_paths, event.event_id)
+    assert record is not None
+    assert record.get("model:code") == "large"
 
 
 def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

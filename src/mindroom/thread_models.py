@@ -177,3 +177,13 @@ def clear_thread_model_override(
         {field: value for field, value in record.items() if field not in removed},
     )
     return not fields.isdisjoint(record)
+
+
+def copy_thread_model_override(runtime_paths: RuntimePaths, source_thread_id: str, target_thread_id: str) -> None:
+    """Give a thread that has no override record of its own a copy of another thread's, as a fork takes its parent's."""
+    path = _store_path(runtime_paths)
+    overrides = _load_overrides(path)
+    record = overrides.get(source_thread_id)
+    if record is None or target_thread_id in overrides:
+        return
+    _save_thread_record(path, overrides, target_thread_id, dict(record))

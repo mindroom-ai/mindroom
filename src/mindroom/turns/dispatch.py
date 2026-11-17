@@ -36,6 +36,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_forks import thread_fork_reference
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -46,6 +47,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
+from mindroom.thread_models import copy_thread_model_override
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
@@ -104,6 +106,18 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
 _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
 # Hook dispatches come only from managed senders, such as automations choosing a model for their prompt.
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
+
+
+def _inherit_fork_thread_models(deps: TurnDispatchDeps, event: PreparedIngress, thread_id: str | None) -> None:
+    """Give a fork's first message a snapshot of its parent thread's models, before any model of its turn resolves."""
+    content = event.source.get("content")
+    reference = thread_fork_reference(content) if thread_id == event.event_id and isinstance(content, dict) else None
+    if reference is None:
+        return
+    try:
+        copy_thread_model_override(deps.runtime_paths, reference.thread_id, event.event_id)
+    except Exception:
+        deps.logger.exception("Fork thread model inheritance failed", parent_thread_id=reference.thread_id)
 
 
 def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
@@ -810,6 +824,7 @@ class TurnDispatcher:
             target_start,
             resolved_thread_id=target.resolved_thread_id,
         )
+        _inherit_fork_thread_models(self.deps, event, target.resolved_thread_id)
         extract_context_start = time.monotonic()
         # A router relay of a human's message reads only the context the relay names.
         if turn.command is None and facts.router_relay and facts.original_sender_is_human:

@@ -27,7 +27,7 @@ class _ThreadForkReference:
     event_id: str
 
 
-def _thread_fork_reference(content: Mapping[str, Any]) -> _ThreadForkReference | None:
+def thread_fork_reference(content: Mapping[str, Any]) -> _ThreadForkReference | None:
     """Parse the fork reference from a thread root's content, or None when it is not a fork."""
     value = content.get(FORK_CONTENT_KEY)
     if not isinstance(value, dict):
@@ -48,13 +48,13 @@ def _own_messages(history: ThreadHistoryResult, thread_id: str) -> list[Resolved
 def _root_reference(messages: Sequence[ResolvedVisibleMessage], thread_id: str) -> _ThreadForkReference | None:
     for message in messages:
         if message.event_id == thread_id:
-            return _thread_fork_reference(message.content)
+            return thread_fork_reference(message.content)
     return None
 
 
 def is_thread_fork_root(content: Mapping[str, Any]) -> bool:
     """Return whether a message's content holds a valid fork reference, which makes it the root of a fork."""
-    return _thread_fork_reference(content) is not None
+    return thread_fork_reference(content) is not None
 
 
 def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:

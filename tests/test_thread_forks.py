@@ -10,9 +10,9 @@ from mindroom.constants import FORK_CONTENT_KEY
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, is_thread_history_degraded
 from mindroom.matrix.thread_forks import (
     _MAX_FORK_DEPTH,
-    _thread_fork_reference,
     _ThreadForkReference,
     fork_parent_thread_ids,
+    thread_fork_reference,
     with_fork_prefix,
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -52,13 +52,13 @@ def _ids(history: ThreadHistoryResult) -> list[str]:
 
 def test_reference_parses_only_two_event_ids() -> None:
     """Reference parses only two event ids."""
-    assert _thread_fork_reference(_fork_content("$p", "$p2")) == _ThreadForkReference("$p", "$p2")
-    assert _thread_fork_reference({}) is None
-    assert _thread_fork_reference({FORK_CONTENT_KEY: "$p"}) is None
-    assert _thread_fork_reference(_fork_content("", "$p2")) is None
-    assert _thread_fork_reference(_fork_content("$p", "")) is None
-    assert _thread_fork_reference(_fork_content("p", "$p2")) is None
-    assert _thread_fork_reference(_fork_content("$p", "p2")) is None
+    assert thread_fork_reference(_fork_content("$p", "$p2")) == _ThreadForkReference("$p", "$p2")
+    assert thread_fork_reference({}) is None
+    assert thread_fork_reference({FORK_CONTENT_KEY: "$p"}) is None
+    assert thread_fork_reference(_fork_content("", "$p2")) is None
+    assert thread_fork_reference(_fork_content("$p", "")) is None
+    assert thread_fork_reference(_fork_content("p", "$p2")) is None
+    assert thread_fork_reference(_fork_content("$p", "p2")) is None
 
 
 @pytest.mark.asyncio
