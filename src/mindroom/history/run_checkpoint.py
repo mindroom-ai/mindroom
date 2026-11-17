@@ -16,7 +16,8 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
-from mindroom.llm.runs import RunStatus, ToolExecution
+from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeDispatchHook, BeforeRequestHook, LoopState, RequestDecision
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.history.types import HistoryScope
-    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.run_storage import RunStorage
     from mindroom.session_storage.store import ConversationStore
@@ -41,6 +41,9 @@ INTERRUPTED_CALL_RESULT = (
     "Interrupted before this call returned a result, so it may have partly run. "
     "Check whether it took effect before repeating a call with side effects."
 )
+# What a run its user stopped ends with, after the text of the response the stop cut off, so the model reads why its
+# work ends there. It follows everything the run's requests sent, so they still match a provider's prompt cache.
+STOPPED_BY_USER_NOTE = "(turn stopped by the user before completion)"
 # Set in the metadata of a run recovery finished, which did not end on its own.
 _RECOVERED_RUN_KEY = "mindroom_recovered_run"
 _CRASH_LOOP_ERROR = "Left out of history: the turn kept being interrupted while it continued from this run."
@@ -103,7 +106,13 @@ def is_recovered_run(run: AnyRunRecord) -> bool:
     return bool((run.metadata or {}).get(_RECOVERED_RUN_KEY))
 
 
-def recover_interrupted_run(store: ConversationStore, session: ConversationSession, run: AnyRunRecord) -> bool:
+def recover_interrupted_run(
+    store: ConversationStore,
+    session: ConversationSession,
+    run: AnyRunRecord,
+    *,
+    stopped: bool = False,
+) -> bool:
     """Finish the cancelled top-level ``run`` of ``session`` as a turn history replays; return whether it is one now.
 
     The turn keeps the run's stored messages exactly, reasoning included, so a later request replays what the run's
@@ -112,6 +121,10 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
     message gets one, the result its execution recorded when a sibling finished before the stop, else
     ``INTERRUPTED_CALL_RESULT``. A run that called no tool, not even one a mid-turn fold took into the scope's
     summary, holds no work to keep and stays as it is. The run's usage is recorded, which a checkpoint never is.
+
+    ``stopped`` says the run's user stopped it, so no replay continues it: its turn then ends with one more assistant
+    message, the text of the response the stop cut off (``CUT_OFF_TEXT_KEY``), which the reply showed, and
+    ``STOPPED_BY_USER_NOTE``.
     """
     if run.status is not RunStatus.cancelled or run.parent_run_id is not None:
         return False
@@ -151,9 +164,13 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
                 external_execution_required=None,
             )
         results.append(tool_result_message(execution))
+    ending = []
+    if stopped:
+        shown = "".join((message.provider_data or {}).get(CUT_OFF_TEXT_KEY, "") for message in reversed(cut_off))
+        ending = [Message(role="assistant", content=f"{shown.strip()}\n\n{STOPPED_BY_USER_NOTE}".lstrip())]
     recovered = replace(
         run,
-        messages=[*messages[:end], *results, *messages[end:]],
+        messages=[*messages[:end], *results, *messages[end:], *ending],
         tools=tools,
         status=RunStatus.completed,
         error=None,
@@ -161,6 +178,26 @@ def recover_interrupted_run(store: ConversationStore, session: ConversationSessi
     )
     carry_request_usage(recovered, cut_off)
     return store.save_run(session, recovered, record_usage=True) == "written"
+
+
+def recover_stopped_run(
+    store: ConversationStore,
+    session: ConversationSession,
+    run_id: str,
+    response_event_id: str | None,
+) -> bool:
+    """Finish run ``run_id``, of a reply its user stopped, as a turn of its own messages; return whether it is one now.
+
+    That is the stored cancelled run of an agent that called a tool (``recover_interrupted_run``), which is then linked
+    to the message that shows the reply, so redacting the message removes it. A team's reply shows its members' text,
+    which its leader's run does not hold, so a team's run stays as it is, for the turn's own record of what it showed.
+    """
+    run = store.get_run(run_id)
+    if not isinstance(run, RunRecord) or not recover_interrupted_run(store, session, run, stopped=True):
+        return False
+    if response_event_id is not None:
+        link_response_event(store, session.session_id, run_id, response_event_id)
+    return True
 
 
 def recover_interrupted_turn(
@@ -215,11 +252,13 @@ def link_response_event(store: ConversationStore, session_id: str, run_id: str, 
 
 __all__ = [
     "INTERRUPTED_CALL_RESULT",
+    "STOPPED_BY_USER_NOTE",
     "CheckpointHooks",
     "checkpoint_hooks",
     "is_recovered_run",
     "link_response_event",
     "recover_interrupted_run",
     "recover_interrupted_turn",
+    "recover_stopped_run",
     "save_run_checkpoint",
 ]

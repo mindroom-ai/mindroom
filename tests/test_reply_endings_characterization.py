@@ -37,11 +37,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import STREAM_STATUS_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, STREAM_STATUS_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, STOPPED_BY_USER_NOTE
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -878,12 +879,16 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
         f"Partial\n\n{_CANCEL_NOTE}",
         "cancelled",
     )
-    run = _interrupted(turn.agent_runs())
-    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped.
-    assert _original_status(run) == "cancelled"
-    assert run.content.startswith(
-        "Partial answer\n\n(turn stopped before completion; 1 tool call(s) were still running)",
-    )
+    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped:
+    # the run called a tool, so it stays as its own messages, the call answered, and ends with the note of the Stop.
+    [run] = turn.agent_runs()
+    assert (run.status, is_interrupted_replay_run(run)) == (RunStatus.completed, False)
+    assert _messages(run)[1:] == [
+        ("assistant", "answer"),
+        ("tool", INTERRUPTED_CALL_RESULT),
+        ("assistant", STOPPED_BY_USER_NOTE),
+    ]
+    assert (run.metadata or {})[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$sent0"
 
 
 @pytest.mark.parametrize(
@@ -1543,11 +1548,12 @@ async def test_a_process_shutdown_mid_stream_leaves_the_reply_for_replay(
     assert turn.hooks.fired == []
     runs = turn.agent_runs()
     assert not any(is_interrupted_replay_run(run) for run in runs)
-    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding only the prompt.
+    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding the prompt and
+    # the message without content that stands for the response the shutdown cut off.
     [run] = runs
     assert run.status is RunStatus.cancelled
     assert run.content is None
-    assert _messages(run) == [("user", _MODEL_PROMPT)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", None)]
     assert await turn.pending()
 
 

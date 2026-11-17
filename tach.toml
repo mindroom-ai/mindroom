@@ -811,6 +811,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
@@ -10073,6 +10074,7 @@ visibility = [
     "mindroom.conversation_state_writer",
     "mindroom.delegation.recovery",
     "mindroom.loop_hooks",
+    "mindroom.response_turn",
 ]
 
 [[modules]]

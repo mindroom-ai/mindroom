@@ -64,6 +64,7 @@ from mindroom.reply_scope import (
     current_reply_event_id,
     current_slot,
     current_span,
+    current_span_stopped,
     initial_write,
     release_decision,
     suppress_decision,
@@ -1926,6 +1927,7 @@ class ResponseRunner:
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
             response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:
