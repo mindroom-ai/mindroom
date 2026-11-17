@@ -44,6 +44,8 @@ router = APIRouter(prefix="/api/github")
 _GITHUB_API = "https://api.github.com"
 _TIMEOUT_SECONDS = 30.0
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+# Far longer than any GitHub API path a client builds, and far below the longest URL httpx sends.
+_MAX_PATH_LENGTH = 4096
 _DIFF = "application/vnd.github.diff"
 _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
@@ -87,7 +89,7 @@ def _path_kind(path: str) -> str | None:
     A segment that decodes to `.` or `..`, or to anything holding `/`, `\\`, or a control character, is refused too,
     so no server on the way can resolve the path outside the repository.
     """
-    match = _PATH.fullmatch(path)
+    match = _PATH.fullmatch(path) if len(path) <= _MAX_PATH_LENGTH else None
     if match is None:
         return None
     segments = [unquote(segment) for segment in match.group(1).split("/")[1:]]

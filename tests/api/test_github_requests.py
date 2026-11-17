@@ -593,6 +593,46 @@ def test_paths_outside_repos_and_graphql_are_refused(
 @pytest.mark.parametrize(
     "path",
     [
+        "/repos/octo/hello/" + "a" * 70_000,
+        "/repos/octo/hello/pulls?q=" + "a" * 70_000,
+        "/repos/octo/hello/" + "a" * 4_079,
+    ],
+    ids=["past the URL limit", "query past the URL limit", "4097 characters"],
+)
+def test_overlong_paths_are_refused(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    path: str,
+) -> None:
+    """A path longer than 4096 characters answers 400, even one too long for a URL."""
+    connect(paths, ALICE)
+
+    response = ask(client, session(app, ALICE), path)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "github_path_not_allowed"}
+    assert github.requests == []
+
+
+def test_a_path_of_4096_characters_is_sent(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """The longest path a client may ask for still reaches GitHub."""
+    connect(paths, ALICE)
+    path = "/repos/octo/hello/" + "a" * (4096 - len("/repos/octo/hello/"))
+
+    assert ask(client, session(app, ALICE), path).json()["status"] == 200
+    assert github.requests[0].url.raw_path.decode() == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "/repos/octo/hello",
         "/repos/octo/hello.js/pulls/7/files?per_page=100&page=2",
         "/repos/octo/hello/compare/main...feature",
