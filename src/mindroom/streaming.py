@@ -24,7 +24,7 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
-from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs
+from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs, utf16_length
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import homeserver_relays_live_frames
 from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
@@ -628,6 +628,8 @@ class StreamingResponse:
     reasoning_text: str = field(default="", init=False)
     _reasoning_segment_started_at: float | None = field(default=None, init=False, repr=False)
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
+    # Each segment's UTF-16 start in the reasoning, the visible tool calls before it, and, once closed, its duration.
+    _reasoning_segments: list[dict[str, int]] = field(default_factory=list, init=False, repr=False)
     # The latest output each running tool call reported, by call ID; only live frames show it.
     tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
@@ -657,16 +659,26 @@ class StreamingResponse:
 
     def add_reasoning(self, text: str, *, started_at: float | None = None) -> None:
         """Append model reasoning, starting a new segment after other output at ``started_at``, or now when unknown."""
+        if not text:
+            return
         if self._reasoning_segment_started_at is None:
             self._reasoning_segment_started_at = time.monotonic() if started_at is None else started_at
             if self.reasoning_text and not self.reasoning_text.endswith("\n"):
                 self.reasoning_text += "\n\n"
+            self._reasoning_segments.append(
+                {
+                    "start": utf16_length(self.reasoning_text),
+                    "after_tool": len(self.tool_trace) if self.show_tool_calls else 0,
+                },
+            )
         self.reasoning_text += text
 
     def end_reasoning_segment(self) -> None:
         """Close the current reasoning segment, if any, adding its observed time."""
         if self._reasoning_segment_started_at is not None:
-            self._reasoning_seconds += time.monotonic() - self._reasoning_segment_started_at
+            elapsed = time.monotonic() - self._reasoning_segment_started_at
+            self._reasoning_seconds += elapsed
+            self._reasoning_segments[-1]["duration_ms"] = round(elapsed * 1000)
             self._reasoning_segment_started_at = None
 
     @property
@@ -706,6 +718,9 @@ class StreamingResponse:
             tools=tools,
             status=self._resolve_stream_status(is_final=False),
             activity="\n".join(line.text for line in warmup_lines),
+            segments=tuple(
+                {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
+            ),
         )
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
@@ -1152,6 +1167,7 @@ class StreamingResponse:
             extra_content[REASONING_CONTENT_KEY] = {
                 "text": self.reasoning_text,
                 "duration_ms": round(self._reasoning_seconds * 1000),
+                "segments": [dict(segment) for segment in self._reasoning_segments],
             }
         return extra_content
 
