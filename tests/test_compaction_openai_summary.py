@@ -12,12 +12,11 @@ import pytest
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.summary_call import (
-    CompactionSummaryIncompleteError,
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
     is_summary_timeout,
 )
-from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import TRANSPORT_TIMEOUT, ModelSafeguardRefusal, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import build_provider
@@ -139,8 +138,8 @@ async def test_summary_rejects_explicit_output_limit_below_usage_cap(route: _Rou
 
 @pytest.mark.parametrize("route", ["chat", "responses"])
 async def test_summary_rejects_partial_text_stopped_by_content_filter(route: _Route, tmp_path: Path) -> None:
-    """Partial nonempty content is still incomplete when a provider stops for another reason."""
-    with pytest.raises(CompactionSummaryIncompleteError, match="incomplete"):
+    """Partial nonempty content stopped by a content filter is a safeguard refusal, never the summary."""
+    with pytest.raises(ModelSafeguardRefusal):
         await generate_compaction_summary(
             model=_model(route, tmp_path, lambda _: _response(route, reason="content_filter")),
             summary_input="Conversation",

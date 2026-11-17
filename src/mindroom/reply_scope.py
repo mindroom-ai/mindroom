@@ -195,6 +195,12 @@ def current_reply_event_id() -> str | None:
     return None if handle is None else handle.reply.event_id
 
 
+def current_span_stopped() -> bool:
+    """Return whether a Stop of its user reached the span the current task executes."""
+    handle = current_span()
+    return handle is not None and handle.stopped()
+
+
 def current_slot() -> SpanSlot | None:
     """Return the slot of the span scope the current task runs in, if any."""
     return _current_slot.get()

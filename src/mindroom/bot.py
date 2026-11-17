@@ -159,10 +159,13 @@ __all__ = ["AgentBot", "create_bot_for_entity"]
 
 
 # Constants
-# Clean restart waits for one final source response before cancelling the
-# receive loop. Keep that poll comfortably inside the 15-second restart budget
-# so shutdown still leaves time for the replacement to boot and authenticate.
-_SYNC_TIMEOUT_MS = 5_000
+# Matrix long-poll timeout. Every sync response, even an empty one, commits the
+# durable store, so a short poll costs idle agents disk syncs on the event loop.
+# nio sends each sync run's first poll with timeout 0, and stop, restart, and
+# reload cancel a pending poll, so readiness and shutdown normally skip the
+# wait. Behind a proxy that keeps a cancelled request open, a reloaded Sliding
+# Sync connection on Tuwunel can still wait out its previous poll.
+_SYNC_TIMEOUT_MS = 30_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 # Startup recovery applies turn retention once. A running bot repeats that pass
