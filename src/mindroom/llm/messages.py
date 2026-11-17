@@ -58,6 +58,9 @@ AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key marking an assistant message that answered another request than the one its caller
 # sent, such as a retry without the media the provider rejected, so its usage sizes no request of the caller's.
 REWRITTEN_ATTEMPT_KEY = "mindroom_attempt_rewritten"
+# ``Message.provider_data`` key holding the text a response streamed before it was cut off, on the assistant message
+# without content that stands for it in its run; recovery of a run its user stopped keeps that text.
+CUT_OFF_TEXT_KEY = "mindroom_cut_off_text"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
 # (``usage/storage.py``, ``agent_loop/helper.py``). It also tells a run's own model messages from the replies its
@@ -412,6 +415,7 @@ def tool_result_view(message: Message) -> ToolResultView:
 
 __all__ = [
     "AGGREGATE_USAGE_KEY",
+    "CUT_OFF_TEXT_KEY",
     "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
     "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
