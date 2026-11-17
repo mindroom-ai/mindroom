@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
 
+import nio
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
+from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.providers import registry as provider_registry
 from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
@@ -29,6 +32,9 @@ if TYPE_CHECKING:
 _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
+_ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
+
+logger = get_logger(__name__)
 
 
 class _ThreadSummary(BaseModel):
@@ -114,6 +120,21 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     return "\n".join(lines)
 
 
+async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> str | None:
+    """Return the room admins' extra title rules, or None when unset; a failed read logs and counts as unset."""
+    try:
+        response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, "thread_summary_instructions")
+    except Exception:
+        logger.warning("Room thread summary instructions read failed", room_id=room_id, exc_info=True)
+        return None
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        value = response.content.get("value")
+        return (value.strip()[:_ROOM_INSTRUCTIONS_MAX_LENGTH] or None) if isinstance(value, str) else None
+    if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
+        logger.warning("Room thread summary instructions read failed", room_id=room_id, error=str(response))
+    return None
+
+
 @timed("thread_summary_generation")
 async def generate_summary(
     messages: Sequence[ResolvedVisibleMessage],
@@ -122,8 +143,12 @@ async def generate_summary(
     *,
     model_name: str,
     tag_vocabulary: str | None,
+    room_instructions: str | None = None,
 ) -> GeneratedSummary | None:
-    """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given."""
+    """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
+
+    ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
+    """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
@@ -137,7 +162,15 @@ async def generate_summary(
     response = await complete_prompt(
         provider,
         prompt,
-        instructions=[config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")],
+        instructions=[
+            config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
+            if room_instructions is None
+            else config.render_prompt(
+                "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
+                instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
+                room_instructions=room_instructions,
+            ),
+        ],
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
