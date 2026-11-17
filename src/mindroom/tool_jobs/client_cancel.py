@@ -135,7 +135,7 @@ def jobs_listing(jobs: list[BackgroundJob]) -> str:
     lines = [
         f"- {describe_job(job, short=True)} {_LIVE_STATUS_TEXT[job.status]}, by {job.owner.recipient}" for job in jobs
     ]
-    stop = "Stop one with `!cancel_job <id>`, or all of them with `!cancel_job all`."
+    stop = "Stop one with `/cancel_job <id>`, or all of them with `/cancel_job all`."
     return "Background jobs running here:\n" + "\n".join(lines) + "\n\n" + stop
 
 
@@ -161,7 +161,7 @@ async def cancel_jobs_command(
     if not allowed:
         if prefix is None:
             return "No background jobs to cancel here."
-        return "No running background job here has that ID; `!jobs` lists them."
+        return "No running background job here has that ID; `/jobs` lists them."
     for job in allowed:
         await runtime.request_cancel(job.job_id)
     return "Cancelling " + ", ".join(describe_job(job, short=True) for job in allowed) + "."

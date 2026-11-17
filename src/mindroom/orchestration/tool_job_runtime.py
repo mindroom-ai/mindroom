@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+# How long the worker sleeps between passes without a change, which also sets how soon a running job past its grace is listed.
 _RETRY_SECONDS = 5.0
 
 
@@ -332,7 +333,8 @@ class ToolJobRuntimeCoordinator:
     async def _reconcile(self) -> None:
         """Stop revoked work, publish live jobs, and admit follow-ups."""
         await self.runtime.cancel_revoked()
-        await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
+        runtime = self.runtime
+        await self._publisher.publish(self.bot_provider, runtime.retained_jobs(), awaited=runtime.awaited_job_ids())
         await self._admit_follow_ups(self.runtime)
 
     async def _admit_follow_ups(self, runtime: ToolJobRuntime) -> None:

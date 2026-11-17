@@ -40,7 +40,8 @@
           "reasoning": "",
           "tools": [],
           "status": "streaming",
-          "activity": ""
+          "activity": "",
+          "segments": []
         }
       }
     },
@@ -224,7 +225,8 @@
             }
           ],
           "status": "streaming",
-          "activity": ""
+          "activity": "",
+          "segments": []
         }
       }
     },
@@ -294,7 +296,8 @@
             }
           ],
           "status": "pending",
-          "activity": ""
+          "activity": "",
+          "segments": []
         }
       }
     },
@@ -338,7 +341,8 @@
           "reasoning": "",
           "tools": [],
           "status": "pending",
-          "activity": ""
+          "activity": "",
+          "segments": []
         }
       }
     }

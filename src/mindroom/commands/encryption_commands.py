@@ -15,7 +15,7 @@ from mindroom.matrix.decrypt_failure import e2ee_stats
 if TYPE_CHECKING:
     import nio
 
-_ENCRYPT_USAGE = "Usage: `!encrypt` to review, then `!encrypt confirm` to enable."
+_ENCRYPT_USAGE = "Usage: `/encrypt` to review, then `/encrypt confirm` to enable."
 _CONFIRM_ARGUMENTS = frozenset({"confirm", "yes"})
 
 
@@ -58,7 +58,7 @@ async def handle_encrypt_command(
             "🔐 This room is **not** end-to-end encrypted.\n\n"
             "⚠️ Enabling encryption is **irreversible**: it cannot be turned off again for this room, "
             "and people joining later cannot read messages sent before they joined.\n\n"
-            "To proceed, type `!encrypt confirm` (room admin only)."
+            "To proceed, type `/encrypt confirm` (room admin only)."
         )
     if requested not in _CONFIRM_ARGUMENTS:
         return f"❌ Unknown argument `{args_text.strip()}`.\n\n{_ENCRYPT_USAGE}"

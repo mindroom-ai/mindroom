@@ -961,7 +961,7 @@
       "properties": {
         "config_command_enabled": {
           "default": false,
-          "description": "Enable the chat !config command for platform administrators.",
+          "description": "Enable the chat /config command for platform administrators.",
           "title": "Config Command Enabled",
           "type": "boolean"
         },

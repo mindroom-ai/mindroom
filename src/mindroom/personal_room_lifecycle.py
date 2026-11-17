@@ -410,13 +410,15 @@ class PersonalRoomLifecycle:
         event: nio.RoomMessageFormatted,
         requester_user_id: str,
     ) -> bool:
-        """Recognize exact self-onboarding commands; ``requester_user_id`` is the event's trusted requester."""
+        """Recognize exact self-onboarding commands, typed with `!` or `/`; ``requester_user_id`` is the event's trusted requester."""
         settings = self.runtime.config.personal_rooms
+        if not self.observes_onboarding_joins or settings is None:
+            return False
+        body = event.body.strip()
         if (
-            not self.observes_onboarding_joins
-            or settings is None
-            or event.body.strip() not in settings.commands
-            or room.room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
+            f"!{body[1:]}" if body.startswith("/") else body
+        ) not in settings.commands or room.room_id not in resolve_room_aliases(
+            settings.onboarding_rooms, self.runtime_paths
         ):
             return False
         if is_human_requester_id(

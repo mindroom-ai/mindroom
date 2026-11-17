@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.delegation.background import delegation_child
+from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -241,6 +243,9 @@ async def consume_tool_job(
         value = payload.value
         if call is not None and _OWNER.get() is not None:
             value = _merge_session_state(value, job, payload, call)
+        if job.kind == "delegation" and not job.consumed:
+            # The turn that reads a subagent job's result first receives what its child cost.
+            receive_subagent_cost(delegation_child(job).cost_usd)
     except BaseException:
         await runtime.release_wait(job.job_id, claim)
         raise

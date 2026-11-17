@@ -63,7 +63,7 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
 
     assert message == (
         "[mind] ⚠️ This model's safeguards blocked the request. "
-        "Choose a different model (`!model list`) or revise the prompt, then try again."
+        "Choose a different model (`/model list`) or revise the prompt, then try again."
     )
     assert "stop_reason" not in message
 
@@ -261,7 +261,7 @@ def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
         "Minimal Bash requires an active managed response owner. Start a new subagent without minimal."
     )
     assert minimal_mode_failure_message(reason, "helper", subagent=False) == (
-        "Minimal Bash requires an active managed response owner. Return to standard mode with `!mode helper standard`."
+        "Minimal Bash requires an active managed response owner. Return to standard mode with `/mode helper standard`."
     )
 
 

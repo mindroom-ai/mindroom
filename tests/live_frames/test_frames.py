@@ -52,6 +52,22 @@ def test_splice_counts_utf16_units_and_never_splits_a_surrogate_pair() -> None:
     assert live_delta(before, before) == {}
 
 
+def test_live_delta_carries_segments_only_when_they_change() -> None:
+    """Reasoning segments ride in a delta whole, and only in the delta that changes them."""
+    before = LiveDocs(
+        md="",
+        reasoning="a",
+        tools=(),
+        status="streaming",
+        activity="",
+        segments=({"start": 0, "after_tool": 0},),
+    )
+    assert "segments" not in live_delta(before, replace(before, reasoning="ab"))
+    after = replace(before, reasoning="a\n\nb", segments=(*before.segments, {"start": 3, "after_tool": 1}))
+    assert live_delta(before, after)["segments"] == [dict(segment) for segment in after.segments]
+    assert after.to_json()["segments"] == [{"start": 0, "after_tool": 0}, {"start": 3, "after_tool": 1}]
+
+
 def test_publisher_ids_order_by_start_time() -> None:
     """A later publisher's id sorts after an earlier one's, which is how clients order publisher generations."""
     first = new_publisher_id()

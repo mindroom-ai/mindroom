@@ -14,6 +14,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _assert_page_preview(case: dict[str, object]) -> None:
+    """A page preview reaches the client as first shown: inline, raw, at its own width."""
+    metadata = case["event"]["content"]["io.mindroom.ui_action"]
+    assert metadata["inline"] is True
+    assert metadata["canvas"]["raw"] is True
+    assert metadata["canvas"]["width"] == 1440
+    assert "replacement" not in case
+
+
 @pytest.mark.asyncio
 async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path: Path) -> None:
     """Dropping an action, Settings destination, or scope must break the exported contract."""
@@ -29,6 +38,8 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             "show_canvas/update",
             "show_canvas/document",
             "show_canvas/shared",
+            "show_canvas/inline",
+            "show_canvas/page",
         )
     }
 
@@ -61,6 +72,16 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             assert case["replacement"]["content"]["m.new_content"]["io.mindroom.ui_action"]["share_state"] is True
         else:
             assert "share_state" not in metadata
+        if case["id"].endswith("/show_canvas/inline"):
+            assert metadata["inline"] is True
+            assert case["replacement"]["content"]["m.new_content"]["io.mindroom.ui_action"]["inline"] is True
+        elif not case["id"].endswith("/show_canvas/page"):
+            assert "inline" not in metadata
+        if case["id"].endswith("/show_canvas/page"):
+            _assert_page_preview(case)
+        else:
+            assert "raw" not in metadata.get("canvas", {})
+            assert "width" not in metadata.get("canvas", {})
         if case["id"].endswith("/show_canvas/update"):
             replacement = case["replacement"]["content"]
             assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}

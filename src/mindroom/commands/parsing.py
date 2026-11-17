@@ -41,48 +41,48 @@ class CommandType(Enum):
 # Command documentation for each command type
 _COMMAND_DOCS = {
     CommandType.MODE: (
-        "!mode <agent> minimal|standard|show|reset",
+        "/mode <agent> minimal|standard|show|reset",
         "Switch one agent between standard tools and a Bash-only interface",
     ),
-    CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
-    CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
-    CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
-    CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
-    CommandType.JOBS: ("!jobs", "List the background jobs running here"),
-    CommandType.CANCEL_JOB: ("!cancel_job <id|all>", "Cancel a background job, or all of them here"),
-    CommandType.HELP: ("!help [topic]", "Get help"),
-    CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
-    CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
-    CommandType.DESKTOP: ("!desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
-    CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
+    CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
+    CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),
+    CommandType.CANCEL_SCHEDULE: ("/cancel_schedule <id>", "Cancel a scheduled task"),
+    CommandType.EDIT_SCHEDULE: ("/edit_schedule <id> <task>", "Edit an existing scheduled task"),
+    CommandType.JOBS: ("/jobs", "List the background jobs running here"),
+    CommandType.CANCEL_JOB: ("/cancel_job <id|all>", "Cancel a background job, or all of them here"),
+    CommandType.HELP: ("/help [topic]", "Get help"),
+    CommandType.RELOAD_PLUGINS: ("/reload-plugins", "Reload configured plugins (admin only)"),
+    CommandType.CONFIG: ("/config <operation>", "Manage configuration"),
+    CommandType.DESKTOP: ("/desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
+    CommandType.MODEL: ("/model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.ROOM_MODEL: (
-        "!room_model [name|list|reset]",
+        "/room_model [name|list|reset]",
         "Show the room model default or switch it (set/reset require a room admin)",
     ),
     CommandType.THREAD_MODE: (
-        "!thread_mode [room|thread|reset|show]",
+        "/thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
     ),
     CommandType.REPLY_MODE: (
-        "!reply_mode [auto|mentions|reset|show]",
+        "/reply_mode [auto|mentions|reset|show]",
         "Show or switch whether agents need a mention to start a conversation here (set/reset require a room admin)",
     ),
     CommandType.AUTO_APPROVE: (
-        "!auto_approve [<minutes>|<hours>h|off]",
+        "/auto_approve [<minutes>|<hours>h|off]",
         "Run your tool calls in this thread without approval for a while, or show or end that window",
     ),
     CommandType.ENCRYPT: (
-        "!encrypt [confirm]",
+        "/encrypt [confirm]",
         "Enable end-to-end encryption for this room (irreversible, room admin only)",
     ),
-    CommandType.E2EE: ("!e2ee", "Show encryption diagnostics for this room"),
-    CommandType.HI: ("!hi", "Show welcome message"),
+    CommandType.E2EE: ("/e2ee", "Show encryption diagnostics for this room"),
+    CommandType.HI: ("/hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
 _COMPACT_COMMAND_DOC_OVERRIDES = {
-    CommandType.SCHEDULE: ("!schedule <time> <message>", "Schedule tasks and reminders"),
-    CommandType.HELP: ("!help [topic]", "Get detailed help"),
-    CommandType.HI: ("!hi", "Show this welcome message again"),
+    CommandType.SCHEDULE: ("/schedule <time> <message>", "Schedule tasks and reminders"),
+    CommandType.HELP: ("/help [topic]", "Get detailed help"),
+    CommandType.HI: ("/hi", "Show this welcome message again"),
 }
 
 
@@ -168,7 +168,10 @@ class _CommandParser:
         """
         message = message.strip()
 
-        message = message.removeprefix(VOICE_PREFIX)
+        raw_text = message.removeprefix(VOICE_PREFIX)
+        # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
+        is_slash = raw_text.startswith("/")
+        message = f"!{raw_text[1:]}" if is_slash else raw_text
         if not message.startswith("!"):
             return None
 
@@ -176,7 +179,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.HI,
                 args={},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.HELP_PATTERN.match(message)
@@ -185,11 +188,11 @@ class _CommandParser:
             return Command(
                 type=CommandType.HELP,
                 args={"topic": topic},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         if self.RELOAD_PLUGINS_PATTERN.match(message):
-            return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=message)
+            return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=raw_text)
 
         match = self.SCHEDULE_PATTERN.match(message)
         if match:
@@ -197,14 +200,14 @@ class _CommandParser:
             return Command(
                 type=CommandType.SCHEDULE,
                 args={"full_text": full_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         if self.LIST_SCHEDULES_PATTERN.match(message):
             return Command(
                 type=CommandType.LIST_SCHEDULES,
                 args={},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.CANCEL_SCHEDULE_PATTERN.match(message)
@@ -214,11 +217,11 @@ class _CommandParser:
             return Command(
                 type=CommandType.CANCEL_SCHEDULE,
                 args={"task_id": task_id, "cancel_all": cancel_all},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         if self.JOBS_PATTERN.match(message):
-            return Command(type=CommandType.JOBS, args={}, raw_text=message)
+            return Command(type=CommandType.JOBS, args={}, raw_text=raw_text)
 
         match = self.CANCEL_JOB_PATTERN.match(message)
         if match:
@@ -226,7 +229,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.CANCEL_JOB,
                 args={"job_id": None if target.lower() == "all" else target},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.EDIT_SCHEDULE_PATTERN.match(message)
@@ -236,7 +239,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.EDIT_SCHEDULE,
                 args={"task_id": task_id, "full_text": full_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.CONFIG_PATTERN.match(message)
@@ -245,7 +248,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.CONFIG,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.DESKTOP_PATTERN.match(message)
@@ -254,12 +257,12 @@ class _CommandParser:
             return Command(
                 type=CommandType.DESKTOP,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.MODE_PATTERN.match(message)
         if match:
-            return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=message)
+            return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
 
         match = self.MODEL_PATTERN.match(message)
         if match:
@@ -267,7 +270,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.MODEL,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.ROOM_MODEL_PATTERN.match(message)
@@ -276,7 +279,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.ROOM_MODEL,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.THREAD_MODE_PATTERN.match(message)
@@ -285,7 +288,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.THREAD_MODE,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.REPLY_MODE_PATTERN.match(message)
@@ -293,7 +296,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.REPLY_MODE,
                 args={"args_text": (match.group(1) or "").strip()},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.AUTO_APPROVE_PATTERN.match(message)
@@ -301,7 +304,7 @@ class _CommandParser:
             return Command(
                 type=CommandType.AUTO_APPROVE,
                 args={"args_text": (match.group(1) or "").strip()},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         match = self.ENCRYPT_PATTERN.match(message)
@@ -310,17 +313,19 @@ class _CommandParser:
             return Command(
                 type=CommandType.ENCRYPT,
                 args={"args_text": args_text},
-                raw_text=message,
+                raw_text=raw_text,
             )
 
         if self.E2EE_PATTERN.match(message):
-            return Command(type=CommandType.E2EE, args={}, raw_text=message)
+            return Command(type=CommandType.E2EE, args={}, raw_text=raw_text)
 
+        if is_slash:
+            return None
         logger.debug("unknown_command", command=message)
         return Command(
             type=CommandType.UNKNOWN,
             args={"raw_command": message},
-            raw_text=message,
+            raw_text=raw_text,
         )
 
 
@@ -337,39 +342,39 @@ def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911, P
     if topic == "schedule":
         return """**Schedule Command**
 
-Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent/team workflows
+Usage: `/schedule <time> <message>` - Schedule tasks, reminders, or agent/team workflows
 
 **Simple Reminders:**
-- `!schedule in 5 minutes Check the deployment`
-- `!schedule tomorrow at 3pm Send the weekly report`
-- `!schedule later Ping me about the meeting`
+- `/schedule in 5 minutes Check the deployment`
+- `/schedule tomorrow at 3pm Send the weekly report`
+- `/schedule later Ping me about the meeting`
 - `ping me tomorrow about the meeting`
 - `remind me in 2 hours to review PRs`
 
 **Event-Driven Workflows (New!):** _(include a polling cadence — they check on a schedule)_
-- `!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me`
-- `!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me`
-- `!schedule Every minute, check if server CPU > 80%; if so, @ops_agent scale up`
-- `!schedule Every 15 minutes, check for mentions of our product on Reddit; if any, @analyst summarize them`
-- `!schedule Every 5 minutes, check for new email from my boss; if any, @notification_agent alert me immediately`
+- `/schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me`
+- `/schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me`
+- `/schedule Every minute, check if server CPU > 80%; if so, @ops_agent scale up`
+- `/schedule Every 15 minutes, check for mentions of our product on Reddit; if any, @analyst summarize them`
+- `/schedule Every 5 minutes, check for new email from my boss; if any, @notification_agent alert me immediately`
 
 **Agent and Team Workflows:**
-- `!schedule Daily at 9am, @finance give me a market analysis`
-- `!schedule Every Monday, @research AI news and @email_assistant send me a summary`
-- `!schedule tomorrow at 2pm, @email_assistant check my Gmail`
+- `/schedule Daily at 9am, @finance give me a market analysis`
+- `/schedule Every Monday, @research AI news and @email_assistant send me a summary`
+- `/schedule tomorrow at 2pm, @email_assistant check my Gmail`
 
 **Recurring Tasks (Cron-style):**
-- `!schedule Every hour, @shell check server status`
-- `!schedule Daily at 9am, @finance market report`
-- `!schedule Weekly on Friday, @analyst prepare weekly summary`
+- `/schedule Every hour, @shell check server status`
+- `/schedule Daily at 9am, @finance market report`
+- `/schedule Weekly on Friday, @analyst prepare weekly summary`
 
 **Conversation Context Limits:**
-- `!schedule Every hour, @ops check deployment health with no history`
-- `!schedule Daily at 9am, @research summarize AI news with only the last 5 messages`
+- `/schedule Every hour, @ops check deployment health with no history`
+- `/schedule Daily at 9am, @research summarize AI news with only the last 5 messages`
 
 **Silent Delivery:**
 - Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools
-- `!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives`
+- `/schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives`
 - Silent schedules hide their trigger and omit successful final responses that are empty or contain only `NO_REPLY`
 - Schedules remain visible by default
 
@@ -384,9 +389,9 @@ How it works:
     if topic in {"reload-plugins", "reload_plugins"}:
         return """**Reload Plugins Command**
 
-Usage: `!reload-plugins` - Force-reload all configured plugins from disk
+Usage: `/reload-plugins` - Force-reload all configured plugins from disk
 
-Alternative syntax: `!reload_plugins`
+Alternative syntax: `/reload_plugins`
 
 Notes:
 - Admin only: platform administrators.
@@ -396,63 +401,63 @@ Notes:
     if topic in {"list_schedules", "inspect_schedules"}:
         return """**List Schedules Command**
 
-Usage: `!list_schedules`
+Usage: `/list_schedules`
 
-Alternative syntax: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`
+Alternative syntax: `/listschedules`, `/list-schedules`, `/list_schedule`, `/listschedule`, `/list-schedule`, `/inspect_schedules`
 
 Shows pending scheduled tasks. When used in a thread, shows tasks for that thread. When used in the main room, shows all tasks in the room."""
 
     if topic in {"cancel", "cancel_schedule"}:
         return """**Cancel Schedule Command**
 
-Usage: `!cancel_schedule <id>` - Cancel a scheduled task
-       `!cancel_schedule all` - Cancel ALL scheduled tasks in this room
+Usage: `/cancel_schedule <id>` - Cancel a scheduled task
+       `/cancel_schedule all` - Cancel ALL scheduled tasks in this room
 
-Alternative syntax: `!cancelschedule`, `!cancel-schedule`
+Alternative syntax: `/cancelschedule`, `/cancel-schedule`
 
 Examples:
-- `!cancel_schedule abc123` - Cancel the task with ID abc123
-- `!cancel_schedule all` - Cancel all scheduled tasks
+- `/cancel_schedule abc123` - Cancel the task with ID abc123
+- `/cancel_schedule all` - Cancel all scheduled tasks
 
-Use `!list_schedules` to see task IDs."""
+Use `/list_schedules` to see task IDs."""
 
     if topic in {"edit", "edit_schedule"}:
         return """**Edit Schedule Command**
 
-Usage: `!edit_schedule <id> <new task>` - Replace an existing scheduled task with new timing/content
+Usage: `/edit_schedule <id> <new task>` - Replace an existing scheduled task with new timing/content
 
-Alternative syntax: `!editschedule`, `!edit-schedule`
+Alternative syntax: `/editschedule`, `/edit-schedule`
 
 Examples:
-- `!edit_schedule abc123 tomorrow at 9am @finance send market update`
-- `!edit_schedule task42 every weekday at 8am check build status`
-- `!edit_schedule task42 keep the same schedule but restore full history`
-- `!edit_schedule task42 every weekday at 8am check build status with no history`
-- `!edit_schedule task42 keep the same schedule but make this schedule silent`
+- `/edit_schedule abc123 tomorrow at 9am @finance send market update`
+- `/edit_schedule task42 every weekday at 8am check build status`
+- `/edit_schedule task42 keep the same schedule but restore full history`
+- `/edit_schedule task42 every weekday at 8am check build status with no history`
+- `/edit_schedule task42 keep the same schedule but make this schedule silent`
 
 Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
 Use "restore full history" or "use unlimited history" to remove a history limit.
 Use "make this schedule silent" or "make this schedule visible" to change its delivery mode.
-Use `!list_schedules` to find task IDs before editing."""
+Use `/list_schedules` to find task IDs before editing."""
 
     if topic == "config":
         return """**Config Command**
 
-Usage: `!config <operation>` - View and modify MindRoom configuration
+Usage: `/config <operation>` - View and modify MindRoom configuration
 
 **Viewing Configuration:**
-- `!config show` - Show entire configuration
-- `!config get <path>` - Get a specific configuration value
-- `!config get agents` - Show all agents
-- `!config get models.default` - Show default model
-- `!config get agents.analyst.display_name` - Show analyst's display name
+- `/config show` - Show entire configuration
+- `/config get <path>` - Get a specific configuration value
+- `/config get agents` - Show all agents
+- `/config get models.default` - Show default model
+- `/config get agents.analyst.display_name` - Show analyst's display name
 
 **Modifying Configuration:**
-- `!config set <path> <value>` - Set a configuration value
-- `!config set agents.analyst.display_name "Research Expert"` - Change display name
-- `!config set models.default.id my-model` - Change default model
-- `!config set defaults.markdown false` - Stop telling agents their replies are shown as Markdown
-- `!config set timezone America/New_York` - Set timezone
+- `/config set <path> <value>` - Set a configuration value
+- `/config set agents.analyst.display_name "Research Expert"` - Change display name
+- `/config set models.default.id my-model` - Change default model
+- `/config set defaults.markdown false` - Stop telling agents their replies are shown as Markdown
+- `/config set timezone America/New_York` - Set timezone
 
 **Path Syntax:**
 - Use dot notation to navigate nested config (e.g., `agents.analyst.role`)
@@ -467,12 +472,12 @@ Set `authorization.config_command_enabled: true`; the caller must also be a plat
     if topic == "mode":
         return """**Agent Mode Command**
 
-Usage: `!mode <agent> minimal|standard|show|reset`
+Usage: `/mode <agent> minimal|standard|show|reset`
 
-- `!mode helper minimal` - Use a Bash-only model interface with the agent's configured tools available through the CLI
-- `!mode helper standard` - Restore the standard tool interface
-- `!mode helper show` - Show the saved choice
-- `!mode helper reset` - Remove the choice and return to standard mode
+- `/mode helper minimal` - Use a Bash-only model interface with the agent's configured tools available through the CLI
+- `/mode helper standard` - Restore the standard tool interface
+- `/mode helper show` - Show the saved choice
+- `/mode helper reset` - Remove the choice and return to standard mode
 
 How it works:
 - Applies to this agent's next Matrix response in the same conversation and survives restarts
@@ -480,34 +485,34 @@ How it works:
 - Private agents keep a separate choice for each requester; other agents and conversations are unaffected
 - Teams and OpenAI-compatible API requests do not use this selection
 - Minimal mode requires existing run/check/kill shell permissions and MindRoom's API server, reachable from wherever the agent's shell runs; a refusal lists everything missing
-- If deployment settings change and minimal mode becomes unavailable, use `!mode <agent> standard` in the same conversation"""
+- If deployment settings change and minimal mode becomes unavailable, use `/mode <agent> standard` in the same conversation"""
 
     if topic == "model":
         return """**Model Command**
 
-Usage: `!model [name|list|reset]` - Show or switch the model used in the current thread
+Usage: `/model [name|list|reset]` - Show or switch the model used in the current thread
 
 **Examples:**
-- `!model` or `!model list` - Show the current thread's model overrides, each with the entities it applies to, and the available models
-- `!model opus` - Make the agents and teams you may address in this thread use the `opus` model
-- `!model reset` - Remove the override of the agents and teams you may address so room-level model selection applies to them again
+- `/model` or `/model list` - Show the current thread's model overrides, each with the entities it applies to, and the available models
+- `/model opus` - Make the agents and teams you may address in this thread use the `opus` model
+- `/model reset` - Remove the override of the agents and teams you may address so room-level model selection applies to them again
 
 How it works:
 - The override applies from the next message in the thread to the agents, teams, and router you may address
 - Every other entity keeps its own thread override or room-level model
 - Model names come from the `models:` section of config.yaml
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
-- Use `!room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
+- Use `/room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
 
     if topic in {"room_model", "room-model", "roommodel"}:
         return """**Room Model Command**
 
-Usage: `!room_model [name|list|reset]` - Show or switch the default model used in the current room
+Usage: `/room_model [name|list|reset]` - Show or switch the default model used in the current room
 
 **Examples:**
-- `!room_model` or `!room_model list` - Show the current room override and available models
-- `!room_model opus` - Make `opus` the default for every agent, team, and the router in this room
-- `!room_model reset` - Remove the runtime override so the room default returns to configured room or entity models
+- `/room_model` or `/room_model list` - Show the current room override and available models
+- `/room_model opus` - Make `opus` the default for every agent, team, and the router in this room
+- `/room_model reset` - Remove the runtime override so the room default returns to configured room or entity models
 
 How it works:
 - The override applies from the next model run and survives restarts without changing config.yaml
@@ -518,13 +523,13 @@ How it works:
     if topic in {"encrypt", "e2ee", "encryption"}:
         return """**Encryption Commands**
 
-Usage: `!encrypt [confirm]` - Enable end-to-end encryption for the current room
-       `!e2ee` - Show encryption diagnostics for the current room
+Usage: `/encrypt [confirm]` - Enable end-to-end encryption for the current room
+       `/e2ee` - Show encryption diagnostics for the current room
 
 **Examples:**
-- `!encrypt` - Review what enabling encryption means for this room
-- `!encrypt confirm` - Enable encryption (room admin only)
-- `!e2ee` - Show room encryption state, bot device, and decryption-failure counters
+- `/encrypt` - Review what enabling encryption means for this room
+- `/encrypt confirm` - Enable encryption (room admin only)
+- `/e2ee` - Show room encryption state, bot device, and decryption-failure counters
 
 How it works:
 - Enabling encryption is **irreversible**; a room can never go back to unencrypted
@@ -535,13 +540,13 @@ How it works:
     if topic in {"thread_mode", "thread-mode", "threadmode"}:
         return """**Thread Mode Command**
 
-Usage: `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room
+Usage: `/thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room
 
 **Examples:**
-- `!thread_mode` or `!thread_mode show` - Show the current room override
-- `!thread_mode room` - Use one continuous conversation for the whole room
-- `!thread_mode thread` - Use Matrix threads for separate conversations in this room
-- `!thread_mode reset` - Remove the room override and use configured modes again
+- `/thread_mode` or `/thread_mode show` - Show the current room override
+- `/thread_mode room` - Use one continuous conversation for the whole room
+- `/thread_mode thread` - Use Matrix threads for separate conversations in this room
+- `/thread_mode reset` - Remove the room override and use configured modes again
 
 How it works:
 - The override applies to future agent replies in the current Matrix room
@@ -551,13 +556,13 @@ How it works:
     if topic in {"reply_mode", "reply-mode", "replymode"}:
         return """**Reply Mode Command**
 
-Usage: `!reply_mode [auto|mentions|reset|show]` - Show or switch whether agents need a mention to start a conversation
+Usage: `/reply_mode [auto|mentions|reset|show]` - Show or switch whether agents need a mention to start a conversation
 
 **Examples:**
-- `!reply_mode` or `!reply_mode show` - Show the reply mode this room uses
-- `!reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
-- `!reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
-- `!reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
+- `/reply_mode` or `/reply_mode show` - Show the reply mode this room uses
+- `/reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
+- `/reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
+- `/reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
 
 How it works:
 - The override applies to future messages in the current Matrix room
@@ -567,20 +572,20 @@ How it works:
     if topic in {"auto_approve", "auto-approve", "autoapprove"}:
         return """**Auto-Approve Command**
 
-Usage: `!auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
+Usage: `/auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
 
 **Examples:**
-- `!auto_approve 30` - Skip approval cards for your tool calls in this thread for 30 minutes
-- `!auto_approve 2h` - Do the same for 2 hours (at most 24 hours)
-- `!auto_approve` - Show when the current window ends
-- `!auto_approve off` - End the window now
+- `/auto_approve 30` - Skip approval cards for your tool calls in this thread for 30 minutes
+- `/auto_approve 2h` - Do the same for 2 hours (at most 24 hours)
+- `/auto_approve` - Show when the current window ends
+- `/auto_approve off` - End the window now
 
 How it works:
 - Every tool call you request in this thread runs without an approval card until the window ends
 - In a room without threads, the window covers the whole room
 - Approval cards already waiting for you in this thread are approved when you turn it on
 - Other people in the thread still approve their own calls
-- `!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card"""
+- `/auto_approve off` does not stop auto-approval started from an approval card; stop that on the card"""
 
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))
@@ -595,7 +600,9 @@ How it works:
 - Agent and team workflows - mention multiple agents for ad-hoc collaboration, or mention a team for its team workflow
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
 
-For detailed help on a command, use: `!help <command>`"""
+For detailed help on a command, use: `/help <command>`
+
+Every command also works with `!` instead of `/` (for example `!help`), which you need in clients that intercept `/`, such as Element."""
 
 
 # Global parser instance

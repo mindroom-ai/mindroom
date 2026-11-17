@@ -165,6 +165,8 @@ class _Homeserver:
     fail_text: str | None = None
     # How many writes that end a reply (``completed`` status) the server fails next, as an unreachable homeserver does.
     fail_completed: int = 0
+    # Text the server refuses in every write that is still streaming, as a homeserver that keeps refusing an edit does.
+    refuse_streaming_text: str | None = None
 
     async def room_send(
         self,
@@ -178,6 +180,13 @@ class _Homeserver:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
         if message_type == "m.room.message" and self.fail_text is not None and self.fail_text in _body(content):
             self.fail_text = None
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        if (
+            message_type == "m.room.message"
+            and self.refuse_streaming_text is not None
+            and self.refuse_streaming_text in _body(content)
+            and content.get(STREAM_STATUS_KEY) == "streaming"
+        ):
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         if message_type == "m.room.message" and self.fail_completed and content.get(STREAM_STATUS_KEY) == "completed":
             self.fail_completed -= 1
@@ -1750,8 +1759,9 @@ async def test_a_pause_whose_progress_edit_fails_ends_the_reply_without_an_inter
         tools=[_ECHO_TOOL],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
     )
-    # The edit that would show the paused tool call is the one the homeserver refuses.
-    turn.homeserver.fail_text = "🔧 `echo` [1]"
+    # The homeserver refuses every progress edit that would show the paused tool call, the pause's own flush included:
+    # one refused progress edit alone is resent by the next, so only a flush that cannot land fails the pause.
+    turn.homeserver.refuse_streaming_text = "🔧 `echo` [1]"
     _require_echo_approval(turn)
     try:
         await turn.runner.generate_response(_plain_request(_target()))
