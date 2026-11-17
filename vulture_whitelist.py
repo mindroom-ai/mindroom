@@ -283,7 +283,6 @@ _.get_latest_agent_message_snapshot  # hook plugins call this public method (src
 _reset_credentials_manager_cache  # unused function (src/mindroom/credentials/manager.py)
 _reset_visible_voice_echo_barriers  # unused function (src/mindroom/voice/visible_voice_echo.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
-_.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)
 _._batch_get  # inherited Gmail tools call this override dynamically (src/mindroom/custom_tools/gmail.py)
 _._build_service  # Agno Google auth decorator calls this override dynamically (src/mindroom/custom_tools/google_drive.py, src/mindroom/custom_tools/gmail.py, src/mindroom/custom_tools/google_calendar.py, src/mindroom/custom_tools/google_sheets.py)
 _.normalize_tool_filters  # unused method (src/mindroom/mcp/config.py)
