@@ -177,7 +177,7 @@ def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict
     joined: list[dict[str, Any]] = []
     for detail in details:
         last = joined[-1] if joined else None
-        name = _REASONING_DETAIL_TEXT.get(detail.get("type"))
+        name = _REASONING_DETAIL_TEXT.get(detail.get("type", ""))
         if (
             name is None
             or last is None
