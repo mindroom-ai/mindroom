@@ -128,7 +128,7 @@ def _store(config: Config) -> ConversationStore:
     return create_session_storage("general", config, runtime_paths_for(config), execution_identity=None)
 
 
-def _recover(config: Config, *, natively: bool = True) -> bool:
+def _recover(config: Config, *, natively: bool = True) -> list[str]:
     return recover_interrupted_turn(_store(config), _SESSION, _SCOPE, {_EVENT}, natively=natively)
 
 
@@ -159,7 +159,7 @@ async def test_a_killed_turn_recovers_its_finished_calls_and_answers_the_one_in_
     checkpoint = _only_run(crashed)
     assert checkpoint.status is RunStatus.cancelled
 
-    assert _recover(crashed)
+    assert _recover(crashed) == [checkpoint.run_id]
 
     run = _only_run(crashed)
     assert run.status is RunStatus.completed
@@ -176,7 +176,7 @@ async def test_a_killed_turn_recovers_its_finished_calls_and_answers_the_one_in_
     assert run.messages[:4] == checkpoint.messages
     assert [tool.result for tool in run.tools or ()] == ["contents of a", INTERRUPTED_CALL_RESULT]
     # A second recovery finds nothing to do, and the turn stays in history.
-    assert _recover(crashed)
+    assert _recover(crashed) == [checkpoint.run_id]
     assert _only_run(crashed).messages == run.messages
 
 

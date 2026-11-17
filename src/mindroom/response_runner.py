@@ -21,6 +21,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
+    CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -1118,7 +1119,7 @@ class ResponseRunner:
         if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
-        recovered = False
+        recovered: list[str] = []
         if handle.span.kind is rl.SpanKind.REPLAY and history_scope is not None:
             attempts = await handle.runtime.restart_interruptions(handle)
             recovered = await self.deps.state_writer.recover_interrupted_turn(
@@ -1128,7 +1129,11 @@ class ResponseRunner:
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
                 natively=attempts <= _NATIVE_RECOVERY_LIMIT,
             )
-        return self._with_recorded_interrupted_attempt(request, handle, recorded, recovered=recovered)
+        if recovered:
+            # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.
+            continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: recovered}
+            request = replace(request, matrix_run_metadata=continued)
+        return self._with_recorded_interrupted_attempt(request, handle, recorded, recovered=bool(recovered))
 
     def _with_recorded_interrupted_attempt(
         self,

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.run_visibility import (
     RECOVERED_RUN_KEY,
     is_model_history_visible_run,
@@ -160,8 +161,8 @@ def recover_interrupted_turn(
     event_ids: Collection[str],
     *,
     natively: bool,
-) -> bool:
-    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return whether history holds one.
+) -> list[str]:
+    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the recovered runs it holds.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
@@ -170,8 +171,8 @@ def recover_interrupted_turn(
     """
     session = store.load_session(session_id)
     if session is None:
-        return False
-    recovered = False
+        return []
+    recovered: list[str] = []
     for run in session.runs:
         if run.parent_run_id is not None or not run_in_scope(run, scope):
             continue
@@ -183,14 +184,28 @@ def recover_interrupted_turn(
         elif recover_interrupted_run(store, session, run) or (
             is_recovered_run(run) and is_model_history_visible_run(run)
         ):
-            recovered = True
+            recovered.append(run.run_id)
     return recovered
+
+
+def link_response_event(store: ConversationStore, session_id: str, run_id: str, response_event_id: str) -> None:
+    """Link run ``run_id`` to the Matrix message that shows its answer, and the recovered runs it continued with it.
+
+    The run's metadata names those runs (``CONTINUED_RUNS_METADATA_KEY``). Redacting the message then removes the
+    interrupted attempts together with the answer that finished their turn.
+    """
+    link = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
+    store.patch_run_metadata(session_id, run_id, link)
+    run = store.get_run(run_id)
+    for continued in (run.metadata or {}).get(CONTINUED_RUNS_METADATA_KEY, ()) if run is not None else ():
+        store.patch_run_metadata(session_id, continued, link)
 
 
 __all__ = [
     "INTERRUPTED_CALL_RESULT",
     "CheckpointHooks",
     "checkpoint_hooks",
+    "link_response_event",
     "recover_interrupted_run",
     "recover_interrupted_turn",
     "save_run_checkpoint",

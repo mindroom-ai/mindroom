@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.run_checkpoint import recover_interrupted_turn
+from mindroom.history.run_checkpoint import link_response_event, recover_interrupted_turn
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
@@ -128,11 +127,13 @@ class ConversationStateWriter:
         run_id: str,
         response_event_id: str,
     ) -> None:
-        """Persist Matrix response linkage onto the run that produced it, off-loop in the session target's FIFO lane."""
-        link = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
+        """Link the run that produced a Matrix response to it, and the recovered runs that run continued.
+
+        Runs off-loop in the session target's FIFO lane (``link_response_event``).
+        """
         await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),
-            lambda storage: storage.patch_run_metadata(session_id, run_id, link),
+            lambda storage: link_response_event(storage, session_id, run_id, response_event_id),
         )
 
     async def recover_interrupted_turn(
@@ -143,10 +144,10 @@ class ConversationStateWriter:
         session_id: str,
         event_ids: Collection[str],
         natively: bool,
-    ) -> bool:
+    ) -> list[str]:
         """Recover the runs a restart cut short while they answered ``event_ids`` (``recover_interrupted_turn``).
 
-        Returns whether the scope's history now holds one, off-loop in the session target's FIFO lane.
+        Returns the recovered runs the scope's history now holds, off-loop in the session target's FIFO lane.
         """
         return await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),

@@ -1063,6 +1063,8 @@ TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+# The recovered runs a turn's replay continued, which its answer's message is linked to as well.
+CONTINUED_RUNS_METADATA_KEY = "mindroom_continued_runs"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"

@@ -4932,7 +4932,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.constants",
     "mindroom.history.run_checkpoint",
     "mindroom.history.session_context",
     "mindroom.history.types",
@@ -10046,6 +10045,7 @@ visibility = [
 path = "mindroom.history.run_checkpoint"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.constants",
     "mindroom.history.run_visibility",
     "mindroom.llm",
     "mindroom.session_storage.store",
