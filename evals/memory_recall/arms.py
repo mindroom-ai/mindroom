@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -82,7 +83,10 @@ ARMS: dict[str, Arm] = {
 # the live per-turn limit of 3, and any larger limit would fuse more and could reorder the top hits.
 _OVER_FETCH = 25
 _TOP_K = 3
-_SEARCH_CONCURRENCY = 16
+# Query embeddings share one local embedder with live agents, so few run at once.
+_SEARCH_CONCURRENCY = 4
+# Waits before each retry of a failed search: four attempts ride out an embedder swapping models or under load.
+_SEARCH_RETRY_DELAYS_S = (2.0, 5.0, 15.0)
 _SCOPE_USER_ID = "memory_recall_eval"
 # The stock file-memory search over `memory/**/*.md`, semantic.
 _SEARCH_CONFIG = MemorySearchConfig(mode="semantic")
@@ -93,6 +97,7 @@ _ID_TIME_RE = re.compile(r"^(?:- )?\[id=m_(\d{14})_")
 _READY_MARKER = "ready"
 # Collapses whitespace the way the indexer's chunker does.
 _CLEANER = SafeFixedSizeChunking()
+_logger = logging.getLogger(__name__)
 
 
 async def replay(
@@ -103,8 +108,12 @@ async def replay(
     config: Config,
     runtime_paths: RuntimePaths,
     index_dir: Path,
-) -> list[list[MemoryResult]]:
-    """Return the hits `arm` injects for each turn, in order; the arm's index is built once under `index_dir`."""
+) -> list[list[MemoryResult] | None]:
+    """Return the hits `arm` injects for each turn, in order; the arm's index is built once under `index_dir`.
+
+    A turn whose search still fails after its retries is None, so the caller can leave it out instead of reading it
+    as a turn that recalled nothing.
+    """
     first_added = _FirstAdded(memory_dir)
     corpus = _build_corpus(memory_dir, arm, first_added)
     if not corpus:
@@ -113,11 +122,13 @@ async def replay(
     hit_times = _HitTimes(corpus, entry_chunks=arm.entry_chunks, first_added=first_added)
     semaphore = asyncio.Semaphore(_SEARCH_CONCURRENCY)
 
-    async def recall(turn: Turn) -> list[MemoryResult]:
+    async def recall(turn: Turn) -> list[MemoryResult] | None:
         if arm.skip_short and is_short_follow_up(turn.query, in_thread=_in_thread(turn.session_id)):
             return []
         async with semaphore:
-            hits = await knowledge.asearch(turn.query, _OVER_FETCH)
+            hits = await _search_with_retries(knowledge, turn.query)
+        if hits is None:
+            return None
         kept = [hit for hit in hits if not any(_written_after(written, turn.ts) for written in hit_times(hit))]
         if arm.selection == "top3":
             # Converted after the cut, as live recall converts its three hits, so the scores match too.
@@ -125,6 +136,20 @@ async def replay(
         return select_recall_hits(_memory_results_from_hits(kept, scope_user_id=_SCOPE_USER_ID))
 
     return list(await asyncio.gather(*(recall(turn) for turn in turns)))
+
+
+async def _search_with_retries(knowledge: AgentKnowledge, query: str) -> list[SearchHit] | None:
+    """Search `query`, retrying a failure after each delay in `_SEARCH_RETRY_DELAYS_S`; None when every attempt failed."""
+    for attempt, delay in enumerate((0.0, *_SEARCH_RETRY_DELAYS_S), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await knowledge.asearch(query, _OVER_FETCH)
+        except Exception as exc:  # embedder HTTP errors, timeouts: all worth another attempt
+            error = f"{type(exc).__name__}: {exc}"
+            _logger.warning("Replay search attempt %d failed: %.300s", attempt, error)
+    _logger.warning("Replay search failed after %d attempts; the turn counts as a search error", attempt)
+    return None
 
 
 def _build_corpus(memory_dir: Path, arm: Arm, first_added: _FirstAdded) -> dict[str, bytes]:

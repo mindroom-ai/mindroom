@@ -49,6 +49,7 @@ _METRIC_COLUMNS = (
     "unrelated_only_turns",
     "abstained_turns",
     "judge_errors",
+    "search_errors",
 )
 
 
@@ -94,7 +95,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     with JudgeCache(out / "judge.sqlite") as cache:
         async with httpx.AsyncClient(transport=transport) as client:
             for name in args.arms.split(","):
-                hits = await replay(
+                replayed = await replay(
                     turns,
                     ARMS[name],
                     memory_dir=args.memory_dir,
@@ -102,7 +103,16 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     runtime_paths=runtime_paths,
                     index_dir=index_dir,
                 )
-                verdicts = await _judge_all(turns, hits, cache=cache, client=client, api_key=api_key)
+                # A turn whose search failed is left out of every metric but `search_errors`.
+                searched = [(turn, hits) for turn, hits in zip(turns, replayed, strict=True) if hits is not None]
+                hits = [turn_hits for _turn, turn_hits in searched]
+                verdicts = await _judge_all(
+                    [turn for turn, _hits in searched],
+                    hits,
+                    cache=cache,
+                    client=client,
+                    api_key=api_key,
+                )
                 results[name] = arm_metrics(
                     verdicts,
                     tokens=[
@@ -110,6 +120,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                         for turn_hits in hits
                     ],
                     hit_tokens=[[_count(f"- {hit.get('memory', '')}\n") for hit in turn_hits] for turn_hits in hits],
+                    search_errors=len(turns) - len(searched),
                 )
     (out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     (out / "results.md").write_text(_markdown(results))
@@ -153,8 +164,12 @@ def arm_metrics(
     *,
     tokens: Sequence[int],
     hit_tokens: Sequence[Sequence[int]],
+    search_errors: int = 0,
 ) -> dict[str, float]:
-    """Return one arm's metrics from each turn's verdicts, injected o200k tokens, and per-hit tokens.
+    """Return one arm's metrics from each searched turn's verdicts, injected o200k tokens, and per-hit tokens.
+
+    `search_errors` counts the turns whose search failed; they are not among the turns given, so no other metric
+    sees them.
 
     A None verdict (the judge failed) counts only in `judge_errors`: its hit's tokens leave the relevance-per-token
     denominator, and a turn whose every hit errored leaves the turn shares, since nothing about it was judged.
@@ -184,6 +199,7 @@ def arm_metrics(
         ),
         "abstained_turns": sum(not turn for turn in verdicts) / turns if turns else 0.0,
         "judge_errors": errors,
+        "search_errors": search_errors,
     }
 
 

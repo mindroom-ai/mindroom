@@ -17,6 +17,8 @@ Every arm indexes its corpus with MindRoom's own knowledge indexer (`KnowledgeMa
 `memory.embedder`, and searches it through the file-memory overlay with hybrid search.
 Each query over-fetches 25 hits, the most that keep live recall's ranking: the store fuses `max(limit * 2, 50)`
 candidates per ranking, and live recall asks for 3.
+At most 4 searches run at once, since query embeddings share the local embedder with live agents.
+A failed search (an embedder error such as HTTP 500 while it swaps models) is retried after 2, 5 and 15 seconds.
 Hits that may have been written after the turn are dropped before selection:
 
 - An entry with an `m_YYYYMMDDhhmmss_` id was written at that UTC time, and is dropped when that is after the turn.
@@ -49,12 +51,14 @@ The index and verdict cache hold memory text, so keep `--out` outside the reposi
 
 ## Metrics
 
-Per arm, over the replayed turns (tokens are o200k, counted over the rendered memory block):
+Per arm, over the turns whose search succeeded (tokens are o200k, counted over the rendered memory block):
 
-- `turns`, `mean_tokens`, `p95_tokens`: turns replayed and injected tokens per turn.
+- `turns`, `mean_tokens`, `p95_tokens`: turns searched and injected tokens per turn.
 - `relevant_per_1k_tokens`: hits judged directly relevant (2) per 1,000 injected tokens.
 - `turns_with_relevant`: share of turns with at least one directly relevant hit.
 - `unrelated_only_turns`: share of turns that injected hits, all judged unrelated (0).
 - `abstained_turns`: share of turns that injected nothing.
 - `judge_errors`: hits the judge failed on. They count nowhere else: their tokens leave the per-token denominator, and
   a turn whose every hit failed leaves the two turn shares above.
+- `search_errors`: turns whose search still failed after four attempts. They count nowhere else, not even in
+  `turns`.

@@ -56,6 +56,7 @@ METRIC_KEYS = {
     "unrelated_only_turns",
     "abstained_turns",
     "judge_errors",
+    "search_errors",
 }
 THREAD = "!room:example.org:$thread-root"
 ROOM = "!room:example.org"
@@ -80,16 +81,27 @@ class _RankedEmbedder:
 
 
 class _CountingEmbedder:
-    """Embeds every text to the same one-dimension vector, so hybrid search ranks by its keyword half."""
+    """Embeds every text to the same one-dimension vector, so hybrid search ranks by its keyword half.
+
+    A query in `failures` fails that many more times, like an embedder answering HTTP 500 while it swaps models.
+    """
 
     sends_batches = False
 
     def __init__(self) -> None:
         self.document_texts = 0
+        self.failures: dict[str, int] = {}
+        self.query_calls: dict[str, int] = {}
 
     def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
         if purpose != "query":
             self.document_texts += len(texts)
+        for text in texts if purpose == "query" else ():
+            self.query_calls[text] = self.query_calls.get(text, 0) + 1
+            if self.failures.get(text, 0) > 0:
+                self.failures[text] -= 1
+                msg = "embedder request failed (HTTP 500)"
+                raise RuntimeError(msg)
         return [[1.0] for _text in texts]
 
     async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
@@ -208,6 +220,7 @@ async def test_run_smoke_on_fixture(
         assert set(metrics) == METRIC_KEYS
         assert metrics["turns"] == 3
         assert metrics["judge_errors"] == 0
+        assert metrics["search_errors"] == 0
     report = (out / "results.md").read_text()
     assert all(arm in report for arm in results)
     for written in (json.dumps(results), report):
@@ -424,6 +437,63 @@ async def test_rerun_reuses_cached_index(tmp_path: Path, memory_dir: Path, embed
     (memory_dir / "2026-01-21.md").write_text("- [id=m_20260121090000_eeee5555] The shed got a new lock.\n")
     await _replay(tmp_path, memory_dir, "A2", turns)
     assert embedder.document_texts > embedded
+
+
+@pytest.fixture
+def _no_search_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(arms, "_SEARCH_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_search_retry_delay")
+async def test_failed_search_is_retried(tmp_path: Path, memory_dir: Path, embedder: _CountingEmbedder) -> None:
+    """A query whose embedding fails twice is searched again and recalls as if it had not failed."""
+    query = "copper roof sheets"
+    [expected] = await _replay(tmp_path, memory_dir, "A2", [_turn("2026-01-25", query)])
+    embedder.failures[query] = 2
+    embedder.query_calls.clear()
+    [hits] = await _replay(tmp_path, memory_dir, "A2", [_turn("2026-01-25", query)])
+    assert embedder.query_calls[query] == 3
+    assert hits == expected
+    assert hits
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_search_retry_delay")
+async def test_search_failing_every_attempt_counts_as_search_error(
+    tmp_path: Path,
+    memory_dir: Path,
+    embedder: _CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose search fails all four attempts is a search error, left out of every other metric."""
+    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
+    broken = "Which invoice arrived by email, and when?"
+    embedder.failures[broken] = 10**6
+    write_turns(
+        [_turn("2026-01-25", "What colour is the garden shed and what is in it?"), _turn("2026-01-25", broken)],
+        tmp_path / "turns.jsonl",
+    )
+    [replayed_broken] = await _replay(tmp_path / "direct", memory_dir, "A2", [_turn("2026-01-25", broken)])
+    assert replayed_broken is None
+    assert embedder.query_calls[broken] == 4
+
+    await run.run_cli(
+        [
+            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
+            *("--config", str(_write_config(tmp_path)), "--arms", "A0,A2,A4", "--out", str(tmp_path / "out")),
+            *("--key-env", "TEST_JUDGE_KEY"),
+        ],
+        transport=_judge_transport(),
+    )
+    results = json.loads((tmp_path / "out" / "results.json").read_text())
+    for metrics in results.values():
+        assert metrics["search_errors"] == 1
+        assert metrics["turns"] == 1
+        assert metrics["abstained_turns"] == 0.0
+        assert metrics["turns_with_relevant"] == 1.0
+        assert metrics["judge_errors"] == 0
 
 
 def test_metrics_exclude_judge_errors() -> None:
