@@ -616,13 +616,9 @@ async def test_hidden_tool_only_steer_whose_stream_failed_keeps_its_failure(
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"))]},
         show_tool_calls=False,
     )
-    notices, arrive = _arrival(turn, mode=MidTurnMode.STEER)
-
-    def arrive_then_lose_the_homeserver() -> None:
-        arrive()
-        turn.homeserver.fail_text = "Thinking..."
-
-    tools.during = arrive_then_lose_the_homeserver
+    notices, tools.during = _arrival(turn, mode=MidTurnMode.STEER)
+    # Its progress edit fails whether it lands before or after the Steer arrives: which comes first is a race.
+    turn.homeserver.fail_streaming = 1
 
     await turn.runner.generate_response(_first_request())
 

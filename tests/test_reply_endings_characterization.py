@@ -165,6 +165,8 @@ class _Homeserver:
     fail_text: str | None = None
     # How many writes that end a reply (``completed`` status) the server fails next, as an unreachable homeserver does.
     fail_completed: int = 0
+    # How many in-progress (``streaming`` status) writes the server fails next.
+    fail_streaming: int = 0
 
     async def room_send(
         self,
@@ -181,6 +183,9 @@ class _Homeserver:
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         if message_type == "m.room.message" and self.fail_completed and content.get(STREAM_STATUS_KEY) == "completed":
             self.fail_completed -= 1
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        if message_type == "m.room.message" and self.fail_streaming and content.get(STREAM_STATUS_KEY) == "streaming":
+            self.fail_streaming -= 1
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         event_id = self.events.setdefault(tx_id or f"anon-{len(self.events)}", f"$sent{len(self.events)}")
         if message_type == "m.room.message":
