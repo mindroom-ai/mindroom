@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.projected_history import ProjectedThreadReader
+    from mindroom.thread_export.storage import WrittenIndexEntry
 
 type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], str | None]
 
@@ -131,6 +132,7 @@ async def _write_thread_to_targets(
     current_summary: _CurrentSummary,
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
+    index_entries: dict[int, list[WrittenIndexEntry]],
 ) -> None:
     """Fetch one thread once and write it independently to each target."""
     try:
@@ -147,7 +149,7 @@ async def _write_thread_to_targets(
 
     for accumulator in accumulators:
         try:
-            wrote_file = await asyncio.to_thread(
+            written = await asyncio.to_thread(
                 write_thread_payload,
                 accumulator.target.output_dir,
                 room,
@@ -159,7 +161,9 @@ async def _write_thread_to_targets(
             accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
             continue
         accumulator.threads_exported += 1
-        if wrote_file:
+        if written.index_entry is not None:
+            index_entries.setdefault(id(accumulator), []).append(written.index_entry)
+        if written.replaced:
             changed_accumulator_ids.add(id(accumulator))
         else:
             accumulator.threads_unchanged += 1
@@ -172,10 +176,11 @@ def _finish_room_exports_blocking(
     truncated: bool,
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
+    index_entries: dict[int, list[WrittenIndexEntry]],
 ) -> None:
     """Reconcile removed threads and update indexes for one enumerated room.
 
-    Re-reads every exported thread file in the room, so it runs off the event loop.
+    Parses the room's thread files this pass did not export or that changed since, so it runs off the event loop.
     """
     for accumulator in accumulators:
         try:
@@ -209,6 +214,7 @@ def _finish_room_exports_blocking(
                 output_dir,
                 room,
                 thread_files_changed=id(accumulator) in changed_accumulator_ids,
+                written_entries=index_entries.get(id(accumulator), ()),
                 trusted_root=accumulator.target.trusted_root,
             )
         except Exception as exc:
@@ -298,6 +304,7 @@ async def _export_enumerated_room_threads(
 ) -> None:
     """Export one enumerated room's threads to every authorized accumulator."""
     changed_accumulator_ids: set[int] = set()
+    index_entries: dict[int, list[WrittenIndexEntry]] = {}
 
     for thread_id in thread_ids:
         await _write_thread_to_targets(
@@ -307,6 +314,7 @@ async def _export_enumerated_room_threads(
             current_summary=current_summary,
             accumulators=authorized,
             changed_accumulator_ids=changed_accumulator_ids,
+            index_entries=index_entries,
         )
 
     await asyncio.to_thread(
@@ -316,4 +324,5 @@ async def _export_enumerated_room_threads(
         truncated=truncated,
         accumulators=authorized,
         changed_accumulator_ids=changed_accumulator_ids,
+        index_entries=index_entries,
     )
