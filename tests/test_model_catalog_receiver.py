@@ -16,7 +16,12 @@ from PIL import Image
 from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
-from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, register_model_catalog_receiver
+from mindroom.model_catalog_receiver import (
+    _DEADLINE_SECONDS,
+    _MAX_USER_REQUESTS,
+    _Receiver,
+    register_model_catalog_receiver,
+)
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import runtime_paths_for
@@ -479,10 +484,37 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
     sent.assert_not_awaited()
     assert dropped(logs) == ["timeout"]
     assert logs[0]["elapsed_ms"] >= 0
+    # The follow-up only proves released capacity, so give it the real deadline.
+    monkeypatch.setattr("mindroom.model_catalog_receiver._DEADLINE_SECONDS", _DEADLINE_SECONDS)
     client.joined_members.side_effect = None
     client.joined_members.return_value = original
     await callback(request())
     assert sent.await_count == 1
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("secret-sentinel")])
+@pytest.mark.asyncio
+async def test_work_error_logs_once_without_detail_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """An error inside the work, even a TimeoutError before the deadline, logs one error warning."""
+    callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    sent.side_effect = error
+    with capture_logs() as logs:
+        await callback(request())
+    assert len(logs) == 1
+    assert dropped(logs) == ["error"]
+    assert logs[0]["log_level"] == "warning"
+    assert logs[0]["error_type"] == type(error).__name__
+    assert logs[0]["request_id"] == "request-1"
+    assert "secret-sentinel" not in repr(logs)
+    sent.side_effect = None
+    with capture_logs() as logs:
+        await callback(request(request_id="request-2"))
+    assert [entry["event"] for entry in logs] == ["model_catalog_answered"]
+    assert sent.await_count == 2
 
 
 @pytest.mark.asyncio
