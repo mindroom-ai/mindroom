@@ -17,7 +17,8 @@ The design is in `docs/baspowers/specs/2026-11-16-memory-recall-efficiency-desig
 Every arm indexes its corpus with MindRoom's own knowledge indexer (`KnowledgeManager.reindex_all`) and the embedder in
 `memory.embedder`, and searches it through the file-memory overlay with hybrid search.
 A0 to A4 use the overlay as it was before A3 shipped (fixed 5,000-character chunks, no excludes); `shipped` uses the
-current one, so it measures the shipped per-turn recall.
+current one, so it measures the agent's own semantic hits in the shipped per-turn recall (team keyword hits and the
+cold-index keyword fallback are not replayed).
 A0 to A4 over-fetch 25 hits per query, the most that keep that recall's ranking: the store fuses `max(limit * 2, 50)`
 candidates per ranking, and it asked for 3. `shipped` asks for the 20 the shipped recall does.
 At most 4 searches run at once, since query embeddings share the local embedder with live agents.

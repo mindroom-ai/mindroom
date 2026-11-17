@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
-from mindroom.token_counting.families import load_o200k
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import o200k_counter
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 # Absorbs float rounding, so a hit exactly ``relative_gap`` below the top hit is kept.
 _SCORE_GAP_TOLERANCE = 1e-9
+_O200K_COUNTER = o200k_counter()
 
 
 def redact_memory_text(text: str) -> str:
@@ -60,17 +62,18 @@ def select_recall_hits(
     hit's, up to ``max_hits``, and while their memory text fits ``token_budget`` o200k tokens in total.
     The first hit that fails any rule ends the selection, so a top hit larger than the budget selects nothing.
     A result without a score counts as score 0.
+    Selection never waits for the tokenizer: until it has loaded, or when it cannot load, the budget counts UTF-8
+    bytes, which never undercount.
     """
     if not results:
         return []
     top_score = results[0].get("score", 0.0)
-    encoder = load_o200k()
     selected: list[MemoryResult] = []
     tokens = 0
     for result in results[:max_hits]:
         if top_score - result.get("score", 0.0) > relative_gap + _SCORE_GAP_TOLERANCE:
             break
-        tokens += len(encoder.encode_ordinary(result.get("memory", "")))
+        tokens += count(_O200K_COUNTER, result.get("memory", ""), upper_bound=True)
         if tokens > token_budget:
             break
         selected.append(result)

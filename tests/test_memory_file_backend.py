@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -36,7 +37,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._file_backend import FileMemoryBackend
-from mindroom.memory._shared import MemoryNotFoundError, MemorySearchOutcome
+from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
 from mindroom.token_counting import families
@@ -57,10 +58,8 @@ from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Sequence
 
-    from mindroom.memory._shared import MemoryResult
     from tests.fakes.knowledge import RecordingRefreshScheduler
 
 
@@ -923,80 +922,114 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
     assert "Keyword fallback memory" in prompt_parts.transient_turn_context
 
 
-def _record_search_limits(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Record the limit of every per-turn memory search, which still runs for real."""
+_GARDEN_QUERY = "garden shed roof copper"
+# Keyword scores 1.0, 0.75, 0.5 and 0.25 for the query: score-gap selection would keep only the first.
+_GARDEN_MEMORIES = ("garden shed roof copper", "garden shed roof", "garden shed", "garden")
+
+
+def _injected(prompt_parts: MemoryPromptParts, candidates: Sequence[str]) -> list[str]:
+    """Return the candidate memories the per-turn context injects, in its order."""
+    lines = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
+    return [line for line in lines if line in candidates]
+
+
+def _semantic_index(monkeypatch: pytest.MonkeyPatch, scored: Sequence[tuple[str, float]] | None) -> list[int]:
+    """Serve the agent's semantic file-memory index from `scored` (memory, cosine) pairs; None keeps it cold.
+
+    Returns the limit of each index search.
+    """
     limits: list[int] = []
-    search = memory_functions.search_agent_memories
 
-    async def recording_search(*args: object, limit: int, **kwargs: object) -> object:
-        limits.append(limit)
-        return await search(*args, limit=limit, **kwargs)
+    class FakeKnowledge:
+        async def asearch(self, _query: str, limit: int) -> list[SearchHit]:
+            limits.append(limit)
+            return [
+                SearchHit(content=memory, meta_data={"source_path": "memory/notes.md", DISTANCE_KEY: 1.0 - score})
+                for memory, score in (scored or [])[:limit]
+            ]
 
-    monkeypatch.setattr(memory_functions, "search_agent_memories", recording_search)
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
+        if scored is None:
+            return SimpleNamespace(knowledge=None, availability=KnowledgeAvailability.INITIALIZING, last_error=None)
+        return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args: [Path("memory/notes.md")])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     return limits
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("global_mode", "agent_mode"), [("keyword", None), ("semantic", "keyword")])
 async def test_keyword_recall_searches_three_and_injects_them_all(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
+    global_mode: str,
+    agent_mode: str | None,
 ) -> None:
-    """Keyword file memory keeps the top-3 recall: the gap selection measured on semantic search does not apply."""
-    config.memory.search.mode = "keyword"
-    memories = ("garden shed roof copper", "garden shed roof", "garden shed", "garden")
-    for memory in memories:
+    """Keyword file memory, set globally or for the agent, keeps the top-3 recall without score-gap selection."""
+    config.memory.search.mode = global_mode
+    if agent_mode is not None:
+        config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
+    for memory in _GARDEN_MEMORIES:
         await add_agent_memory(memory, "general", config)
-    limits = _record_search_limits(monkeypatch)
+    index_limits = _semantic_index(monkeypatch, [("unused semantic hit", 0.9)])
 
-    prompt_parts = await build_memory_prompt_parts("garden shed roof copper", "general", config)
+    prompt_parts = await build_memory_prompt_parts(_GARDEN_QUERY, "general", config)
 
-    assert limits == [3]
-    injected = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
-    assert [line for line in injected if line in memories] == list(memories[:3])
+    assert index_limits == []
+    assert _injected(prompt_parts, _GARDEN_MEMORIES) == list(_GARDEN_MEMORIES[:3])
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("global_mode", "agent_mode", "expected_limit", "expected"),
-    [
-        ("keyword", "semantic", 20, ["The shed is painted green", "The shed roof is copper"]),
-        (
-            "semantic",
-            "keyword",
-            3,
-            ["The shed is painted green", "The shed roof is copper", "Pixel eats salmon kibble"],
-        ),
-    ],
-)
+@pytest.mark.parametrize(("global_mode", "agent_mode"), [("semantic", None), ("keyword", "semantic")])
 async def test_per_turn_recall_uses_gap_selection(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
     global_mode: str,
-    agent_mode: str,
-    expected_limit: int,
-    expected: list[str],
+    agent_mode: str | None,
 ) -> None:
-    """Only an agent whose effective search mode is semantic over-fetches and keeps the hits close to the best one."""
+    """Semantic file memory, set globally or for the agent, over-fetches and keeps the hits close to the best one."""
     config.memory.search.mode = global_mode
-    config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
-    hits: list[MemoryResult] = [
-        {"id": "1", "memory": "The shed is painted green", "score": 0.90},
-        {"id": "2", "memory": "The shed roof is copper", "score": 0.87},
-        {"id": "3", "memory": "Pixel eats salmon kibble", "score": 0.60},
-    ]
-    limits: list[int] = []
-
-    async def search(*_args: object, limit: int, **_kwargs: object) -> MemorySearchOutcome:
-        limits.append(limit)
-        return MemorySearchOutcome(results=hits[:limit])
-
-    monkeypatch.setattr(memory_functions, "search_agent_memories", search)
+    if agent_mode is not None:
+        config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
+    scored = [("The shed is painted green", 0.90), ("The shed roof is copper", 0.87), ("Pixel eats kibble", 0.60)]
+    index_limits = _semantic_index(monkeypatch, scored)
 
     prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
-    assert limits == [expected_limit]
-    injected = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
-    assert [line for line in injected if line in {hit["memory"] for hit in hits}] == expected
+    assert index_limits == [20]
+    assert _injected(prompt_parts, [memory for memory, _score in scored]) == [memory for memory, _ in scored[:2]]
+
+
+@pytest.mark.asyncio
+async def test_cold_index_keyword_fallback_keeps_top_three(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the semantic index is cold, the keyword fallback injects its top 3, even a hit over the token budget."""
+    config.memory.search.mode = "semantic"
+    long_memory = f"{_GARDEN_MEMORIES[0]} {' '.join(['notes'] * 900)}"
+    memories = (long_memory, *_GARDEN_MEMORIES[1:])
+    for memory in memories:
+        await add_agent_memory(memory, "general", config)
+    _semantic_index(monkeypatch, None)
+
+    prompt_parts = await build_memory_prompt_parts(_GARDEN_QUERY, "general", config)
+
+    assert _injected(prompt_parts, memories) == list(memories[:3])
+
+
+@pytest.mark.asyncio
+async def test_team_keyword_hit_cannot_suppress_semantic_hits(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Team keyword hits follow the gap-selected semantic hits, scored on their own scale, without displacing them."""
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memory = "Team note about the garden shed"
+    await store_conversation_memory(team_memory, ["general", "calculator"], "session-team", config)
+    scored = [("The shed is painted green", 0.80), ("The shed roof is copper", 0.78), ("Pixel eats kibble", 0.60)]
+    _semantic_index(monkeypatch, scored)
+
+    prompt_parts = await build_memory_prompt_parts(team_memory, "general", config)
+
+    candidates = [team_memory, *(memory for memory, _score in scored)]
+    assert _injected(prompt_parts, candidates) == [scored[0][0], scored[1][0], team_memory]
 
 
 @pytest.mark.asyncio

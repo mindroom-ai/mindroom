@@ -23,10 +23,14 @@ from evals.memory_recall.turns import Turn, write_turns
 from mindroom.config.main import load_config
 from mindroom.config.memory import MemorySearchConfig
 from mindroom.constants import resolve_runtime_paths, runtime_paths_with_storage_root
-from mindroom.memory import _semantic_file_search
+from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
+from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.memory import _semantic_file_search, build_memory_prompt_parts
+from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
 from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._semantic_file_search import search_semantic_file_memories
-from mindroom.memory.functions import _PER_TURN_SEARCH_LIMIT
+from mindroom.runtime_resolution import resolve_knowledge_binding
+from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
@@ -392,10 +396,67 @@ async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypa
             config=config,
             runtime_paths=runtime_paths_with_storage_root(runtime_paths, home / "storage"),
             search_config=MemorySearchConfig(mode="semantic"),
-            limit=_PER_TURN_SEARCH_LIMIT,
+            limit=_RECALL_SEARCH_LIMIT,
         )
         assert hits
         assert hits == select_recall_hits(live), query
+
+
+@pytest.mark.asyncio
+async def test_shipped_arm_matches_the_prompt_an_agent_gets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A semantic file-memory agent's per-turn prompt, built end to end over its real index, injects the shipped hits."""
+    memory_dir = _ranked_notes(tmp_path, monkeypatch)
+    # "rank000" has no two notes equally close, whose order would follow which the index wrote first.
+    queries = ["beacon", "lantern", "rank000"]
+    replayed = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-25", query) for query in queries])
+
+    agent_yaml = tmp_path / "agent" / "config.yaml"
+    agent_yaml.parent.mkdir()
+    agent_yaml.write_text(
+        CONFIG_YAML.replace(
+            "agents: {}",
+            "agents:\n  alpha:\n    display_name: Alpha\n    memory_backend: file\n"
+            "    memory_search:\n      mode: semantic",
+        ),
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=agent_yaml,
+        storage_path=tmp_path / "agent" / "storage",
+        process_env={},
+    )
+    config = load_config(runtime_paths)
+    file_memory = resolve_agent_file_memory_knowledge("alpha", config, runtime_paths, execution_identity=None)
+    assert file_memory is not None
+    shutil.copytree(memory_dir, file_memory.root / "memory")
+    binding = resolve_knowledge_binding(
+        file_memory.base_id,
+        file_memory.config,
+        runtime_paths,
+        None,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=file_memory.base_id,
+        config=file_memory.config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    assert (await manager.reindex_all()).published
+
+    for query, hits in zip(queries, replayed, strict=True):
+        prompt_parts = await build_memory_prompt_parts(
+            query,
+            "alpha",
+            config,
+            runtime_paths,
+            counter=fake_token_counter(),
+        )
+        expected = [hit["memory"] for hit in hits]
+        lines = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
+        assert expected
+        assert [line for line in lines if line.startswith("rank")] == expected, query
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,10 @@ overlay and hybrid search the per-turn recall uses. The `shipped` arm indexes th
 overlay, which leaves files out and splits entries itself; the other arms index through the overlay as it was before,
 with fixed 5,000-character chunks and no excludes. Hits that may have been written after a turn are dropped before
 selection, so a note written from that very turn cannot leak its answer.
+
+The `shipped` arm measures the agent's own semantic hits, the part of the shipped per-turn recall that
+`select_recall_hits` chooses. The file backend appends team keyword hits after them, and its keyword fallback for a
+cold index keeps the top 3; neither is replayed, since the benchmarked agents have no team memory.
 """
 
 from __future__ import annotations
@@ -30,11 +34,12 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.memory_entries import _ENTRY_START_RE, _HEADING_RE, split_memory_entries
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
+from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
 from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._semantic_file_search import _memory_results_from_hits
-from mindroom.memory.functions import _PER_TURN_SEARCH_LIMIT
 from mindroom.path_globs import matches_root_glob
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -136,7 +141,9 @@ async def replay(
         index_dir=index_dir,
         shipped=arm.shipped,
     )
-    limit = _PER_TURN_SEARCH_LIMIT if arm.shipped else _OVER_FETCH
+    limit = _RECALL_SEARCH_LIMIT if arm.shipped else _OVER_FETCH
+    # Loaded up front: until it is, selection budgets bytes instead of o200k tokens.
+    load_o200k()
     hit_times = _HitTimes(corpus, entry_chunks=arm.entry_chunks, first_added=first_added)
     semaphore = asyncio.Semaphore(_SEARCH_CONCURRENCY)
 
@@ -412,7 +419,8 @@ def _file_memory(root: Path, config: Config, *, shipped: bool) -> _FileMemoryKno
     )
     stock = file_memory.config.knowledge_bases[file_memory.base_id].model_copy(update={"chunk_strategy": "fixed"})
     return replace(
-        file_memory, config=file_memory.config.with_runtime_knowledge_base_overlay(file_memory.base_id, stock)
+        file_memory,
+        config=file_memory.config.with_runtime_knowledge_base_overlay(file_memory.base_id, stock),
     )
 
 

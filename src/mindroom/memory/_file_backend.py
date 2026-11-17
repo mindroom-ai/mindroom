@@ -24,7 +24,7 @@ from mindroom.timing import timed
 from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
-from ._prompting import redact_memory_text
+from ._prompting import redact_memory_text, select_recall_hits
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -794,6 +794,12 @@ def _agent_keyword_results(scope: MemoryScope, query: str, limit: int) -> list[M
     return _keyword_results(scope, query, limit)
 
 
+# Semantic hits the per-turn recall fetches for `select_recall_hits` to choose from. The store fuses
+# `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of a
+# three-hit search.
+_RECALL_SEARCH_LIMIT = 20
+
+
 @timed("system_prompt_assembly.memory_search.file.team_scope")
 def _team_keyword_results(scopes: list[MemoryScope], query: str, limit: int) -> list[MemoryResult]:
     return [result for scope in scopes for result in _keyword_results(scope, query, limit)]
@@ -832,6 +838,7 @@ class FileMemoryBackend:
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
         editable: bool = False,
+        recall: bool = False,
     ) -> MemorySearchOutcome:
         """Search file-backed memories visible to an agent: its own scope, then its teams' scopes by keyword.
 
@@ -839,6 +846,12 @@ class FileMemoryBackend:
         file-reading paths run in worker threads (#1260); only the semantic
         index query stays natively async. A semantic-path failure falls back
         to keyword matches and surfaces its classified cause in the outcome.
+
+        ``recall`` is the per-turn recall. Its semantic hits are chosen by
+        ``select_recall_hits`` from a wider search and come first; the best
+        ``limit`` team keyword hits follow, since keyword and cosine scores
+        are not comparable. Keyword matches, a fallback's included, rank as
+        in any search.
         """
         agent_scope, *teams = await asyncio.to_thread(
             _visible_scopes,
@@ -861,7 +874,7 @@ class FileMemoryBackend:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,
-                    limit=limit,
+                    limit=_RECALL_SEARCH_LIMIT if recall else limit,
                     execution_identity=execution_identity,
                 )
             except SemanticFileMemoryIndexUnavailableError as exc:
@@ -881,10 +894,15 @@ class FileMemoryBackend:
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
                 )
+        selected = None if results is None or not recall else select_recall_hits(results)
         if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
 
-        results.extend(await asyncio.to_thread(_team_keyword_results, teams, query, limit))
+        team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
+        if selected is not None:
+            team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+            return MemorySearchOutcome(results=selected + team_results[:limit], degraded_reason=degraded_reason)
+        results.extend(team_results)
         results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 

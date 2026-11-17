@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.logging_config import get_logger
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
@@ -15,7 +14,7 @@ from mindroom.timing import timed
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
-from ._prompting import format_memories_as_context, select_recall_hits
+from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
 if TYPE_CHECKING:
@@ -32,13 +31,6 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
-
-# Hits the per-turn search injects, for every recall but semantic file memory's.
-_PER_TURN_TOP_K = 3
-# Hits the per-turn search over semantic file memory fetches for `select_recall_hits` to choose from. The store fuses
-# `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of a
-# three-hit search.
-_PER_TURN_SEARCH_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -95,8 +87,12 @@ async def search_agent_memories(
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
     editable: bool = False,
+    recall: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept."""
+    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept.
+
+    ``recall`` marks the per-turn recall, which semantic file memory narrows by score gap and token budget.
+    """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
@@ -106,6 +102,7 @@ async def search_agent_memories(
         limit=limit,
         execution_identity=execution_identity,
         editable=editable,
+        recall=recall,
     )
 
 
@@ -284,20 +281,15 @@ async def build_memory_prompt_parts(
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemoryPromptParts()
 
-    # Score-gap selection was measured on semantic file memory only; other recalls keep their top hits.
-    selects = memory_backend(config, agent_name) == "file" and memory_search(config, agent_name).mode == "semantic"
     search_outcome = await search_agent_memories(
         prompt,
         agent_name,
         config,
         runtime_paths,
-        limit=_PER_TURN_SEARCH_LIMIT if selects else _PER_TURN_TOP_K,
         execution_identity=execution_identity,
+        recall=True,
     )
     agent_memories = search_outcome.results
-    if selects:
-        # Off the event loop: the first selection loads the token encoder, which may download its vocabulary.
-        agent_memories = await asyncio.to_thread(select_recall_hits, agent_memories)
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
