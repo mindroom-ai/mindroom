@@ -323,8 +323,8 @@ def owner_runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
     )
 
 
-def owner_config(paths: RuntimePaths) -> Config:
-    """Alice's personal agent, made from a template that gives it `matrix_user`, with its Matrix account recorded."""
+def write_owner_roster(paths: RuntimePaths) -> None:
+    """Record Alice's personal agent, made from the template `mind`, in the runtime's roster."""
     entry = PersonalAgentRosterEntry(
         template="mind",
         user_id=OWNER,
@@ -337,6 +337,11 @@ def owner_config(paths: RuntimePaths) -> Config:
     roster_path = personal_agent_roster_path(paths)
     roster_path.parent.mkdir(parents=True, exist_ok=True)
     roster_path.write_text(PersonalAgentRoster(entries=[entry]).model_dump_json(), encoding="utf-8")
+
+
+def owner_config(paths: RuntimePaths) -> Config:
+    """Alice's personal agent, made from a template that gives it `matrix_user`, with its Matrix account recorded."""
+    write_owner_roster(paths)
     data = {
         "models": {"default": {"provider": "openai", "id": "m"}},
         "personal_agents": {
@@ -356,14 +361,17 @@ def owner_turn(
     requester_id: str = OWNER,
     agent_name: str = AGENT,
     attachment_ids: tuple[str, ...] = (),
+    room_id: str = ROOM,
+    **fields: object,
 ) -> AbstractContextManager[None]:
-    """Enter a chat turn in ``ROOM`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
+    """Enter a chat turn in ``room_id`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
 
-    The turn holds the attachments ``attachment_ids`` name, stored in the runtime's storage, as a bot's turn does.
+    The turn holds the attachments ``attachment_ids`` name, stored in the runtime's storage, as a bot's turn does, and
+    any other context ``fields``.
     """
     context = make_test_tool_runtime_context(
         agent_name=agent_name,
-        target=MessageTarget.resolve(ROOM, None, "$event"),
+        target=MessageTarget.resolve(room_id, None, "$event"),
         requester_id=requester_id,
         client=MagicMock(),
         config=config,
@@ -372,6 +380,7 @@ def owner_turn(
         conversation_reader=make_conversation_reader_mock(),
         storage_path=paths.storage_root,
         attachment_ids=attachment_ids,
+        **fields,
     )
     return tool_runtime_context(context)
 
