@@ -116,6 +116,43 @@ async def test_secret_in_candidate_is_sent_redacted() -> None:
     assert scores == [0.7, 0.3]
 
 
+def _straddling(offset: int) -> str:
+    """A text over the clip length whose secret starts ``offset`` characters into it."""
+    return "." * offset + f" {_SECRET} " + "." * (3_000 - offset)
+
+
+def _secret_fragments(body: str) -> list[str]:
+    """Every 8-character piece of the secret that appears in a posted body."""
+    pieces = {_SECRET[start : start + 8] for start in range(len(_SECRET) - 7)}
+    return sorted(piece for piece in pieces if piece in body)
+
+
+# A 3,044-character text keeps [0, 1000) and [2044, 3044); offsets 990 and 2024 put the secret across each edge.
+_CLIP_EDGES = [990, 2_024]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", _CLIP_EDGES)
+async def test_secret_across_a_clip_edge_of_a_candidate_never_leaves(offset: int) -> None:
+    """A credential cut by the clip window is redacted before clipping, and the candidate is still judged."""
+    seen: list[httpx.Request] = []
+    scores = await _reranker(_answers({"c0": 0.7}), seen).ascore("query", [_straddling(offset)])
+
+    assert _secret_fragments(seen[0].content.decode()) == []
+    assert scores == [0.7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", _CLIP_EDGES)
+async def test_secret_across_a_clip_edge_of_the_query_never_leaves(offset: int) -> None:
+    """A credential cut by the clip window of the query is redacted before clipping."""
+    seen: list[httpx.Request] = []
+    scores = await _reranker(_answers({"c0": 0.7}), seen).ascore(_straddling(offset), ["a"])
+
+    assert _secret_fragments(seen[0].content.decode()) == []
+    assert scores == [0.7]
+
+
 @pytest.mark.asyncio
 async def test_candidates_past_the_byte_cap_score_zero() -> None:
     """Leading candidates that fit one request are judged; the rest score 0.0 and keep their order."""
