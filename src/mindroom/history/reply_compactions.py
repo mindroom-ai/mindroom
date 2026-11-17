@@ -101,28 +101,26 @@ class ReplyCompactions:
 
 
 class ReplyCompactionLifecycle:
-    """Compaction lifecycle that records automatic compactions on the reply and sends manual ones as notices."""
+    """Compaction lifecycle that records automatic compactions on the reply and sends manual ones as notices.
+
+    Every lifecycle event carries its compaction's mode, which picks the sink.
+    """
 
     def __init__(self, recorder: ReplyCompactions, notice: MatrixCompactionLifecycle) -> None:
         self._recorder = recorder
         self._notice = notice
-        # The handles the notice returned, so a manual compaction's later events reach it.
-        self._notice_ids: set[str] = set()
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Send a manual compaction's notice, or record an automatic one on the reply."""
         if event.mode == "manual":
-            notice_id = await self._notice.start(event)
-            if notice_id is not None:
-                self._notice_ids.add(notice_id)
-            return notice_id
+            return await self._notice.start(event)
         return self._recorder.start(event)
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
         """Report persisted compaction progress to whichever sink the compaction started in."""
         if event.notice_event_id is None:
             return
-        if event.notice_event_id in self._notice_ids:
+        if event.mode == "manual":
             await self._notice.progress(event)
             return
         self._recorder.update(
@@ -140,7 +138,7 @@ class ReplyCompactionLifecycle:
         entry_id = outcome.lifecycle_notice_event_id
         if entry_id is None:
             return
-        if entry_id in self._notice_ids:
+        if outcome.mode == "manual":
             await self._notice.complete_success(outcome)
             return
         self._recorder.update(
@@ -157,7 +155,7 @@ class ReplyCompactionLifecycle:
         """Report a failed compaction to whichever sink it started in."""
         if event.notice_event_id is None:
             return
-        if event.notice_event_id in self._notice_ids:
+        if event.mode == "manual":
             await self._notice.complete_failure(event)
             return
         self._recorder.update(

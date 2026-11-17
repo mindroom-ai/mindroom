@@ -26,6 +26,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     StreamingResponse,
+    UnfinishedStreamedReply,
     send_streaming_response,
     stream_progress_edits,
 )
@@ -151,6 +152,7 @@ async def _run(
     placeholder_event_id: str | None = None,
     show_tool_calls: bool = True,
     compactions: ReplyCompactions | None = None,
+    resumed: UnfinishedStreamedReply | None = None,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
@@ -163,6 +165,7 @@ async def _run(
             adopt_existing_placeholder=placeholder_event_id is not None,
             show_tool_calls=show_tool_calls,
             compactions=compactions,
+            resumed=resumed,
             **records.hooks(),
         )
 
@@ -463,6 +466,33 @@ async def test_compaction_after_two_visible_tools_anchors_after_tool_2(tmp_path:
 async def test_compaction_with_hidden_tool_calls_anchors_at_zero(tmp_path: Path, frames: _Frames) -> None:
     """Without tool-call markers in the body, a compaction sits at the top of the reply."""
     assert await _anchored_compaction(tmp_path, frames, show_tool_calls=False) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(tmp_path: Path, frames: _Frames) -> None:
+    """A resumed reply's earlier tool calls count: a compaction before any new tool sits after them."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    resumed = UnfinishedStreamedReply(
+        visible_text="🔧 `counter` [1]\n\nHalf of the report",
+        tool_trace=(
+            ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        ),
+    )
+    stream = _stream(compaction.start, 0.05, compaction.succeed, 0.05, "The rest.", 0.03)
+    await _run(
+        _config(tmp_path),
+        stream,
+        records,
+        edits,
+        placeholder_event_id="$placeholder",
+        compactions=recorder,
+        resumed=resumed,
+    )
+
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    assert entry["after_tool"] == 1
+    assert [live["after_tool"] for live in _live_compactions(frames.sent)] == [1]
 
 
 @pytest.mark.asyncio

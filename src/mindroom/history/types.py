@@ -231,6 +231,7 @@ class CompactionLifecycleProgress:
     runs_remaining: int
     threshold_tokens: int | None = None
     duration_ms: int | None = None
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     notice_event_id: str | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
@@ -273,6 +274,7 @@ class CompactionLifecycleProgress:
 class CompactionLifecycleFailure:
     """Visible lifecycle notice payload emitted after failed foreground compaction."""
 
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     notice_event_id: str | None
     mode: CompactionMode
     session_id: str
@@ -285,19 +287,19 @@ class CompactionLifecycleFailure:
 
 
 class CompactionLifecycle(Protocol):
-    """Interface for ordered foreground compaction Matrix notice delivery."""
+    """Interface that reports a foreground compaction's lifecycle, as a notice or on the reply, in order."""
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Report a compaction's start and return a handle its later events carry back, or ``None`` to get none."""
 
     async def complete_success(self, outcome: CompactionOutcome) -> None:
-        """Edit the lifecycle notice after successful compaction."""
+        """Report a successful compaction."""
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
-        """Edit the lifecycle notice after persisted compaction progress."""
+        """Report persisted compaction progress."""
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-        """Edit the lifecycle notice after failed compaction."""
+        """Report a failed compaction."""
 
 
 @dataclass(frozen=True)
@@ -318,6 +320,7 @@ class CompactionOutcome:
     compacted_run_count: int
     compacted_at: str
     history_budget_tokens: int | None = None
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
 

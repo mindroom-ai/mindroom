@@ -2718,12 +2718,14 @@ class TestAgentBot(AgentBotTestBase):
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streamed", [False, True], ids=["collected", "streamed"])
     async def test_auto_compaction_records_on_reply_without_notice(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        streamed: bool,
     ) -> None:
-        """An automatic compaction is recorded on the reply it ran for, and sends no separate notice."""
+        """An automatic compaction is recorded on the reply it ran for, collected or streamed, and sends no notice."""
 
         async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             lifecycle = ctx.compaction_lifecycle
@@ -2762,12 +2764,19 @@ class TestAgentBot(AgentBotTestBase):
 
         sent_contents: list[dict[str, Any]] = []
         deliver_sent = delivered_matrix_side_effect("$response")
+        progress_edits: list[dict[str, Any]] = []
+        deliver_progress_edit = delivered_matrix_side_effect("$edit")
 
         async def record_send(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
             content = kwargs.get("content", args[2] if len(args) > 2 else None)
             if isinstance(content, dict):
                 sent_contents.append(content)
             return await deliver_sent(*args, **kwargs)
+
+        async def record_progress_edit(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            # A streamed reply's progress edits: (client, room_id, event_id, content, text).
+            progress_edits.append(cast("dict[str, Any]", args[3]))
+            return await deliver_progress_edit(*args, **kwargs)
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -2780,7 +2789,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=streamed),
             patch(
                 "mindroom.response_runner.stream_agent_response",
                 new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
@@ -2790,6 +2799,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_progress_edit)),
             patch(
                 "mindroom.reply_turn.locked_turn.store_conversation_memory",
                 new_callable=AsyncMock,
@@ -2829,6 +2839,9 @@ class TestAgentBot(AgentBotTestBase):
         assert entry["mode"] == "auto"
         assert entry["after_tool"] == 0
         assert entry["after_tokens"] == 4_000
+        # A streamed reply also shows it in a progress edit, which only the stream itself writes.
+        shown = [content[COMPACTIONS_CONTENT_KEY] for content in progress_edits if COMPACTIONS_CONTENT_KEY in content]
+        assert [entries[0]["status"] for entries in shown] == (["success"] if streamed else [])
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 2), (False, 0)])
