@@ -62,8 +62,11 @@ _METRIC_COLUMNS = (
     "judge_errors",
     "search_errors",
     "rerank_errors",
-    "usd_per_turn_estimate",
+    "usd_per_turn",
+    "usd_source",
 )
+#: How the turns of a rerank row were priced, by whether each turn's price was billed.
+_USD_SOURCES = {frozenset({True}): "billed", frozenset({False}): "estimate", frozenset({True, False}): "mixed"}
 _LATENCY_COLUMNS = (
     "latency_turns",
     "latency_added_p50_ms",
@@ -137,7 +140,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     tuning, held_out = split_turns(len(turns), seed=args.split_seed)
     splits = {"all": list(range(len(turns))), "tuning": tuning, "held_out": held_out}
 
-    results: dict[str, dict[str, dict[str, float]]] = {split: {} for split in splits}
+    results: dict[str, dict[str, dict[str, float | str | None]]] = {split: {} for split in splits}
     latency: dict[str, dict[str, float | str | None]] = {}
     with JudgeCache(out / "judge.sqlite") as cache, RerankCache(out / "rerank.sqlite") as rerank_cache:
         async with httpx.AsyncClient(transport=transport) as client:
@@ -240,7 +243,7 @@ async def _arm_rows(
     sample = None
     if latency_turns:
         sample = await measure_latency(
-            inner,
+            inner if spec.create_live is None else spec.create_live(runtime_paths),
             [turns[index] for index in held_out],
             [replayed[index] for index in held_out],
             count=latency_turns,
@@ -344,15 +347,17 @@ def arm_metrics(
     }
 
 
-def rerank_metrics(reranked: Sequence[TurnRerank | None]) -> dict[str, float]:
-    """Return the turns whose reranker call failed (they kept the hybrid selection) and the mean estimated price.
+def rerank_metrics(reranked: Sequence[TurnRerank | None]) -> dict[str, float | str | None]:
+    """Return the turns whose reranker call failed (they kept the hybrid selection) and the mean list price.
 
-    The price counts only turns that called the reranker; both are 0 for an arm without one.
+    The price counts only turns that called the reranker; `usd_source` says whether it is the provider's billed input
+    (`billed`), the o200k estimate (`estimate`) or both (`mixed`), and is None for an arm without a reranker.
     """
     calls = [call for call in reranked if call is not None]
     return {
         "rerank_errors": sum(call.scores is None for call in calls),
-        "usd_per_turn_estimate": sum(call.usd for call in calls) / len(calls) if calls else 0.0,
+        "usd_per_turn": sum(call.usd for call in calls) / len(calls) if calls else 0.0,
+        "usd_source": _USD_SOURCES.get(frozenset(call.billed for call in calls)),
     }
 
 

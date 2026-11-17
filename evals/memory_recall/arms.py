@@ -121,6 +121,16 @@ ARMS: dict[str, Arm] = {
         reranker="bge-reranker-v2-m3",
     ),
 }
+# The `shipped` candidates, reranked by a judgment backend (A6), or by one that also asks the gate question (A7).
+ARMS |= {
+    name: replace(ARMS["A5"], name=name, reranker=reranker)
+    for name, reranker in (
+        ("A6o", "openai_decisions"),
+        ("A6t", "typesafe"),
+        ("A7o", "openai_decisions-gate"),
+        ("A7t", "typesafe-gate"),
+    )
+}
 
 # The most hits that keep live recall's ranking: the store fuses `max(limit * 2, 50)` candidates per ranking, 50 for
 # the live per-turn limit of 3, and any larger limit would fuse more and could reorder the top hits.

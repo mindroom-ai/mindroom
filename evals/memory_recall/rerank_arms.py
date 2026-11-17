@@ -11,12 +11,15 @@ against the live provider, and counts as a fallback each call that failed or pas
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.judgment import rerank as judgment_rerank
 from mindroom.knowledge.rerank import _create_reranker
 from mindroom.memory._file_backend import _RECALL_SELECTION, _retrieve_memories
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
@@ -25,9 +28,12 @@ from mindroom.token_counting.families import load_o200k
 from .rerank_cache import checked_scores
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
+    from mindroom.config.judgment import ProbabilityJudgmentConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.judgment.answers import JudgmentResult
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.knowledge.rerank import Reranker
     from mindroom.memory._shared import MemoryResult
 
@@ -52,9 +58,11 @@ class RerankerSpec:
     usd_per_million_input_tokens: float
     create: Callable[[RuntimePaths], Reranker]
     #: Input tokens a priced request adds besides the query and candidate texts: its framing, and each candidate's
-    #: question. Estimates until the provider's billed input is measured.
+    #: question. Only for the estimate a turn falls back to when the provider's billed input is unknown.
     request_overhead_tokens: int = 0
     candidate_overhead_tokens: int = 0
+    #: Builds the reranker as live recall configures it, for latency mode; None means `create` already does.
+    create_live: Callable[[RuntimePaths], Reranker] | None = None
 
 
 def _cross_encoder(model: str) -> Callable[[RuntimePaths], Reranker]:
@@ -64,10 +72,67 @@ def _cross_encoder(model: str) -> Callable[[RuntimePaths], Reranker]:
     return lambda runtime_paths: _create_reranker(config, runtime_paths)
 
 
-def _needs_judgment_reranker(runtime_paths: RuntimePaths) -> Reranker:
-    _ = runtime_paths
-    msg = "This reranker needs the judgment reranker (unified-retrieval PR 4), which does not exist yet"
-    raise NotImplementedError(msg)
+class _BilledJudgment:
+    """The production judgment reranker, keeping the input tokens its provider billed for the last call.
+
+    Calls must not overlap, as `rerank_turns` makes them one turn at a time.
+    """
+
+    def __init__(self, settings: ProbabilityJudgmentConfig, runtime_paths: RuntimePaths, *, gate: bool) -> None:
+        reranker = judgment_rerank.create_judgment_reranker(settings, runtime_paths)
+        if reranker is None:
+            msg = f"The {settings.provider} reranker has no API key"
+            raise RuntimeError(msg)
+        batch = replace(reranker.batch, evaluate=self._billed(reranker.batch.evaluate))
+        self._reranker = replace(reranker, batch=batch, gate=gate)
+        self.last_input_tokens: int | None = None
+
+    def _billed(
+        self,
+        evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult[tuple[float | None, ...]]]],
+    ) -> Callable[[JudgmentRequest], Awaitable[JudgmentResult[tuple[float | None, ...]]]]:
+        async def billed(request: JudgmentRequest) -> JudgmentResult[tuple[float | None, ...]]:
+            result = await evaluate(request)
+            self.last_input_tokens = result.input_tokens
+            return result
+
+        return billed
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        """Score `documents` as the production reranker does."""
+        self.last_input_tokens = None
+        return await self._reranker.ascore(query, documents)
+
+
+def _rubric_version(*, gate: bool) -> str:
+    """Return a short hash of the questions a judgment request asks, so a changed rubric scores afresh."""
+    questions = [judgment_rerank._candidate_question(0, "{passage}"), *([judgment_rerank._GATE] if gate else [])]
+    return hashlib.sha256(repr(questions).encode()).hexdigest()[:12]
+
+
+def _judgment(
+    provider: Literal["openai_decisions", "typesafe"],
+    *,
+    gate: bool,
+    usd_per_million_input_tokens: float,
+) -> RerankerSpec:
+    """Return a judgment arm's spec: quality calls wait up to `CALL_CAP_S`, latency calls time out as live ones."""
+
+    def settings(**overrides: float) -> ProbabilityJudgmentConfig:
+        if provider == "typesafe":
+            return TypeSafeJudgmentConfig(provider="typesafe", **overrides)
+        return OpenAIDecisionsJudgmentConfig(provider="openai_decisions", **overrides)
+
+    return RerankerSpec(
+        provider=provider,
+        model="jev-1.13.0" if provider == "typesafe" else OPENAI_DECISIONS_MODEL,
+        rubric_version=_rubric_version(gate=gate),
+        usd_per_million_input_tokens=usd_per_million_input_tokens,
+        create=lambda paths: _BilledJudgment(settings(timeout_seconds=CALL_CAP_S), paths, gate=gate),
+        request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
+        candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
+        create_live=lambda paths: _BilledJudgment(settings(), paths, gate=gate),
+    )
 
 
 # The plan's estimate of a judgment request: about 60 rubric tokens per candidate, plus framing around them.
@@ -81,33 +146,21 @@ RERANKERS: dict[str, RerankerSpec] = {
         usd_per_million_input_tokens=0.0,
         create=_cross_encoder("BAAI/bge-reranker-v2-m3"),
     ),
-    "openai_decisions": RerankerSpec(
-        provider="openai_decisions",
-        model=OPENAI_DECISIONS_MODEL,
-        rubric_version="",
-        usd_per_million_input_tokens=0.10,
-        create=_needs_judgment_reranker,
-        request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
-        candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
-    ),
-    "typesafe": RerankerSpec(
-        provider="typesafe",
-        model="jev-1.13.0",
-        rubric_version="",
-        usd_per_million_input_tokens=0.042,
-        create=_needs_judgment_reranker,
-        request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
-        candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
-    ),
+    "openai_decisions": _judgment("openai_decisions", gate=False, usd_per_million_input_tokens=0.10),
+    "typesafe": _judgment("typesafe", gate=False, usd_per_million_input_tokens=0.042),
+    "openai_decisions-gate": _judgment("openai_decisions", gate=True, usd_per_million_input_tokens=0.10),
+    "typesafe-gate": _judgment("typesafe", gate=True, usd_per_million_input_tokens=0.042),
 }
 
 
 @dataclass(frozen=True)
 class TurnRerank:
-    """One turn's reranker scores (None when the call failed) and its estimated list price."""
+    """One turn's reranker scores (None when the call failed) and its list price, billed or estimated."""
 
     scores: list[float] | None
     usd: float
+    #: Whether `usd` is the provider's billed input; otherwise it is the o200k estimate.
+    billed: bool
 
 
 @dataclass(frozen=True)
@@ -143,7 +196,10 @@ async def rerank_turns(
     reranker: CachedReranker,
     spec: RerankerSpec,
 ) -> list[TurnRerank | None]:
-    """Score each turn's candidates, from the cache where it can; None for a turn with none to score."""
+    """Score each turn's candidates, from the cache where it can; None for a turn with none to score.
+
+    A turn costs the input its provider billed for its whole request, when that is known; else the o200k estimate.
+    """
     reranked: list[TurnRerank | None] = []
     for turn, turn_candidates in zip(turns, candidates, strict=True):
         if not turn_candidates:
@@ -155,17 +211,17 @@ async def rerank_turns(
         except Exception as exc:  # any failure: live recall keeps the hybrid selection
             _logger.warning("Reranking a turn failed; it keeps the hybrid selection: %.300s", exc)
             scores = None
-        reranked.append(TurnRerank(scores=scores, usd=_usd(spec, turn.query, texts)))
+        billed = reranker.billed_input_tokens(turn.query, texts)
+        tokens = _estimated_tokens(spec, turn.query, texts) if billed is None else billed
+        usd = tokens * spec.usd_per_million_input_tokens / 1_000_000
+        reranked.append(TurnRerank(scores=scores, usd=usd, billed=billed is not None))
     return reranked
 
 
-def _usd(spec: RerankerSpec, query: str, texts: Sequence[str]) -> float:
-    """Return the estimated list price of one request scoring `texts` for `query`."""
-    if not spec.usd_per_million_input_tokens:
-        return 0.0
+def _estimated_tokens(spec: RerankerSpec, query: str, texts: Sequence[str]) -> int:
+    """Return the estimated input tokens of one request scoring `texts` for `query`."""
     tokens = sum(len(load_o200k().encode_ordinary(text)) for text in (query, *texts))
-    tokens += spec.request_overhead_tokens + spec.candidate_overhead_tokens * len(texts)
-    return tokens * spec.usd_per_million_input_tokens / 1_000_000
+    return tokens + spec.request_overhead_tokens + spec.candidate_overhead_tokens * len(texts)
 
 
 async def measure_latency(

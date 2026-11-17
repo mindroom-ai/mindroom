@@ -64,7 +64,8 @@ METRIC_KEYS = {
     "judge_errors",
     "search_errors",
     "rerank_errors",
-    "usd_per_turn_estimate",
+    "usd_per_turn",
+    "usd_source",
 }
 THREAD = "!room:example.org:$thread-root"
 ROOM = "!room:example.org"

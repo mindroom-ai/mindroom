@@ -15,6 +15,8 @@ The design is in `docs/baspowers/specs/2026-11-16-memory-recall-efficiency-desig
 | shipped | all of `memory/**/*.md`, which the shipped overlay filters with `memory.search.exclude: [memory/archive/**]`, as Bas's deployment sets it | the shipped overlay's entry chunks | as A3, over 20 hits | no |
 | shipped_default | as `shipped`, with the default `memory.search`, which excludes nothing | as `shipped` | as `shipped` | no |
 | A5 | as `shipped` | as `shipped` | the 20 `shipped` candidates reranked by `BAAI/bge-reranker-v2-m3` (local cross-encoder), kept from the best down while at or above the threshold, at most 5 and 800 tokens | no |
+| A6o, A6t | as `shipped` | as `shipped` | as A5, reranked by the `openai_decisions` (`gpt-6-luna`) or `typesafe` (`jev-1.13.0`) judgment backend: one predicate per candidate, in one request | no |
+| A7o, A7t | as `shipped` | as `shipped` | as A6o, A6t, plus the gate question in the same request, which caps every score | no |
 
 Every arm indexes its corpus with MindRoom's own knowledge indexer (`KnowledgeManager.reindex_all`) and the embedder in
 `memory.embedder`, and searches it through the file-memory overlay with hybrid search.
@@ -40,12 +42,15 @@ compare arms with each other, not with live recall.
 
 ### Rerank arms
 
-An arm with a `reranker` (A5) replays the `shipped` search, scores all its candidates with that reranker
+An arm with a `reranker` (A5 to A7t) replays the `shipped` search, scores all its candidates with that reranker
 (`rerank_arms.RERANKERS`), and keeps the best-scoring hits at or above each threshold in `--thresholds`
-(default `0.3,0.5,0.7,0.8`), one results row per threshold (`A5@0.5`).
+(default `0.3,0.5,0.7,0.8`), one results row per threshold (`A5@0.5`), through live recall's own `retrieve()`
+selection.
 The turns are scored once, and every threshold reads the same scores.
 `rerank.sqlite` caches each score by the sha256 of provider, model, rubric version, query and text, so a rerun or a
 new threshold asks no provider again.
+A judgment arm's rubric version is a hash of the questions its request asks (`mindroom.judgment.rerank`, with the gate
+question for A7), so a changed rubric scores afresh.
 A turn whose reranker fails, or returns a wrong count or a non-finite score, keeps the `shipped` selection.
 Selection uses every score a call returned, however long it took, so the quality rows say nothing about latency.
 
@@ -53,12 +58,16 @@ Latency is measured apart, with `--latency-turns N` (the gate uses 200): after o
 arm calls its provider, uncached, for the first N held-out turns that have candidates, one turn at a time, so every
 gate rule is checked on held-out turns.
 A call that fails or takes over 2 seconds (live recall's deadline) is a fallback, and adds 2 seconds to the turn.
+A judgment arm's timed calls use the production `timeout_seconds` (1.5), so a call live recall would drop at 1.5 s
+fails there too; its quality calls wait up to 30 seconds instead.
 Calls are not cancelled at the deadline, so a slow call cannot delay the next one.
 A call still running after 30 seconds (`CALL_CAP_S`) is cancelled and recorded as a timeout, a fallback, and the
 measurement goes on; a warm-up still running then ends the arm's latency measurement with `latency_failure`.
 Run it against the live provider on a machine that is not busy with anything else.
-`openai_decisions` and `typesafe` are listed with their list prices but need the judgment reranker (unified-retrieval
-PR 4) before an arm can use them.
+The judgment arms are built by `mindroom.judgment.rerank.create_judgment_reranker`, the production path (redaction,
+clipping, packing and the 128,000-byte request cap included); A7 sets its `gate`.
+They read their key as production does: `OPENAI_API_KEY` (or a saved OpenAI credential) for A6o and A7o,
+`TYPESAFE_API_KEY` for A6t and A7t; without one, the run stops with "The <provider> reranker has no API key".
 Rerank arms run only when named in `--arms`; A5 loads the cross-encoder in process, so run it on a machine with room.
 
 ## Run
@@ -75,6 +84,14 @@ uv run python -m evals.memory_recall.run \
   --key-env OPENROUTER_API_KEY   # judge key; --limit N replays only the first N turns
   # --thresholds 0.3,0.5,0.7,0.8 for rerank arms; --split-seed N (default 0) for the tuning/held-out split
   # --latency-turns 200 to time rerank calls; --judge-model M for a second judge
+```
+
+The judgment arms, with their providers' keys in the environment:
+
+```bash
+OPENAI_API_KEY=... TYPESAFE_API_KEY=... uv run python -m evals.memory_recall.run \
+  --turns /tmp/recall/turns.jsonl --memory-dir <memory dir> --config ~/.mindroom-chat/config.yaml \
+  --arms shipped,A6o,A6t,A7o,A7t --out /tmp/recall/out --key-env OPENROUTER_API_KEY
 ```
 
 A second judge (`--judge-model google/gemini-3.8-flash`) reruns the same command into the same `--out`: verdicts are
@@ -108,11 +125,13 @@ Per arm, over the turns whose search succeeded (tokens are o200k, counted over t
 - `search_errors`: turns whose search still failed after four attempts. They count nowhere else, not even in
   `turns`.
 - `rerank_errors`: turns whose reranker call failed, which kept the `shipped` selection.
-- `usd_per_turn_estimate`: mean list price of a turn's reranker call: the o200k tokens of the query and candidates
-  plus the provider's estimated request and per-candidate overhead (`RerankerSpec`). An estimate: measure the billed
-  input before reading it against a price limit.
+- `usd_per_turn`: mean list price of a turn's reranker call, input only ($0.10/M for OpenAI Decisions, $0.042/M for
+  TypeSafe; output is free). A turn whose whole request was sent costs the input tokens the provider billed, which
+  `rerank.sqlite` keeps for reruns; otherwise (a partly cached request, or a provider that reports no usage) it is
+  estimated: the o200k tokens of the query and candidates plus the request and per-candidate overhead (`RerankerSpec`).
+- `usd_source`: `billed`, `estimate`, or `mixed` when the turns were priced both ways; `n/a` without a reranker.
 
-Both count only turns that called the reranker, and are 0 for an arm without one.
+These count only turns that called the reranker; `rerank_errors` and `usd_per_turn` are 0 for an arm without one.
 
 Latency table (`--latency-turns` only), per rerank arm:
 
