@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 # Legacy format: Knowledge-index metadata omitted chunk_strategy; every index then held fixed-size chunks.
 # Last legacy release: v2026.11.366; replacement: unreleased, which persists the chunk strategy.
 # Handling: Keep absence empty, the identity of fixed-size chunks, so only a base chunked another way rebuilds.
-# Coverage: tests/test_file_memory_knowledge.py::test_chunk_strategy_change_rebuilds_index.
+# Coverage: tests/test_file_memory_knowledge.py::test_chunk_strategy_is_part_of_the_index_settings.
 
 
 def normalize_legacy_indexing_settings(

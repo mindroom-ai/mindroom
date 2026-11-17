@@ -24,7 +24,7 @@ from mindroom.timing import timed
 from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
-from ._prompting import redact_memory_text, select_recall_hits
+from ._prompting import add_within_recall_budget, redact_memory_text, select_recall_hits
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -850,7 +850,8 @@ class FileMemoryBackend:
         ``recall`` is the per-turn recall. Its semantic hits are chosen by
         ``select_recall_hits`` from a wider search and come first; the best
         ``limit`` team keyword hits follow, since keyword and cosine scores
-        are not comparable. Keyword matches, a fallback's included, rank as
+        are not comparable, each only if it fits the token budget the
+        semantic hits left. Keyword matches, a fallback's included, rank as
         in any search.
         """
         agent_scope, *teams = await asyncio.to_thread(
@@ -901,7 +902,10 @@ class FileMemoryBackend:
         team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
         if selected is not None:
             team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
-            return MemorySearchOutcome(results=selected + team_results[:limit], degraded_reason=degraded_reason)
+            return MemorySearchOutcome(
+                results=add_within_recall_budget(selected, team_results[:limit]),
+                degraded_reason=degraded_reason,
+            )
         results.extend(team_results)
         results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)

@@ -19,12 +19,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_CHUNK_SIZE = 5000
+# The most characters of one memory entry chunk; a longer entry is split into pieces.
+_CHUNK_SIZE = 1200
 _CHUNK_OVERLAP = 0
 _MEMORY_KNOWLEDGE_PREFIX = "file_memory"
 _FILE_MEMORY_DESCRIPTION = (
     "Configured file memory for this agent. "
-    "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
+    "Read-only semantic search over configured Markdown paths (default: memory/**/*.md, without memory/archive/**)."
 )
 
 

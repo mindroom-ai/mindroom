@@ -1,79 +1,59 @@
-"""Split memory Markdown files into dated entries, the units recall indexes and returns.
+"""Split memory Markdown files into entries, the units recall indexes and returns.
 
 Daily notes hold one entry per `- [id=m_YYYYMMDDhhmmss_…]` line; older entries start with `[auto_flush:…]` instead.
 Topic files hold one entry per Markdown heading (`#` to `###`), with any text before the first heading as its own entry.
 Both kinds of boundary are honoured in every file, so a topic file with id entries splits on those too.
-An entry is dated by its id; without one, by a `YYYY-MM-DD` prefix of the file name; otherwise its date is unknown.
-An entry longer than the size cap is split at whitespace into pieces that keep its date.
+A heading inside a fenced code block is code, such as a shell comment, not a boundary; an entry line still is, and it
+closes the fence, so one entry's unclosed fence cannot swallow the rest of a daily note.
+An entry longer than the size cap is split at whitespace into pieces.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from datetime import date, datetime
-from pathlib import PurePath
 
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.readers import Document
 
-_ENTRY_START_RE = re.compile(r"^(?:- )?\[(?:id=m_(?P<id_date>\d{8})\d{6}_|auto_flush:)")
+_ENTRY_START_RE = re.compile(r"^(?:- )?\[(?:id=m_\d{14}_|auto_flush:)")
 _HEADING_RE = re.compile(r"^#{1,3}\s")
-_FILE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# A fence may be indented, as inside a list item; a backtick fence's info string holds no backtick.
+_FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}(?=[^`]*$)|~{3,})(?P<info>.*)$")
 
 
-@dataclass(frozen=True)
-class _MemoryEntry:
-    """One recall unit of a memory file and the day it was written, when known."""
+def split_memory_entries(text: str, max_chars: int) -> list[str]:
+    """Split one memory file's text into stripped entries of at most ``max_chars`` characters, in file order.
 
-    text: str
-    date: date | None
-
-
-def split_memory_entries(text: str, *, file_name: str, max_chars: int = 1200) -> list[_MemoryEntry]:
-    """Split one memory file's text into entries of at most ``max_chars`` characters; blank entries are dropped."""
-    file_date = _file_date(file_name)
-    entries: list[_MemoryEntry] = []
-    for section in _sections(text):
-        body = section.strip()
-        if not _has_content(body):
-            continue
-        entry_date = _id_date(body) or file_date
-        entries.extend(_MemoryEntry(text=piece, date=entry_date) for piece in _pieces(body, max_chars))
-    return entries
+    Blank and heading-only entries are dropped.
+    """
+    entries = [body for section in _sections(text) if _has_content(body := section.strip())]
+    return [piece for entry in entries for piece in _pieces(entry, max_chars)]
 
 
 def _sections(text: str) -> list[str]:
     sections: list[list[str]] = [[]]
+    open_fence: str | None = None
     for line in text.splitlines():
-        if _ENTRY_START_RE.match(line) or _HEADING_RE.match(line):
+        if _ENTRY_START_RE.match(line) or (open_fence is None and _HEADING_RE.match(line)):
             sections.append([])
+            open_fence = None
+        elif fence := _FENCE_RE.match(line):
+            open_fence = _fence_after(open_fence, fence["fence"], fence["info"])
         sections[-1].append(line)
     return ["\n".join(lines) for lines in sections]
+
+
+def _fence_after(open_fence: str | None, fence: str, info: str) -> str | None:
+    """Return the fence open after a fence line: it opens one, or closes the open one with as long a run of its kind."""
+    if open_fence is None:
+        return fence
+    closes = fence[0] == open_fence[0] and len(fence) >= len(open_fence) and not info.strip()
+    return None if closes else open_fence
 
 
 def _has_content(body: str) -> bool:
     """Return whether ``body`` holds more than headings and blank lines."""
     return any(line.strip() and not _HEADING_RE.match(line) for line in body.splitlines())
-
-
-def _id_date(body: str) -> date | None:
-    match = _ENTRY_START_RE.match(body)
-    if match is None or match["id_date"] is None:
-        return None
-    return _parse_date(match["id_date"], "%Y%m%d")
-
-
-def _file_date(file_name: str) -> date | None:
-    match = _FILE_DATE_RE.match(PurePath(file_name).name)
-    return None if match is None else _parse_date(match[0], "%Y-%m-%d")
-
-
-def _parse_date(value: str, date_format: str) -> date | None:
-    try:
-        return datetime.strptime(value, date_format).date()  # noqa: DTZ007 - a calendar day, not an instant
-    except ValueError:
-        return None
 
 
 def _pieces(body: str, max_chars: int) -> list[str]:

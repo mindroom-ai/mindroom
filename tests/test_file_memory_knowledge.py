@@ -282,10 +282,42 @@ def test_overlay_uses_memory_entry_chunks(tmp_path: Path) -> None:
     ]
 
 
-def test_chunk_strategy_change_rebuilds_index(tmp_path: Path) -> None:
-    """An index chunked another way, including one written before the strategy was recorded, is rebuilt.
+def test_entry_chunks_are_capped_at_the_chunk_size(tmp_path: Path) -> None:
+    """The overlay caps entries at its 1,200-character chunk size, which a heading-only file is chunked at too."""
+    config, base_id, root = _semantic_overlay(tmp_path)
+    assert config.knowledge_bases[base_id].chunk_size == 1_200
+    small = config.with_runtime_knowledge_base_overlay(
+        base_id,
+        config.knowledge_bases[base_id].model_copy(update={"chunk_size": 300}),
+    )
+    indexer = FileIndexer(
+        base_id=base_id,
+        config=small,
+        runtime_paths=test_runtime_paths(tmp_path),
+        knowledge_root=root,
+        collection=KnowledgeCollection(path=tmp_path / "collections", name="memory"),
+        build_embedder=lambda: RefreshEmbedder(_FakeEmbedder()),
+        max_concurrent_file_indexes=1,
+    )
+    entry = root / "memory" / "notes.md"
+    entry.write_text("- [id=m_20260110090000_aaaa1111] " + "word " * 140)
+    headings = root / "memory" / "headings.md"
+    headings.write_text("".join(f"# Heading number {number}\n" for number in range(40)))
 
-    The old index stays searchable meanwhile, as after a `chunk_size` change.
+    entry_chunks = indexer._read_file(entry)
+    heading_chunks = indexer._read_file(headings)
+
+    assert entry_chunks is not None
+    assert heading_chunks is not None
+    assert len(entry_chunks.chunks) == 3
+    assert len(heading_chunks.chunks) > 1
+    assert all(len(chunk.text) <= 300 for chunk in [*entry_chunks.chunks, *heading_chunks.chunks])
+
+
+def test_chunk_strategy_is_part_of_the_index_settings(tmp_path: Path) -> None:
+    """Index settings differ by chunk strategy, also from an index written before the strategy was recorded.
+
+    The old index stays compatible for search meanwhile, as after a `chunk_size` change.
     """
     config, base_id, root = _semantic_overlay(tmp_path)
     base_config = config.knowledge_bases[base_id]

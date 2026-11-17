@@ -1033,6 +1033,30 @@ async def test_team_keyword_hit_cannot_suppress_semantic_hits(config: Config, mo
 
 
 @pytest.mark.asyncio
+async def test_team_keyword_hits_share_the_recall_token_budget(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A team keyword hit that does not fit the budget the semantic hits left is dropped; smaller ones still follow."""
+    load_o200k()
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memories = (
+        f"Team garden shed plan {' '.join(['notes'] * 300)}",
+        "Team garden shed key",
+        "Team garden shed lock",
+    )
+    for number, memory in enumerate(team_memories):
+        await store_conversation_memory(memory, ["general", "calculator"], f"session-team-{number}", config)
+    scored = [(f"The garden shed is green {' '.join(['paint'] * 600)}", 0.80)]
+    _semantic_index(monkeypatch, scored)
+
+    prompt_parts = await build_memory_prompt_parts("garden shed", "general", config)
+
+    injected = _injected(prompt_parts, [scored[0][0], *team_memories])
+    assert injected[0] == scored[0][0]
+    assert team_memories[0] not in injected
+    assert sorted(injected[1:]) == sorted(team_memories[1:])
+
+
+@pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     config: Config,
     refresh_scheduler: RecordingRefreshScheduler,

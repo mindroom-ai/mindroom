@@ -37,6 +37,7 @@ def test_selection_drops_hits_beyond_gap() -> None:
     hits = [_hit("a", 0.80), _hit("b", 0.78), _hit("c", 0.60), _hit("d", 0.79)]
 
     assert select_recall_hits(hits) == hits[:2]
+    assert select_recall_hits(hits, score_gap=0.25) == hits
 
 
 def test_selection_keeps_a_hit_exactly_at_the_gap() -> None:
@@ -87,21 +88,26 @@ def _unloaded_encoder(monkeypatch: pytest.MonkeyPatch, get_encoding: object) -> 
     monkeypatch.setattr(tiktoken, "get_encoding", get_encoding)
 
 
-def test_selection_budgets_bytes_when_the_encoder_fails_to_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tokenizer that cannot load never fails recall: the budget counts UTF-8 bytes, which never undercount."""
+# A typical ~1,000-character entry is 250 estimated tokens; with the 2,000-character one 750 fit, and the 400-character
+# one would make 850.
+_ESTIMATED_HITS = (("a" * 1_000, 0.9), ("b" * 2_000, 0.9), ("c" * 400, 0.9))
+
+
+def test_selection_estimates_tokens_when_the_encoder_fails_to_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tokenizer that cannot load never fails recall: the budget estimates a quarter token per character."""
 
     def failing_get_encoding(name: str) -> tiktoken.Encoding:
         msg = f"cannot download {name}"
         raise OSError(msg)
 
     _unloaded_encoder(monkeypatch, failing_get_encoding)
-    hits = [_hit("a" * 500, 0.9), _hit("b" * 400, 0.9)]
+    hits = [_hit(memory, score) for memory, score in _ESTIMATED_HITS]
 
-    assert select_recall_hits(hits) == hits[:1]
+    assert select_recall_hits(hits) == hits[:2]
 
 
 def test_selection_does_not_wait_for_a_stalled_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tokenizer download that hangs does not hold up recall, which budgets bytes until the encoder is ready."""
+    """A tokenizer download that hangs does not hold up recall, which estimates tokens until the encoder is ready."""
     release = threading.Event()
 
     def stalled_get_encoding(name: str) -> tiktoken.Encoding:
@@ -110,12 +116,12 @@ def test_selection_does_not_wait_for_a_stalled_encoder(monkeypatch: pytest.Monke
         raise OSError(msg)
 
     _unloaded_encoder(monkeypatch, stalled_get_encoding)
-    hits = [_hit("a" * 500, 0.9), _hit("b" * 400, 0.9)]
+    hits = [_hit(memory, score) for memory, score in _ESTIMATED_HITS]
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             started = time.monotonic()
             selected = pool.submit(select_recall_hits, hits).result(timeout=5)
         assert time.monotonic() - started < 2
-        assert selected == hits[:1]
+        assert selected == hits[:2]
     finally:
         release.set()

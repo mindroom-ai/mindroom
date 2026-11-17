@@ -153,7 +153,7 @@ class KnowledgeBaseConfig(BaseModel):
         default="fixed",
         description=(
             "How text-like files are split into chunks: fixed splits at chunk_size characters, "
-            "memory_entries makes each memory entry or Markdown section its own chunk of at most 1,200 characters"
+            "memory_entries makes each memory entry or Markdown section its own chunk of at most chunk_size characters"
         ),
     )
     include_extensions: list[str] | None = Field(

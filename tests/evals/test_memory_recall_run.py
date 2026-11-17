@@ -8,8 +8,8 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
-from pathlib import Path
+from datetime import UTC, date, datetime
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 import httpx
@@ -327,6 +327,49 @@ async def test_date_only_entry_counts_from_the_turn_day(
     sources = _sources(hits)
     assert any(source.startswith("memory/2026-01-24.md") for source in sources)
     assert not any(source.startswith("memory/2026-01-25.md") for source in sources)
+
+
+def test_entries_are_dated_by_id_then_file_name_then_first_commit() -> None:
+    """An id gives an exact UTC time, or its day when the time is invalid; else the file's day, else its first commit."""
+    text = (
+        "- [id=m_20261109111659_x] Exact time.\n"
+        "- [id=m_20261109251659_y] Hour 25, so only the day.\n"
+        "- [id=m_20261399111659_z] Month 13, so the file's day.\n"
+        "- [auto_flush:!room:$a] No id.\n"
+        "## Topic\nBody.\n"
+    )
+    first_commit = date(2026, 1, 2)
+
+    def first_added(_relative: PurePosixPath) -> date:
+        return first_commit
+
+    dated = arms._written_entries(text, PurePosixPath("2026-11-10.md"), first_added)
+    undated = arms._written_entries(text, PurePosixPath("lessons.md"), first_added)
+
+    file_day = date(2026, 11, 10)
+    assert [written for _entry, written in dated] == [
+        datetime(2026, 11, 9, 11, 16, 59, tzinfo=UTC),
+        date(2026, 11, 9),
+        file_day,
+        file_day,
+        file_day,
+    ]
+    assert [written for _entry, written in undated][2:] == [first_commit] * 3
+
+
+def test_pieces_of_a_long_entry_take_its_time() -> None:
+    """An entry over the 1,200-character cap is split, and every piece keeps the entry's id time."""
+    text = "- [id=m_20261109111659_x] " + "word " * 595 + "\n- [id=m_20261109111700_y] Next.\n"
+
+    def first_added(_relative: PurePosixPath) -> None:
+        return None
+
+    entries = arms._written_entries(text, PurePosixPath("notes.md"), first_added)
+
+    assert [written for _entry, written in entries] == [
+        *[datetime(2026, 11, 9, 11, 16, 59, tzinfo=UTC)] * 3,
+        datetime(2026, 11, 9, 11, 17, tzinfo=UTC),
+    ]
 
 
 def _ranked_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

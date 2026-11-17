@@ -31,6 +31,11 @@ Hits that may have been written after the turn are dropped before selection:
 - An entry with no known date is kept.
 - A chunk holding several entries is dropped when any of them is.
 
+Every section of a topic file without ids is dated by that file's first commit, even a section added much later, so
+such a section can answer a turn from before it was written.
+That is 23% of Harry's entry chunks and 2% of DevAgent's, which inflates absolute relevance for every arm alike;
+compare arms with each other, not with live recall.
+
 ## Run
 
 ```bash

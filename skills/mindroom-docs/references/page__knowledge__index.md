@@ -79,7 +79,7 @@ knowledge_bases:
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
 | `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
-| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most 1,200 characters, as semantic file memory does; semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most `chunk_size` characters, as semantic file memory does at 1,200; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |

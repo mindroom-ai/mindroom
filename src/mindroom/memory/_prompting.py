@@ -19,8 +19,10 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
-# Absorbs float rounding, so a hit exactly ``relative_gap`` below the top hit is kept.
+# Absorbs float rounding, so a hit exactly ``score_gap`` below the top hit is kept.
 _SCORE_GAP_TOLERANCE = 1e-9
+# The o200k tokens one turn's recalled memories may take in total.
+_RECALL_TOKEN_BUDGET = 800
 _O200K_COUNTER = o200k_counter()
 
 
@@ -53,17 +55,17 @@ def select_recall_hits(
     results: Sequence[MemoryResult],
     *,
     max_hits: int = 5,
-    relative_gap: float = 0.05,
-    token_budget: int = 800,
+    score_gap: float = 0.05,
+    token_budget: int = _RECALL_TOKEN_BUDGET,
 ) -> list[MemoryResult]:
     """Return the leading recall hits worth injecting, in rank order.
 
-    Hits are kept while their score is within ``relative_gap`` (an absolute difference on the score scale) of the top
+    Hits are kept while their score is within ``score_gap`` (an absolute difference on the score scale) of the top
     hit's, up to ``max_hits``, and while their memory text fits ``token_budget`` o200k tokens in total.
     The first hit that fails any rule ends the selection, so a top hit larger than the budget selects nothing.
     A result without a score counts as score 0.
-    Selection never waits for the tokenizer: until it has loaded, or when it cannot load, the budget counts UTF-8
-    bytes, which never undercount.
+    Selection never waits for the tokenizer: until it has loaded, or when it cannot load, the budget estimates a
+    quarter token per character.
     """
     if not results:
         return []
@@ -71,13 +73,38 @@ def select_recall_hits(
     selected: list[MemoryResult] = []
     tokens = 0
     for result in results[:max_hits]:
-        if top_score - result.get("score", 0.0) > relative_gap + _SCORE_GAP_TOLERANCE:
+        if top_score - result.get("score", 0.0) > score_gap + _SCORE_GAP_TOLERANCE:
             break
-        tokens += count(_O200K_COUNTER, result.get("memory", ""), upper_bound=True)
+        tokens += _recall_tokens(result)
         if tokens > token_budget:
             break
         selected.append(result)
     return selected
+
+
+def add_within_recall_budget(
+    selected: Sequence[MemoryResult],
+    extra: Sequence[MemoryResult],
+    *,
+    token_budget: int = _RECALL_TOKEN_BUDGET,
+) -> list[MemoryResult]:
+    """Return ``selected`` followed by the hits of ``extra``, in order, that fit the token budget ``selected`` left.
+
+    A hit of ``extra`` that does not fit is dropped, and a later, smaller one may still fit.
+    """
+    remaining = token_budget - sum(_recall_tokens(result) for result in selected)
+    added: list[MemoryResult] = []
+    for result in extra:
+        tokens = _recall_tokens(result)
+        if tokens <= remaining:
+            added.append(result)
+            remaining -= tokens
+    return [*selected, *added]
+
+
+def _recall_tokens(result: MemoryResult) -> int:
+    """Return the o200k tokens of a hit's memory text: exact once the encoder has loaded, estimated before."""
+    return count(_O200K_COUNTER, result.get("memory", ""))
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

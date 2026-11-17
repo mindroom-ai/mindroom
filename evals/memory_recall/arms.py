@@ -21,6 +21,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
@@ -31,7 +32,7 @@ from mindroom.constants import runtime_paths_with_storage_root
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.memory_entries import _ENTRY_START_RE, _HEADING_RE, split_memory_entries
+from mindroom.knowledge.memory_entries import split_memory_entries
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
@@ -42,12 +43,11 @@ from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.file_memory_knowledge import _FileMemoryKnowledgeResolution
-    from mindroom.knowledge.memory_entries import _MemoryEntry
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.memory._shared import MemoryResult
@@ -110,6 +110,13 @@ _ENTRIES_SUFFIX = ".entries"
 _UNDATED = "undated"
 _TIME_LABEL = "%Y%m%dT%H%M%SZ"
 _ID_TIME_RE = re.compile(r"^(?:- )?\[id=m_(\d{14})_")
+_FILE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# Entry chunks are capped as the shipped overlay caps them.
+_ENTRY_MAX_CHARS = 1200
+# A cap no entry reaches, which splits a file into its whole entries.
+_UNCAPPED = sys.maxsize
+# The stock overlay's fixed chunk size, before entry chunks.
+_STOCK_CHUNK_SIZE = 5000
 _READY_MARKER = "ready"
 # Collapses whitespace the way the indexer's chunker does.
 _CLEANER = SafeFixedSizeChunking()
@@ -142,7 +149,7 @@ async def replay(
         shipped=arm.shipped,
     )
     limit = _RECALL_SEARCH_LIMIT if arm.shipped else _OVER_FETCH
-    # Loaded up front: until it is, selection budgets bytes instead of o200k tokens.
+    # Loaded up front: until it is, selection estimates o200k tokens instead of counting them.
     load_o200k()
     hit_times = _HitTimes(corpus, entry_chunks=arm.entry_chunks, first_added=first_added)
     semaphore = asyncio.Semaphore(_SEARCH_CONCURRENCY)
@@ -201,7 +208,7 @@ def _build_corpus(memory_dir: Path, arm: Arm, first_added: _FirstAdded) -> dict[
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, (entry, written) in enumerate(_written_entries(text, relative, first_added), start=1):
-            corpus[f"{corpus_path}{_ENTRIES_SUFFIX}/{_label(written)}__{number}.md"] = entry.text.encode()
+            corpus[f"{corpus_path}{_ENTRIES_SUFFIX}/{_label(written)}__{number}.md"] = entry.encode()
     return corpus
 
 
@@ -248,31 +255,43 @@ def _written_after(written: _Written, turn_ts: datetime) -> bool:
 def _written_entries(
     text: str,
     relative: PurePosixPath,
-    first_added: _FirstAdded,
-) -> list[tuple[_MemoryEntry, _Written]]:
-    """Split a memory file into its entries, each with when it was written.
+    first_added: Callable[[PurePosixPath], date | None],
+) -> list[tuple[str, _Written]]:
+    """Split a memory file into its entry chunks, each with when its entry was written.
 
-    That is the UTC time of an `m_YYYYMMDDhhmmss_` id, else the entry's day (from the file name), else the file's
-    first commit. A later piece of an over-long entry, which starts at no entry or heading boundary, takes its
-    entry's time.
+    That is the UTC time of an `m_YYYYMMDDhhmmss_` id, else the id's day, else a `YYYY-MM-DD` prefix of the file
+    name, else the file's first commit. Every piece of an over-long entry takes its entry's time.
     """
-    entries: list[tuple[_MemoryEntry, _Written]] = []
-    for index, entry in enumerate(split_memory_entries(text, file_name=relative.name)):
-        if index and not (_ENTRY_START_RE.match(entry.text) or _HEADING_RE.match(entry.text)):
-            written = entries[-1][1]
-        else:
-            written = _id_time(entry.text) or entry.date or first_added(relative)
-        entries.append((entry, written))
+    entries: list[tuple[str, _Written]] = []
+    for entry in split_memory_entries(text, _UNCAPPED):
+        written = _id_time(entry) or _id_day(entry) or _file_day(relative.name) or first_added(relative)
+        entries.extend((piece, written) for piece in split_memory_entries(entry, _ENTRY_MAX_CHARS))
     return entries
 
 
 def _id_time(text: str) -> datetime | None:
     """Return the UTC time in an entry's leading `m_YYYYMMDDhhmmss_` id, or None."""
     match = _ID_TIME_RE.match(text)
-    if match is None:
-        return None
+    return None if match is None else _parse_time(match[1], "%Y%m%d%H%M%S")
+
+
+def _id_day(text: str) -> date | None:
+    """Return the day in an entry's leading id, for an id whose time of day is not a valid time."""
+    match = _ID_TIME_RE.match(text)
+    time = None if match is None else _parse_time(match[1][:8], "%Y%m%d")
+    return None if time is None else time.date()
+
+
+def _file_day(file_name: str) -> date | None:
+    """Return the day a `YYYY-MM-DD` prefix of a memory file's name records, or None."""
+    match = _FILE_DAY_RE.match(file_name)
+    time = None if match is None else _parse_time(match[0], "%Y-%m-%d")
+    return None if time is None else time.date()
+
+
+def _parse_time(value: str, time_format: str) -> datetime | None:
     try:
-        return datetime.strptime(match[1], "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+        return datetime.strptime(value, time_format).replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -329,7 +348,7 @@ class _HitTimes:
             spans: list[tuple[int, int, _Written]] = []
             cursor = 0
             for entry, written in _written_entries(text, relative, self._first_added):
-                piece = _CLEANER.clean_text(entry.text).strip()
+                piece = _CLEANER.clean_text(entry).strip()
                 start = flat.find(piece, cursor)
                 if start == -1:
                     continue
@@ -417,7 +436,9 @@ def _file_memory(root: Path, config: Config, *, shipped: bool) -> _FileMemoryKno
         config=config,
         search_config=_STOCK_SEARCH_CONFIG,
     )
-    stock = file_memory.config.knowledge_bases[file_memory.base_id].model_copy(update={"chunk_strategy": "fixed"})
+    stock = file_memory.config.knowledge_bases[file_memory.base_id].model_copy(
+        update={"chunk_strategy": "fixed", "chunk_size": _STOCK_CHUNK_SIZE},
+    )
     return replace(
         file_memory,
         config=file_memory.config.with_runtime_knowledge_base_overlay(file_memory.base_id, stock),
@@ -429,7 +450,9 @@ def _corpus_hash(corpus: dict[str, bytes], config: Config, *, shipped: bool) -> 
     digest = hashlib.sha256(config.memory.embedder.model_dump_json().encode())
     if shipped:
         # Only the shipped overlay changes the key, so the other arms keep the indexes they cached before it existed.
+        overlay = _file_memory(Path(), config, shipped=True)
         digest.update(b"shipped overlay")
+        digest.update(overlay.config.knowledge_bases[overlay.base_id].model_dump_json(exclude={"path"}).encode())
     for relative in sorted(corpus):
         digest.update(json.dumps([relative, hashlib.sha256(corpus[relative]).hexdigest()]).encode())
     return digest.hexdigest()[:16]
