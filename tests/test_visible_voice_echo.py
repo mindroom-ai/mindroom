@@ -295,6 +295,33 @@ async def test_finalized_echo_is_not_reset_after_revocation(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
+async def test_tracked_pending_echo_is_completed_on_a_retry_after_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry after revocation ends the placeholder an earlier attempt published and recorded."""
+    harness = _echo_harness(tmp_path, voice_enabled=True)
+    source_event_id = "$voice-retried-after-revocation"
+    monkeypatch.setattr(
+        harness.router.deps.turn_store,
+        "visible_echo",
+        AsyncMock(return_value=SourceVisibleEcho("$echo:localhost", is_fallback=None)),
+    )
+    edit = AsyncMock(return_value=True)
+    monkeypatch.setattr(harness.gateway, "edit_text", edit)
+    monkeypatch.setattr("mindroom.voice.visible_voice_echo.is_sender_allowed_for_agent_reply_in_room", lambda *_: False)
+    handle = harness.router.start(_request(source_event_id))
+    assert handle is not None
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+
+    edit.assert_awaited_once()
+    request = edit.await_args.args[0]
+    assert request.event_id == "$echo:localhost"
+    assert request.new_text == "Router agent is transcribing…"
+    assert request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Path) -> None:
     """A hard crash after Matrix delivery must not create a second visible router echo."""
     harness = _echo_harness(tmp_path, voice_enabled=True)
