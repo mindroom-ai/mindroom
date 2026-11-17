@@ -1,10 +1,12 @@
 """Replay logged turns through each recall arm, judge the hits, and write aggregate metrics.
 
     python -m evals.memory_recall.run --turns T.jsonl --memory-dir D --config ~/.mindroom-chat/config.yaml
-        --arms A0,A1,A2,A3,A4,shipped,shipped_default --out DIR [--key-env ENV] [--limit N]
+        --arms A0,A1,A2,A3,A4,shipped,shipped_default,A5 --out DIR [--key-env ENV] [--limit N]
+        [--thresholds 0.3,0.5,0.7,0.8] [--split-seed N]
 
-Writes `DIR/results.json` and `DIR/results.md` (numbers only, never memory text), caches each arm's index under
-`DIR/index/` and the judge's verdicts in `DIR/judge.sqlite`.
+Writes `DIR/results.json` and `DIR/results.md` (numbers only, never memory text) for all turns and for a seeded
+tuning half and its held-out other half, caches each arm's index under `DIR/index/`, the judge's verdicts in
+`DIR/judge.sqlite` and reranker scores in `DIR/rerank.sqlite`. A rerank arm gives one row per threshold, `A5@0.5`.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import asyncio
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,14 +31,21 @@ from mindroom.token_counting.families import load_o200k
 
 from .arms import ARMS, replay
 from .judge import JudgeCache, Verdict, judge_hits
+from .rerank_arms import RERANKERS, TurnRerank, rerank_turns, select_reranked
+from .rerank_cache import CachedReranker, RerankCache
 from .turns import read_turns
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from mindroom.constants import RuntimePaths
     from mindroom.memory._shared import MemoryResult
 
+    from .arms import Arm
     from .turns import Turn
+
+#: One results row: its name, each turn's injected hits (None for a failed search) and reranker calls, if any.
+type _Row = tuple[str, list[list[MemoryResult] | None], list[TurnRerank | None] | None]
 
 JUDGE_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 _JUDGE_CONCURRENCY = 16
@@ -50,6 +60,10 @@ _METRIC_COLUMNS = (
     "abstained_turns",
     "judge_errors",
     "search_errors",
+    "rerank_p50_ms",
+    "rerank_p95_ms",
+    "fallback_rate",
+    "usd_per_turn",
 )
 
 
@@ -61,10 +75,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--turns", type=Path, required=True, help="JSONL written by turns.write_turns")
     parser.add_argument("--memory-dir", type=Path, required=True, help="The agent's memory/ directory")
     parser.add_argument("--config", type=Path, required=True, help="MindRoom config.yaml with memory.embedder")
-    parser.add_argument("--arms", default=",".join(ARMS), help="Comma-separated arm names (default: all)")
+    parser.add_argument(
+        "--arms",
+        default=",".join(name for name, arm in ARMS.items() if arm.reranker is None),
+        help="Comma-separated arm names (default: every arm without a reranker)",
+    )
     parser.add_argument("--out", type=Path, required=True, help="Output directory")
     parser.add_argument("--key-env", default="OPENROUTER_API_KEY", help="Env var holding the judge's API key")
     parser.add_argument("--limit", type=int, default=None, help="Replay only the first N turns")
+    parser.add_argument(
+        "--thresholds",
+        default="0.3,0.5,0.7,0.8",
+        help="Comma-separated minimum reranker scores each rerank arm is measured at, from one set of scores",
+    )
+    parser.add_argument("--split-seed", type=int, default=0, help="Seed of the tuning and held-out halves")
     return parser
 
 
@@ -88,11 +112,14 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     index_dir = out / "index"
     runtime_paths = resolve_runtime_paths(config_path=args.config, storage_path=index_dir)
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    thresholds = [float(value) for value in args.thresholds.split(",")]
     turns = read_turns(args.turns)[: args.limit]
     template = config.get_prompt("MEMORY_CONTEXT_PROMPT_TEMPLATE")
+    tuning, held_out = split_turns(len(turns), seed=args.split_seed)
+    splits = {"all": list(range(len(turns))), "tuning": tuning, "held_out": held_out}
 
-    results: dict[str, dict[str, float]] = {}
-    with JudgeCache(out / "judge.sqlite") as cache:
+    results: dict[str, dict[str, dict[str, float]]] = {split: {} for split in splits}
+    with JudgeCache(out / "judge.sqlite") as cache, RerankCache(out / "rerank.sqlite") as rerank_cache:
         async with httpx.AsyncClient(transport=transport) as client:
             for name in args.arms.split(","):
                 replayed = await replay(
@@ -103,27 +130,90 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     runtime_paths=runtime_paths,
                     index_dir=index_dir,
                 )
-                # A turn whose search failed is left out of every metric but `search_errors`.
-                searched = [(turn, hits) for turn, hits in zip(turns, replayed, strict=True) if hits is not None]
-                hits = [turn_hits for _turn, turn_hits in searched]
-                verdicts = await _judge_all(
-                    [turn for turn, _hits in searched],
-                    hits,
-                    cache=cache,
-                    client=client,
-                    api_key=api_key,
+                rows = await _arm_rows(
+                    name,
+                    ARMS[name],
+                    turns,
+                    replayed,
+                    thresholds=thresholds,
+                    rerank_cache=rerank_cache,
+                    runtime_paths=runtime_paths,
                 )
-                results[name] = arm_metrics(
-                    verdicts,
-                    tokens=[
-                        _count(format_memories_as_context(turn_hits, _CONTEXT, prompt_template=template))
-                        for turn_hits in hits
-                    ],
-                    hit_tokens=[[_count(f"- {hit.get('memory', '')}\n") for hit in turn_hits] for turn_hits in hits],
-                    search_errors=len(turns) - len(searched),
-                )
+                for row, selected, reranked in rows:
+                    # A turn whose search failed is left out of every metric but `search_errors`.
+                    hits = {index: turn_hits for index, turn_hits in enumerate(selected) if turn_hits is not None}
+                    verdicts = await _judge_all(
+                        [turns[index] for index in hits],
+                        list(hits.values()),
+                        cache=cache,
+                        client=client,
+                        api_key=api_key,
+                    )
+                    judged = dict(zip(hits, verdicts, strict=True))
+                    tokens = {
+                        index: _count(format_memories_as_context(turn_hits, _CONTEXT, prompt_template=template))
+                        for index, turn_hits in hits.items()
+                    }
+                    hit_tokens = {
+                        index: [_count(f"- {hit.get('memory', '')}\n") for hit in turn_hits]
+                        for index, turn_hits in hits.items()
+                    }
+                    for split, indices in splits.items():
+                        kept = [index for index in indices if index in hits]
+                        results[split][row] = arm_metrics(
+                            [judged[index] for index in kept],
+                            tokens=[tokens[index] for index in kept],
+                            hit_tokens=[hit_tokens[index] for index in kept],
+                            search_errors=len(indices) - len(kept),
+                        ) | rerank_metrics([reranked[index] for index in indices] if reranked else [])
     (out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    (out / "results.md").write_text(_markdown(results))
+    (out / "results.md").write_text(
+        "\n".join(f"## {split}\n\n{_markdown(split_results)}" for split, split_results in results.items()),
+    )
+
+
+def split_turns(count: int, *, seed: int) -> tuple[list[int], list[int]]:
+    """Return the turn indices of a seeded tuning half and of the held-out rest, each in order."""
+    indices = list(range(count))
+    random.Random(seed).shuffle(indices)  # noqa: S311 - a reproducible split, not a secret
+    return sorted(indices[: count // 2]), sorted(indices[count // 2 :])
+
+
+async def _arm_rows(
+    name: str,
+    arm: Arm,
+    turns: Sequence[Turn],
+    replayed: list[list[MemoryResult] | None],
+    *,
+    thresholds: Sequence[float],
+    rerank_cache: RerankCache,
+    runtime_paths: RuntimePaths,
+) -> list[_Row]:
+    """Return the arm's rows: itself, or for a rerank arm one row per threshold, all from one scoring of the turns."""
+    if arm.reranker is None:
+        return [(name, replayed, None)]
+    spec = RERANKERS[arm.reranker]
+    reranker = CachedReranker(
+        spec.create(runtime_paths),
+        rerank_cache,
+        provider=spec.provider,
+        model=spec.model,
+        rubric_version=spec.rubric_version,
+    )
+    reranked = await rerank_turns(turns, replayed, reranker, spec)
+    return [
+        (
+            f"{name}@{threshold:g}",
+            [
+                None
+                if candidates is None
+                else select_reranked(candidates, None if call is None else call.scores, threshold=threshold)
+                for candidates, call in zip(replayed, reranked, strict=True)
+            ],
+            reranked,
+        )
+        for threshold in thresholds
+    ]
 
 
 def _count(text: str) -> int:
@@ -203,11 +293,26 @@ def arm_metrics(
     }
 
 
+def rerank_metrics(reranked: Sequence[TurnRerank | None]) -> dict[str, float]:
+    """Return the latency (p50, p95 in ms of the known uncached calls), fallback share and mean list price per turn.
+
+    Only turns that called the reranker count; every value is 0 for an arm without one.
+    """
+    calls = [call for call in reranked if call is not None]
+    milliseconds = [call.seconds * 1000 for call in calls if call.seconds is not None]
+    return {
+        "rerank_p50_ms": float(_nearest_rank(milliseconds, 0.5)),
+        "rerank_p95_ms": float(_nearest_rank(milliseconds, 0.95)),
+        "fallback_rate": sum(call.fallback for call in calls) / len(calls) if calls else 0.0,
+        "usd_per_turn": sum(call.usd for call in calls) / len(calls) if calls else 0.0,
+    }
+
+
 def _share(turns: Sequence[Sequence[Verdict]], predicate: Callable[[Sequence[Verdict]], bool]) -> float:
     return sum(bool(predicate(turn)) for turn in turns) / len(turns) if turns else 0.0
 
 
-def _nearest_rank(values: Sequence[int], quantile: float) -> int:
+def _nearest_rank(values: Sequence[float], quantile: float) -> float:
     """Return the nearest-rank `quantile` of `values`, or 0 for none."""
     if not values:
         return 0
