@@ -306,7 +306,7 @@ matrix_api(
 ## [`matrix_user`]
 
 `matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they confirm it.
-It acts only for the agent's owner, in a chat with the agent or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
 
 `matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
 
@@ -317,7 +317,7 @@ It acts only for the agent's owner, in a chat with the agent or, for reads, thro
 | `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
 | `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
-| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so only in a chat with the agent |
+| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
 | `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 Messages in encrypted rooms are not readable: they show as `[encrypted, not readable]`, and search does not find them.
@@ -335,9 +335,10 @@ Messages in encrypted rooms are not readable: they show as `[encrypted, not read
 | `create_room` | Creates a private room called `name`, inviting `user_id` if given |
 
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
-A message sent this way cannot start with `!` or `\`, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
+A message sent this way, or the name of a file sent, cannot start with `!` or `\`, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
+That token can act as every account the `users` pattern covers, administrators included.
 Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
 
 ```yaml

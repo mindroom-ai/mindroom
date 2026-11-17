@@ -23,8 +23,9 @@ from mindroom.custom_tools.matrix_user_reads import (
     read_people,
     read_room,
     read_rooms,
+    request_failure,
+    room_needed,
     search_messages,
-    transport_failure,
 )
 from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
@@ -49,15 +50,16 @@ _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
 _ROOM_ACTIONS = frozenset({"room", "messages", "download", "mark_read"})
 _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
+_SEARCH_ROOM = "search's room_id is a room ID such as !abc:example.com; leave it out to search all your owner's rooms."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
-_UNKNOWN_ACTION = "action must be rooms, messages, search, room, people, download, or mark_read."
 # The MCP gateway never offers the write function: a call without a chat turn has no card for the owner to confirm.
 _WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
 
 
-def _room_needed(action: str) -> str:
-    return f"{action} needs room_id, a room ID such as !abc:example.com."
+def _non_blank(value: str | None) -> str | None:
+    """Return ``value``, or None for a blank one, which a model may send for an argument it leaves out."""
+    return value if value is not None and value.strip() else None
 
 
 class MatrixUserTools(Toolkit):
@@ -122,10 +124,8 @@ class MatrixUserTools(Toolkit):
         )
         try:
             fields = await run(client, actor)
-        except MatrixRequestError as error:
-            return self._payload("error", action=action, message=str(error))
-        except (TimeoutError, aiohttp.ClientError) as failed:
-            return self._payload("error", action=action, message=transport_failure(failed))
+        except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as failed:
+            return self._payload("error", action=action, message=request_failure(failed))
         finally:
             await client.close()
         return self._payload("ok", action=action, **fields)
@@ -163,7 +163,7 @@ class MatrixUserTools(Toolkit):
         """Return the read ``action`` asks for, or which of its arguments is missing."""
         if action in _ROOM_ACTIONS:
             if room_id is None or not room_id.startswith("!"):
-                return _room_needed(action)
+                return room_needed(action)
             return self._room_read_for(
                 action,
                 room_id,
@@ -175,15 +175,14 @@ class MatrixUserTools(Toolkit):
         if action == "rooms":
             return lambda client: read_rooms(client, query=query, limit=limit)
         if action == "people":
-            if query is None or not query.strip():
+            if query is None:
                 return _PEOPLE_QUERY_NEEDED
             return lambda client: read_people(client, query, limit=limit)
-        if action != "search":
-            return _UNKNOWN_ACTION
-        if query is None or not query.strip():
+        # The only action left: search.
+        if query is None:
             return _SEARCH_QUERY_NEEDED
         if room_id is not None and not room_id.startswith("!"):
-            return _room_needed(action)
+            return _SEARCH_ROOM
         return lambda client: search_messages(client, query, room_id=room_id, page_token=page_token, limit=limit)
 
     def _room_read_for(
@@ -214,7 +213,7 @@ class MatrixUserTools(Toolkit):
         turn = get_tool_runtime_context()
         if turn is None:
             return _TURN_NEEDED
-        if event_id is None or not event_id.strip():
+        if event_id is None:
             return _EVENT_NEEDED
         return lambda client: self._download(client, turn, room_id, event_id)
 
@@ -245,11 +244,11 @@ class MatrixUserTools(Toolkit):
         """
         read = self._read_for(
             action,
-            room_id=room_id,
-            event_id=event_id,
-            thread_id=thread_id,
-            query=query,
-            page_token=page_token,
+            room_id=_non_blank(room_id),
+            event_id=_non_blank(event_id),
+            thread_id=_non_blank(thread_id),
+            query=_non_blank(query),
+            page_token=_non_blank(page_token),
             limit=limit,
         )
         if isinstance(read, str):
@@ -283,22 +282,18 @@ class MatrixUserTools(Toolkit):
         """
         write = MatrixUserWrite(
             action,
-            room_id=room_id,
-            user_id=user_id,
-            message=message,
-            event_id=event_id,
-            thread_id=thread_id,
-            emoji=emoji,
+            room_id=_non_blank(room_id),
+            user_id=_non_blank(user_id),
+            message=_non_blank(message),
+            event_id=_non_blank(event_id),
+            thread_id=_non_blank(thread_id),
+            emoji=_non_blank(emoji),
             attachments=tuple(attachments or ()),
-            name=name,
+            name=_non_blank(name),
         )
         turn = get_tool_runtime_context()
         if turn is None:
             return self._payload("error", action=action, message=_WRITE_TURN_NEEDED)
         if (problem := write.problem()) is not None:
             return self._payload("error", action=action, message=problem)
-        storage_path = self._runtime_paths.storage_root
-        return await self._as_owner(
-            action,
-            lambda client, actor: write_as_person(client, actor, turn, write, storage_path=storage_path),
-        )
+        return await self._as_owner(action, lambda client, actor: write_as_person(client, actor, turn, write))

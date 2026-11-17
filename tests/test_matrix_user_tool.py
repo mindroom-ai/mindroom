@@ -230,6 +230,10 @@ async def test_results_keep_non_ascii_text_as_is(config: Config, paths: RuntimeP
         ({"action": "messages"}, "messages needs room_id, a room ID such as !abc:example.com."),
         ({"action": "search"}, "search needs query: the words to look for."),
         ({"action": "search", "query": " "}, "search needs query: the words to look for."),
+        (
+            {"action": "search", "query": "budget", "room_id": "#planning:example.com"},
+            "search's room_id is a room ID such as !abc:example.com; leave it out to search all your owner's rooms.",
+        ),
         ({"action": "download", "room_id": ROOM}, "download needs event_id: the ID of the message with the file."),
     ],
 )
@@ -251,6 +255,42 @@ async def test_each_action_names_the_arguments_it_is_missing(
         "message": message,
     }
     assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "blank"),
+    [
+        ({"action": "messages", "room_id": ROOM}, {"thread_id": ""}),
+        ({"action": "messages", "room_id": ROOM}, {"event_id": " "}),
+        ({"action": "messages", "room_id": ROOM}, {"page_token": " "}),
+        ({"action": "search", "query": "budget"}, {"room_id": ""}),
+    ],
+    ids=["thread_id", "event_id", "page_token", "room_id"],
+)
+async def test_a_blank_read_argument_is_left_out(
+    config: Config,
+    paths: RuntimePaths,
+    arguments: dict[str, str],
+    blank: dict[str, str],
+) -> None:
+    """A blank argument, as a model may send for one it means to leave out, asks the homeserver what leaving it out does."""
+    homeserver = FakeHomeserver(
+        {
+            f"/_matrix/client/v3/rooms/{ROOM}/messages": {"chunk": []},
+            "/_matrix/client/v3/search": {"search_categories": {"room_events": {"results": []}}},
+        },
+    )
+    toolkit = owner_toolkit(config, paths)
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        without = await toolkit.matrix_user_read(**arguments)
+        with_blank = await toolkit.matrix_user_read(**arguments, **blank)
+
+    assert json.loads(without)["status"] == "ok"
+    assert with_blank == without
+    first, second = homeserver.requests
+    assert (second.method, second.url, second.body) == (first.method, first.url, first.body)
 
 
 def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: RuntimePaths) -> None:

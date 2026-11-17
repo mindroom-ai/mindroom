@@ -41,8 +41,10 @@ if TYPE_CHECKING:
     import nio
 
 __all__ = [
+    "MATRIX_USER_ID",
     "MatrixRequestError",
     "download_file",
+    "json_objects",
     "mark_read",
     "matrix_json",
     "optional_json",
@@ -51,9 +53,10 @@ __all__ = [
     "read_people",
     "read_room",
     "read_rooms",
+    "request_failure",
     "room_encrypted",
+    "room_needed",
     "search_messages",
-    "transport_failure",
 ]
 
 _MAX_ANSWER_BYTES = 2 * 1024 * 1024
@@ -80,14 +83,15 @@ _EDIT, _REACTION = "m.replace", "m.annotation"
 _THREAD = "m.thread"
 # The first millisecond of the year 10000, which no date reaches.
 _END_OF_DATES_MS = 253_402_300_800_000
-_MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
+# A full Matrix user ID, such as @alice:example.com.
+MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
 # The room list's groups, in the order it lists them.
 _UNREAD, _INVITED, _OTHER = range(3)
 # Every event field the room list reads. The homeserver trims each event of the joined rooms to these, so a long last
 # message costs a few bytes; `m.direct`'s content, keyed by people, is account data, which it does not trim.
 _ROOM_LIST_EVENT_FIELDS = ["type", "state_key", "sender", "content.name", "content.is_direct", "content.unread"]
 _TOO_MANY_ROOMS = (
-    'This account has too many rooms to list at once. Ask the person for the room\'s name or ID and use action "room".'
+    'This account has too many rooms to list at once. Ask your owner for the room\'s ID and use action "room".'
 )
 _NO_FILE = "That message has no file."
 _ENCRYPTED = "That message is encrypted and cannot be read."
@@ -179,13 +183,21 @@ def _refusal(status: int, answer: dict[str, Any]) -> MatrixRequestError:
     return MatrixRequestError(message, status=status, errcode=errcode)
 
 
-def transport_failure(failed: TimeoutError | aiohttp.ClientError) -> str:
-    """Return what the model reads of a request that got no answer.
+def request_failure(failed: MatrixRequestError | TimeoutError | aiohttp.ClientError) -> str:
+    """Return what the model reads of a failed request: the homeserver's refusal, or that no answer came.
 
     Never the transport's own text, which names the host or URL it requested. Some of aiohttp's timeouts are
     ClientErrors too, so the timeout is checked first.
     """
+    if isinstance(failed, MatrixRequestError):
+        return str(failed)
     return _TIMED_OUT if isinstance(failed, TimeoutError) else _UNREACHABLE
+
+
+def room_needed(action: str, *, alias: bool = False) -> str:
+    """Return what ``action`` says without the room it needs: a room ID, or when ``alias``, an alias too."""
+    aliased = " or an alias such as #abc:example.com" if alias else ""
+    return f"{action} needs room_id, a room ID such as !abc:example.com{aliased}."
 
 
 async def optional_json(client: nio.AsyncClient, path: str) -> dict[str, Any] | None:
@@ -214,14 +226,14 @@ def _mapping(value: object) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
-def _objects(answer: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    """Return the JSON objects listed under ``key``, such as a page's events."""
+def json_objects(answer: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Return the JSON objects listed under ``key`` of a homeserver's answer, such as a page's events."""
     listed = answer.get(key)
     return [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else []
 
 
 def _events(section: object) -> list[dict[str, Any]]:
-    return _objects(_mapping(section), "events")
+    return json_objects(_mapping(section), "events")
 
 
 def _state_event(events: list[dict[str, Any]], event_type: str, state_key: str = "") -> dict[str, Any]:
@@ -337,7 +349,7 @@ def _joined_room(room_id: str, room: dict[str, Any], partners: dict[str, str]) -
     return _ListedRoom(
         group=_UNREAD if attention else _OTHER,
         room_id=room_id,
-        name=_text(_content(_state_event(events, "m.room.name")).get("name")) or partners.get(room_id) or _heroes(room),
+        name=_name(_content(_state_event(events, "m.room.name")).get("name")) or partners.get(room_id) or _heroes(room),
         status=", ".join(attention) or None,
     )
 
@@ -351,7 +363,7 @@ def _invited_room(room_id: str, room: dict[str, Any], person: str) -> _ListedRoo
     return _ListedRoom(
         group=_INVITED,
         room_id=room_id,
-        name=_text(_content(_state_event(events, "m.room.name")).get("name")) or (inviter if direct else None),
+        name=_name(_content(_state_event(events, "m.room.name")).get("name")) or (inviter if direct else None),
         status=f"invited by {inviter}" if inviter else "invited",
     )
 
@@ -397,12 +409,12 @@ async def read_room(client: nio.AsyncClient, room_id: str, *, limit: int | None)
     person = quote(client.user_id, safe="")
     direct = _mapping(await optional_json(client, f"/user/{person}/account_data/m.direct"))
     members = [
-        _line(user_id, _text(_mapping(member).get("display_name"))) for user_id, member in sorted(joined.items())
+        _line(user_id, _name(_mapping(member).get("display_name"))) for user_id, member in sorted(joined.items())
     ]
     return {
         "room_id": room_id,
-        "name": _text(name),
-        "topic": topic if isinstance(topic, str) else None,
+        "name": _name(name),
+        "topic": _cut(_text(topic)),
         "encrypted": encrypted,
         "dm": room_id in _direct_partners(direct),
         "joined_members": len(joined),
@@ -416,16 +428,15 @@ async def read_people(client: nio.AsyncClient, query: str, *, limit: int | None)
     ``limit`` (default 10, at most 50) bounds a search, and ``limited`` says whether the directory had more.
     """
     query = query.strip()
-    if _MATRIX_USER_ID.fullmatch(query):
+    if MATRIX_USER_ID.fullmatch(query):
         profile = await matrix_json(client, "GET", f"/profile/{quote(query, safe='')}")
-        return {"people": [_line(query, _text(profile.get("displayname")))]}
+        return {"people": [_line(query, _name(profile.get("displayname")))]}
     count = _clamped(limit, _PEOPLE_LIMIT, _MAX_PEOPLE_LIMIT)
     found = await matrix_json(client, "POST", "/user_directory/search", {"search_term": query, "limit": count})
-    results = found.get("results")
     people = [
-        _line(result["user_id"], _text(result.get("display_name")))
-        for result in (results if isinstance(results, list) else [])
-        if isinstance(result, dict) and isinstance(result.get("user_id"), str)
+        _line(result["user_id"], _name(result.get("display_name")))
+        for result in json_objects(found, "results")
+        if isinstance(result.get("user_id"), str)
     ]
     return {"people": people[:count], "limited": found.get("limited") is True}
 
@@ -484,6 +495,15 @@ def _cut(text: str | None, limit: int = _MAX_TEXT_CHARACTERS) -> str | None:
     return f"{text[:limit]} […]"
 
 
+def _name(value: object) -> str | None:
+    """Return a name or a type someone chose, such as a room's name or a file's type, as one line of its first 200."""
+    return _cut(_text(value), _MAX_NAME_CHARACTERS)
+
+
+def _encrypted(event: dict[str, Any]) -> bool:
+    return event.get("type") == "m.room.encrypted"
+
+
 def _media_kind(content: dict[str, Any]) -> _MediaKind | None:
     """Return the kind of file a message carries, None for a message without; a `msgtype` that is not text is none."""
     msgtype = content.get("msgtype")
@@ -497,7 +517,7 @@ def _file_name(content: dict[str, Any]) -> str:
 
 def _said(message: dict[str, Any], content: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return what a message says, and the note naming its file when it has one."""
-    if message.get("type") == "m.room.encrypted":
+    if _encrypted(message):
         return "[encrypted, not readable]", None
     body = content.get("body")
     if _media_kind(content) is None:
@@ -508,7 +528,7 @@ def _said(message: dict[str, Any], content: dict[str, Any]) -> tuple[str | None,
     body, name = _text(body), _file_name(content)
     info = _mapping(content.get("info"))
     size = _count(info.get("size"))
-    details = [_cut(name, _MAX_NAME_CHARACTERS), _text(info.get("mimetype")), f"{size} bytes" if size else None]
+    details = [_name(name), _name(info.get("mimetype")), f"{size} bytes" if size else None]
     # A body that is not the file's name is a caption.
     caption = body if body != name else None
     return _cut(caption), f"[file: {', '.join(detail for detail in details if detail)}]"
@@ -520,13 +540,11 @@ def _reactions_note(message: dict[str, Any], senders_by_key: dict[str, set[str]]
     A bundled count already covers the page's reactions, so a key counts the larger of the two.
     """
     counts = {key: len(senders) for key, senders in senders_by_key.items()}
-    for group in _objects(_bundled(message, _REACTION), "chunk"):
+    for group in json_objects(_bundled(message, _REACTION), "chunk"):
         key = group.get("key")
         if isinstance(key, str):
             counts[key] = max(counts.get(key, 0), _count(group.get("count")))
-    shown = [
-        (name, count) for key, count in counts.items() if count and (name := _cut(_text(key), _MAX_NAME_CHARACTERS))
-    ]
+    shown = [(name, count) for key, count in counts.items() if count and (name := _name(key))]
     shown.sort(key=lambda reaction: (-reaction[1], reaction[0]))
     return f"[reactions: {' '.join(f'{name}{count}' for name, count in shown)}]" if shown else None
 
@@ -534,7 +552,7 @@ def _reactions_note(message: dict[str, Any], senders_by_key: dict[str, set[str]]
 def _thread_note(message: dict[str, Any], *, thread_page: bool) -> str | None:
     """Return the thread a reply in one is in, unless the page is that thread's, or how many replies a root has."""
     relation = _relation(message)
-    if relation.get("rel_type") == _THREAD and (root := _cut(_text(relation.get("event_id")), _MAX_NAME_CHARACTERS)):
+    if relation.get("rel_type") == _THREAD and (root := _name(relation.get("event_id"))):
         return None if thread_page else f"[in thread {root}]"
     replies = _count(_bundled(message, _THREAD).get("count"))
     return f"[thread: {replies} {'reply' if replies == 1 else 'replies'}]" if replies else None
@@ -642,7 +660,7 @@ async def read_messages(
         return await _around(client, room, quote(event_id, safe=""), count=count)
     parameters = _page_query({"dir": "b", "limit": count, "filter": _MESSAGES_FILTER}, page_token)
     page = await matrix_json(client, "GET", f"/rooms/{room}/messages?{parameters}")
-    return _messages_page(_message_lines(_objects(page, "chunk")[::-1]), page.get("end"))
+    return _messages_page(_message_lines(json_objects(page, "chunk")[::-1]), page.get("end"))
 
 
 async def _thread(
@@ -657,7 +675,7 @@ async def _thread(
     root = [] if page_token else [await matrix_json(client, "GET", f"/rooms/{room}/event/{thread}")]
     parameters = _page_query({"dir": "b", "limit": count}, page_token)
     replies = await matrix_json(client, "GET", f"/rooms/{room}/relations/{thread}/m.thread?{parameters}", version="v1")
-    lines = _message_lines([*root, *_objects(replies, "chunk")[::-1]], thread_page=True)
+    lines = _message_lines([*root, *json_objects(replies, "chunk")[::-1]], thread_page=True)
     return _messages_page(lines, replies.get("next_batch"))
 
 
@@ -667,8 +685,8 @@ async def _around(client: nio.AsyncClient, room: str, event: str, *, count: int)
     parameters = urlencode({"limit": side * 2, "filter": _MESSAGES_FILTER})
     context = await matrix_json(client, "GET", f"/rooms/{room}/context/{event}?{parameters}")
     # The events before come newest first.
-    before = _objects(context, "events_before")[:side][::-1]
-    after = _objects(context, "events_after")[:side]
+    before = json_objects(context, "events_before")[:side][::-1]
+    after = json_objects(context, "events_after")[:side]
     return _messages_page(_message_lines([*before, _mapping(context.get("event")), *after]))
 
 
@@ -694,7 +712,7 @@ async def search_messages(
     answer = await matrix_json(client, "POST", path, {"search_categories": {"room_events": criteria}})
     found = _mapping(_mapping(answer.get("search_categories")).get("room_events"))
     lines: dict[str, str] = {}
-    for hit in _objects(found, "results"):
+    for hit in json_objects(found, "results"):
         event = _mapping(hit.get("result"))
         room = event.get("room_id")
         if _redacted(event) or not isinstance(room, str):
@@ -749,7 +767,7 @@ async def download_file(
     The download stops at the attachment store's size cap. Returns the attachment's ID, name, type, and size.
     """
     event = await read_event(client, room_id, event_id)
-    if event.get("type") == "m.room.encrypted":
+    if _encrypted(event):
         raise MatrixRequestError(_ENCRYPTED)
     content, media = _content(event), parse_matrix_media_event_source(event)
     kind = _media_kind(content)
@@ -759,7 +777,7 @@ async def download_file(
     data = await download_media_bytes(client, media)
     if data is None:
         raise MatrixRequestError(_NOT_FETCHED)
-    name, mime_type = _file_name(content), media_mime_type(media) or "application/octet-stream"
+    name, mime_type = _file_name(content), _name(media_mime_type(media)) or "application/octet-stream"
     record = await run_blocking_until_complete(
         partial(
             register_bytes_attachment,
@@ -781,7 +799,7 @@ async def download_file(
     )
     if record is None:
         raise MatrixRequestError(_NOT_FETCHED)
-    return {"attachment_id": record.attachment_id, "name": name, "mime_type": mime_type, "size_bytes": len(data)}
+    return {"attachment_id": record.attachment_id, "name": _name(name), "mime_type": mime_type, "size_bytes": len(data)}
 
 
 async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | None) -> dict[str, object]:
@@ -793,7 +811,7 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
     room = quote(room_id, safe="")
     if event_id is None:
         newest = await matrix_json(client, "GET", f"/rooms/{room}/messages?{urlencode({'dir': 'b', 'limit': 1})}")
-        read_up_to = next(iter(_objects(newest, "chunk")), {}).get("event_id")
+        read_up_to = next(iter(json_objects(newest, "chunk")), {}).get("event_id")
         if not isinstance(read_up_to, str):
             raise MatrixRequestError(_NOTHING_TO_MARK)
     else:
@@ -805,7 +823,6 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
     try:
         await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
-        failure = str(error) if isinstance(error, MatrixRequestError) else transport_failure(error)
-        msg = f"The room is read up to {read_up_to}, but it is still marked unread: {failure}"
+        msg = f"The room is read up to {read_up_to}, but it is still marked unread: {request_failure(error)}"
         raise MatrixRequestError(msg) from None
     return {} if event_id is not None else {"read_up_to": read_up_to}

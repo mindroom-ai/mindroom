@@ -136,7 +136,7 @@ def resolve_context_attachment_path(
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
     """Resolve a context attachment ID to a local file path."""
-    attachment = _resolve_context_attachment_record(context, attachment_id)
+    attachment = resolve_context_attachment_record(context, attachment_id)
     if isinstance(attachment, str):
         return None, attachment
     return attachment.local_path, None
@@ -150,13 +150,13 @@ def read_context_attachment(
     limit_label: str,
 ) -> tuple[bytes | None, str | None]:
     """Read the bytes of an attachment available in this conversation, or return why it cannot be read; blocking."""
-    attachment = _resolve_context_attachment_record(context, attachment_id)
+    attachment = resolve_context_attachment_record(context, attachment_id)
     if isinstance(attachment, str):
         return None, attachment
     return _read_attachment_bytes(attachment, byte_limit=byte_limit, limit_label=limit_label)
 
 
-def _resolve_context_attachment_record(
+def resolve_context_attachment_record(
     context: ToolRuntimeContext,
     attachment_id: str,
 ) -> AttachmentRecord | str:
@@ -210,7 +210,7 @@ def _view_attachment(  # noqa: PLR0911
     metadata: dict[str, object],
 ) -> ToolValue:
     """Read authorized attachment bytes and use shared preparation for every image view."""
-    attachment = _resolve_context_attachment_record(context, attachment_id)
+    attachment = resolve_context_attachment_record(context, attachment_id)
     if isinstance(attachment, str):
         return media_error(attachment, metadata=metadata)
     payload, error = _read_attachment_bytes(
@@ -312,7 +312,7 @@ def resolve_send_attachment(
         runtime_media = get_tool_runtime_media_attachment(context, reference)
         if runtime_media is not None:
             return runtime_media, False
-        record = _resolve_context_attachment_record(context, reference)
+        record = resolve_context_attachment_record(context, reference)
         newly_registered = False
     else:
         record = _register_attachment_file_path(
@@ -594,7 +594,7 @@ class AttachmentTools(Toolkit):
         if path_error is not None:
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=path_error)
 
-        attachment = _resolve_context_attachment_record(context, requested_attachment_id)
+        attachment = resolve_context_attachment_record(context, requested_attachment_id)
         if isinstance(attachment, str):
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=attachment)
 

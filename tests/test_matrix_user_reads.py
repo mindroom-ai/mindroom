@@ -426,8 +426,7 @@ async def test_an_oversized_room_list_says_what_to_do(client: nio.AsyncClient, h
         await read_rooms(client, query=None, limit=None)
 
     assert str(error.value) == (
-        "This account has too many rooms to list at once. "
-        'Ask the person for the room\'s name or ID and use action "room".'
+        'This account has too many rooms to list at once. Ask your owner for the room\'s ID and use action "room".'
     )
 
 
@@ -616,6 +615,55 @@ async def test_a_file_name_and_a_reaction_key_are_cut(client: nio.AsyncClient, h
     result = await _messages(client)
 
     assert result["messages"] == [message_line("$file", f"[file: {'n' * 200} […]] [reactions: {'k' * 200} […]1]")]
+
+
+@pytest.mark.asyncio
+async def test_names_topics_and_types_are_cut(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A room's name, a display name, and a file's name and type show their first 200 characters.
+
+    A room member or whoever invites the person sets each of them; a topic shows as one line of its first 2000.
+    """
+    long, cut = "n" * 201, "n" * 200 + " […]"
+    long_type, cut_type = "t" * 201, "t" * 200 + " […]"
+    topic = "Next\nquarter " + "q" * 2000
+    bob = "@bob:example.com"
+    homeserver.answers.update(
+        {
+            SYNC_PATH: sync_answer(
+                join={ROOM: joined_room(long)},
+                invite={"!ask:example.com": invited_room(PERSON, bob, long)},
+            ),
+            f"{ROOM_PATH}/joined_members": {"joined": {bob: {"display_name": long}}},
+            f"{ROOM_PATH}/state/m.room.name": {"name": long},
+            f"{ROOM_PATH}/state/m.room.topic": {"topic": topic},
+            f"/_matrix/client/v3/profile/{bob}": {"displayname": long},
+            "/_matrix/client/v3/user_directory/search": {"results": [{"user_id": bob, "display_name": long}]},
+            MESSAGES_PATH: {"chunk": [_file_event("m.file", "notes.txt", long_type, 4)]},
+            f"{ROOM_PATH}/event/$file": _file_event("m.file", long, long_type, 4),
+            MEDIA_PATH: Answer(b"note"),
+        },
+    )
+
+    rooms = await read_rooms(client, query=None, limit=None)
+    room = await read_room(client, ROOM, limit=None)
+    profile = await read_people(client, bob, limit=None)
+    found = await read_people(client, "bob", limit=None)
+    messages = await _messages(client)
+    downloaded = await download_file(client, ROOM, "$file", storage_path=tmp_path, for_room_id=CHAT, for_thread_id=None)
+
+    assert rooms["rooms"] == [f"!ask:example.com | {cut} | invited by {bob}", f"{ROOM} | {cut}"]
+    assert (room["name"], room["topic"], room["members"]) == (
+        cut,
+        ("Next quarter " + "q" * 2000)[:2000] + " […]",
+        [f"{bob} | {cut}"],
+    )
+    assert profile["people"] == found["people"] == [f"{bob} | {cut}"]
+    assert messages["messages"] == [message_line("$file", f"[file: notes.txt, {cut_type}, 4 bytes]")]
+    assert (downloaded["name"], downloaded["mime_type"]) == (cut, cut_type)
 
 
 @pytest.mark.asyncio
@@ -959,6 +1007,9 @@ async def test_download_registers_an_attachment_within_the_size_cap(
     assert (record.kind, record.room_id, record.thread_id, record.sender) == (kind, CHAT, "$turn", "@bob:example.com")
     [download] = homeserver.requests_to(MEDIA_PATH)
     assert download.query["user_id"] == [PERSON]
+    # The token travels only in the Authorization header.
+    assert TOKEN not in download.url
+    assert "access_token" not in download.url
 
     monkeypatch.setattr("mindroom.matrix.media.RETAINED_MEDIA_MAX_BYTES", len(data) - 1)
     elsewhere = tmp_path / "elsewhere"

@@ -9,7 +9,6 @@ event would go out in plain text.
 from __future__ import annotations
 
 import json
-import re
 import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -21,16 +20,19 @@ from uuid import uuid4
 
 import aiohttp
 
-from mindroom.attachments.storage import AttachmentRecord, load_attachment
 from mindroom.constants import AGENT_AUTHORED_KEY
+from mindroom.custom_tools.attachments import resolve_context_attachment_record
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.matrix_user_reads import (
+    MATRIX_USER_ID,
     MatrixRequestError,
+    json_objects,
     matrix_json,
     optional_json,
     read_event,
+    request_failure,
     room_encrypted,
-    transport_failure,
+    room_needed,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -43,13 +45,11 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
-from mindroom.tool_system.runtime_context import attachment_id_available_in_tool_runtime_context
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import nio
 
+    from mindroom.attachments.storage import AttachmentRecord
     from mindroom.custom_tools.matrix_user_authority import MatrixUserActor
     from mindroom.matrix.client_delivery import MatrixSendOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -58,7 +58,6 @@ __all__ = ["MatrixUserWrite", "write_as_person"]
 
 logger = get_logger(__name__)
 
-_ACTIONS = frozenset({"send", "react", "edit", "redact", "join", "leave", "invite", "create_room"})
 _MAX_WRITES = 12
 _WRITES_WINDOW_SECONDS = 30.0
 _RATE_LIMIT_LOCK = Lock()
@@ -67,18 +66,16 @@ _RECENT_WRITES: defaultdict[tuple[str, str, str], deque[float]] = defaultdict(de
 # A DM made for the person with someone, by the two of them, that could not be added to the person's `m.direct`: the
 # next send to that someone uses it rather than making another.
 _UNRECORDED_DIRECT_ROOMS: dict[tuple[str, str], str] = {}
-_MATRIX_USER_ID = re.compile(r"@[^:\s]+:\S+")
-_UNKNOWN_ACTION = "action must be send, react, edit, redact, join, leave, invite, or create_room."
 _ONE_TARGET = "send needs exactly one of room_id and user_id."
 _NOTHING_TO_SEND = "send needs message, attachments, or both."
 _REPLY_NEEDS_TEXT = "A reply (event_id) needs message."
 _NOT_A_USER_ID = "user_id is a full Matrix ID such as @bob:example.com."
 _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
 # A bridge or the homeserver runs such a message as its sender's command, whatever marks it as the agent's.
-_COMMAND_LIKE = 'A message sent as the person cannot start with "!" or "\\": it would read as a command.'
-_ENCRYPTED = "The room is encrypted, and nothing is sent as the person into an encrypted room."
+_COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
+_ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
-_CONTACT_ROOM = "Nothing is written as the person into a contact room."
+_CONTACT_ROOM = "Nothing is written as your owner into a contact room."
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
@@ -86,17 +83,12 @@ def _given(text: str | None) -> bool:
     return text is not None and bool(text.strip())
 
 
-def _room_needed(action: str) -> str:
-    alias = " or an alias such as #abc:example.com" if action == "join" else ""
-    return f"{action} needs room_id, a room ID such as !abc:example.com{alias}."
-
-
 def _names_room(room_id: str | None, *, alias: bool) -> bool:
     return room_id is not None and room_id.startswith(("!", "#") if alias else "!")
 
 
 def _user_problem(user_id: str | None) -> str | None:
-    return None if user_id is None or _MATRIX_USER_ID.fullmatch(user_id) else _NOT_A_USER_ID
+    return None if user_id is None or MATRIX_USER_ID.fullmatch(user_id) else _NOT_A_USER_ID
 
 
 def _command_problem(text: str | None) -> str | None:
@@ -129,16 +121,15 @@ class MatrixUserWrite:
     attachments: tuple[str, ...] = ()
     name: str | None = None
 
-    def problem(self) -> str | None:  # noqa: PLR0911 - one return per refusal
+    def problem(self) -> str | None:
         """Return what the arguments lack, or why they are refused, without asking the homeserver anything."""
-        if self.action not in _ACTIONS:
-            return _UNKNOWN_ACTION
         if self.action == "send":
             return self._send_problem()
         if self.action == "create_room":
             return _user_problem(self.user_id) if _given(self.name) else "create_room needs name."
-        if not _names_room(self.room_id, alias=self.action == "join"):
-            return _room_needed(self.action)
+        alias = self.action == "join"
+        if not _names_room(self.room_id, alias=alias):
+            return room_needed(self.action, alias=alias)
         needed = {
             "react": {"event_id": self.event_id, "emoji": self.emoji},
             "edit": {"event_id": self.event_id, "message": self.message},
@@ -156,7 +147,7 @@ class MatrixUserWrite:
         if (self.room_id is None) == (self.user_id is None):
             return _ONE_TARGET
         if self.room_id is not None and not _names_room(self.room_id, alias=False):
-            return _room_needed("send")
+            return room_needed("send")
         if (problem := _user_problem(self.user_id)) is not None:
             return problem
         if not _given(self.message) and not self.attachments:
@@ -174,11 +165,8 @@ class _Written:
     event_ids: list[str] = field(default_factory=list)
     # The content of its first event; only its keys and size are logged.
     content: dict[str, Any] | None = None
-
-
-def _failure(error: MatrixRequestError | TimeoutError | aiohttp.ClientError) -> str:
-    """Return what the model reads of a failed request."""
-    return str(error) if isinstance(error, MatrixRequestError) else transport_failure(error)
+    # Whom it invited: into a room, into a new room, or into a DM made for a send.
+    invited: str | None = None
 
 
 async def write_as_person(
@@ -186,8 +174,6 @@ async def write_as_person(
     actor: MatrixUserActor,
     turn: ToolRuntimeContext,
     write: MatrixUserWrite,
-    *,
-    storage_path: Path,
 ) -> dict[str, object]:
     """Make ``write`` as the person ``client`` acts as, marked as ``actor``'s agent's, and log one audit line for it.
 
@@ -196,9 +182,9 @@ async def write_as_person(
     """
     written = _Written(room_id=write.room_id)
     try:
-        fields = await _write(client, actor, turn, write, written, storage_path=storage_path)
+        fields = await _write(client, actor, turn, write, written)
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
-        _audit(actor, write, written, error=_failure(error))
+        _audit(actor, write, written, error=request_failure(error))
         raise
     _audit(actor, write, written)
     return fields
@@ -217,6 +203,7 @@ def _audit(actor: MatrixUserActor, write: MatrixUserWrite, written: _Written, *,
         content_keys=sorted(content),
         content_bytes=len(json.dumps(content).encode()) if content else 0,
         attachments=len(write.attachments),
+        **({} if written.invited is None else {"invited": written.invited}),
         **({} if error is None else {"error": error}),
     )
 
@@ -227,14 +214,12 @@ async def _write(
     turn: ToolRuntimeContext,
     write: MatrixUserWrite,
     written: _Written,
-    *,
-    storage_path: Path,
 ) -> dict[str, object]:
     if write.user_id == actor.person_user_id:
         raise MatrixRequestError(_NOT_THE_OWNER)
     if write.room_id is not None and send_refused(write.room_id):
         raise MatrixRequestError(_CONTACT_ROOM)
-    files = _turn_files(turn, write.attachments, storage_path)
+    files = _turn_files(turn, write.attachments)
     limited = check_rate_limit(
         lock=_RATE_LIMIT_LOCK,
         recent_actions=_RECENT_WRITES,
@@ -254,6 +239,7 @@ async def _write(
     if write.action in {"react", "edit", "redact"}:
         return await _event_write(client, actor, turn, write, written, marker)
     if write.action == "create_room":
+        written.invited = write.user_id
         # A plain request: the homeserver's default power levels, as a room the person makes in their own client has.
         invite = {"invite": [write.user_id]} if write.user_id is not None else {}
         body = {"name": write.name, "preset": "private_chat", **invite}
@@ -268,22 +254,24 @@ async def _write(
         await matrix_json(client, "POST", f"/rooms/{room}/leave", {})
         return {"room_id": room_id}
     # The only action left: invite.
+    written.invited = write.user_id
     await matrix_json(client, "POST", f"/rooms/{room}/invite", {"user_id": write.user_id})
     return {"room_id": room_id}
 
 
-def _turn_files(
-    turn: ToolRuntimeContext,
-    attachment_ids: tuple[str, ...],
-    storage_path: Path,
-) -> list[AttachmentRecord]:
-    """Return the stored files of the turn that ``attachment_ids`` name, refusing any the turn does not hold."""
+def _turn_files(turn: ToolRuntimeContext, attachment_ids: tuple[str, ...]) -> list[AttachmentRecord]:
+    """Return the stored files of the turn that ``attachment_ids`` name, refusing any it does not hold.
+
+    A file goes out with its name as its text, which whoever sent the file chose, so a name that would read as a
+    command is refused too.
+    """
     files: list[AttachmentRecord] = []
     for attachment_id in attachment_ids:
-        available = attachment_id_available_in_tool_runtime_context(turn, attachment_id)
-        record = load_attachment(storage_path, attachment_id) if available else None
-        if record is None or not record.local_path.is_file():
-            msg = f"Attachment {attachment_id} is not available in this conversation."
+        record = resolve_context_attachment_record(turn, attachment_id)
+        if isinstance(record, str):
+            raise MatrixRequestError(record)
+        if (problem := _command_problem(record.filename)) is not None:
+            msg = f"Attachment {attachment_id}'s file name is sent as its text. {problem}"
             raise MatrixRequestError(msg)
         files.append(record)
     return files
@@ -302,7 +290,7 @@ async def _require_unencrypted(client: nio.AsyncClient, room_id: str) -> None:
     try:
         encrypted = await room_encrypted(client, room_id)
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
-        msg = f"{_ENCRYPTION_UNKNOWN} ({_failure(error).rstrip('.')})."
+        msg = f"{_ENCRYPTION_UNKNOWN} ({request_failure(error).rstrip('.')})."
         raise MatrixRequestError(msg) from None
     if encrypted:
         raise MatrixRequestError(_ENCRYPTED)
@@ -333,8 +321,8 @@ async def _send(
     else:
         room_id, made = await _direct_room(client, actor.person_user_id, str(write.user_id))
     written.room_id = room_id
-    if send_refused(room_id):
-        raise MatrixRequestError(_CONTACT_ROOM)
+    if made:
+        written.invited = write.user_id
     try:
         await _require_unencrypted(client, room_id)
     except MatrixRequestError as refused:
@@ -446,7 +434,7 @@ async def _event_write(
 async def _require_own_event(client: nio.AsyncClient, room_id: str, event_id: str, person: str) -> None:
     sender = (await read_event(client, room_id, event_id)).get("sender")
     if sender != person:
-        msg = f"Only the person's own events can be changed, and {event_id} was sent by {sender}."
+        msg = f"Only your owner's own events can be changed, and {event_id} was sent by {sender}."
         raise MatrixRequestError(msg)
 
 
@@ -454,8 +442,7 @@ async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: st
     """Return the newest event of a thread, which a reply that answers none of them follows; its root if it has none."""
     path = f"/rooms/{quote(room_id, safe='')}/relations/{quote(thread_id, safe='')}/m.thread"
     page = await matrix_json(client, "GET", f"{path}?{urlencode({'dir': 'b', 'limit': 1})}", version="v1")
-    chunk = page.get("chunk")
-    newest = chunk[0].get("event_id") if isinstance(chunk, list) and chunk and isinstance(chunk[0], dict) else None
+    newest = next(iter(json_objects(page, "chunk")), {}).get("event_id")
     return newest if isinstance(newest, str) else thread_id
 
 
@@ -505,7 +492,7 @@ async def _record_direct_room(
         await matrix_json(client, "PUT", direct_path, direct)
     except (MatrixRequestError, TimeoutError, aiohttp.ClientError) as error:
         msg = (
-            f"{_made_dm(room_id, them)}, but could not record it as one ({_failure(error).rstrip('.')}). "
+            f"{_made_dm(room_id, them)}, but could not record it as one ({request_failure(error).rstrip('.')}). "
             f"Nothing was sent; to send there, use room_id {room_id}."
         )
         raise MatrixRequestError(msg) from None
@@ -523,11 +510,10 @@ async def _only_the_two(client: nio.AsyncClient, room_id: str, person: str, them
         if error.status in {HTTPStatus.FORBIDDEN, HTTPStatus.NOT_FOUND}:
             return False
         raise
-    chunk = answer.get("chunk")
     memberships = {
         event.get("state_key"): content.get("membership")
-        for event in (chunk if isinstance(chunk, list) else [])
-        if isinstance(event, dict) and isinstance(content := event.get("content"), dict)
+        for event in json_objects(answer, "chunk")
+        if isinstance(content := event.get("content"), dict)
     }
     present = {user_id for user_id, membership in memberships.items() if membership in {"join", "invite"}}
     return memberships.get(person) == "join" and present == {person, them}

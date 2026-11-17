@@ -342,7 +342,7 @@ def owner_turn(
 ) -> AbstractContextManager[None]:
     """Enter a chat turn in ``ROOM`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
 
-    The turn holds the attachments ``attachment_ids`` name.
+    The turn holds the attachments ``attachment_ids`` name, stored in the runtime's storage, as a bot's turn does.
     """
     context = make_test_tool_runtime_context(
         agent_name=agent_name,
@@ -353,6 +353,7 @@ def owner_turn(
         runtime_paths=paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        storage_path=paths.storage_root,
         attachment_ids=attachment_ids,
     )
     return tool_runtime_context(context)

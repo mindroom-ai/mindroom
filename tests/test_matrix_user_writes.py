@@ -17,7 +17,9 @@ from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
 from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.guarded_rooms import guarded_room
+from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, register_tool_runtime_media_attachment
 from tests.matrix_user_helpers import (
     OWNER,
     ROOM,
@@ -30,6 +32,7 @@ from tests.matrix_user_helpers import (
     owner_runtime_paths,
     owner_toolkit,
     owner_turn,
+    room_event,
     text_message,
 )
 
@@ -53,8 +56,8 @@ UPLOAD_PATH = "/_matrix/media/v3/upload"
 DIRECT_PATH = f"{CLIENT}/user/{OWNER}/account_data/m.direct"
 CREATE_PATH = f"{CLIENT}/createRoom"
 THREAD_PATH = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
-ENCRYPTED = "The room is encrypted, and nothing is sent as the person into an encrypted room."
-COMMAND_LIKE = 'A message sent as the person cannot start with "!" or "\\": it would read as a command.'
+ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
+COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
 
 
@@ -285,6 +288,9 @@ async def test_send_with_an_attachment(
     [upload] = homeserver.requests_to(UPLOAD_PATH)
     assert upload.uploaded == b"Remember the milk"
     assert upload.query["user_id"] == [OWNER]
+    # The token travels only in the Authorization header.
+    assert TOKEN not in upload.url
+    assert "access_token" not in upload.url
     [_, file] = _sent(homeserver)
     assert (file["msgtype"], file["url"], file["filename"]) == ("m.file", "mxc://example.com/notes", "notes.txt")
     assert file[AGENT_AUTHORED_KEY] == agent_id
@@ -299,8 +305,113 @@ async def test_an_attachment_the_turn_does_not_hold_is_refused_before_any_reques
     """Only the turn's own files can be sent."""
     result = await _write(config, paths, homeserver, action="send", room_id=ROOM, attachments=["att_elsewhere"])
 
-    assert result == _error("send", "Attachment att_elsewhere is not available in this conversation.")
+    assert result == _error("send", "Attachment ID is not available in this context: att_elsewhere")
     assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_an_ephemeral_attachment_is_named_as_such(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An encrypted file the turn holds only in memory has no stored copy to upload, and the refusal says which it is."""
+    media = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_media",
+        filename="photo.png",
+        url="mxc://example.com/media",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=1,
+    )
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        turn = get_tool_runtime_context()
+        assert turn is not None
+        register_tool_runtime_media_attachment(turn, media)
+        result = await owner_toolkit(config, paths).matrix_user_write(
+            action="send",
+            room_id=ROOM,
+            attachments=["att_media"],
+        )
+
+    assert json.loads(result) == _error("send", "Ephemeral attachment att_media can be sent but has no local file.")
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["!admin users list", "  \\!admin x", "\u200b!x"])
+async def test_a_command_like_file_name_is_refused(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """A file goes out with its name as its text, which a bridge or the homeserver would run as the owner's command.
+
+    Whoever sent a file named it, so a downloaded file can carry such a name.
+    """
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Remember the milk")
+    record = register_local_attachment(paths.storage_root, notes, kind="file", filename=name, room_id=ROOM)
+    assert record is not None
+
+    with owner_turn(config, paths, attachment_ids=(record.attachment_id,)), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_write(
+            action="send",
+            room_id=ROOM,
+            attachments=[record.attachment_id],
+        )
+
+    assert json.loads(result) == _error(
+        "send",
+        f"Attachment {record.attachment_id}'s file name is sent as its text. {COMMAND_LIKE}",
+    )
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_file_downloaded_in_a_turn_is_sent_in_that_turn(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    agent_id: str,
+) -> None:
+    """A file fetched from one of the owner's rooms goes out in the same turn, uploaded as the owner, marked as the agent's."""
+    files = "!files:example.com"
+    content = {
+        "msgtype": "m.file",
+        "body": "notes.txt",
+        "url": "mxc://example.com/abc",
+        "info": {"mimetype": "text/plain"},
+    }
+    homeserver.answers.update(
+        {
+            f"{CLIENT}/rooms/{files}/event/$file": room_event("$file", "m.room.message", content),
+            "/_matrix/client/v1/media/download/example.com/abc": Answer(b"Remember the milk"),
+            UPLOAD_PATH: {"content_uri": "mxc://example.com/copy"},
+        },
+    )
+    toolkit = owner_toolkit(config, paths)
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        fetched = json.loads(await toolkit.matrix_user_read(action="download", room_id=files, event_id="$file"))
+        sent = json.loads(
+            await toolkit.matrix_user_write(action="send", room_id=ROOM, attachments=[fetched["attachment_id"]]),
+        )
+
+    assert sent == _ok("send", room_id=ROOM, event_id="$sent")
+    [upload] = homeserver.requests_to(UPLOAD_PATH)
+    assert upload.uploaded == b"Remember the milk"
+    assert upload.query["user_id"] == [OWNER]
+    [file] = _sent(homeserver)
+    assert (file["msgtype"], file["url"], file["body"]) == ("m.file", "mxc://example.com/copy", "notes.txt")
+    assert file[AGENT_AUTHORED_KEY] == agent_id
+    [send] = [request for request in _changes(homeserver) if request.path.startswith(_send_path())]
+    assert send.query["user_id"] == [OWNER]
 
 
 @pytest.mark.asyncio
@@ -531,7 +642,7 @@ async def test_edit_and_redact_refuse_another_persons_event(
 
     assert result == _error(
         arguments["action"],
-        f"Only the person's own events can be changed, and $theirs was sent by {BOB}.",
+        f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
     )
     assert _changes(homeserver) == []
 
@@ -699,7 +810,7 @@ async def test_a_contact_room_is_refused_before_any_request(
     with owner_turn(config, paths), homeserver.serving_the_toolkit(), guarded_room(ROOM):
         result = await owner_toolkit(config, paths).matrix_user_write(action="send", room_id=ROOM, message="Hi")
 
-    assert json.loads(result) == _error("send", "Nothing is written as the person into a contact room.")
+    assert json.loads(result) == _error("send", "Nothing is written as your owner into a contact room.")
     assert homeserver.requests == []
 
 
@@ -780,6 +891,69 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "arguments",
+    [
+        {"action": "invite", "room_id": ROOM, "user_id": BOB},
+        {"action": "create_room", "name": "Trip", "user_id": BOB},
+        {"action": "send", "user_id": BOB, "message": "Lunch?"},
+    ],
+    ids=["invite", "create_room", "new-dm"],
+)
+async def test_the_audit_line_names_whom_a_write_invited(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+) -> None:
+    """Whom the owner's account invited is logged, into a room, a new room, or a DM made for a send."""
+    homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": NEW_DM}, DIRECT_PATH: {}})
+
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, **arguments)
+
+    assert result["status"] == "ok"
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert audit["invited"] == BOB
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "blank"),
+    [
+        ({"room_id": ROOM}, {"event_id": ""}),
+        ({"room_id": ROOM}, {"thread_id": " "}),
+        ({"room_id": ROOM}, {"user_id": ""}),
+        ({"user_id": BOB}, {"room_id": "  "}),
+    ],
+    ids=["event_id", "thread_id", "user_id", "room_id"],
+)
+async def test_a_blank_write_argument_is_left_out(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+    blank: dict[str, str],
+) -> None:
+    """A blank argument, as a model may send for one it means to leave out, is no reply target, thread, or recipient."""
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: {BOB: [NEW_DM]},
+            _members_path(NEW_DM): _members(alice="join", bob="join"),
+        },
+    )
+
+    without = await _write(config, paths, homeserver, action="send", message="Yes", **arguments)
+    with_blank = await _write(config, paths, homeserver, action="send", message="Yes", **arguments, **blank)
+
+    assert without["status"] == "ok"
+    assert with_blank == without
+    room_id = without["room_id"]
+    first, second = _sent(homeserver, room_id)
+    assert second == first
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("arguments", "message"),
     [
         ({"action": "send", "message": "Hi"}, "send needs exactly one of room_id and user_id."),
@@ -805,7 +979,6 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
         ),
         ({"action": "invite", "room_id": ROOM}, "invite needs user_id."),
         ({"action": "create_room"}, "create_room needs name."),
-        ({"action": "kick"}, "action must be send, react, edit, redact, join, leave, invite, or create_room."),
     ],
 )
 async def test_each_action_names_what_it_is_missing(
