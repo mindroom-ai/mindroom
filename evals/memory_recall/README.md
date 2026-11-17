@@ -57,7 +57,9 @@ Selection uses every score a call returned, however long it took, so the quality
 Latency is measured apart, with `--latency-turns N` (the gate uses 200): after one untimed warm-up call, each rerank
 arm calls its provider, uncached, for the first N held-out turns that have candidates, one turn at a time, so every
 gate rule is checked on held-out turns.
-A call that fails or takes over 2 seconds (live recall's deadline) is a fallback, and adds 2 seconds to the turn.
+A call that fails or takes over 2 seconds (live recall's deadline) is a fallback.
+A call adds its elapsed time to the turn, at most 2 seconds: an immediate error adds only the moment it took, a
+judgment call that hits the production timeout about 1.5 seconds, and a slower call the full 2.
 A judgment arm's timed calls use the production `timeout_seconds` (1.5), so a call live recall would drop at 1.5 s
 fails there too; its quality calls wait up to 30 seconds instead.
 Calls are not cancelled at the deadline, so a slow call cannot delay the next one.
