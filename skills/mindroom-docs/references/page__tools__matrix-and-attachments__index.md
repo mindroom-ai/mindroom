@@ -17,7 +17,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Use Matrix as a personal agent's owner: read their rooms and DMs, messages and threads, search, files, a room's members, and people, mark rooms read, and send, react, edit, delete, and join, leave, invite, or create rooms as them, each write approved by the owner on its card or within an `!auto_approve` window they opened.
+- [`matrix_user`] - Read Matrix as a personal agent's owner and, when they approve, write as them.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -27,11 +27,11 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 ## Tool Runtime Context
 
 Except the reads of [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
-Unless the call passes explicit IDs, they act on the current room and thread.
+Unless the call passes explicit IDs, they act on the current room and thread, except [`matrix_user`], which needs `room_id` for every action on a room.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 `room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
-Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
+Except [`matrix_user`], tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
 
