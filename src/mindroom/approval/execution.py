@@ -29,6 +29,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.reply_scope import current_reply_event_id, current_span_stopped
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -336,7 +337,8 @@ async def _stream_continuation_turn(
     The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
     follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
     resumed run already read it. A resumed run keeps its stored system prompt; each fresh attempt renders
-    ``system_enrichment_items`` into its own. A ``quiet`` turn may end without an answer, as its turn could.
+    ``system_enrichment_items`` into its own. A ``quiet`` turn may end without an answer, as its turn could. A fresh
+    attempt the reply's user stops is stored as any reply's stopped run is, linked to the reply it continues.
     """
     if resume.attempt is None:
         run_id = str(uuid4())
@@ -366,6 +368,8 @@ async def _stream_continuation_turn(
             run_metadata_collector=run_metadata,
             on_completed=completed.append,
             subagent_cost=subagent_cost,
+            response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
         ),
         resume=resume,
     )
