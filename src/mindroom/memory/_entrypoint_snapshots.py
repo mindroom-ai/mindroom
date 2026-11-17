@@ -40,8 +40,8 @@ class _Snapshot:
     used_at: float
 
 
-# Read from the store on first use; None until then.
-_snapshots: dict[tuple[str, str, Path], _Snapshot] | None = None
+# Each store's copies, read from that store on first use.
+_snapshots: dict[Path, dict[tuple[str, str, Path], _Snapshot]] = {}
 _lock = threading.Lock()
 
 
@@ -92,14 +92,14 @@ def stable_entrypoint_preamble(
     Keying by the file keeps one requester's private memory out of another requester's turns.
     ``now`` is wall-clock seconds, so idle times count across restarts; ``store`` is the file the copies are kept in.
     """
-    global _snapshots
     with _lock:
-        if _snapshots is None:
-            _snapshots = _load(store)
-        for key in [key for key, snapshot in _snapshots.items() if now - snapshot.used_at >= PROMPT_CACHE_IDLE_SECONDS]:
-            del _snapshots[key]
+        store = store.resolve()
+        if (kept := _snapshots.get(store)) is None:
+            kept = _snapshots[store] = _load(store)
+        for key in [key for key, snapshot in kept.items() if now - snapshot.used_at >= PROMPT_CACHE_IDLE_SECONDS]:
+            del kept[key]
         key = (agent_name, conversation.session_id, source_path)
-        snapshot = _snapshots.get(key)
+        snapshot = kept.get(key)
         if (
             snapshot is not None
             and snapshot.compaction == conversation.compaction
@@ -108,6 +108,6 @@ def stable_entrypoint_preamble(
             preamble, body = snapshot.preamble, snapshot.body
         else:
             preamble, body = fresh_preamble, fresh_body
-        _snapshots[key] = _Snapshot(preamble, body, conversation.compaction, now)
-        _save(store, _snapshots)
+        kept[key] = _Snapshot(preamble, body, conversation.compaction, now)
+        _save(store, kept)
     return preamble

@@ -27,6 +27,7 @@ def _preamble(
     summary: str | None = None,
     path: Path = MEMORY,
     now: float = 0.0,
+    store: Path = STORE,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
     return snapshots.stable_entrypoint_preamble(
@@ -35,7 +36,7 @@ def _preamble(
         path,
         text,
         f"preamble of {text!r}",
-        store=STORE,
+        store=store,
         now=now,
     )
 
@@ -91,13 +92,52 @@ def test_idle_snapshots_are_dropped() -> None:
     """Copies of idle conversations are released, so the store stays as small as the active conversations."""
     _preamble("a", session="old", now=0)
     _preamble("a", session="new", now=4000)
-    assert list(snapshots._snapshots) == [("mind", "new", MEMORY)]
+    assert list(snapshots._snapshots[STORE.resolve()]) == [("mind", "new", MEMORY)]
 
 
-def test_snapshots_survive_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A restart must not change the system prompt of a conversation whose cache is still warm."""
-    _preamble("a", now=0)
-    monkeypatch.setattr(snapshots, "_snapshots", None)
-    assert _preamble("a\nb", now=3000) == "preamble of 'a'"
-    monkeypatch.setattr(snapshots, "_snapshots", None)
-    assert _preamble("a2\nb", now=3100) == "preamble of 'a2\\nb'"
+@pytest.mark.parametrize(
+    ("later", "kept"),
+    [
+        ({"text": "a\nb\nc", "now": 3000}, True),
+        ({"text": "a\nb2"}, False),
+        ({"text": "a"}, False),
+        ({"text": "a\nb\nc", "now": 3600}, False),
+        ({"text": "a\nb\nc", "summary": "compacted"}, False),
+        ({"text": "a\nb\nc", "session": "thread-2"}, False),
+        ({"text": "a\nb\nc", "path": Path("/private/MEMORY.md")}, False),
+    ],
+    ids=["added-line", "edited-line", "deleted-line", "idle", "compacted", "other-session", "private-file"],
+)
+def test_snapshots_keep_their_rules_across_a_restart(later: dict, kept: bool) -> None:
+    """A restart keeps a warm conversation's preamble, and every reason to load the file again still applies."""
+    _preamble("a\nb")
+    snapshots._snapshots.clear()
+    assert _preamble(**later) == ("preamble of 'a\\nb'" if kept else f"preamble of {later['text']!r}")
+
+
+def test_each_store_restores_and_keeps_only_its_own_copies() -> None:
+    """A store never receives another store's private copies, and each one restores its own."""
+    first, second = Path("first.json"), Path("second.json")
+    _preamble("a", session="in-second", store=second)
+    snapshots._snapshots.clear()
+    _preamble("a", session="in-first", store=first)
+    assert _preamble("a\nb", session="in-second", store=second) == "preamble of 'a'"
+    assert "in-second" not in first.read_text(encoding="utf-8")
+    assert "in-first" not in second.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["[[", "{}", "null", '[["mind"]]', '[["mind","thread-1","/m","p","b",null,null,"x"]]'],
+)
+def test_unreadable_store_loads_the_file_again(content: str) -> None:
+    """A malformed store costs one cache write, never the turn."""
+    STORE.write_text(content, encoding="utf-8")
+    assert _preamble("a\nb") == "preamble of 'a\\nb'"
+
+
+def test_store_that_cannot_be_read_or_saved_keeps_copies_in_memory() -> None:
+    """A store path under a regular file fails every read and save, and turns still keep their preamble."""
+    Path("not-a-dir").write_text("", encoding="utf-8")
+    assert _preamble("a", store=Path("not-a-dir/snapshots.json")) == "preamble of 'a'"
+    assert _preamble("a\nb", store=Path("not-a-dir/snapshots.json")) == "preamble of 'a'"
