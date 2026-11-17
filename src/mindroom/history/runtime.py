@@ -640,6 +640,7 @@ def finalize_history_preparation(
                 available_history_budget=available_history_budget,
                 current_history_tokens=estimated,
                 model=model,
+                compacts_mid_turn=execution_plan.automatic_compaction and execution_plan.text_compaction_available,
             )
             log_replay_plan(
                 replay_plan=replay_plan,

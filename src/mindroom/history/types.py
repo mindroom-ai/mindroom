@@ -184,6 +184,9 @@ class ResolvedReplayPlan:
     add_history_to_context: bool
     num_history_runs: int | None = None
     num_history_messages: int | None = None
+    # The recovered runs the request continues replay as a bounded account of their tool calls: their own messages
+    # exceed the request's budget and nothing compacts them (``plan_replay_that_fits``).
+    recovered_as_account: bool = False
 
 
 @dataclass(frozen=True)

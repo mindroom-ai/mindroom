@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -27,9 +27,12 @@ from mindroom.history.replay import (
     HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
     estimate_summary_text_tokens,
+    has_effective_persisted_replay,
     plan_replay_that_fits,
 )
+from mindroom.history.request_messages import replayed_history
 from mindroom.history.request_size import request_sizer
+from mindroom.history.run_visibility import RECOVERED_RUN_KEY
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -53,6 +56,7 @@ from mindroom.history.types import (
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
+from mindroom.llm.runs import ToolExecution
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -63,7 +67,7 @@ from tests.conftest import (
     request_frame,
     seed_session,
 )
-from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
+from tests.fakes.scripted_model import ScriptedModel, estimate_only_model, tool_call
 from tests.fakes.summary_model import summary_model
 from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
@@ -79,6 +83,8 @@ from tests.providers.openai_family_support import openai_family_adapter
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.runs import RunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 
 def _agent_settings(config: Config) -> ResolvedHistorySettings:
@@ -1216,6 +1222,94 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
     assert replay_plan.mode == "limited"
     assert replay_plan.num_history_runs == 1
     assert replay_plan.num_history_messages is None
+
+
+def _recovered_run(run_id: str, result: str) -> RunRecord:
+    """Return a run recovery finished (``history.run_checkpoint``): its prompt, one file read, and that read's result."""
+    call_id = f"{run_id}-read"
+    return replace(
+        _completed_run(
+            run_id,
+            messages=[
+                Message(role="user", content=f"{run_id} question"),
+                Message(role="assistant", tool_calls=[tool_call("read_file", call_id, path="notes.txt")]),
+                Message(role="tool", content=result, tool_call_id=call_id, tool_name="read_file"),
+            ],
+        ),
+        tools=[
+            ToolExecution(tool_call_id=call_id, tool_name="read_file", tool_args={"path": "notes.txt"}, result=result),
+        ],
+        metadata={RECOVERED_RUN_KEY: True},
+    )
+
+
+def _plan_and_replay(
+    session: ConversationSession,
+    budget: int,
+    *,
+    compacts_mid_turn: bool,
+) -> tuple[ResolvedReplayPlan, list[Message], int]:
+    """Plan ``session``'s replay within ``budget``; return the plan, the history it replays, and that history's size."""
+    settings, model = replay_settings(), ScriptedModel([])
+    plan = plan_replay_that_fits(
+        session=session,
+        history_settings=settings,
+        available_history_budget=budget,
+        current_history_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            history_settings=settings,
+            model=model,
+        ),
+        model=model,
+        compacts_mid_turn=compacts_mid_turn,
+    )
+    history, _summary = replayed_history(session, HistoryScope(kind="agent", scope_id="test_agent"), settings, plan)
+    return plan, history, model.request_tokens(ModelRequest(messages=tuple(history)))
+
+
+def test_a_plan_that_replays_no_earlier_run_counts_the_recovered_runs_it_still_replays() -> None:
+    """No plan trims the recovered runs a request continues, so the plan without earlier runs holds their size."""
+    earlier = _completed_run("run-1", messages=[Message(role="user", content="u" * 4000)])
+    session = _session("session-1", runs=[earlier, _recovered_run("run-2", "r" * 400)])
+
+    plan, history, sent_tokens = _plan_and_replay(session, 300, compacts_mid_turn=False)
+
+    assert (plan.mode, plan.num_history_runs, plan.recovered_as_account) == ("disabled", 0, False)
+    assert [message.role for message in history] == ["user", "assistant", "tool"]
+    assert 0 < plan.estimated_tokens == sent_tokens <= 300
+    # The request replays stored runs, so the thread never stands in for them.
+    assert has_effective_persisted_replay(session=session, replay_plan=plan)
+
+
+def test_recovered_runs_over_the_budget_replay_as_a_bounded_account_where_nothing_compacts() -> None:
+    """Recovered runs that cannot fit replay as an account of their calls, beside the earlier runs that then fit."""
+    session = _session("session-1", runs=[_completed_run("run-1"), _recovered_run("run-2", "r" * 40_000)])
+
+    plan, history, sent_tokens = _plan_and_replay(session, 2_000, compacts_mid_turn=False)
+
+    assert plan.recovered_as_account
+    assert plan.estimated_tokens == sent_tokens <= 2_000
+    assert [message.role for message in history] == ["user", "assistant", "user"]
+    assert [str(message.content) for message in history[:2]] == ["run-1 question", "run-1 answer"]
+    account = str(history[-1].content)
+    assert "do not fit in this request" in account
+    assert "The `read_file` tool finished with input preview" in account
+    assert "notes.txt" in account
+    # The account holds each result as the short preview a reply's records keep.
+    assert "r" * 400 in account
+    assert "r" * 2_000 not in account
+    assert history[-1].from_history
+
+
+def test_recovered_runs_over_the_budget_stay_whole_for_the_run_s_mid_turn_compaction_to_fold() -> None:
+    """A run that compacts mid-turn folds what its first request cannot hold, and its plan holds that request's size."""
+    session = _session("session-1", runs=[_completed_run("run-1"), _recovered_run("run-2", "r" * 40_000)])
+
+    plan, history, sent_tokens = _plan_and_replay(session, 2_000, compacts_mid_turn=True)
+
+    assert (plan.mode, plan.num_history_runs, plan.recovered_as_account) == ("disabled", 0, False)
+    assert [message.role for message in history] == ["user", "assistant", "tool"]
+    assert plan.estimated_tokens == sent_tokens > 2_000
 
 
 @pytest.mark.asyncio
