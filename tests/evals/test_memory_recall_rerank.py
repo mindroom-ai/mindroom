@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from evals.memory_recall import judge, rerank_arms, run
-from evals.memory_recall.rerank_arms import select_reranked
+from evals.memory_recall.rerank_arms import RerankerSpec, measure_latency, rerank_turns, select_reranked
 from evals.memory_recall.rerank_cache import CachedReranker, RerankCache
-from evals.memory_recall.run import split_turns
+from evals.memory_recall.run import latency_metrics, split_turns
 from evals.memory_recall.turns import write_turns
 from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._shared import MemoryResult
+from mindroom.token_counting import families
 from tests.evals.test_memory_recall_run import (
     FIXTURE_MEMORY,
     _CountingEmbedder,
@@ -47,7 +50,7 @@ def _cached(stub: _StubReranker, cache: RerankCache, *, model: str = "stub-model
 
 @pytest.mark.asyncio
 async def test_cached_reranker_skips_second_request(tmp_path: Path) -> None:
-    """A second request for scored texts reaches no provider; only new texts are sent, and the latency is kept."""
+    """A second request for scored texts reaches no provider, and only new texts are sent."""
     stub = _StubReranker()
     documents = ["Pixel eats salmon", "the shed is green"]
     with RerankCache(tmp_path / "rerank.sqlite") as cache:
@@ -56,14 +59,9 @@ async def test_cached_reranker_skips_second_request(tmp_path: Path) -> None:
         again = await reranker.ascore("cat food", documents)
         assert first == again == [0.9, 0.6]
         assert len(stub.requests) == 1
-        latency = reranker.latency("cat food", documents)
-        assert latency is not None
-        assert latency >= 0.0
 
         await reranker.ascore("cat food", [*documents, "a tomato bed"])
         assert stub.requests[-1] == ("cat food", ["a tomato bed"])
-        # Only a call that scored every text of its request measures that request's latency.
-        assert reranker.latency("cat food", [*documents, "a tomato bed"]) is None
 
         # Another model is another key, so it is scored afresh.
         await _cached(stub, cache, model="other-model").ascore("cat food", documents)
@@ -131,6 +129,20 @@ def test_a5_selection_without_scores_is_the_shipped_selection() -> None:
     assert select_reranked(candidates, None, threshold=0.8) == select_recall_hits(candidates)
 
 
+def test_a5_selection_counts_exact_o200k_tokens_from_a_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before the tokenizer has loaded, selection still counts exact o200k tokens, never the character estimate.
+
+    `"x " * 1000` is 2,000 characters, which the estimate counts as 500 tokens, but o200k encodes as about 1,000, so
+    it does not fit the 800-token budget.
+    """
+    # No encoder has loaded, and a background load never finishes.
+    monkeypatch.setattr(families, "_encoders", {})
+    monkeypatch.setattr(families, "_load_in_background", lambda _name: None)
+    candidates = [MemoryResult(id="c0", memory="x " * 1000, user_id="u", score=0.5)]
+
+    assert select_reranked(candidates, [0.9], threshold=0.5) == []
+
+
 def test_split_is_seeded_and_disjoint() -> None:
     """The tuning and held-out halves cover every turn once, and the same seed always splits the same way."""
     tuning, held_out = split_turns(11, seed=7)
@@ -140,6 +152,83 @@ def test_split_is_seeded_and_disjoint() -> None:
     assert len(tuning) == 5
     assert split_turns(11, seed=7) == (tuning, held_out)
     assert split_turns(11, seed=8) != (tuning, held_out)
+
+
+class _TimedReranker:
+    """Answers at once, after 50 ms for a query naming "slow", and raises for one naming "broken"; counts calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        self.calls += 1
+        if "slow" in query:
+            await asyncio.sleep(0.05)
+        if "broken" in query:
+            msg = "provider refused"
+            raise RuntimeError(msg)
+        return [0.5] * len(documents)
+
+
+@pytest.mark.asyncio
+async def test_latency_mode_times_every_uncached_call_and_counts_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each measured turn calls the provider itself, after one warm-up call; slow and failed calls fall back.
+
+    A call over the deadline adds only the deadline, as live recall stops waiting then.
+    """
+    monkeypatch.setattr(rerank_arms, "DEADLINE_S", 0.02)
+    timed = _TimedReranker()
+    queries = ["fast", "fast", "slow", "broken", "unmeasured"]
+    turns = [_turn("2026-01-15", query) for query in queries]
+    candidates = [_candidates(2) for _query in queries]
+    candidates.insert(1, [])
+    turns.insert(1, _turn("2026-01-15", "no candidates"))
+
+    calls = await measure_latency(timed, turns, candidates, count=4)
+
+    # One warm-up call, then every measured turn, a repeated query too.
+    assert timed.calls == 5
+    assert [call.fallback for call in calls] == [False, False, True, True]
+    metrics = latency_metrics(calls)
+    assert metrics["latency_turns"] == 4
+    assert metrics["latency_fallback_rate"] == 0.5
+    assert metrics["latency_added_p95_ms"] == pytest.approx(20.0)
+    assert metrics["latency_added_p50_ms"] is not None
+    assert metrics["latency_added_p50_ms"] < 20.0
+
+
+def test_latency_metrics_without_measurements_are_missing() -> None:
+    """No measured call reports no latency and no fallback rate, never a zero."""
+    assert latency_metrics([]) == {
+        "latency_turns": 0,
+        "latency_added_p50_ms": None,
+        "latency_added_p95_ms": None,
+        "latency_fallback_rate": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cost_estimate_adds_request_and_rubric_overhead(tmp_path: Path) -> None:
+    """A priced provider's estimate counts the query, the candidates and the request's fixed and per-candidate overhead."""
+    spec = RerankerSpec(
+        provider="stub",
+        model="m",
+        rubric_version="v1",
+        usd_per_million_input_tokens=1.0,
+        create=lambda _paths: _StubReranker(),
+        request_overhead_tokens=100,
+        candidate_overhead_tokens=60,
+    )
+    candidates = [
+        MemoryResult(id="c0", memory="hello", user_id="u"),
+        MemoryResult(id="c1", memory="world", user_id="u"),
+    ]
+    with RerankCache(tmp_path / "rerank.sqlite") as cache:
+        [call] = await rerank_turns([_turn("2026-01-15", "hi")], [candidates], _cached(_StubReranker(), cache), spec)
+
+    assert call is not None
+    # "hi", "hello", "world" are one o200k token each.
+    assert call.usd == pytest.approx((3 + 100 + 2 * 60) / 1_000_000)
 
 
 @pytest.mark.asyncio
@@ -169,11 +258,52 @@ async def test_threshold_sweep_reuses_scores(tmp_path: Path, monkeypatch: pytest
 
     results = json.loads((out / "results.json").read_text())
     assert results == first
-    assert set(results) == {"all", "tuning", "held_out"}
-    assert set(results["all"]) == {"shipped", "A5@0.5", "A5@0.8"}
-    assert results["all"]["A5@0.5"]["mean_tokens"] > results["all"]["A5@0.8"]["mean_tokens"] > 0
-    assert results["all"]["A5@0.8"]["fallback_rate"] == 0.0
-    assert results["all"]["A5@0.8"]["rerank_p95_ms"] >= results["all"]["A5@0.8"]["rerank_p50_ms"] >= 0.0
-    assert results["all"]["shipped"]["rerank_p50_ms"] == 0.0
-    assert results["tuning"]["shipped"]["turns"] + results["held_out"]["shipped"]["turns"] == len(turns)
+    assert results["judge_model"] == run.JUDGE_MODEL
+    assert results["split_seed"] == 0
+    assert "latency" not in results
+    splits = results["splits"]
+    assert set(splits) == {"all", "tuning", "held_out"}
+    assert set(splits["all"]) == {"shipped", "A5@0.5", "A5@0.8"}
+    assert splits["all"]["A5@0.5"]["mean_tokens"] > splits["all"]["A5@0.8"]["mean_tokens"] > 0
+    # A quality run reports no latency or fallback numbers, which only latency mode measures.
+    assert not any("latency" in column or "fallback" in column for column in splits["all"]["A5@0.8"])
+    assert splits["all"]["A5@0.8"]["rerank_errors"] == 0
+    assert splits["tuning"]["shipped"]["turns"] + splits["held_out"]["shipped"]["turns"] == len(turns)
     assert "Pixel" not in (out / "results.md").read_text()
+
+    # Latency mode calls the provider for every measured turn, uncached, and reports beside the quality rows.
+    await run.run_cli([*argv, "--latency-turns", "2"], transport=_judge_transport())
+    assert len(stub.requests) == len(turns) + 1 + 2
+    latency = json.loads((out / "results.json").read_text())["latency"]
+    assert set(latency) == {"A5"}
+    assert latency["A5"]["latency_turns"] == 2
+    assert latency["A5"]["latency_fallback_rate"] == 0.0
+    assert "latency_added_p95_ms" in (out / "results.md").read_text()
+
+
+@pytest.mark.asyncio
+async def test_judge_model_is_selectable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second judge answers every request of its run and is named in the results."""
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
+    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
+    write_turns([_turn("2026-01-15", "salmon kibble Pixel")], tmp_path / "turns.jsonl")
+    inner = _judge_transport()
+    models: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        models.append(json.loads(request.content)["model"])
+        return await inner.handle_async_request(request)
+
+    await run.run_cli(
+        [
+            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
+            *("--config", str(_write_config(tmp_path)), "--out", str(tmp_path / "out"), "--key-env", "TEST_JUDGE_KEY"),
+            *("--arms", "shipped", "--judge-model", "google/gemini-3.8-flash"),
+        ],
+        transport=httpx.MockTransport(handle),
+    )
+
+    assert models
+    assert set(models) == {"google/gemini-3.8-flash"}
+    assert json.loads((tmp_path / "out" / "results.json").read_text())["judge_model"] == "google/gemini-3.8-flash"

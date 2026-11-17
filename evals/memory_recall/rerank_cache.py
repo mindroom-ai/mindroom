@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import sqlite3
-import time
 from typing import TYPE_CHECKING, Self
 
 if TYPE_CHECKING:
@@ -16,13 +15,20 @@ if TYPE_CHECKING:
     from mindroom.knowledge.rerank import Reranker
 
 
+def checked_scores(scores: Sequence[float], count: int) -> list[float]:
+    """Return `scores` when they are `count` finite numbers; raise ValueError otherwise."""
+    if len(scores) != count or not all(math.isfinite(score) for score in scores):
+        msg = f"Reranker returned {len(scores)} scores for {count} texts, or a non-finite score"
+        raise ValueError(msg)
+    return list(scores)
+
+
 class RerankCache:
-    """Scores per key, and the seconds of each request a single uncached call scored, in one SQLite file."""
+    """Reranker scores per key, in one SQLite file."""
 
     def __init__(self, path: Path) -> None:
         self._db = sqlite3.connect(path)
         self._db.execute("CREATE TABLE IF NOT EXISTS scores (key TEXT PRIMARY KEY, score REAL)")
-        self._db.execute("CREATE TABLE IF NOT EXISTS latencies (key TEXT PRIMARY KEY, seconds REAL)")
         self._db.commit()
 
     def score(self, key: str) -> float | None:
@@ -30,16 +36,9 @@ class RerankCache:
         row = self._db.execute("SELECT score FROM scores WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
-    def latency(self, key: str) -> float | None:
-        """Return the cached seconds of the request `key`, or None."""
-        row = self._db.execute("SELECT seconds FROM latencies WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
-
-    def put(self, scores: dict[str, float], *, latency: tuple[str, float] | None) -> None:
-        """Store `scores`, and the `(request key, seconds)` of the call that scored them, in one transaction."""
+    def put(self, scores: dict[str, float]) -> None:
+        """Store `scores` in one transaction."""
         self._db.executemany("INSERT OR REPLACE INTO scores (key, score) VALUES (?, ?)", scores.items())
-        if latency is not None:
-            self._db.execute("INSERT OR REPLACE INTO latencies (key, seconds) VALUES (?, ?)", latency)
         self._db.commit()
 
     def close(self) -> None:
@@ -59,8 +58,8 @@ class CachedReranker:
     """A `Reranker` that sends a provider only the texts it has not scored for the query before.
 
     Keys are the sha256 of provider, model, rubric version, query and text, so a new rubric or model scores afresh.
-    A call that scored every text of its request records its seconds under that request, the latency a live recall
-    of that turn would add. A wrong count or a non-finite score raises and is not cached.
+    A wrong count or a non-finite score raises and is not cached. Latency is not measured here, since a cached or
+    partly cached call says nothing about it: `rerank_arms.measure_latency` times uncached calls.
     """
 
     def __init__(self, inner: Reranker, cache: RerankCache, *, provider: str, model: str, rubric_version: str) -> None:
@@ -75,21 +74,11 @@ class CachedReranker:
         pending = [index for index, score in enumerate(scores) if score is None]
         if not pending:
             return [score for score in scores if score is not None]
-        start = time.perf_counter()
-        fresh = await self._inner.ascore(query, [documents[index] for index in pending])
-        seconds = time.perf_counter() - start
-        if len(fresh) != len(pending) or not all(math.isfinite(score) for score in fresh):
-            msg = f"Reranker returned {len(fresh)} scores for {len(pending)} texts, or a non-finite score"
-            raise ValueError(msg)
-        latency = (self._key(query, *documents), seconds) if len(pending) == len(documents) else None
-        self._cache.put({keys[index]: score for index, score in zip(pending, fresh, strict=True)}, latency=latency)
+        fresh = checked_scores(await self._inner.ascore(query, [documents[index] for index in pending]), len(pending))
+        self._cache.put({keys[index]: score for index, score in zip(pending, fresh, strict=True)})
         for index, score in zip(pending, fresh, strict=True):
             scores[index] = score
         return [score for score in scores if score is not None]
 
-    def latency(self, query: str, documents: Sequence[str]) -> float | None:
-        """Return the seconds of the uncached call that scored exactly `documents` for `query`, or None."""
-        return self._cache.latency(self._key(query, *documents))
-
-    def _key(self, query: str, *texts: str) -> str:
-        return hashlib.sha256(json.dumps([*self._identity, query, *texts]).encode()).hexdigest()
+    def _key(self, query: str, text: str) -> str:
+        return hashlib.sha256(json.dumps([*self._identity, query, text]).encode()).hexdigest()

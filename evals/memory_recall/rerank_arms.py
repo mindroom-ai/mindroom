@@ -3,12 +3,17 @@
 `select_reranked` stands in for the shared `retrieve()` with the recall's selection (at most 5 hits, 800 o200k tokens,
 a minimum reranker score), so the arm can switch to it once it exists. A turn whose reranker fails keeps the shipped
 hybrid selection, as live recall will.
+
+Quality and latency are measured apart. Quality (`rerank_turns`) reads cached scores and selects from every score a
+call returned, however long it took. Latency (`measure_latency`) times uncached calls one turn at a time against the
+live provider, and counts as a fallback each call that failed or passed the deadline live recall waits.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -18,6 +23,8 @@ from mindroom.memory._prompting import select_recall_hits
 from mindroom.memory._shared import MemoryResult
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.token_counting.families import load_o200k
+
+from .rerank_cache import checked_scores
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -43,6 +50,10 @@ class RerankerSpec:
     rubric_version: str
     usd_per_million_input_tokens: float
     create: Callable[[RuntimePaths], Reranker]
+    #: Input tokens a priced request adds besides the query and candidate texts: its framing, and each candidate's
+    #: question. Estimates until the provider's billed input is measured.
+    request_overhead_tokens: int = 0
+    candidate_overhead_tokens: int = 0
 
 
 def _cross_encoder(model: str) -> Callable[[RuntimePaths], Reranker]:
@@ -58,6 +69,9 @@ def _needs_judgment_reranker(runtime_paths: RuntimePaths) -> Reranker:
     raise NotImplementedError(msg)
 
 
+# The plan's estimate of a judgment request: about 60 rubric tokens per candidate, plus framing around them.
+_JUDGMENT_REQUEST_OVERHEAD_TOKENS = 100
+_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS = 60
 RERANKERS: dict[str, RerankerSpec] = {
     "bge-reranker-v2-m3": RerankerSpec(
         provider="sentence_transformers",
@@ -72,6 +86,8 @@ RERANKERS: dict[str, RerankerSpec] = {
         rubric_version="",
         usd_per_million_input_tokens=0.10,
         create=_needs_judgment_reranker,
+        request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
+        candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
     ),
     "typesafe": RerankerSpec(
         provider="typesafe",
@@ -79,22 +95,36 @@ RERANKERS: dict[str, RerankerSpec] = {
         rubric_version="",
         usd_per_million_input_tokens=0.042,
         create=_needs_judgment_reranker,
+        request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
+        candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
     ),
 }
 
 
 @dataclass(frozen=True)
 class TurnRerank:
-    """One turn's reranker call: its scores (None when it failed), its latency when known, and its list price."""
+    """One turn's reranker scores (None when the call failed) and its estimated list price."""
 
     scores: list[float] | None
-    seconds: float | None
     usd: float
+
+
+@dataclass(frozen=True)
+class LatencyCall:
+    """One uncached reranker call: its seconds, and whether it returned valid scores."""
+
+    seconds: float
+    ok: bool
 
     @property
     def fallback(self) -> bool:
-        """Whether live recall would have kept the hybrid selection: the call failed or missed the deadline."""
-        return self.scores is None or (self.seconds is not None and self.seconds > DEADLINE_S)
+        """Whether live recall would have kept the hybrid selection: the call failed or passed the deadline."""
+        return not self.ok or self.seconds > DEADLINE_S
+
+    @property
+    def added_seconds(self) -> float:
+        """The wait the call adds to a live turn, which stops waiting at the deadline."""
+        return min(self.seconds, DEADLINE_S)
 
 
 async def rerank_turns(
@@ -103,7 +133,7 @@ async def rerank_turns(
     reranker: CachedReranker,
     spec: RerankerSpec,
 ) -> list[TurnRerank | None]:
-    """Score each turn's candidates, one turn at a time as live recall would; None for a turn with none to score."""
+    """Score each turn's candidates, from the cache where it can; None for a turn with none to score."""
     reranked: list[TurnRerank | None] = []
     for turn, turn_candidates in zip(turns, candidates, strict=True):
         if not turn_candidates:
@@ -115,17 +145,54 @@ async def rerank_turns(
         except Exception as exc:  # any failure: live recall keeps the hybrid selection
             _logger.warning("Reranking a turn failed; it keeps the hybrid selection: %.300s", exc)
             scores = None
-        tokens = 0
-        if spec.usd_per_million_input_tokens:
-            tokens = sum(len(load_o200k().encode_ordinary(text)) for text in (turn.query, *texts))
-        reranked.append(
-            TurnRerank(
-                scores=scores,
-                seconds=reranker.latency(turn.query, texts),
-                usd=tokens * spec.usd_per_million_input_tokens / 1_000_000,
-            ),
-        )
+        reranked.append(TurnRerank(scores=scores, usd=_usd(spec, turn.query, texts)))
     return reranked
+
+
+def _usd(spec: RerankerSpec, query: str, texts: Sequence[str]) -> float:
+    """Return the estimated list price of one request scoring `texts` for `query`."""
+    if not spec.usd_per_million_input_tokens:
+        return 0.0
+    tokens = sum(len(load_o200k().encode_ordinary(text)) for text in (query, *texts))
+    tokens += spec.request_overhead_tokens + spec.candidate_overhead_tokens * len(texts)
+    return tokens * spec.usd_per_million_input_tokens / 1_000_000
+
+
+async def measure_latency(
+    reranker: Reranker,
+    turns: Sequence[Turn],
+    candidates: Sequence[Sequence[MemoryResult] | None],
+    *,
+    count: int,
+) -> list[LatencyCall]:
+    """Time the uncached reranker call of the first `count` turns that have candidates, one turn at a time.
+
+    One untimed warm-up call first loads what a long-running process keeps loaded, such as a local model. A call is
+    not cancelled at the deadline, so a slow call cannot delay the next one; it counts as a fallback instead.
+    """
+    requests = [
+        (turn.query, [candidate.get("memory", "") for candidate in turn_candidates])
+        for turn, turn_candidates in zip(turns, candidates, strict=True)
+        if turn_candidates
+    ][:count]
+    if not requests:
+        return []
+    try:
+        await reranker.ascore(*requests[0])
+    except Exception as exc:  # the warm-up only loads; the timed call of this turn reports its outcome
+        _logger.warning("Warm-up rerank call failed: %.300s", exc)
+    calls: list[LatencyCall] = []
+    for query, texts in requests:
+        start = time.perf_counter()
+        try:
+            checked_scores(await reranker.ascore(query, texts), len(texts))
+        except Exception as exc:  # any failure: live recall keeps the hybrid selection
+            _logger.warning("Timed rerank call failed: %.300s", exc)
+            ok = False
+        else:
+            ok = True
+        calls.append(LatencyCall(seconds=time.perf_counter() - start, ok=ok))
+    return calls
 
 
 def select_reranked(
@@ -139,6 +206,8 @@ def select_reranked(
     Ties keep the hybrid order. Each kept hit carries its reranker score. Without scores (the reranker failed) this
     is the shipped hybrid selection.
     """
+    # Counts exact o200k tokens: `select_recall_hits` estimates them until the encoder has loaded in the background.
+    load_o200k()
     if scores is None:
         return select_recall_hits(candidates)
     ranked = sorted(zip(scores, candidates, strict=True), key=lambda pair: -pair[0])

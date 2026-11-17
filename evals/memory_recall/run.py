@@ -2,11 +2,12 @@
 
     python -m evals.memory_recall.run --turns T.jsonl --memory-dir D --config ~/.mindroom-chat/config.yaml
         --arms A0,A1,A2,A3,A4,shipped,shipped_default,A5 --out DIR [--key-env ENV] [--limit N]
-        [--thresholds 0.3,0.5,0.7,0.8] [--split-seed N]
+        [--thresholds 0.3,0.5,0.7,0.8] [--split-seed N] [--judge-model M] [--latency-turns N]
 
 Writes `DIR/results.json` and `DIR/results.md` (numbers only, never memory text) for all turns and for a seeded
 tuning half and its held-out other half, caches each arm's index under `DIR/index/`, the judge's verdicts in
-`DIR/judge.sqlite` and reranker scores in `DIR/rerank.sqlite`. A rerank arm gives one row per threshold, `A5@0.5`.
+`DIR/judge.sqlite` and reranker scores in `DIR/rerank.sqlite`. A rerank arm gives one row per threshold, `A5@0.5`;
+with `--latency-turns N` it also times N uncached reranker calls, one at a time, in a separate latency table.
 """
 
 from __future__ import annotations
@@ -31,12 +32,12 @@ from mindroom.token_counting.families import load_o200k
 
 from .arms import ARMS, replay
 from .judge import JudgeCache, Verdict, judge_hits
-from .rerank_arms import RERANKERS, TurnRerank, rerank_turns, select_reranked
+from .rerank_arms import RERANKERS, LatencyCall, TurnRerank, measure_latency, rerank_turns, select_reranked
 from .rerank_cache import CachedReranker, RerankCache
 from .turns import read_turns
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.memory._shared import MemoryResult
@@ -60,11 +61,10 @@ _METRIC_COLUMNS = (
     "abstained_turns",
     "judge_errors",
     "search_errors",
-    "rerank_p50_ms",
-    "rerank_p95_ms",
-    "fallback_rate",
-    "usd_per_turn",
+    "rerank_errors",
+    "usd_per_turn_estimate",
 )
+_LATENCY_COLUMNS = ("latency_turns", "latency_added_p50_ms", "latency_added_p95_ms", "latency_fallback_rate")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -89,6 +89,17 @@ def _parser() -> argparse.ArgumentParser:
         help="Comma-separated minimum reranker scores each rerank arm is measured at, from one set of scores",
     )
     parser.add_argument("--split-seed", type=int, default=0, help="Seed of the tuning and held-out halves")
+    parser.add_argument(
+        "--judge-model",
+        default=JUDGE_MODEL,
+        help=f"OpenRouter model that judges the hits (default: {JUDGE_MODEL}); verdicts are cached per model",
+    )
+    parser.add_argument(
+        "--latency-turns",
+        type=int,
+        default=0,
+        help="Also time this many uncached reranker calls of each rerank arm, one turn at a time (default: none)",
+    )
     return parser
 
 
@@ -107,6 +118,8 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     api_key = os.environ.get(args.key_env, "")
     if not api_key:
         parser.error(f"set the judge's API key in ${args.key_env}")
+    # Every token count and budget is exact: `select_recall_hits` estimates tokens until this encoder has loaded.
+    load_o200k()
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
     index_dir = out / "index"
@@ -119,6 +132,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     splits = {"all": list(range(len(turns))), "tuning": tuning, "held_out": held_out}
 
     results: dict[str, dict[str, dict[str, float]]] = {split: {} for split in splits}
+    latency: dict[str, dict[str, float | None]] = {}
     with JudgeCache(out / "judge.sqlite") as cache, RerankCache(out / "rerank.sqlite") as rerank_cache:
         async with httpx.AsyncClient(transport=transport) as client:
             for name in args.arms.split(","):
@@ -130,7 +144,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     runtime_paths=runtime_paths,
                     index_dir=index_dir,
                 )
-                rows = await _arm_rows(
+                rows, calls = await _arm_rows(
                     name,
                     ARMS[name],
                     turns,
@@ -138,7 +152,10 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                     thresholds=thresholds,
                     rerank_cache=rerank_cache,
                     runtime_paths=runtime_paths,
+                    latency_turns=args.latency_turns,
                 )
+                if calls is not None:
+                    latency[name] = latency_metrics(calls)
                 for row, selected, reranked in rows:
                     # A turn whose search failed is left out of every metric but `search_errors`.
                     hits = {index: turn_hits for index, turn_hits in enumerate(selected) if turn_hits is not None}
@@ -147,6 +164,7 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                         list(hits.values()),
                         cache=cache,
                         client=client,
+                        model=args.judge_model,
                         api_key=api_key,
                     )
                     judged = dict(zip(hits, verdicts, strict=True))
@@ -166,9 +184,14 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
                             hit_tokens=[hit_tokens[index] for index in kept],
                             search_errors=len(indices) - len(kept),
                         ) | rerank_metrics([reranked[index] for index in indices] if reranked else [])
-    (out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    report: dict[str, object] = {"judge_model": args.judge_model, "split_seed": args.split_seed, "splits": results}
+    sections = [f"## {split}\n\n{_markdown(rows, _METRIC_COLUMNS)}" for split, rows in results.items()]
+    if latency:
+        report["latency"] = latency
+        sections.append(f"## latency (uncached, one turn at a time)\n\n{_markdown(latency, _LATENCY_COLUMNS)}")
+    (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     (out / "results.md").write_text(
-        "\n".join(f"## {split}\n\n{_markdown(split_results)}" for split, split_results in results.items()),
+        f"Judge: `{args.judge_model}`, split seed {args.split_seed}\n\n" + "\n".join(sections),
     )
 
 
@@ -188,20 +211,26 @@ async def _arm_rows(
     thresholds: Sequence[float],
     rerank_cache: RerankCache,
     runtime_paths: RuntimePaths,
-) -> list[_Row]:
-    """Return the arm's rows: itself, or for a rerank arm one row per threshold, all from one scoring of the turns."""
+    latency_turns: int,
+) -> tuple[list[_Row], list[LatencyCall] | None]:
+    """Return the arm's rows and, for a rerank arm with `latency_turns`, its timed uncached calls.
+
+    The rows are the arm itself, or for a rerank arm one row per threshold, all from one scoring of the turns.
+    """
     if arm.reranker is None:
-        return [(name, replayed, None)]
+        return [(name, replayed, None)], None
     spec = RERANKERS[arm.reranker]
+    inner = spec.create(runtime_paths)
     reranker = CachedReranker(
-        spec.create(runtime_paths),
+        inner,
         rerank_cache,
         provider=spec.provider,
         model=spec.model,
         rubric_version=spec.rubric_version,
     )
     reranked = await rerank_turns(turns, replayed, reranker, spec)
-    return [
+    calls = await measure_latency(inner, turns, replayed, count=latency_turns) if latency_turns else None
+    rows: list[_Row] = [
         (
             f"{name}@{threshold:g}",
             [
@@ -214,6 +243,7 @@ async def _arm_rows(
         )
         for threshold in thresholds
     ]
+    return rows, calls
 
 
 def _count(text: str) -> int:
@@ -226,6 +256,7 @@ async def _judge_all(
     *,
     cache: JudgeCache,
     client: httpx.AsyncClient,
+    model: str,
     api_key: str,
 ) -> list[list[Verdict | None]]:
     """Return the judge's verdict on each injected hit, turn by turn; turns that injected nothing need no request."""
@@ -240,7 +271,7 @@ async def _judge_all(
                 [hit.get("memory", "") for hit in turn_hits],
                 cache=cache,
                 client=client,
-                model=JUDGE_MODEL,
+                model=model,
                 api_key=api_key,
             )
 
@@ -294,17 +325,28 @@ def arm_metrics(
 
 
 def rerank_metrics(reranked: Sequence[TurnRerank | None]) -> dict[str, float]:
-    """Return the latency (p50, p95 in ms of the known uncached calls), fallback share and mean list price per turn.
+    """Return the turns whose reranker call failed (they kept the hybrid selection) and the mean estimated price.
 
-    Only turns that called the reranker count; every value is 0 for an arm without one.
+    The price counts only turns that called the reranker; both are 0 for an arm without one.
     """
     calls = [call for call in reranked if call is not None]
-    milliseconds = [call.seconds * 1000 for call in calls if call.seconds is not None]
     return {
-        "rerank_p50_ms": float(_nearest_rank(milliseconds, 0.5)),
-        "rerank_p95_ms": float(_nearest_rank(milliseconds, 0.95)),
-        "fallback_rate": sum(call.fallback for call in calls) / len(calls) if calls else 0.0,
-        "usd_per_turn": sum(call.usd for call in calls) / len(calls) if calls else 0.0,
+        "rerank_errors": sum(call.scores is None for call in calls),
+        "usd_per_turn_estimate": sum(call.usd for call in calls) / len(calls) if calls else 0.0,
+    }
+
+
+def latency_metrics(calls: Sequence[LatencyCall]) -> dict[str, float | None]:
+    """Return the timed calls' count, the p50 and p95 wait (ms) they add to a turn, and their fallback share.
+
+    Without any timed call the latency and fallback values are None (missing), never 0.
+    """
+    added = [call.added_seconds * 1000 for call in calls]
+    return {
+        "latency_turns": len(calls),
+        "latency_added_p50_ms": _nearest_rank(added, 0.5) if added else None,
+        "latency_added_p95_ms": _nearest_rank(added, 0.95) if added else None,
+        "latency_fallback_rate": sum(call.fallback for call in calls) / len(calls) if calls else None,
     }
 
 
@@ -320,19 +362,22 @@ def _nearest_rank(values: Sequence[float], quantile: float) -> float:
     return ordered[max(math.ceil(quantile * len(ordered)), 1) - 1]
 
 
-def _markdown(results: dict[str, dict[str, float]]) -> str:
-    """Return the metrics as a Markdown table, one row per arm."""
+def _markdown(results: Mapping[str, Mapping[str, float | None]], columns: Sequence[str]) -> str:
+    """Return the metrics as a Markdown table, one row per arm; a missing value shows as `n/a`."""
     lines = [
-        "| arm | " + " | ".join(_METRIC_COLUMNS) + " |",
-        "|---|" + "---:|" * len(_METRIC_COLUMNS),
+        "| arm | " + " | ".join(columns) + " |",
+        "|---|" + "---:|" * len(columns),
     ]
     for name, metrics in results.items():
-        cells = [
-            f"{metrics[column]:.3f}" if isinstance(metrics[column], float) else str(metrics[column])
-            for column in _METRIC_COLUMNS
-        ]
+        cells = [_cell(metrics[column]) for column in columns]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def _cell(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}" if isinstance(value, float) else str(value)
 
 
 if __name__ == "__main__":

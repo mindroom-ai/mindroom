@@ -43,10 +43,17 @@ compare arms with each other, not with live recall.
 An arm with a `reranker` (A5) replays the `shipped` search, scores all its candidates with that reranker
 (`rerank_arms.RERANKERS`), and keeps the best-scoring hits at or above each threshold in `--thresholds`
 (default `0.3,0.5,0.7,0.8`), one results row per threshold (`A5@0.5`).
-The turns are scored once, one at a time as live recall would, and every threshold reads the same scores.
+The turns are scored once, and every threshold reads the same scores.
 `rerank.sqlite` caches each score by the sha256 of provider, model, rubric version, query and text, so a rerun or a
-new threshold asks no provider again; a call that scored a whole turn stores its latency there too.
+new threshold asks no provider again.
 A turn whose reranker fails, or returns a wrong count or a non-finite score, keeps the `shipped` selection.
+Selection uses every score a call returned, however long it took, so the quality rows say nothing about latency.
+
+Latency is measured apart, with `--latency-turns N` (the gate uses 200): after one untimed warm-up call, each rerank
+arm calls its provider, uncached, for the first N turns that have candidates, one turn at a time.
+A call that fails or takes over 2 seconds (live recall's deadline) is a fallback, and adds 2 seconds to the turn.
+Calls are not cancelled at the deadline, so a slow call cannot delay the next one.
+Run it against the live provider on a machine that is not busy with anything else.
 `openai_decisions` and `typesafe` are listed with their list prices but need the judgment reranker (unified-retrieval
 PR 4) before an arm can use them.
 Rerank arms run only when named in `--arms`; A5 loads the cross-encoder in process, so run it on a machine with room.
@@ -64,16 +71,22 @@ uv run python -m evals.memory_recall.run \
   --out /tmp/recall/out \
   --key-env OPENROUTER_API_KEY   # judge key; --limit N replays only the first N turns
   # --thresholds 0.3,0.5,0.7,0.8 for rerank arms; --split-seed N (default 0) for the tuning/held-out split
+  # --latency-turns 200 to time rerank calls; --judge-model M for a second judge
 ```
+
+A second judge (`--judge-model google/gemini-3.8-flash`) reruns the same command into the same `--out`: verdicts are
+cached per judge model, the reranker scores and indexes are reused, and the same `--split-seed` gives the same halves.
+With `--limit 400`, the held-out half holds the 200 paired turns.
 
 Output in `--out`:
 
-- `results.json` and `results.md`: per-arm metrics, numbers only, for `all` turns and for the `tuning` and `held_out`
-  halves. The halves are a seeded random split of the turns (`--split-seed`): pick a rerank threshold on `tuning`,
-  then check the gate on `held_out`.
+- `results.json` and `results.md`: numbers only. `judge_model` and `split_seed` name the run; `splits` holds per-arm
+  metrics for `all` turns and for the `tuning` and `held_out` halves, a seeded random split of the turns
+  (`--split-seed`): pick a rerank threshold on `tuning`, then check the gate on `held_out`. With `--latency-turns`,
+  `latency` holds each rerank arm's latency numbers.
 - `index/<hash>/`: each arm's corpus and index, reused by reruns over the same corpus and embedder.
 - `judge.sqlite`: cached verdicts, so each run only judges hits no earlier run judged.
-- `rerank.sqlite`: cached reranker scores and call latencies.
+- `rerank.sqlite`: cached reranker scores.
 
 The index and the caches hold memory text or are keyed by it, so keep `--out` outside the repository and never commit
 it.
@@ -91,11 +104,17 @@ Per arm, over the turns whose search succeeded (tokens are o200k, counted over t
   a turn whose every hit failed leaves the two turn shares above.
 - `search_errors`: turns whose search still failed after four attempts. They count nowhere else, not even in
   `turns`.
-- `rerank_p50_ms`, `rerank_p95_ms`: latency of the reranker calls, over the turns whose whole request one uncached call
-  scored (this run's or an earlier one's). Measure them on a fresh `--out`, against the live provider.
-- `fallback_rate`: share of turns that called the reranker where live recall would have kept the hybrid selection:
-  the call failed or took over 2 seconds. Selection still uses the scores of a slow call, so a slow reranker keeps
-  its quality numbers.
-- `usd_per_turn`: mean list price of a turn's reranker call, from the o200k tokens of the query and candidates.
+- `rerank_errors`: turns whose reranker call failed, which kept the `shipped` selection.
+- `usd_per_turn_estimate`: mean list price of a turn's reranker call: the o200k tokens of the query and candidates
+  plus the provider's estimated request and per-candidate overhead (`RerankerSpec`). An estimate: measure the billed
+  input before reading it against a price limit.
 
-The four reranker columns count only turns that called the reranker, and are 0 for an arm without one.
+Both count only turns that called the reranker, and are 0 for an arm without one.
+
+Latency table (`--latency-turns` only), per rerank arm:
+
+- `latency_turns`: calls timed.
+- `latency_added_p50_ms`, `latency_added_p95_ms`: the wait a call adds to a live turn, at most the 2-second deadline.
+- `latency_fallback_rate`: share of timed calls that failed or passed the deadline.
+
+With no call timed, the percentiles and the fallback rate are `n/a` (JSON `null`), never 0.
