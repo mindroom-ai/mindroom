@@ -32,7 +32,7 @@ None of the actions touches the user's own computer or browser:
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
 | `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
-| `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False, inline=False, raw=False, width=None)` | Canvas panel, or the conversation with `inline=True` | A web page the agent wrote; it cannot open websites | The user's confirmed answer, as their next message |
 | `read_canvas_state(canvas_event_id)` | Nothing | A canvas shown with `share_state=True` | What the page last saved, as the user's Chat last shared it |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
 | `open_settings(section="general")` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |

@@ -66,6 +66,7 @@ from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _calculate_delivery_event_size,
     calculate_event_size,
+    fit_reasoning_to_ordinary_event,
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
@@ -1887,6 +1888,90 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.room_send.await_count == 1
         kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
         assert kept["text"].endswith("…")
+
+    @pytest.mark.parametrize(
+        ("half", "size_limit", "kept_segments"),
+        [(40_000, 30_000, 1), (10, None, 2)],
+        ids=["cut-drops-the-segment-past-the-cut", "fitting-reasoning-keeps-every-segment"],
+    )
+    async def test_cut_reasoning_keeps_only_segments_that_start_in_the_kept_text(
+        self,
+        half: int,
+        size_limit: int | None,
+        kept_segments: int,
+    ) -> None:
+        """Cutting reasoning to a prefix keeps only the segments that begin inside it."""
+        client = MagicMock(spec=nio.AsyncClient)
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": half + 2, "after_tool": 2, "duration_ms": 5},
+        ]
+        reasoning = {"text": "a" * half + "\n\n" + "b" * half, "duration_ms": 9, "segments": segments}
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {"msgtype": "m.text", "body": "answer", "io.mindroom.reasoning": reasoning},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert (len(kept["text"]) < half) == (kept_segments == 1)
+        assert kept["segments"] == segments[:kept_segments]
+
+    async def test_cut_reasoning_counts_segment_starts_in_utf16_code_units(self) -> None:
+        """A non-BMP character in the kept text takes two UTF-16 code units, so a segment after it stays."""
+        client = MagicMock(spec=nio.AsyncClient)
+        lead = "🙂" * 1000 + "\n\n"
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": 2002, "after_tool": 1, "duration_ms": 5},
+            {"start": 2002 + 50_000, "after_tool": 2, "duration_ms": 6},
+        ]
+        text = lead + "b" * 50_000 + "c" * 50_000
+        content = {"msgtype": "m.text", "body": "answer"}
+        expected_text = lead + "b" * 500 + "…"
+        size_limit = calculate_event_size(
+            {**content, "io.mindroom.reasoning": {"text": expected_text, "duration_ms": 15, "segments": segments[:2]}},
+        )
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {**content, "io.mindroom.reasoning": {"text": text, "duration_ms": 15, "segments": segments}},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert kept["segments"] == segments[:2]
+        assert kept["text"] == expected_text
+
+    async def test_cut_at_a_segment_start_drops_that_segment(self) -> None:
+        """A cut that keeps none of a segment's text drops the segment, even though the cut text ends in a marker."""
+        client = MagicMock(spec=nio.AsyncClient)
+        lead = "a" * 1000 + "\n\n"
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": 1002, "after_tool": 1, "duration_ms": 5},
+        ]
+        content = {"msgtype": "m.text", "body": "answer"}
+        size_limit = calculate_event_size(
+            {**content, "io.mindroom.reasoning": {"text": lead + "…", "duration_ms": 9, "segments": segments}},
+        )
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {**content, "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments}},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert kept["text"] == lead + "…"
+        assert kept["segments"] == segments[:1]
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,

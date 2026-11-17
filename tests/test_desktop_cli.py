@@ -191,7 +191,7 @@ def test_login_identity_output_routes_users_to_chat_pairing(capsys: pytest.Captu
     )
 
     output = capsys.readouterr().out
-    assert "!desktop setup" in output
+    assert "/desktop setup" in output
     assert "cloud agent's desktop tool configuration" not in output
 
 

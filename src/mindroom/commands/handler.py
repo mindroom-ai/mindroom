@@ -273,7 +273,7 @@ def _format_welcome_message(
     welcome_msg += (
         "💬 **How to interact:**\n"
         "• Mention an agent or team with @ to get their attention using its configured alias\n"
-        "• Use `!help` to see available commands\n"
+        "• Use `/help` to see available commands (or `!help` in clients that intercept `/`, such as Element)\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
         "• Multiple agents can collaborate when you mention them together; mention a team directly for its team workflow\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
@@ -514,7 +514,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
         elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
-                "❌ Use `!desktop` in a private room containing only you, the serving bot, "
+                "❌ Use `/desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
         else:
@@ -674,7 +674,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.UNKNOWN:
         # Handle unknown commands
-        response_text = "❌ Unknown command. Try !help for available commands."
+        response_text = "❌ Unknown command. Try `/help` (or `!help`) for available commands."
 
     if response_text:
         if command.type in COMMAND_TYPES_WITH_SIDE_EFFECTS:

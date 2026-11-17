@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _LIST_ARGUMENTS = frozenset({"list", "show"})
 _THREAD_REQUIRED_MESSAGE = (
-    "❌ `!model` overrides only work inside a thread. Start a thread (or reply in one) and run it there."
+    "❌ `/model` overrides only work inside a thread. Start a thread (or reply in one) and run it there."
 )
 
 
@@ -91,7 +91,7 @@ def _set_thread_model(
     model = config.models[model_name]
     return (
         f"✅ This thread now uses `{model_name}` ({model.provider} {model.id}) for the agents and teams you may address.\n"
-        "Use `!model reset` to restore room-level model selection."
+        "Use `/model reset` to restore room-level model selection."
     )
 
 
@@ -170,7 +170,7 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
         current = "No thread model override is set; room-level model selection applies."
     return (
         f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
-        "Use `!model <name>` inside a thread to switch it, or `!model reset` to remove the override."
+        "Use `/model <name>` inside a thread to switch it, or `/model reset` to remove the override."
     )
 
 

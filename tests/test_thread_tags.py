@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.matrix.room_history_reads import (
     _MAX_THREAD_ENUMERATION_PAGES,
@@ -391,7 +392,6 @@ async def test_manual_tag_started_first_prevents_automatic_tag_batch() -> None:
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=True,
         applied_tags=(),
-        failed_tags=(),
     )
     assert set(current_events) == {_thread_tag_state_key("$manual-first-root:localhost", "manual")}
 
@@ -461,7 +461,6 @@ async def test_manual_remove_started_first_prevents_automatic_tag_batch() -> Non
     assert automatic_task.result() == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_get_state.assert_awaited_once_with("!room:localhost")
@@ -499,7 +498,6 @@ async def test_completed_manual_removal_survives_the_model_inference_gap() -> No
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_put_state.assert_not_awaited()
@@ -585,7 +583,6 @@ async def test_automatic_batch_serializes_manual_write_until_all_tags_finish() -
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=("auto-one", "auto-two"),
-        failed_tags=(),
     )
     assert write_order == ["auto-one", "auto-two", "manual"]
 
@@ -688,35 +685,62 @@ async def test_automatic_batch_does_not_block_mutations_for_another_thread() -> 
 
 @pytest.mark.asyncio
 async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
-    """One failed automatic tag should not prevent later tags from being attempted."""
+    """A failed automatic tag does not prevent later tags from being attempted, and the batch logs one error."""
     client = AsyncMock()
     client.room_get_state.return_value = _thread_tags_room_state_response()
-    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None])
+    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None, TimeoutError("timed out")])
 
     with (
         patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
-        patch("mindroom.thread_tags.logger.exception") as log_exception,
+        capture_logs() as logs,
     ):
         result = await set_thread_tags_if_empty(
             client,
             "!room:localhost",
             "$partial-auto-root:localhost",
-            ["first", "second"],
+            ["first", "second", "third"],
+            set_by="@automatic:localhost",
+        )
+
+    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second", "third"]
+    errors = [log for log in logs if log["log_level"] == "error"]
+    assert [(log["event"], log["thread_root_id"], log["tags"]) for log in errors] == [
+        ("Failed to write automatic thread tags", "$partial-auto-root:localhost", ["first", "third"]),
+    ]
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=("second",),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier", ["written", "failed"])
+async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller(earlier: str) -> None:
+    """Power levels that refuse a tag, also partway through the batch, stop it without an error of their own.
+
+    A different failure of an earlier tag is still logged once.
+    """
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response()
+    first = None if earlier == "written" else TimeoutError("timed out")
+    write_tag = AsyncMock(side_effect=[first, ThreadTagsPermissionError("refused"), None])
+
+    with (
+        patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
+        capture_logs() as logs,
+        pytest.raises(ThreadTagsPermissionError),
+    ):
+        await set_thread_tags_if_empty(
+            client,
+            "!room:localhost",
+            "$refused-root:localhost",
+            ["first", "second", "third"],
             set_by="@automatic:localhost",
         )
 
     assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
-    log_exception.assert_called_once_with(
-        "Failed to write conditional thread tag",
-        room_id="!room:localhost",
-        thread_root_id="$partial-auto-root:localhost",
-        tag="first",
-    )
-    assert result == SetThreadTagsIfEmptyResult(
-        had_existing_tags=False,
-        applied_tags=("second",),
-        failed_tags=("first",),
-    )
+    errors = [(log["event"], log["tags"]) for log in logs if log["log_level"] == "error"]
+    assert errors == ([] if earlier == "written" else [("Failed to write automatic thread tags", ["first"])])
 
 
 @pytest.mark.asyncio

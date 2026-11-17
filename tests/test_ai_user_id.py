@@ -1722,7 +1722,7 @@ class TestUserIdPassthrough:
 
         assert response.text == (
             "[general] ⚠️ This model's safeguards blocked the request. "
-            "Choose a different model (`!model list`) or revise the prompt, then try again."
+            "Choose a different model (`/model list`) or revise the prompt, then try again."
         )
         assert len(model.requests) == 1
 

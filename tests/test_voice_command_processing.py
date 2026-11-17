@@ -513,7 +513,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     await bot._on_media_message(room, event)
     await bot._coalescing_gate.drain_all()
     send_response.assert_awaited_once()
-    assert send_response.await_args.kwargs["response_text"] == ("❌ Unknown command. Try !help for available commands.")
+    assert send_response.await_args.kwargs["response_text"] == (
+        "❌ Unknown command. Try `/help` (or `!help`) for available commands."
+    )
 
 
 @pytest.mark.asyncio

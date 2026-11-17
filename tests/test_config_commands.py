@@ -2105,7 +2105,7 @@ async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_p
     apply_change.assert_not_awaited()
     response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
     assert "lost when MindRoom restarted" in response_text
-    assert "!config set" in response_text
+    assert "/config set" in response_text
     assert _written_pending_states(client)[-1] == {}
     assert config_path.read_text(encoding="utf-8") == original
 

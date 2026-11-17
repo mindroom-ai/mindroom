@@ -567,9 +567,9 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
     )
 
     assert build.surface.mode == "minimal"
-    documents = list(_minimal(build).context_documents.values())
-    assert "scripted\nscripted body" in documents
-    assert not any(document.startswith("other\n") for document in documents)
+    documents = _minimal(build).context_documents
+    assert documents["skill:scripted"].endswith("scripted body")
+    assert "skill:other" not in documents
 
 
 def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None:
