@@ -12,6 +12,7 @@ import contextlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
@@ -41,6 +42,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_REASON_LENGTH = 500
+_MAX_LINE_LENGTH = 80
+_MAX_LINK_LENGTH = 2000
+LINK_REFUSAL = (
+    "Give `url` as an `http` or `https` link with a host, no sign-in part and no spaces, at most "
+    f"{_MAX_LINK_LENGTH} characters, or leave it out. No card was posted."
+)
 # How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
 _SAVE_GRACE_SECONDS = 30
 
@@ -59,6 +66,11 @@ class SecretRequestCard:
     # A key card's service as people read its name, and whether the service already has a key the answer replaces.
     display_name: str = ""
     replaces: bool = False
+    # What the agent chose to show, each empty when it gave none: what it calls a temporary secret, the page that
+    # gives the secret (a button), and the hint in the empty field.
+    label: str = ""
+    url: str = ""
+    placeholder: str = ""
 
     def message(
         self,
@@ -71,12 +83,19 @@ class SecretRequestCard:
     ) -> dict[str, Any]:
         """Return the card's message content in `status`, in the thread when `thread_id` is given."""
         if isinstance(self.target, TemporaryTarget):
-            body = temporary_secret_body(status, agent_display_name=self.agent_display_name, name=self.target.name)
+            body = temporary_secret_body(
+                status,
+                agent_display_name=self.agent_display_name,
+                name=self.target.name,
+                label=self.label,
+                url=self.url,
+            )
         else:
             body = secret_request_body(
                 status,
                 agent_display_name=self.agent_display_name,
                 display_name=self.display_name,
+                url=self.url,
             )
         metadata = secret_request_content(
             request,
@@ -84,6 +103,9 @@ class SecretRequestCard:
             reason=self.reason,
             status=status,
             replaces=self.replaces,
+            label=self.label,
+            url=self.url,
+            placeholder=self.placeholder,
         )
         return build_message_content(
             body,
@@ -97,6 +119,32 @@ class SecretRequestCard:
 def card_reason(reason: str) -> str | None:
     """Return the reason a card shows, cut to its limit, or None when the agent gave none."""
     return reason.strip()[:_MAX_REASON_LENGTH] or None
+
+
+def card_line(text: str | None) -> str:
+    """Return a label or a field hint as a card shows it: one line, cut to its limit, empty when the agent gave none."""
+    return " ".join((text or "").split())[:_MAX_LINE_LENGTH]
+
+
+def card_link(url: str | None) -> str | None:
+    """Return the page a card's button opens, empty when the agent named none, or None for one no card shows.
+
+    A card shows an `http` or `https` URL with a host and no sign-in part (`user:password@`), written without spaces
+    or control characters. The person sees its host on the button; MindRoom never fetches it.
+    """
+    link = (url or "").strip()
+    if not link:
+        return ""
+    if len(link) > _MAX_LINK_LENGTH or any(char.isspace() or not char.isprintable() for char in link):
+        return None
+    try:
+        parts = urlsplit(link)
+        # Reading the port refuses one that is no port.
+        host, _port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    with_account = parts.username is not None or parts.password is not None
+    return link if parts.scheme in {"http", "https"} and host and not with_account else None
 
 
 async def chat_refusal(runtime_paths: RuntimePaths, *, noun: str) -> str | None:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import model_payload, prior_usage_of
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import runtime_matrix_homeserver
@@ -184,6 +184,7 @@ def note_child_run_id(
         # A model switch during the run is what the child's follow-ups ask for next.
         child.requested_model_name = model_name
         child.model_name = model_name
+        _publish(child.delegation_id, lambda feed: feed.model(model_name))
     update_subagent_turn_sync(child, runtime_paths)
 
 
@@ -329,7 +330,7 @@ def _subagent_sink(context: ToolRuntimeContext, observation: ChildRunObservation
     return lambda snapshot: subagent_frames.publish(
         account,
         room_id,
-        snapshot,
+        replace(snapshot, model=model_payload(context.current_config, snapshot.model_name)),
         previews=previews,
         client=client,
         homeserver_url=homeserver_url,
@@ -349,6 +350,7 @@ def _open_feed(observation: ChildRunObservation, context: ToolRuntimeContext | N
     try:
         sink = None if context is None else _subagent_sink(context, observation)
         if sink is None:
+            _publish(child.delegation_id, lambda feed: feed.model(child.model_name))
             _publish(child.delegation_id, lambda feed: feed.status("running"))
         else:
             ActivityFeed.open(
