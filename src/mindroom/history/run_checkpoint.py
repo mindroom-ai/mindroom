@@ -191,9 +191,14 @@ def recover_stopped_run(
     That is the stored cancelled run of an agent that called a tool (``recover_interrupted_run``), which is then linked
     to the message that shows the reply, so redacting the message removes it. A team's reply shows its members' text,
     which its leader's run does not hold, so a team's run stays as it is, for the turn's own record of what it showed.
+    A run that finished before the stop reached it, such as one stopped while its toolkits closed, is its answer and
+    stays as it is.
     """
     run = store.get_run(run_id)
-    if not isinstance(run, RunRecord) or not recover_interrupted_run(store, session, run, stopped=True):
+    if not isinstance(run, RunRecord):
+        return False
+    finished = run.status is RunStatus.completed and run.parent_run_id is None
+    if not finished and not recover_interrupted_run(store, session, run, stopped=True):
         return False
     if response_event_id is not None:
         link_response_event(store, session.session_id, run_id, response_event_id)

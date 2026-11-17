@@ -20,7 +20,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_checkpoint import (
@@ -847,3 +847,45 @@ async def test_a_process_shutdown_mid_response_stores_no_stop_and_recovers_witho
         ("assistant", None),
         ("tool", "contents of a"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_while_a_finished_run_closes_its_toolkits_keeps_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that reaches a run only after it stored its answer keeps that run, and its prefix replays unchanged."""
+    config = _config(tmp_path)
+    closing = asyncio.Event()
+
+    async def slow_close(_closes: object) -> None:
+        closing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("mindroom.agent_loop.run.close_toolkits", slow_close)
+    model = ScriptedModel(
+        [_thinking_call(tool_call("read_file", "read", path="a"), signature="signature-1"), answer("The answer")],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    sinks = TurnSinks(response_event_id=lambda: "$reply", stopped_by_user=lambda: True)
+    turn = asyncio.create_task(_respond(config, sinks=sinks))
+    await asyncio.wait_for(closing.wait(), 10)
+    assert _only_run(config).status is RunStatus.completed
+
+    request_task_cancel(turn)
+    with suppress(asyncio.CancelledError):
+        await turn
+
+    run = _only_run(config)
+    assert not is_interrupted_replay_run(run)
+    assert (run.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == "$reply"
+
+    async def closed(_closes: object) -> None:
+        return None
+
+    monkeypatch.setattr("mindroom.agent_loop.run.close_toolkits", closed)
+    following = ScriptedModel([answer("Next answer")])
+    install_model_providers(monkeypatch, {"default": following})
+    await _respond(config, prompt="Next question", event_id="$next")
+    sent = _wire(model.requests[-1])
+    assert _wire(following.requests[0])[: len(sent)] == sent
