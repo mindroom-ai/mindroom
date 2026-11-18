@@ -88,6 +88,8 @@ DM_NOT_LISTED = (
     f"Made the DM {NEW_DM} with {BOB}, but could not list it as a DM ({DM_NOT_LISTED_WHY}). "
     f"To send there again, use room_id {NEW_DM}."
 )
+# A reply's quote, which a bridge drops before it looks for a command, then a command.
+QUOTED_COMMAND = "> <@alice:example.com> quoted text\n\n!tg logout"
 UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
@@ -470,7 +472,7 @@ async def test_an_ephemeral_attachment_is_named_as_such(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["!admin users list", "  \\!admin x", "\u200b!x"])
+@pytest.mark.parametrize("name", ["!admin users list", "  \\!admin x", "\u200b!x", "> quoted\n\n!x"])
 async def test_a_command_like_file_name_is_refused(
     config: Config,
     paths: RuntimePaths,
@@ -974,7 +976,17 @@ async def test_a_joined_room_is_still_checked_for_encryption_before_a_send(
 @pytest.mark.parametrize("action", ["send", "edit"])
 @pytest.mark.parametrize(
     "text",
-    ["!help", "  !admin users list", "\\!admin x", "\\\\!x", "\ufeff!x", "\u200b!x", "\u2060\\\\!x"],
+    [
+        "!help",
+        "  !admin users list",
+        "\\!admin x",
+        "\\\\!x",
+        "\ufeff!x",
+        "\u200b!x",
+        "\u2060\\\\!x",
+        QUOTED_COMMAND,
+        "> first\n>second\n\n> third\n\n\n\\!x",
+    ],
 )
 async def test_a_command_like_message_is_refused(
     config: Config,
@@ -985,12 +997,41 @@ async def test_a_command_like_message_is_refused(
 ) -> None:
     """A bridge or the homeserver would run such a message as the person's command, so it is never sent.
 
-    Invisible characters before the command do not hide it: a recipient may drop them first.
+    Invisible characters before the command do not hide it: a recipient may drop them first. Nor do quoted lines: a
+    bridge drops a reply's quote before it looks for a command.
     """
     result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message=text)
 
     assert result == error_result(action, COMMAND_LIKE)
     assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_command_is_refused_without_a_reply_too(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A message that starts with quoted lines is checked after them, whether or not it is a reply."""
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message=QUOTED_COMMAND)
+
+    assert result == error_result("send", COMMAND_LIKE)
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["> <@alice:example.com> quoted text", "> !quoted\n\nSounds good"])
+async def test_a_quote_without_a_command_after_it_is_sent(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    text: str,
+) -> None:
+    """Only what follows the quoted lines can be a command, so a quote alone or before ordinary text goes out."""
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, event_id="$own", message=text)
+
+    assert result == ok_result("send", room_id=ROOM, event_id="$sent")
+    assert [content["body"] for content in _sent(homeserver)] == [text]
 
 
 @pytest.mark.asyncio

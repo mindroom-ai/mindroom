@@ -96,15 +96,22 @@ def _user_problem(user_id: str | None) -> str | None:
     return None if user_id is None or MATRIX_USER_ID.fullmatch(user_id) else _NOT_A_USER_ID
 
 
-def _command_problem(text: str | None) -> str | None:
+def _first_visible(line: str) -> str:
+    """Return the first character of ``line`` that is neither whitespace nor invisible, or "" when it has none."""
     # A recipient may drop leading whitespace and invisible format characters (Unicode category Cf, such as U+FEFF and
-    # U+200B) before it looks for a command, so the first character that is neither decides.
+    # U+200B) before it looks for a command.
+    return next(
+        (character for character in line if not character.isspace() and unicodedata.category(character) != "Cf"),
+        "",
+    )
+
+
+def _command_problem(text: str | None) -> str | None:
+    # A bridge drops a reply's quote, its leading `>` lines and the blank lines between and after them, before it
+    # looks for a command, so the first line that is neither decides. The repository's reply-fallback stripper takes
+    # only the exact fallback a client writes ("> " lines, then one blank line), which a model need not.
     first = next(
-        (
-            character
-            for character in (text or "")
-            if not character.isspace() and unicodedata.category(character) != "Cf"
-        ),
+        (first for line in (text or "").splitlines() if (first := _first_visible(line)) not in {"", ">"}),
         "",
     )
     return _COMMAND_LIKE if first in {"!", "\\"} else None
