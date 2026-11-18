@@ -12,6 +12,7 @@ from mindroom.memory._prompt_snapshots import (
     FreshPrompt,
     held_system_prompt,
     prompt_cache_ttl_seconds,
+    prompt_snapshot_path,
     stamp_prompt_request,
 )
 from mindroom.memory._prompting import redact_memory_text, strip_user_turn_time_prefix
@@ -48,6 +49,7 @@ __all__ = [
     "held_system_prompt",
     "list_all_agent_memories",
     "prompt_cache_ttl_seconds",
+    "prompt_snapshot_path",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",

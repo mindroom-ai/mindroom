@@ -534,7 +534,7 @@ An agent's system prompt has a stable part (identity, role, instructions, worksp
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
 A changed system prompt makes the provider read the whole conversation again, so an ongoing conversation keeps the system prompt it last sent while its cache can still be reused.
-What changed since, such as an edited context file, a new skill, a new `MEMORY.md` entry, or the date, reaches the agent once as a note after the current message.
+Each reply is told what changed since, such as an edited context file, a new skill, a new `MEMORY.md` entry, or the date, in a note that is not kept in the conversation.
 The conversation takes the current system prompt when its history is compacted, when its model or tools change, or after no request for the model's cache lifetime: one hour, or five minutes with `extended_cache_time: false` and for providers without that setting.
 Teams and [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) agents always send the current system prompt.
 

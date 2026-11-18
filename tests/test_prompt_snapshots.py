@@ -6,48 +6,54 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.memory import ConversationRef, FreshPrompt, held_system_prompt, stamp_prompt_request
+from mindroom.memory import (
+    ConversationRef,
+    FreshPrompt,
+    held_system_prompt,
+    prompt_snapshot_path,
+    stamp_prompt_request,
+)
 from mindroom.memory import _prompt_snapshots as snapshots
 
-STORE = Path("prompt_snapshots")
+DATABASE = Path("agents/mind/sessions/mind.db")
+_STORE = prompt_snapshot_path(DATABASE, "thread-1").parent
 HOUR = snapshots.prompt_cache_ttl_seconds(extended_cache_time=True)
 MARGIN = snapshots._MARGIN_SECONDS
 
 
 @pytest.fixture(autouse=True)
 def _store_in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the relative ``STORE`` each test writes inside its own directory."""
+    """Keep the relative ``DATABASE`` each test's prompts lie beside inside its own directory."""
     monkeypatch.chdir(tmp_path)
 
 
 def _send(
     *system: str,
-    agent: str = "mind",
     session: str = "thread-1",
     summary: str | None = None,
     model: str = "anthropic/opus",
     tools: str = "tools-1",
     memory_path: str | None = "/workspace/MEMORY.md",
     memory: str = "",
-    turn: str | None = None,
     now: float = 0.0,
     ttl: float = HOUR,
-    store: Path = STORE,
+    database: Path = DATABASE,
 ) -> tuple[tuple[str, ...], str]:
     """Return the system texts a turn sends, and what it is told changed, when its fresh prompt is ``system``."""
     return held_system_prompt(
-        store,
-        agent,
+        prompt_snapshot_path(database, session),
         ConversationRef(session, (summary, None)),
         FreshPrompt(system, model=model, tools=tools, memory_path=memory_path, memory_body=memory),
-        turn=turn,
         ttl=ttl,
         now=now,
     )
 
 
-def test_warm_conversation_keeps_its_prompt_and_hears_each_change_once() -> None:
-    """A changed file must not change the prefix cached requests share; the change follows the conversation."""
+def test_warm_conversation_keeps_its_prompt_and_every_turn_hears_the_whole_difference() -> None:
+    """A changed file must not change the prefix cached requests share; the change ends each turn's requests.
+
+    Nothing records what a turn was told, so a turn that fails loses nothing: the next one is told the same.
+    """
     assert _send("role\nAGENTS v1", "date") == (("role\nAGENTS v1", "date"), "")
 
     system, changes = _send("role\nAGENTS v2", "date", now=10)
@@ -55,31 +61,17 @@ def test_warm_conversation_keeps_its_prompt_and_hears_each_change_once() -> None
     assert "-AGENTS v1" in changes
     assert "+AGENTS v2" in changes
 
-    # The conversation was told, so the same fresh prompt says nothing again.
-    assert _send("role\nAGENTS v2", "date", now=20) == (("role\nAGENTS v1", "date"), "")
+    assert _send("role\nAGENTS v2", "date", now=20) == (system, changes)
 
-    # A later change is told against what the conversation last heard, not against the prompt it keeps.
+    # The difference is always to the prompt the conversation keeps, never to what an earlier turn was told.
     system, changes = _send("role\nAGENTS v3", "date", now=30)
     assert system == ("role\nAGENTS v1", "date")
-    assert "-AGENTS v2" in changes
+    assert "-AGENTS v1" in changes
     assert "+AGENTS v3" in changes
-    assert "v1" not in changes
+    assert "v2" not in changes
 
-
-def test_a_turn_prepared_again_hears_its_changes_again() -> None:
-    """A first attempt that failed stored no note, so the attempt that replaces it must carry the same one."""
-    _send("v1", turn="$first")
-    _, told = _send("v2", turn="$second", now=10)
-    assert "+v2" in told
-    assert _send("v2", turn="$second", now=20) == (("v1",), told)
-    # What changed between the attempts follows what the first one was told.
-    _, retold = _send("v3", turn="$second", now=30)
-    assert retold.startswith(told)
-    assert "+v3" in retold
-    assert _send("v3", turn="$third", now=40) == (("v1",), "")
-    # A turn nothing identifies is never taken for another one.
-    _send("v4", now=50)
-    assert _send("v4", now=60) == (("v1",), "")
+    # A change that is taken back leaves nothing to tell.
+    assert _send("role\nAGENTS v1", "date", now=40) == (("role\nAGENTS v1", "date"), "")
 
 
 def test_unchanged_prompt_tells_nothing() -> None:
@@ -107,8 +99,8 @@ def test_idle_time_follows_the_models_cache_lifetime() -> None:
 def test_every_model_request_restarts_the_idle_time() -> None:
     """A long tool loop keeps the cache warm with each request, so its next turn still keeps the prompt."""
     _send("v1", now=0)
-    stamp_prompt_request(STORE, "mind", "thread-1", now=3000)
-    stamp_prompt_request(STORE, "mind", "thread-1", now=6000)
+    stamp_prompt_request(prompt_snapshot_path(DATABASE, "thread-1"), now=3000)
+    stamp_prompt_request(prompt_snapshot_path(DATABASE, "thread-1"), now=6000)
     assert _send("v2", now=9000)[0] == ("v1",)
 
     _send("v1", session="quiet", now=0)
@@ -117,8 +109,8 @@ def test_every_model_request_restarts_the_idle_time() -> None:
 
 def test_stamping_a_conversation_without_a_kept_prompt_does_nothing() -> None:
     """A run of a conversation that keeps no prompt, such as a team member's, stamps nothing into existence."""
-    stamp_prompt_request(STORE, "mind", "unknown", now=1)
-    assert not STORE.exists()
+    stamp_prompt_request(prompt_snapshot_path(DATABASE, "unknown"), now=1)
+    assert not DATABASE.parent.parent.exists()
 
 
 @pytest.mark.parametrize(
@@ -135,7 +127,7 @@ def test_a_changed_prefix_takes_the_fresh_prompt(changed: dict) -> None:
 
 
 def test_memory_that_only_gained_lines_keeps_the_prompt() -> None:
-    """A memory added mid-conversation is told at the tail instead of reloading the prompt."""
+    """A memory added mid-conversation ends the turn's requests instead of reloading the prompt."""
     _send("memory: a", memory="a")
     system, changes = _send("memory: a\nb", memory="a\nb")
     assert system == ("memory: a",)
@@ -147,9 +139,17 @@ def test_edited_or_deleted_memory_takes_the_fresh_prompt() -> None:
     _send("memory: a\nb", memory="a\nb")
     assert _send("memory: a", memory="a") == (("memory: a",), "")
     assert _send("memory: a2", memory="a2") == (("memory: a2",), "")
-    # A line the conversation heard of at its tail counts too.
-    _send("memory: a2\nb", memory="a2\nb")
-    assert _send("memory: a2\nb2", memory="a2\nb2") == (("memory: a2\nb2",), "")
+
+
+def test_a_memory_added_and_deleted_again_is_never_kept() -> None:
+    """A line a turn only heard of at its tail leaves no trace once it is deleted or replaced."""
+    _send("memory: a", memory="a")
+    assert "+secret" in _send("memory: a\nsecret", memory="a\nsecret")[1]
+    assert _send("memory: a", memory="a") == (("memory: a",), "")
+    system, changes = _send("memory: a\nother", memory="a\nother")
+    assert system == ("memory: a",)
+    assert "secret" not in changes
+    assert all("secret" not in kept.read_text(encoding="utf-8") for kept in _STORE.glob("*.json"))
 
 
 def test_empty_memory_takes_the_fresh_prompt_once_it_gains_lines() -> None:
@@ -158,11 +158,16 @@ def test_empty_memory_takes_the_fresh_prompt_once_it_gains_lines() -> None:
     assert _send("header\na", memory="header\na") == (("header\na",), "")
 
 
-def test_prompts_are_kept_per_agent_conversation_and_memory_file() -> None:
-    """Another conversation, agent, or requester's private memory never receives this conversation's prompt."""
-    _send("v1", memory="a")
+def test_prompts_are_kept_per_state_root_conversation_and_memory_file() -> None:
+    """Another conversation, another requester's private instance, or another memory file never gets this prompt.
+
+    Two private instances of one agent can share a session id; each keeps its prompts beside its own database.
+    """
+    _send("alice's private context", memory="a")
     assert _send("v2", memory="a", session="thread-2")[0] == ("v2",)
-    assert _send("v2", memory="a", agent="other")[0] == ("v2",)
+    bob = Path("private/bob/sessions/mind.db")
+    assert _send("bob's private context", memory="a", database=bob) == (("bob's private context",), "")
+    assert "alice" not in "".join(kept.read_text(encoding="utf-8") for kept in bob.parent.parent.rglob("*.json"))
     assert _send("private", memory="a", memory_path="/private/MEMORY.md") == (("private",), "")
 
 
@@ -170,15 +175,15 @@ def test_idle_prompts_are_dropped() -> None:
     """Prompts of idle conversations are deleted, so the store stays as small as the active conversations."""
     _send("v1", session="old", now=0)
     _send("v1", session="new", now=HOUR + MARGIN)
-    assert len(list(STORE.iterdir())) == 1
+    assert len(list(_STORE.glob("*.json"))) == 1
     assert _send("v2", session="new", now=HOUR + MARGIN + 1)[0] == ("v1",)
 
 
-@pytest.mark.parametrize("content", ["[[", "{}", "null", '{"system": "v1"}', '{"system": ["v1"], "known": 3}'])
+@pytest.mark.parametrize("content", ["[[", "{}", "null", '{"prompt": "v1"}', '{"prompt": {"system": ["v1"]}}'])
 def test_unreadable_prompt_takes_the_fresh_one(content: str) -> None:
     """A malformed file costs one cache write, never the turn."""
     _send("v1")
-    [kept] = STORE.iterdir()
+    [kept] = _STORE.glob("*.json")
     kept.write_text(content, encoding="utf-8")
     assert _send("v2") == (("v2",), "")
     assert _send("v3")[0] == ("v2",)
@@ -187,5 +192,5 @@ def test_unreadable_prompt_takes_the_fresh_one(content: str) -> None:
 def test_store_that_cannot_be_written_sends_the_fresh_prompt() -> None:
     """A store path under a regular file fails every read and save, and turns still get their prompt."""
     Path("not-a-dir").write_text("", encoding="utf-8")
-    assert _send("v1", store=Path("not-a-dir/prompts")) == (("v1",), "")
-    assert _send("v2", store=Path("not-a-dir/prompts")) == (("v2",), "")
+    assert _send("v1", database=Path("not-a-dir/sessions/mind.db")) == (("v1",), "")
+    assert _send("v2", database=Path("not-a-dir/sessions/mind.db")) == (("v2",), "")

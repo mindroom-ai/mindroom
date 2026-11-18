@@ -336,7 +336,7 @@ async def inject_room_tags(ctx: SystemEnrichContext) -> None:
 ```
 
 Items are rendered in a `<mindroom_system_context>` block, sorted by key.
-For an agent, `"stable"` items join the system prompt, and `"volatile"` items, the default, follow the current message in their own block, so they never change the system prompt; a team's system prompt takes both.
+For an agent, `"stable"` items join the system prompt, and `"volatile"` items, the default, reach the model in their own block at the end of each request of that reply only, so they never change the system prompt and later replies do not see them; a team's system prompt takes both.
 Mark an item `"stable"` only when its text stays the same from turn to turn; a changed one reaches an ongoing conversation as a note instead ([Prompt Caching](configuration/models.md#prompt-caching)).
 `persist` has no effect here because system enrichment always applies to the current turn only.
 Use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.

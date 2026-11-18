@@ -307,11 +307,12 @@ FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
     "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
     "or when a marker says lines were omitted."
 )
-# Tells a conversation that keeps the system prompt it started with what changed in the current one.
+# Tells a turn of a conversation that keeps an earlier system prompt how the current one differs from it.
 SYSTEM_PROMPT_CHANGES_TEMPLATE = (
-    "[System prompt update] This conversation keeps the system prompt it started with. "
-    "The current system prompt differs from what you were last shown as in the unified diff below: "
-    "lines starting with `+` are current and replace the lines starting with `-`, which no longer apply.\n"
+    "[System prompt update] Your system prompt above is the copy this conversation keeps from an earlier turn, "
+    "and parts of it have changed since. The unified diff below is the whole difference: lines starting with `+` "
+    "are current and replace the corresponding parts of your system prompt above, and lines starting with `-` no "
+    "longer apply.\n"
     "{changes}"
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (

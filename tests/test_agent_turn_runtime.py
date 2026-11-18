@@ -1572,7 +1572,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
         "checkpoint_hooks",
-        "_agent_loop_hooks",
+        "agent_loop_hooks",
     ]
     assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert hooks.answer_tool_calls is not None

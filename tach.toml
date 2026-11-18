@@ -1383,6 +1383,7 @@ depends_on = [
     "mindroom.history.run_checkpoint",
     "mindroom.history.types",
     "mindroom.llm",
+    "mindroom.memory",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
     "mindroom.tool_jobs.execution",
@@ -6809,6 +6810,7 @@ expose = [
     "stream_agent_response",
     "run_delegated_child_response",
     "agent_run_metadata_content",
+    "turn_local_context",
 ]
 from = ["mindroom.ai"]
 
@@ -6892,6 +6894,7 @@ expose = [
     "held_system_prompt",
     "list_all_agent_memories",
     "prompt_cache_ttl_seconds",
+    "prompt_snapshot_path",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",

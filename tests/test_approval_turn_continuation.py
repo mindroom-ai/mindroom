@@ -35,10 +35,10 @@ from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.memory import prompt_snapshot_path
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnMode
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
@@ -1172,9 +1172,10 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The attempt a model switch starts after the approved run carries the resume's system enrichment.
+    """The approved run and the attempt a model switch starts after it both carry the resume's system enrichment.
 
-    Volatile enrichment follows the prompt, so it never changes the system prompt the conversation's cache starts with.
+    Volatile enrichment ends each request, unstored, so it never changes the system prompt the conversation's cache
+    starts with and no later request replays it. Every request of the resume restarts the conversation's idle time.
     """
     paths, config = _usage_config(tmp_path)
     identity = _identity("enrich-session")
@@ -1182,14 +1183,20 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
     instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.")
+    stamped: list[Path] = []
+    monkeypatch.setattr("mindroom.loop_hooks.stamp_prompt_request", lambda path, *, now: stamped.append(path))  # noqa: ARG005
 
     result = await _approve_add(tmp_path, config, paths, identity, paused, "approved", (instruction,))
 
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text.endswith("Done.")
-    *_, fresh = model.requests
-    assert instruction.text not in system_text(fresh.messages)
-    assert any(instruction.text in str(message.content) for message in fresh.messages)
+    _before_pause, resumed, fresh = model.requests
+    for request in (resumed, fresh):
+        *earlier, last = [str(message.content) for message in request.messages]
+        assert instruction.text in last
+        assert instruction.text not in "".join(earlier)
+    database = create_session_storage("general", config, paths, identity).path
+    assert stamped == [prompt_snapshot_path(database, identity.session_id)] * 2
 
 
 @pytest.mark.asyncio
