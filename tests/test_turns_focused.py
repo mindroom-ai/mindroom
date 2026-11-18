@@ -804,7 +804,7 @@ def _build_harness(
                 agent_name=agent_name,
                 delivery_gateway=cast("DeliveryGateway", gateway),
                 turn_store=turn_store,
-                claim_room_event=journal_store.claim_room_event,
+                journal=journal_store,
             ),
         ),
     )

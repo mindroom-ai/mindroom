@@ -6196,6 +6196,7 @@ path = "mindroom.voice.visible_voice_echo"
 depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.event_journal",
 ]
 visibility = ["mindroom.bot"]
 

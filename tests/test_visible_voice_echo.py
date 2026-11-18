@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -19,6 +20,7 @@ from mindroom.constants import (
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.turn_policy import DispatchPlan, ResponseAction
+from mindroom.voice import visible_voice_echo
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.test_turns_focused import _SENDER, _THREAD_ROOT, _build_harness, _room_with_members, _route_as_delivered
 from tests.test_voice_echo_retry import _force_readiness_fallback, _voice_event
@@ -221,8 +223,7 @@ async def test_two_answering_bots_post_one_transcript(tmp_path: Path, monkeypatc
     _transcribes(monkeypatch, normalized)
     first = _build_harness(config, tmp_path)
     second = _build_harness(config, tmp_path, agent_name="research")
-    answer = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
-    monkeypatch.setattr(second.policy, "plan_turn", AsyncMock(return_value=answer))
+    _answers(second, monkeypatch)
     send_started, release_send = asyncio.Event(), asyncio.Event()
     send = first.gateway.send_text
 
@@ -245,6 +246,70 @@ async def test_two_answering_bots_post_one_transcript(tmp_path: Path, monkeypatc
     assert [request.response_text for request in first.gateway.sent] == [_TRANSCRIPT]
     assert second.gateway.sent == []
     assert len(first.runner.requests) == len(second.runner.requests) == 1
+
+
+async def _owner_fails_to_post(config: Config, tmp_path: Path, room: nio.MatrixRoom, event: nio.Event) -> None:
+    """Let General claim the transcript and fail to send it, as a bot whose Matrix send failed does."""
+    owner = _build_harness(config, tmp_path)
+    owner.gateway.send_text = AsyncMock(return_value=None)
+    await _deliver(owner, room, event)
+    assert owner.runner.requests == []
+
+
+def _answers(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan an individual answer, as each of two bots a person addresses separately does."""
+    answer = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+    monkeypatch.setattr(harness.policy, "plan_turn", AsyncMock(return_value=answer))
+
+
+@pytest.mark.asyncio
+async def test_other_bot_waits_for_the_retry_of_an_owner_that_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot that does not post the transcript replies only once the bot that does has posted it on its retry."""
+    monkeypatch.setattr(visible_voice_echo, "_OWNER_RECEIPT_GRACE_SECONDS", 30.0)
+    config = _config(tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event, normalized = _voice_event(config)
+    _transcribes(monkeypatch, normalized)
+    await _owner_fails_to_post(config, tmp_path, room, event)
+    other = _build_harness(config, tmp_path, agent_name="research")
+    _answers(other, monkeypatch)
+
+    other_delivery = asyncio.create_task(_deliver(other, room, event))
+    await asyncio.sleep(0.3)
+    assert other.runner.requests == []
+    owner = _build_harness(config, tmp_path)
+    await _deliver(owner, room, event)
+    await asyncio.wait_for(other_delivery, timeout=5)
+
+    assert [request.response_text for request in owner.gateway.sent] == [_TRANSCRIPT]
+    assert other.gateway.sent == []
+    assert len(owner.runner.requests) == len(other.runner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_other_bot_replies_after_the_grace_when_the_owner_never_posts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait for another bot's transcript is bounded: the reply follows a short grace."""
+    monkeypatch.setattr(visible_voice_echo, "_OWNER_RECEIPT_GRACE_SECONDS", 0.2)
+    config = _config(tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event, normalized = _voice_event(config)
+    _transcribes(monkeypatch, normalized)
+    await _owner_fails_to_post(config, tmp_path, room, event)
+    other = _build_harness(config, tmp_path, agent_name="research")
+    _answers(other, monkeypatch)
+    started = time.monotonic()
+
+    await _deliver(other, room, event)
+
+    assert time.monotonic() - started >= 0.2
+    assert other.gateway.sent == []
+    assert len(other.runner.requests) == 1
 
 
 @pytest.mark.asyncio

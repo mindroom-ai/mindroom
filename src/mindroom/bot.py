@@ -659,7 +659,7 @@ class AgentBot:
             agent_name=self.agent_name,
             delivery_gateway=self._delivery_gateway,
             turn_store=self._turn_store,
-            claim_room_event=self._journal_store.claim_room_event,
+            journal=self._journal_store,
         )
         self._visible_responses = VisibleResponseReconciler(
             VisibleResponseReconcilerDeps(

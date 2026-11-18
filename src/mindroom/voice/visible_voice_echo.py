@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
@@ -17,19 +18,21 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.event_journal import turn_rows
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.dispatch_handoff import PreparedIngress
+    from mindroom.event_journal import EventJournalStore
     from mindroom.message_target import MessageTarget
     from mindroom.turn_store import TurnStore
 
+# How long a bot waits for the receipt of another bot that posts the transcript and has failed or not run yet.
+_OWNER_RECEIPT_GRACE_SECONDS = 0.25
 # One lock per voice message for every bot of this process: a bot that does not post the transcript still waits
 # here for the bot that does, so no reply precedes it.
-_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
+_posting: WeakValueDictionary[tuple[str, str], asyncio.Condition] = WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,8 @@ class VisibleVoiceEchoLifecycle:
     agent_name: str
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
-    # `EventJournalStore.claim_room_event`: the first bot to claim a voice message posts its transcript.
-    claim_room_event: Callable[[str, str, str, str], Awaitable[str]]
+    # Holds the claim every bot shares, whose first writer posts the transcript, and each bot's receipt.
+    journal: EventJournalStore
 
     async def publish(
         self,
@@ -57,11 +60,17 @@ class VisibleVoiceEchoLifecycle:
         content = transcript.source["content"]
         if not self.runtime.config.voice.visible_router_echo or content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True:
             return
-        lock = _locks.setdefault((room_id, source_event_id), asyncio.Lock())
-        async with lock:
-            owner = await self.claim_room_event(room_id, source_event_id, "voice_transcript", self.agent_name)
-            # Another owner has posted, as it held this lock during its send; this bot's own receipt says it has.
-            if owner != self.agent_name or await self.turn_store.visible_echo(source_event_id) is not None:
+        posting = _posting.setdefault((room_id, source_event_id), asyncio.Condition())
+        async with posting:
+            owner = await self.journal.claim_room_event(room_id, source_event_id, "voice_transcript", self.agent_name)
+            if owner != self.agent_name:
+                # The owner held this lock during its send, so it has no receipt only when that send failed or it
+                # has not run yet. Its retry gets a short grace, which releases the lock; then this bot answers.
+                if await self.journal.turn_records(owner).read(turn_rows.visible_echo, source_event_id) is None:
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(posting.wait(), _OWNER_RECEIPT_GRACE_SECONDS)
+                return
+            if await self.turn_store.visible_echo(source_event_id) is not None:
                 return
             event_id = await self.delivery_gateway.send_text(
                 SendTextRequest(
@@ -81,3 +90,4 @@ class VisibleVoiceEchoLifecycle:
                 raise RuntimeError(msg)
             await self.turn_store.record_visible_echo(room_id, source_event_id, event_id)
             await self.turn_store.record_finalized_visible_echo(source_event_id, event_id, is_fallback=False)
+            posting.notify_all()
