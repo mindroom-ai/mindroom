@@ -102,6 +102,7 @@ from mindroom.tools.lumalabs import lumalabs_tools
 from mindroom.tools.matrix_api import matrix_api_tools
 from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
+from mindroom.tools.matrix_user import matrix_user_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
 from mindroom.tools.microsoft_files import microsoft_files_tools
