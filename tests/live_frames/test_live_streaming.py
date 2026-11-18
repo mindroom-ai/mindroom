@@ -37,7 +37,7 @@ from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_
 from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
     import nio
@@ -153,6 +153,8 @@ async def _run(
     show_tool_calls: bool = True,
     compactions: ReplyCompactions | None = None,
     resumed: UnfinishedStreamedReply | None = None,
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
+    allow_new_terminal_message: Callable[[], bool] | None = None,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
@@ -166,6 +168,8 @@ async def _run(
             show_tool_calls=show_tool_calls,
             compactions=compactions,
             resumed=resumed,
+            placeholder_ready=placeholder_ready,
+            allow_new_terminal_message=allow_new_terminal_message,
             **records.hooks(),
         )
 
@@ -493,6 +497,51 @@ async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(tmp
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
     assert entry["after_tool"] == 1
     assert [live["after_tool"] for live in _live_compactions(frames.sent)] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+@pytest.mark.parametrize("approved", [False, True], ids=["declined", "approved"])
+async def test_compaction_before_the_participation_decision_creates_no_reply(tmp_path: Path, approved: bool) -> None:  # noqa: FBT001
+    """A compaction before the turn may become visible sends nothing: a declined turn leaves no reply.
+
+    An approved one's placeholder, sent once the decision allows it, carries the entry.
+    """
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    decided = asyncio.Event()
+    creates_before_decision: list[int] = []
+
+    async def placeholder_ready() -> bool:
+        await decided.wait()
+        return approved
+
+    def decide() -> None:
+        creates_before_decision.append(sum(write.kind == "create" for write in records.writes))
+        decided.set()
+
+    stream = _stream(compaction.start, 0.1, compaction.succeed, 0.1, decide, 0.05)
+    await _run(
+        _config(tmp_path, update_interval=0.05),
+        stream,
+        records,
+        edits,
+        compactions=recorder,
+        placeholder_ready=placeholder_ready,
+        allow_new_terminal_message=lambda: approved,
+    )
+
+    assert creates_before_decision == [0]
+    creates = [write for write in records.writes if write.kind == "create"]
+    if not approved:
+        assert creates == []
+        assert [write for write in records.writes if write.kind == "terminal"] == []
+        assert edits.contents == []
+        return
+    [create] = creates
+    assert create.content is not None
+    assert create.content["body"] == PROGRESS_PLACEHOLDER
+    assert [entry["status"] for entry in create.content[COMPACTIONS_CONTENT_KEY]] == ["success"]
 
 
 @pytest.mark.asyncio

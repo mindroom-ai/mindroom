@@ -2269,8 +2269,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         live_task = _start_live_frames(client, streaming, delivery_queue)
         if compactions is not None:
             # A compaction anchors after the tool calls shown so far, and each change is shown at once, like a
-            # worker's progress, even over the placeholder.
+            # worker's progress, even over the placeholder. It never creates the reply: one not yet visible may wait
+            # for its participation decision, and its first write carries the entries.
             def _compaction_changed() -> None:
+                if streaming.event_id is None:
+                    return
                 _queue_delivery_request(
                     delivery_queue,
                     force_refresh=True,
