@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.ai import ai_response
 from mindroom.attachments.storage import register_local_attachment
@@ -25,6 +24,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.message_target import MessageTarget
 from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.response_turn import build_matrix_run_metadata
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
