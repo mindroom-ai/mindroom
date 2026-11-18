@@ -189,6 +189,8 @@ class CommandHandlerContext:
     controller_identity: Callable[[str], DesktopControllerIdentity]
     # Runs saved schedules.
     scheduled_tasks: ScheduledTaskRuntime
+    # Writes one room state event through the room's steward: (room_id, event_type, content, state_key=...).
+    put_room_state: Callable[..., Awaitable[bool]]
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -563,6 +565,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
+            put_state=context.put_room_state,
         )
 
     elif command.type == CommandType.REPLY_MODE:
@@ -581,7 +584,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             command.args.get("args_text", ""),
             config=context.config,
             runtime_paths=context.runtime_paths,
-            client=context.client,
+            put_room_state=context.put_room_state,
             room=room,
             thread_id=effective_thread_id,
             requester_user_id=requester_user_id,
@@ -596,6 +599,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
+            put_state=context.put_room_state,
         )
 
     elif command.type == CommandType.E2EE:

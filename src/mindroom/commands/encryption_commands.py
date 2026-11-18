@@ -11,8 +11,11 @@ from mindroom.matrix.client_room_admin import (
 )
 from mindroom.matrix.cross_signing import cross_signing_status_line
 from mindroom.matrix.decrypt_failure import e2ee_stats
+from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import nio
 
 _ENCRYPT_USAGE = "Usage: `/encrypt` to review, then `/encrypt confirm` to enable."
@@ -24,17 +27,15 @@ async def _confirm_encrypt(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
+    put_state: Callable[..., Awaitable[bool]] | None,
 ) -> str:
-    """Enable encryption for a room admin, or explain why not."""
+    """Enable encryption for a room admin through ``put_state``, the room steward's, or explain why not."""
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
     if admin_user_id is None:
         return "❌ Room admin only."
-    if await ensure_room_encryption_enabled(client, room_id):
+    if await ensure_room_encryption_enabled(client, room_id, put_state=put_state):
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
-    return (
-        "❌ Failed to enable encryption. "
-        "I may lack permission to change room state here; ask a room admin to enable it from their client."
-    )
+    return moderator_rights_message("enable encryption")
 
 
 async def handle_encrypt_command(
@@ -44,6 +45,7 @@ async def handle_encrypt_command(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
+    put_state: Callable[..., Awaitable[bool]] | None = None,
 ) -> str:
     """Review or enable Matrix end-to-end encryption for the current room."""
     encrypted = await room_encryption_enabled(client, room_id)
@@ -62,7 +64,7 @@ async def handle_encrypt_command(
         )
     if requested not in _CONFIRM_ARGUMENTS:
         return f"❌ Unknown argument `{args_text.strip()}`.\n\n{_ENCRYPT_USAGE}"
-    return await _confirm_encrypt(client, room_id, requester_user_id, sender_user_id)
+    return await _confirm_encrypt(client, room_id, requester_user_id, sender_user_id, put_state)
 
 
 async def handle_e2ee_command(

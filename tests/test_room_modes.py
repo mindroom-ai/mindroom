@@ -247,17 +247,12 @@ async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room:
 
 
 @pytest.mark.asyncio
-async def test_a_thread_mode_command_the_router_cannot_publish_says_so(room: _Room) -> None:
-    """`!thread_mode` keeps the override when the state write is refused, and its answer says the view may lag."""
+async def test_a_thread_mode_command_the_room_refuses_changes_nothing(room: _Room) -> None:
+    """`!thread_mode` keeps the old mode when the state write is refused, and its answer asks for the rights."""
     room.client.room_put_state.side_effect = None
     room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert await room.thread_mode_command("room") == (
-        "⚠️ This room now uses `room` thread mode for future agent replies.\n\n"
-        "Use `/thread_mode reset` to restore configured modes.\n\n"
-        "Clients may still show the old thread mode in this room because publishing the new one failed. "
-        "Run the command again to retry."
-    )
-    assert room.stored() == ("room", None)
+    assert await room.thread_mode_command("room") == "I need moderator rights in this room to change the thread mode."
+    assert room.stored() == (None, None)
     assert room.published() is None
 
 

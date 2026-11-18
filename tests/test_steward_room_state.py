@@ -24,7 +24,11 @@ from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.room_thread_modes import clear_room_thread_mode_override, set_room_thread_mode_override
+from mindroom.room_thread_modes import (
+    clear_room_thread_mode_override,
+    resolve_room_thread_mode_override,
+    set_room_thread_mode_override,
+)
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
 from tests.bot_helpers import make_test_agent_bot
@@ -1169,12 +1173,12 @@ async def test_slower_earlier_trigger_cannot_restore_a_replaced_thread_mode(room
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command", ["room", "reset"])
 async def test_command_reports_a_failed_publication(room_state: RoomState, command: str) -> None:
-    """The command saves the override but does not claim success when clients cannot see the new mode."""
+    """The command changes nothing and asks for moderator rights when the room refuses the state its clients read."""
     config, paths, _, _, client = room_state
     set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
     client.room_put_state.side_effect = None
     client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    for _ in range(2):  # The reply asks to run the command again; a second failure warns again.
+    for _ in range(2):  # A second failure answers the same.
         reply = await handle_thread_mode_command(
             command,
             client=client,
@@ -1184,8 +1188,8 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
             requester_user_id="@admin:localhost",
             sender_user_id="@admin:localhost",
         )
-        assert reply.startswith("⚠️")
-        assert "failed" in reply
+        assert reply == "I need moderator rights in this room to change the thread mode."
+        assert resolve_room_thread_mode_override(paths, ROOM_ID) == "thread"
 
 
 async def _hang_a_room_state_retry(duties: StewardDuties, state: RoomState) -> None:

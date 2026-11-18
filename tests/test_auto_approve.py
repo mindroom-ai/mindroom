@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
@@ -29,12 +30,14 @@ from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCardView, ApprovalDecision, CallKey
 from mindroom.llm.runs import ToolExecution
 from mindroom.message_target import MessageTarget
+from mindroom.steward_duties import put_room_state_as_steward
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.approval_card_helpers import card_view
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import approval_manager_for_test, make_conversation_reader_mock, test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -212,11 +215,12 @@ async def _send(
     acts_for_requester: bool = False,
     config: Config | None = None,
     room_mode: bool = False,
-    client: AsyncMock | None = None,
+    put_room_state: Callable[..., Awaitable[bool]] | None = None,
 ) -> tuple[str, RuntimePaths]:
     runtime_paths = test_runtime_paths(tmp_path)
     context = make_test_command_handler_context(
-        client=client or AsyncMock(),
+        client=AsyncMock(),
+        put_room_state=put_room_state or AsyncMock(return_value=True),
         config=config or Config(),
         runtime_paths=runtime_paths,
         logger=MagicMock(),
@@ -268,36 +272,39 @@ async def test_auto_approve_command_starts_shows_and_ends_the_thread_window(tmp_
 
 @pytest.mark.asyncio
 async def test_auto_approve_command_publishes_the_rooms_open_windows_for_clients(tmp_path: Path) -> None:
-    """Starting and ending a window rewrite the router's room state from the stored windows."""
+    """Starting and ending a window rewrite the room steward's own state from the stored windows."""
     client = AsyncMock(user_id="@mindroom_router:localhost")
     client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=ROOM_ID)
+    runtime = SimpleNamespace(room_steward=lambda _room_id: SimpleNamespace(client=client))
+    put_room_state = partial(put_room_state_as_steward, runtime)
 
-    await _send(tmp_path, "!auto_approve 30", client=client)
+    await _send(tmp_path, "!auto_approve 30", put_room_state=put_room_state)
 
     runtime_paths = test_runtime_paths(tmp_path)
     expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
     assert expires_at is not None
     client.room_put_state.assert_awaited_once_with(
-        room_id=ROOM_ID,
-        event_type="io.mindroom.auto_approve",
-        content={"windows": [{"thread_id": THREAD_ID, "requester_id": HUMAN, "expires_at": expires_at.isoformat()}]},
+        ROOM_ID,
+        "io.mindroom.auto_approve",
+        {"windows": [{"thread_id": THREAD_ID, "requester_id": HUMAN, "expires_at": expires_at.isoformat()}]},
         state_key="@mindroom_router:localhost",
     )
     client.room_put_state.reset_mock()
-    await _send(tmp_path, "!auto_approve off", client=client)
-    assert client.room_put_state.await_args.kwargs["content"] == {"windows": []}
+    await _send(tmp_path, "!auto_approve off", put_room_state=put_room_state)
+    assert client.room_put_state.await_args.args[2] == {"windows": []}
 
 
 @pytest.mark.asyncio
-async def test_auto_approve_command_replies_when_publishing_its_state_fails(tmp_path: Path) -> None:
-    """A refused or failed state write leaves the window on and the confirmation sent."""
-    client = AsyncMock(user_id="@mindroom_router:localhost")
-    client.room_put_state.side_effect = nio.exceptions.RemoteProtocolError("connection reset")
+@pytest.mark.parametrize("refusal", [{"return_value": False}, {"side_effect": OSError("connection reset")}])
+async def test_auto_approve_command_asks_for_moderator_rights_when_its_state_is_refused(
+    tmp_path: Path,
+    refusal: dict[str, Any],
+) -> None:
+    """A window the room's clients cannot show is not opened."""
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30", put_room_state=AsyncMock(**refusal))
 
-    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30", client=client)
-
-    assert reply.startswith("⚠️ Auto-approve for all your tool calls is on in this thread until")
-    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
+    assert reply == "I need moderator rights in this room to turn on auto-approve."
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
 
 @pytest.mark.asyncio

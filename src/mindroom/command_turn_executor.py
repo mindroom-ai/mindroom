@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -12,6 +13,7 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY, model_selection_targets_other_runtime
+from mindroom.steward_duties import put_room_state_as_steward
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -194,6 +196,7 @@ class CommandTurnExecutor:
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
             scheduled_tasks=orchestrator.scheduled_tasks,
+            put_room_state=partial(put_room_state_as_steward, orchestrator),
         )
         await handle_command(
             context=context,

@@ -331,6 +331,39 @@ class TestEncryptCommand:
             ("@requester:localhost", "@sender:localhost"),
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("written", [True, False])
+    async def test_confirm_writes_through_the_room_steward(self, written: bool) -> None:
+        """The answering agent enables encryption through the steward, and asks for rights where none has them."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_agent:localhost")}
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        put_state = AsyncMock(return_value=written)
+
+        with patch(
+            "mindroom.commands.encryption_commands.room_admin_power_user",
+            new=AsyncMock(return_value="@requester:localhost"),
+        ):
+            response = await handle_encrypt_command(
+                "confirm",
+                client=client,
+                room_id="!room:localhost",
+                requester_user_id="@requester:localhost",
+                sender_user_id="@sender:localhost",
+                put_state=put_state,
+            )
+
+        put_state.assert_awaited_once_with(
+            "!room:localhost",
+            "m.room.encryption",
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+        )
+        client.room_put_state.assert_not_awaited()
+        # The agent's own next sends are encrypted before its sync shows the change.
+        assert client.rooms["!room:localhost"].encrypted is written
+        assert ("now enabled" in response) is written
+        assert written or response == "I need moderator rights in this room to enable encryption."
+
 
 class TestE2EECommand:
     """`!e2ee` diagnostics output."""

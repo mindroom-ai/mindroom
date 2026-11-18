@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
 from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -277,10 +277,12 @@ async def ensure_room_encryption_enabled(
     room_id: str,
     *,
     snapshot: RoomStateSnapshot | None = None,
+    put_state: Callable[..., Awaitable[bool]] | None = None,
 ) -> bool:
     """Enable Matrix encryption on a room if it is not already enabled.
 
     Enabling encryption is irreversible; this helper never disables it.
+    A client that only answers writes through ``put_state``, the room steward's.
     Returns whether the room is encrypted after the call.
     """
     enabled = await room_encryption_enabled(client, room_id, snapshot=snapshot)
@@ -288,8 +290,9 @@ async def ensure_room_encryption_enabled(
         return True
     if enabled is None:
         return False
-    response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
-    if isinstance(response, nio.RoomPutStateResponse):
+    write = put_state or client.room_put_state
+    response = await write(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
+    if response is True or isinstance(response, nio.RoomPutStateResponse):
         cached_room = client.rooms.get(room_id)
         if cached_room is not None:
             # nio only encrypts sends once the cached room flips encrypted, which

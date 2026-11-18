@@ -7,8 +7,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-import nio
-
 from mindroom.approval.auto_approve_windows import (
     AUTO_APPROVE_MAX_DURATION,
     auto_approve_expires_at,
@@ -20,10 +18,13 @@ from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.matrix.event_types import AUTO_APPROVE_WINDOWS_EVENT_TYPE
+from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
 
+    import nio
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -48,12 +49,12 @@ def _until(expires_at: datetime, config: Config) -> str:
 
 
 async def _publish_windows(
-    client: nio.AsyncClient,
+    put_room_state: Callable[..., Awaitable[bool]],
     runtime_paths: RuntimePaths,
     room_id: str,
     logger: structlog.stdlib.BoundLogger,
-) -> None:
-    """Publish the room's open windows as the router's state, for clients; a failed write never undoes the command."""
+) -> bool:
+    """Publish the room's open windows as the room steward's own state, for clients; False when the room refuses."""
     content = {
         "windows": [
             {
@@ -65,17 +66,10 @@ async def _publish_windows(
         ],
     }
     try:
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type=AUTO_APPROVE_WINDOWS_EVENT_TYPE,
-            content=content,
-            state_key=client.user_id,
-        )
+        return await put_room_state(room_id, AUTO_APPROVE_WINDOWS_EVENT_TYPE, content, state_key=None)
     except Exception:
         logger.warning("Publishing auto-approve windows failed", room_id=room_id, exc_info=True)
-        return
-    if not isinstance(response, nio.RoomPutStateResponse):
-        logger.warning("Auto-approve windows state was refused", room_id=room_id, response=str(response))
+        return False
 
 
 async def _approve_pending_cards(
@@ -113,12 +107,12 @@ async def _approve_pending_cards(
     return approved
 
 
-async def handle_auto_approve_command(
+async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
     args_text: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
+    put_room_state: Callable[..., Awaitable[bool]],
     room: nio.MatrixRoom,
     thread_id: str | None,
     requester_user_id: str,
@@ -149,7 +143,7 @@ async def handle_auto_approve_command(
     if requested == "off":
         if not end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
             return f"Auto-approve for all your tool calls is not on in {place}."
-        await _publish_windows(client, runtime_paths, room.room_id, logger)
+        await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
         return (
             f"✅ Auto-approve for all your tool calls is off in {place}; they follow the usual approval rules again. "
             "A tool you auto-approved from an approval card stays approved until you stop it on that card or its time ends."
@@ -165,7 +159,10 @@ async def handle_auto_approve_command(
         requester_id=approver_id,
         duration=duration,
     )
-    await _publish_windows(client, runtime_paths, room.room_id, logger)
+    if not await _publish_windows(put_room_state, runtime_paths, room.room_id, logger):
+        # A window the room's clients cannot show stays closed.
+        end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
+        return moderator_rights_message("turn on auto-approve")
     approved = await _approve_pending_cards(
         config=config,
         runtime_paths=runtime_paths,

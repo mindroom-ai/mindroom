@@ -88,6 +88,10 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
         MagicMock(side_effect=AssertionError("the test did not expect a Desktop controller lookup")),
     )
     kwargs.setdefault("scheduled_tasks", MagicMock(spec=ScheduledTaskRuntime))
+    kwargs.setdefault(
+        "put_room_state",
+        AsyncMock(side_effect=AssertionError("the test did not expect a room state write through the steward")),
+    )
     return CommandHandlerContext(*args, **kwargs)
 
 

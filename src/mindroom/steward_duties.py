@@ -53,13 +53,17 @@ async def put_room_state_as_steward(
     event_type: str,
     content: dict[str, Any],
     *,
-    state_key: str = "",
+    state_key: str | None = "",
 ) -> bool:
-    """Write one state event through the room steward's client; False without a steward or when the room refuses."""
+    """Write one state event through the room steward's client; False without a steward or when the room refuses.
+
+    A ``state_key`` of None is the steward's own Matrix ID, the one such key Matrix lets it write.
+    """
     steward = runtime.room_steward(room_id)
     if steward is None or steward.client is None:
         return False
-    response = await steward.client.room_put_state(room_id, event_type, content, state_key=state_key)
+    key = steward.client.user_id if state_key is None else state_key
+    response = await steward.client.room_put_state(room_id, event_type, content, state_key=key)
     return isinstance(response, nio.RoomPutStateResponse)
 
 
