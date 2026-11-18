@@ -60,6 +60,8 @@ class _ExportedThread:
 
 # One source's exported threads by room and thread ID.
 type ExportedThreads = dict[tuple[str, str], _ExportedThread]
+# One source's room thread roots by room ID, in /threads order, and whether the listing was cut short.
+type EnumeratedRooms = dict[str, tuple[list[str], bool]]
 # The rows a strict read returned, as `thread_fingerprint` gives them: the read leaves no refresh owed.
 type _ReadRows = frozenset[tuple[str, str, None]]
 
@@ -296,6 +298,22 @@ def _finish_room_exports_blocking(
             accumulator.failed_items.append(failure_for_room(room, f"Room reconciliation failed: {exc}"))
 
 
+async def _room_thread_root_ids(
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    *,
+    max_thread_roots: int,
+    enumerated: EnumeratedRooms | None,
+) -> tuple[list[str], bool]:
+    """Return the room's thread roots as the source last listed them, or list them and record the listing."""
+    listed = None if enumerated is None else enumerated.get(room.room_id)
+    if listed is None:
+        listed = await enumerate_room_thread_root_ids(client, room.room_id, max_thread_roots=max_thread_roots)
+        if enumerated is not None:
+            enumerated[room.room_id] = listed
+    return listed
+
+
 async def export_threads_for_targets_for_client(
     *,
     client: nio.AsyncClient,
@@ -308,11 +326,13 @@ async def export_threads_for_targets_for_client(
     targets: Sequence[ThreadExportTarget],
     max_thread_roots: int = 2000,
     exported: ExportedThreads | None = None,
+    enumerated: EnumeratedRooms | None = None,
 ) -> tuple[ThreadExportAccumulator, ...]:
     """Fetch each Matrix thread once and fan it out to authorized destinations.
 
     ``client`` answers only what the projection cannot: which threads a room
-    has, and who is currently joined to it. Thread bodies come from ``reader``.
+    has, unless ``enumerated`` still holds the room, and who is currently
+    joined to it. Thread bodies come from ``reader``.
     Each thread's summary is the one ``entity_name`` would list for it, under
     the same trust and pin rules as thread listings.
     """
@@ -349,10 +369,11 @@ async def export_threads_for_targets_for_client(
             accumulator.retained_room_keys.add(room.key)
 
         try:
-            thread_ids, truncated = await enumerate_room_thread_root_ids(
+            thread_ids, truncated = await _room_thread_root_ids(
                 client,
-                room.room_id,
+                room,
                 max_thread_roots=max_thread_roots,
+                enumerated=enumerated,
             )
         except Exception as exc:
             for accumulator in authorized:

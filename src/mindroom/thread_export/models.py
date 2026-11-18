@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.thread_export.execution import ExportedThreads
+    from mindroom.thread_export.execution import EnumeratedRooms, ExportedThreads
     from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
@@ -131,6 +131,7 @@ class ThreadExportSource:
     ``target_output_dirs=None`` preserves the all-target fan-out used by
     administrative exports; workspace sources name only their own targets.
     ``exported`` holds what earlier passes wrote, so unchanged threads are skipped.
+    ``enumerated`` holds the thread roots earlier passes listed per room; a room it holds is not listed again.
     """
 
     client: nio.AsyncClient
@@ -140,3 +141,4 @@ class ThreadExportSource:
     membership_index: AgentReplyMembershipIndex
     target_output_dirs: tuple[Path, ...] | None = None
     exported: ExportedThreads | None = None
+    enumerated: EnumeratedRooms | None = None
