@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    UI_WIDGETS_CONTENT_KEY,
     runtime_matrix_homeserver,
 )
 from mindroom.final_delivery import StreamTransportOutcome
@@ -56,6 +57,7 @@ from mindroom.tool_system.events import (
     tool_markers_match_trace,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
+from mindroom.ui_widgets.render import render_ui_widgets
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -380,6 +382,7 @@ class _StreamingDeliverySnapshot:
     interactive_source_event_id: str | None
     markdown_renderer: Callable[[str], str]
     chars_since_last_update: int
+    ui_widgets: bool
     untransformed_text: str | None = None
 
 
@@ -397,10 +400,13 @@ def _visible_text(
     accumulated_text: str,
     *,
     in_progress: bool,
-) -> tuple[str, interactive.InteractiveMetadata | None]:
-    """Return the text a reply shows for its accumulated text, and the interactive question it carries.
+    ui_widgets: bool,
+) -> tuple[str, interactive.InteractiveMetadata | None, dict[str, object] | None]:
+    """Return the text a reply shows for its accumulated text, its interactive question, and its widgets.
 
     Progress edits and live frames both show this text, so they never disagree about what is visible.
+    With ``ui_widgets``, valid ``ui`` blocks are replaced by their fallback blocks and returned as the
+    ``io.mindroom.ui`` value; that runs last, so the interactive pass never reads fallback text.
     """
     text_to_send = accumulated_text if accumulated_text.strip() else _PROGRESS_PLACEHOLDER
     # A block still arriving is unfinished, not malformed, so only the final text warns about unparsed blocks.
@@ -417,19 +423,28 @@ def _visible_text(
             display_text = display_text.removesuffix(last_word).rstrip()
         # An interactive block still arriving is raw JSON; its question renders once the block closes.
         display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
-    return display_text, response.interactive_metadata
+    if not ui_widgets:
+        return display_text, response.interactive_metadata, None
+    rendered = render_ui_widgets(display_text, in_progress=in_progress)
+    return rendered.text or _PROGRESS_PLACEHOLDER, response.interactive_metadata, rendered.content
 
 
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
     """Format one outbound payload from immutable stream state."""
     in_progress = snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES
-    display_text, interactive_metadata = _visible_text(snapshot.accumulated_text, in_progress=in_progress)
+    display_text, interactive_metadata, ui = _visible_text(
+        snapshot.accumulated_text,
+        in_progress=in_progress,
+        ui_widgets=snapshot.ui_widgets,
+    )
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
     )
     extra_content = dict(snapshot.extra_content or {})
     extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
+    if ui is not None:
+        extra_content[UI_WIDGETS_CONTENT_KEY] = ui
     if (
         snapshot.stream_status == STREAM_STATUS_COMPLETED
         and interactive_metadata is not None
@@ -560,6 +575,7 @@ class StreamingResponse:
     max_idle: float = 2.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
+    ui_widgets: bool = False  # When True, valid `ui` blocks show as fallback blocks with their `io.mindroom.ui` value
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     presentation_state: dict[str, object] | None = None
     extra_content: Mapping[str, Any] | None = None
@@ -721,7 +737,7 @@ class StreamingResponse:
         if not self.live_active:
             return None
         assert self.event_id is not None
-        display_text, _ = _visible_text(self.accumulated_text, in_progress=True)
+        display_text, _, ui = _visible_text(self.accumulated_text, in_progress=True, ui_widgets=self.ui_widgets)
         md = (
             ""
             if display_text == _PROGRESS_PLACEHOLDER
@@ -746,6 +762,7 @@ class StreamingResponse:
                 {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
             ),
             compactions=tuple(self.compactions.content() or ()) if self.compactions is not None else (),
+            ui=ui,
         )
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
@@ -1180,6 +1197,7 @@ class StreamingResponse:
             interactive_source_event_id=self.interactive_source_event_id,
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
+            ui_widgets=self.ui_widgets,
         )
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
@@ -2223,6 +2241,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     allow_new_terminal_message: Callable[[], bool] | None = None,
     resumed: UnfinishedStreamedReply | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
+    ui_widgets: bool = False,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome.
 
@@ -2239,6 +2258,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         runtime_paths=runtime_paths,
         latest_thread_event_id=latest_thread_event_id,
         show_tool_calls=show_tool_calls,
+        ui_widgets=ui_widgets,
         extra_content=extra_content,
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,
@@ -2374,6 +2394,7 @@ async def stream_progress_edits(
     extra_content: dict[str, Any] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
+    ui_widgets: bool = False,
 ) -> AsyncIterator[ProgressPublisher]:
     """Stream progress into one existing reply whose terminal update belongs to the caller.
 
@@ -2401,6 +2422,7 @@ async def stream_progress_edits(
         interval_ramp_seconds=stream_config.interval_ramp_seconds,
         max_idle=stream_config.max_idle,
         show_tool_calls=show_tool_calls,
+        ui_widgets=ui_widgets,
         extra_content=extra_content,
         visible_progress_callback=visible_progress_callback,
         transport_is_current=transport_is_current,

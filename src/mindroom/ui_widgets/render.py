@@ -28,7 +28,7 @@ _MARKER_ID = re.compile(_MARKER + r"([0-9a-f]{10})")
 
 
 @dataclass(frozen=True, slots=True)
-class UiRender:
+class _UiRender:
     """A reply text with its widgets replaced, and the `io.mindroom.ui` value for them (`None` without an entry)."""
 
     text: str
@@ -193,7 +193,7 @@ def _content(found: list[tuple[str, str]]) -> dict[str, object] | None:
     return {"version": 1, "widgets": [{"id": widget_id, "json": canonical} for widget_id, canonical in widgets.items()]}
 
 
-def render_ui_widgets(text: str, *, in_progress: bool) -> UiRender:
+def render_ui_widgets(text: str, *, in_progress: bool) -> _UiRender:
     """Replace each valid closed `ui` block by its marker block and collect the widgets.
 
     Idempotent: a marker block is ordinary text, gets no entry, and its id is not used again.
@@ -201,7 +201,7 @@ def render_ui_widgets(text: str, *, in_progress: bool) -> UiRender:
     Text that changes in no way is returned as the same object.
     """
     if _UI_FENCE.search(text) is None:
-        return UiRender(text, None)
+        return _UiRender(text, None)
     lines = text.split("\n")
     closed, open_at = _ui_fences(lines)
     cut = in_progress and open_at is not None
@@ -209,6 +209,6 @@ def render_ui_widgets(text: str, *, in_progress: bool) -> UiRender:
         del lines[open_at:]
     out, found = _replace_blocks(lines, closed, set(_MARKER_ID.findall(text)), warn=not in_progress)
     if not found and not cut:
-        return UiRender(text, None)
+        return _UiRender(text, None)
     rendered = "\n".join(out)
-    return UiRender(rendered.rstrip() if cut else rendered, _content(found))
+    return _UiRender(rendered.rstrip() if cut else rendered, _content(found))

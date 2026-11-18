@@ -69,12 +69,19 @@ from mindroom.matrix.large_messages import (
     fit_reasoning_to_ordinary_event,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
+from mindroom.reply_presentation import (
+    NoteKind,
+    Presentation,
+    Segment,
+    decode_presentation,
+    note_segment,
+    render_body,
+)
 from mindroom.reply_scope import current_span, initial_write
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import ProgressPermission
+from mindroom.streaming import ProgressPermission, ProgressState
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
@@ -1964,7 +1971,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         fitted = fit_reasoning_to_ordinary_event(
             client,
             _ROOM_ID,
-            {**content, "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments}},
+            {
+                **content,
+                "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments},
+            },
             room_encrypted=False,
             size_limit=size_limit,
         )
@@ -2264,6 +2274,52 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ACTING_REQUESTER_KEY: "@user:localhost",
         }
         assert ACTING_REQUESTER_KEY not in run_metadata
+
+    @pytest.mark.parametrize("ui_widgets", [True, False])
+    async def test_the_recorded_progress_has_no_open_ui_fence(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        ui_widgets: bool,
+    ) -> None:
+        """A reply's records hold what its progress showed, so a later note lands below it, outside any code block.
+
+        The stream is told whether its agent draws widgets; a finished reply's record keeps the text as written.
+        """
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.runtime.config.agents["agent"].ui_widgets = ui_widgets
+        open_fence = 'Signups peaked.\n\n```ui\n{"type":"chart",'
+        cut = "Signups peaked." if ui_widgets else open_fence
+        request = StreamingDeliveryRequest(
+            target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            response_stream=_empty_stream(),
+            identity=_identity(),
+        )
+
+        async def shown_text() -> str:
+            reply = await alice.replies.load(handle.reply_id)
+            return render_body(decode_presentation(reply.possibly_shown or reply.presentation))[0]
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            async with reply_span(alice, source_event_id="$cause", room_id=request.target.room_id) as handle:
+                await gateway.deliver_stream(request)
+                hooks = stream.await_args.kwargs
+                progress = ProgressState(
+                    text=open_fence,
+                    tool_trace=(),
+                    presentation_state=None,
+                    placeholder_only=False,
+                )
+                assert await hooks["progress_write_ahead"](progress) is ProgressPermission.SEND
+                assert await shown_text() == cut
+                with patch(
+                    "mindroom.delivery_gateway.send_message_outcome",
+                    AsyncMock(side_effect=delivered_matrix_side_effect("$answer")),
+                ):
+                    await hooks["terminal_send"](None, _ROOM_ID, {"body": open_fence}, open_fence, progress=progress)
+                assert await shown_text() == open_fence
+
+        assert hooks["ui_widgets"] is ui_widgets
 
     async def test_recovery_replays_a_final_edit_as_an_edit(
         self,

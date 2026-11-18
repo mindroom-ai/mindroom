@@ -91,8 +91,8 @@ def test_parse_widget_never_raises_and_never_echoes_input() -> None:
   - `_canonical_widget_json(widget: Chart) -> str`, `_widget_id(canonical: str, taken: Collection[str] = ()) -> str`
   - `_fallback_block(widget: Chart, widget_id: str) -> str` (the whole fenced block, no trailing newline)
   - These three are private (only `render.py` and its tests use them; privata rejects a public name nothing else imports), so the test snippets below call them with the underscore.
-  - `@dataclass(frozen=True, slots=True) class UiRender: text: str; content: dict[str, object] | None`
-  - `render_ui_widgets(text: str, *, in_progress: bool) -> UiRender`
+  - `@dataclass(frozen=True, slots=True) class _UiRender: text: str; content: dict[str, object] | None` (private like `interactive._InteractiveResponse`: only `render.py` names it)
+  - `render_ui_widgets(text: str, *, in_progress: bool) -> _UiRender`
   - `without_open_ui_fence(text: str) -> str` (the text cut where an open column-0 `ui` fence begins, else the same object)
 
 - [ ] **Step 1: Write the failing tests.**
@@ -197,7 +197,8 @@ def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
 **Files:**
 - Modify: `src/mindroom/streaming.py` (`_visible_text`, `_StreamingDeliverySnapshot`, `_prepare_delivery_from_snapshot`, `StreamingResponse`, `_delivery_snapshot`, `live_state`, `send_streaming_response`, `stream_progress_edits`)
 - Modify: `src/mindroom/delivery_gateway.py` (the `send_streaming_response` call, the `stream_progress_edits` call, and `shown()` in the reply stream hooks)
-- Test: `tests/live_frames/test_live_streaming.py`, `tests/test_streaming_edits.py`, `tests/test_response_delivery_gateway.py`
+- Modify: `tach.toml` (`mindroom.delivery_gateway` now depends on `mindroom.config.resolution`)
+- Test: `tests/live_frames/test_live_streaming.py`, `tests/test_streaming.py` (where the `stream_progress_edits` harness is), `tests/test_response_delivery_gateway.py`
 
 **Interfaces:**
 - Consumes: `render_ui_widgets`, `without_open_ui_fence`, `UI_WIDGETS_CONTENT_KEY`, `ui_widgets()`, `LiveDocs.ui`.
@@ -215,7 +216,7 @@ def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
   - `test_widget_content_holds_no_float`: walk the final content of a reply with `180.5`; no value is a `float`.
   - `test_the_ui_render_runs_after_the_interactive_formatting`: a reply with an `interactive` block and a chart titled `` ```interactive `` yields the question, the chart entry and no stray text removed.
 - [ ] **Step 2: Run.** Expected: FAIL.
-- [ ] **Step 3: Implement.** In `_visible_text`, after the interactive formatting and the in-progress cuts, when `ui_widgets`: `render = render_ui_widgets(display_text, in_progress=in_progress)`, text `render.text or _PROGRESS_PLACEHOLDER`. `_prepare_delivery_from_snapshot` sets `extra_content[UI_WIDGETS_CONTENT_KEY]` when the value is not `None`; `live_state` passes it as `LiveDocs.ui`. The gateway passes `ui_widgets=ui_widgets(config, self.deps.agent_name)` to both constructors, and `shown()` builds the presentation from `without_open_ui_fence(progress.text)` when the switch is on.
+- [ ] **Step 3: Implement.** In `_visible_text`, after the interactive formatting and the in-progress cuts, when `ui_widgets`: `render = render_ui_widgets(display_text, in_progress=in_progress)`, text `render.text or _PROGRESS_PLACEHOLDER`. `_prepare_delivery_from_snapshot` sets `extra_content[UI_WIDGETS_CONTENT_KEY]` when the value is not `None`; `live_state` passes it as `LiveDocs.ui`. The gateway passes `ui_widgets=ui_widgets(config, self.deps.agent_name)` to both constructors, and `shown()` builds the presentation from `without_open_ui_fence(progress.text)` when the switch is on. That holds for progress only: the terminal record of a finished reply keeps the text as written, because the final event shows the partial block. `_whole_reply_progress` (a resumed reply that shows earlier spans) cuts the span's text the same way before it builds the whole presentation.
 - [ ] **Step 4: Run the three files plus `tests/test_streaming.py` and `tests/test_interactive.py`.** Expected: PASS.
 - [ ] **Step 5: Commit** (message `feat(ui-widgets): widgets on streamed edits and live frames`).
 

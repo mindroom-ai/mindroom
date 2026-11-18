@@ -160,6 +160,7 @@ async def _run(
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
     allow_new_terminal_message: Callable[[], bool] | None = None,
     client: nio.AsyncClient | None = None,
+    ui_widgets: bool = False,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
@@ -175,6 +176,7 @@ async def _run(
             resumed=resumed,
             placeholder_ready=placeholder_ready,
             allow_new_terminal_message=allow_new_terminal_message,
+            ui_widgets=ui_widgets,
             **records.hooks(),
         )
 
@@ -1437,3 +1439,132 @@ async def test_frames_are_recorded_only_after_the_edit_in_flight_landed(tmp_path
     kinds = [write.kind for write in records.writes]
     assert kinds == ["progress", "progress_delivered", "progress", "progress_delivered", "shown_live"]
     assert records.writes[-1].progress.text == "Approved. Building now"
+
+
+_CHART = (
+    '{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],'
+    '"series":[{"name":"Signups","data":[120,180.5,150]}],"y":"users"}'
+)
+_CHART_BLOCK = "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```"
+_OPEN_UI_FENCE = '\n\n```ui\n{"type":"chart",'
+_UI_KEY = "io.mindroom.ui"
+# Frames carry the progress, so no durable edit lands between the first message and the terminal update.
+_FRAMES_ONLY = {"min_update_interval": 0.01, "interval_ramp_seconds": 60}
+
+
+def _live_states(frames: _Frames) -> list[tuple[str, object]]:
+    """Return the Markdown and widget value a client holds after each frame."""
+    states: list[tuple[str, object]] = []
+    md, ui = "", None
+    for frame in frames.sent:
+        if "snapshot" in frame:
+            md, ui = frame["snapshot"]["md"], frame["snapshot"].get("ui")
+        else:
+            delta = frame["delta"]
+            if (splice := delta.get("md")) is not None:
+                md = md[: splice["at"]] + splice["ins"] + md[splice["at"] + splice["del"] :]
+            ui = delta.get("ui", ui)
+        states.append((md, ui))
+    return states
+
+
+def _floats(value: object) -> list[float]:
+    if isinstance(value, float):
+        return [value]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in _floats(item)]
+    if isinstance(value, list | tuple):
+        return [found for item in value for found in _floats(item)]
+    return []
+
+
+@pytest.mark.asyncio
+async def test_an_open_ui_fence_is_hidden_without_a_signal(tmp_path: Path, frames: _Frames) -> None:
+    """While a `ui` block is still arriving, the reply shows the text before it and no widget value at all."""
+    records, edits = _records(), _Edits()
+    stream = _stream("Signups peaked.", 0.05, _OPEN_UI_FENCE, 0.05)
+    await _run(_config(tmp_path, **_FRAMES_ONLY), stream, records, edits, ui_widgets=True)
+
+    assert {md for md, _ in _live_states(frames)} == {"Signups peaked."}
+    assert all("ui" not in frame.get("snapshot", {}) and "ui" not in frame.get("delta", {}) for frame in frames.sent)
+    assert all(_UI_KEY not in (write.content or {}) for write in records.writes)
+
+
+@pytest.mark.asyncio
+async def test_a_closed_ui_block_becomes_its_widget_at_once(tmp_path: Path, frames: _Frames) -> None:
+    """A block that closed is a widget in the next frame, before any durable edit, and on the final event."""
+    records, edits = _records(), _Edits()
+    stream = _stream(
+        "Signups peaked in February.",
+        0.05,
+        f"\n\n```ui\n{_CHART}\n```\n",
+        0.05,
+        "\nMarch is still 25% above January.",
+        0.05,
+    )
+    await _run(_config(tmp_path, **_FRAMES_ONLY), stream, records, edits, ui_widgets=True)
+
+    assert edits.contents == []
+    md, ui = next(state for state in _live_states(frames) if state[1] is not None)
+    assert md.rstrip() == f"Signups peaked in February.\n\n{_CHART_BLOCK}"
+    assert ui["widgets"][0]["id"] == "df4d729a5d"
+    terminal = _terminal(records)
+    assert terminal[_UI_KEY] == ui
+    assert terminal["body"] == f"Signups peaked in February.\n\n{_CHART_BLOCK}\n\nMarch is still 25% above January."
+    assert '<pre><code class="language-mindroom-ui-df4d729a5d">' in terminal["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_without_the_switch_a_ui_block_is_delivered_as_written(tmp_path: Path, frames: _Frames) -> None:
+    """An agent without `ui_widgets` sends a `ui` block as the code block it is."""
+    records, edits = _records(), _Edits()
+    stream = _stream("Signups peaked.", 0.05, f"\n\n```ui\n{_CHART}\n```", 0.05)
+    await _run(_config(tmp_path, **_FRAMES_ONLY), stream, records, edits)
+
+    assert _terminal(records)["body"] == f"Signups peaked.\n\n```ui\n{_CHART}\n```"
+    assert all(_UI_KEY not in (write.content or {}) for write in records.writes)
+    assert all(ui is None for _, ui in _live_states(frames))
+    assert _live_states(frames)[-1][0].endswith("```")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_ends_inside_a_ui_fence_shows_the_partial_block(tmp_path: Path) -> None:
+    """A finished reply hides nothing: what the model wrote of the block is an ordinary code block."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Signups peaked.", _OPEN_UI_FENCE), records, edits, ui_widgets=True)
+
+    terminal = _terminal(records)
+    assert terminal["body"] == f"Signups peaked.{_OPEN_UI_FENCE}"
+    assert _UI_KEY not in terminal
+
+
+@pytest.mark.asyncio
+async def test_widget_content_holds_no_float(tmp_path: Path) -> None:
+    """Matrix event JSON forbids floats, so a fractional chart value travels only inside the widget's JSON text."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream(f"```ui\n{_CHART}\n```"), records, edits, ui_widgets=True)
+
+    terminal = _terminal(records)
+    assert "180.5" in terminal[_UI_KEY]["widgets"][0]["json"]
+    assert _floats(terminal) == []
+
+
+@pytest.mark.asyncio
+async def test_the_ui_render_runs_after_the_interactive_formatting(tmp_path: Path) -> None:
+    """A question and a chart in one reply both render, and a chart title that looks like a fence removes no text."""
+    records, edits = _records(), _Edits()
+    chart = _CHART.replace('"title":"Signups"', '"title":"```interactive"')
+    question = (
+        '```interactive\n{"question": "Proceed?", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}\n```'
+    )
+    stream = _stream(f"Before.\n\n```ui\n{chart}\n```\n\nBetween.\n\n{question}\n\nAfter.")
+    await _run(_config(tmp_path), stream, records, edits, ui_widgets=True)
+
+    terminal = _terminal(records)
+    (entry,) = terminal[_UI_KEY]["widgets"]
+    body = terminal["body"]
+    assert f"Before.\n\n````mindroom-ui-{entry['id']}\n```interactive (line chart, users)\n" in body
+    assert "\n````\n\nBetween.\n\nProceed?" in body
+    assert "✅ Yes" in body
+    assert body.endswith("After.")
+    assert '"question"' not in body

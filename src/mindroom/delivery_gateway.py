@@ -18,6 +18,7 @@ import nio
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
+from mindroom.config.resolution import ui_widgets
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -129,6 +130,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
+from mindroom.ui_widgets.render import without_open_ui_fence
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -270,17 +272,20 @@ async def _whole_reply_progress(
     progress: AbstractAsyncContextManager[ProgressPublisher],
     handle: SpanHandle,
     published: dict[str, Presentation],
+    *,
+    ui_widgets: bool,
 ) -> AsyncIterator[ProgressPublisher]:
     """Publish the whole reply for each of the span's own publications, remembering what each body shows.
 
     A body stays remembered until a later one is written ahead, which is the
-    only state the streamer sends from then on.
+    only state the streamer sends from then on. With ``ui_widgets``, a ``ui`` block still
+    arriving is left out, as it is from what the progress shows.
     """
     async with progress as publish:
 
         async def publish_whole(chunk: StructuredStreamChunk) -> None:
             shown = handle.presentation(
-                chunk.content,
+                without_open_ui_fence(chunk.content) if ui_widgets else chunk.content,
                 tuple(chunk.tool_trace or ()),
                 team_state=chunk.presentation_state,
             )
@@ -2001,6 +2006,7 @@ class DeliveryGateway:
             request.response_stream,
             streaming_cls=request.streaming_cls,
             show_tool_calls=request.show_tool_calls,
+            ui_widgets=ui_widgets(config, self.deps.agent_name),
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             # A live view, because the caller keeps adding run metadata to its dict while the stream runs.
@@ -2043,13 +2049,17 @@ class DeliveryGateway:
         confirmed by the next write. ``published`` maps the whole-reply bodies a
         progress stream sent to the presentations they show.
         """
+        draws_widgets = ui_widgets(self.deps.runtime.config, self.deps.agent_name)
 
-        def shown(progress: ProgressState) -> Presentation:
+        def shown(progress: ProgressState, *, finished: bool = False) -> Presentation:
             whole = None if published is None else _take_published(published, progress.text)
             if whole is not None:
                 return whole
+            # Progress hides a `ui` block still arriving, so the records leave it out and a Stop, restart or
+            # error note lands below what was shown, outside the code block. A finished reply keeps it as written.
+            text = progress.text if finished or not draws_widgets else without_open_ui_fence(progress.text)
             return handle.presentation(
-                progress.text,
+                text,
                 progress.tool_trace,
                 team_state=progress.presentation_state,
             )
@@ -2099,7 +2109,7 @@ class DeliveryGateway:
 
         def terminal(progress: ProgressState) -> ReplyWrite:
             if progress.untransformed_text is None:
-                return terminal_write(handle, shown(progress), state=ReplyState.COMPLETED)
+                return terminal_write(handle, shown(progress, finished=True), state=ReplyState.COMPLETED)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
@@ -2109,7 +2119,7 @@ class DeliveryGateway:
                 placeholder=handle.base.placeholder,
                 show_tool_calls=handle.base.show_tool_calls,
             )
-            canonical = shown(replace(progress, text=progress.untransformed_text))
+            canonical = shown(replace(progress, text=progress.untransformed_text), finished=True)
             return terminal_write(handle, canonical, state=ReplyState.COMPLETED, frozen_display=whole)
 
         async def terminal_send(
@@ -2177,6 +2187,7 @@ class DeliveryGateway:
         assert handle is not None, "progress streams into the reply of the span that runs it"
         published: dict[str, Presentation] = {}
         hooks = self._reply_stream_hooks(handle, target, published=published)
+        draws_widgets = ui_widgets(self.deps.runtime.config, self.deps.agent_name)
         progress = stream_progress_edits(
             self._ready_client(),
             target,
@@ -2184,6 +2195,7 @@ class DeliveryGateway:
             self.deps.runtime_paths,
             event_id=event_id,
             show_tool_calls=show_tool_calls,
+            ui_widgets=draws_widgets,
             extra_content=extra_content,
             visible_progress_callback=visible_progress_callback,
             transport_is_current=self._stream_transport_gate(
@@ -2196,7 +2208,7 @@ class DeliveryGateway:
         )
         if all(segment.span_id == handle.span_id for segment in handle.base.segments):
             return progress
-        return _whole_reply_progress(progress, handle, published)
+        return _whole_reply_progress(progress, handle, published, ui_widgets=draws_widgets)
 
     def _stream_transport_gate(
         self,

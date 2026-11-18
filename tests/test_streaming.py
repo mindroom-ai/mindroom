@@ -1064,7 +1064,7 @@ async def test_cancellation_mid_stream_leaves_the_partial_text_without_a_note(co
     assert exc_info.value.args == (USER_STOP_CANCEL_MSG,)
 
 
-def _progress_edits(config: Config) -> AbstractAsyncContextManager[ProgressPublisher]:
+def _progress_edits(config: Config, *, ui_widgets: bool = False) -> AbstractAsyncContextManager[ProgressPublisher]:
     return stream_progress_edits(
         make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
         MessageTarget.resolve("!test:localhost", "$thread", "$original_123"),
@@ -1072,8 +1072,33 @@ def _progress_edits(config: Config) -> AbstractAsyncContextManager[ProgressPubli
         runtime_paths_for(config),
         event_id="$waiting",
         show_tool_calls=True,
+        ui_widgets=ui_widgets,
         **FakeReplyRecords().progress_hooks(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("ui_widgets", [True, False])
+async def test_progress_edits_of_a_resumed_reply_render_widgets(config: Config, ui_widgets: bool) -> None:
+    """A resumed reply's progress shows a chart the reply holds as its widget, when its agent draws widgets."""
+    gateway = _FakeGateway()
+    chart = '{"type":"chart","kind":"bar","title":"Orders","labels":["Q1","Q2"],"series":[{"name":"Orders","data":[120,180.5]}]}'
+    text = f"Orders grew.\n\n```ui\n{chart}\n```\n\nWaiting for approval."
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        async with _progress_edits(config, ui_widgets=ui_widgets) as publish:
+            await publish(StructuredStreamChunk(content=text))
+
+    [edit] = gateway.ops
+    if not ui_widgets:
+        assert edit.content["body"] == text
+        assert "io.mindroom.ui" not in edit.content
+        return
+    (entry,) = edit.content["io.mindroom.ui"]["widgets"]
+    assert entry["id"] == "15a2d22c55"
+    assert "Orders grew.\n\n```mindroom-ui-15a2d22c55\nOrders (bar chart)\n" in edit.content["body"]
+    assert '{"type"' not in edit.content["body"]
 
 
 @pytest.mark.asyncio
