@@ -357,6 +357,27 @@ async def test_claimed_baseline_join_onboards_and_retries_without_stewardship(co
     await lifecycle._reconcile()
 
     assert coordination.owner.ensure.await_count == 2
+    assert not lifecycle._retry_candidates
+
+
+@pytest.mark.asyncio
+async def test_retry_pass_without_stewardship_leaves_the_lobbys_backfill_owed(coordination: Coordination) -> None:
+    """A pass that only settled this bot's own retry scanned no lobby, so taking the lobby over still backfills it."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    lifecycle.is_steward = lambda _room_id: False
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None, None]
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    await lifecycle._reconcile()
+    lifecycle.runtime.client.joined_members.assert_not_awaited()
+    set_lobby_members(lifecycle, "@alice:localhost", "@bob:localhost")
+    lifecycle.is_steward = lambda _room_id: True
+
+    await lifecycle._reconcile()
+
+    lifecycle.runtime.client.joined_members.assert_awaited_once_with("!lobby:localhost")
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@alice:localhost", "@bob:localhost"]
     assert lifecycle._reconciled
 
 

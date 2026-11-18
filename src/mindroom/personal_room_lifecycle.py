@@ -559,7 +559,8 @@ class PersonalRoomLifecycle:
         """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
-        if self._reconciled or not (self.observes_onboarding_joins or self._retry_candidates) or settings is None:
+        observes = self.observes_onboarding_joins
+        if self._reconciled or not (observes or self._retry_candidates) or settings is None:
             return
         if not self._reconciliation_ready(settings):
             return
@@ -581,8 +582,8 @@ class PersonalRoomLifecycle:
                 return
             if not await self._reconcile_candidate(candidate, revision):
                 failed = True
-        # A live trigger that failed during this pass is still owed a retry.
-        if not failed and not self._retry_candidates and revision == self._config_revision:
+        # A live trigger that failed during this pass is still owed a retry, and a pass for retries alone read no lobby.
+        if observes and not failed and not self._retry_candidates and revision == self._config_revision:
             self._reconciled = True
 
     async def _reconcile_candidate(self, candidate: tuple[str, str], revision: int) -> bool:
