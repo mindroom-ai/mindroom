@@ -17,12 +17,15 @@ from mindroom.judgment.answers import JudgmentError
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.evaluator import BatchEvaluator
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
+import mindroom.judgment.rerank as judgment_rerank
 from mindroom.judgment.rerank import _JudgmentReranker, create_judgment_reranker
+from mindroom.judgment.state import JudgmentQuestion, JudgmentRequest, build_batch_request
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
+from mindroom.redaction import REDACTION_FAILED
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 _SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"  # noqa: S105
@@ -165,6 +168,49 @@ async def test_candidates_past_the_byte_cap_score_zero() -> None:
     assert 0 < judged < len(documents)
     assert len(seen[0].content) <= 128_000
     assert scores == [0.9] * judged + [0.0] * (len(documents) - judged)
+
+
+@pytest.mark.asyncio
+async def test_packing_keeps_the_most_candidates_that_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The request holds the most leading candidates that fit, found without rebuilding it once per dropped one."""
+    builds: list[int] = []
+
+    def counting_build(questions: Sequence[JudgmentQuestion], message: str, *, instructions: str) -> JudgmentRequest:
+        builds.append(len(questions))
+        return build_batch_request(questions, message, instructions=instructions)
+
+    monkeypatch.setattr(judgment_rerank, "build_batch_request", counting_build)
+    seen: list[httpx.Request] = []
+    reranker = _reranker(lambda names: _answers(dict.fromkeys(names, 0.9))(names), seen)
+    documents = [f"passage {index} " + "lorem ipsum dolor sit amet " * 80 for index in range(200)]
+    await reranker.ascore("query", documents)
+
+    judged = len(json.loads(seen[0].content)["questions"])
+    one_more = [judgment_rerank._candidate_question(index, document) for index, document in enumerate(documents)]
+    assert not reranker.batch.fits(build_batch_request(one_more[: judged + 1], "query", instructions=""))
+    assert len(builds) <= 10
+
+
+@pytest.mark.asyncio
+async def test_query_redaction_cannot_read_raises_without_a_request() -> None:
+    """A query too long for the redactor raises, so retrieval keeps the hybrid selection."""
+    seen: list[httpx.Request] = []
+    with pytest.raises(JudgmentError):
+        await _reranker(_answers({"c0": 0.9}), seen).ascore("x" * 70_000, ["a"])
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_candidate_redaction_cannot_read_is_not_sent_and_scores_zero() -> None:
+    """A candidate too long for the redactor is left out of the request and scores 0.0; the others are judged."""
+    seen: list[httpx.Request] = []
+    reranker = _reranker(_answers({"c0": 0.9, "c2": 0.8}), seen)
+    scores = await reranker.ascore("query", ["a", "y" * 70_000, "c"])
+
+    posted = seen[0].content.decode()
+    assert [question["name"] for question in json.loads(posted)["questions"]] == ["c0", "c2"]
+    assert REDACTION_FAILED not in posted
+    assert scores == [0.9, 0.0, 0.8]
 
 
 @pytest.mark.asyncio
