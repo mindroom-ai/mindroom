@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 class _InvalidScoresError(ValueError):
     """The reranker returned a wrong number of scores, or one the selection cannot read."""
 
+
 # Absorbs float rounding, so a hit exactly ``hybrid_score_gap`` below the top hit is kept.
 _SCORE_GAP_TOLERANCE = 1e-9
 _O200K_COUNTER = o200k_counter()

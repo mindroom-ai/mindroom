@@ -444,7 +444,12 @@ async def test_batch_evaluator_logs_a_count_not_every_probability(
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
     settings = OpenAIDecisionsJudgmentConfig(provider="openai_decisions")
-    batch = create_batch_evaluator(settings, paths, owner="root:rerank", capacity=JudgmentCapacity(max_concurrent=1, max_per_owner=1))
+    batch = create_batch_evaluator(
+        settings,
+        paths,
+        owner="root:rerank",
+        capacity=JudgmentCapacity(max_concurrent=1, max_per_owner=1),
+    )
     assert batch is not None
     with capture_logs() as logs:
         result = await batch.evaluate(_batch_request())

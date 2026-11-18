@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
+import mindroom.judgment.rerank as judgment_rerank
 import mindroom.knowledge.rerank as rerank_module
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.main import Config
@@ -17,7 +18,6 @@ from mindroom.judgment.answers import JudgmentError
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.evaluator import BatchEvaluator
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
-import mindroom.judgment.rerank as judgment_rerank
 from mindroom.judgment.rerank import _JudgmentReranker, create_judgment_reranker
 from mindroom.judgment.state import JudgmentQuestion, JudgmentRequest, build_batch_request
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
