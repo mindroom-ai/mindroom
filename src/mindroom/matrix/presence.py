@@ -110,8 +110,6 @@ def build_agent_status_message(
 async def is_user_online(client: nio.AsyncClient, user_id: str) -> bool:
     """Ask the homeserver whether a Matrix user is currently online.
 
-    Agents' syncs leave out presence, so no synced cache holds it.
-
     Args:
         client: The Matrix client to use for the presence check
         user_id: The Matrix user ID string (e.g., "@user:example.com")

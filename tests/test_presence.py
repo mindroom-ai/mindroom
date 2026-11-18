@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -12,12 +12,7 @@ from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.presence import (
-    build_agent_status_message,
-    is_user_online,
-    set_presence_status,
-    should_use_streaming,
-)
+from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.tool_system.registry import builtin_tool_registry
 
 
@@ -242,134 +237,3 @@ class TestBuildAgentStatusMessage:
         status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🔧" not in status
-
-
-class TestIsUserOnline:
-    """Test the is_user_online function."""
-
-    @pytest.mark.asyncio
-    async def test_user_online(self) -> None:
-        """Test detecting online user."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "online"
-        mock_response.last_active_ago = None
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_called_once_with("@user:example.com")
-
-    @pytest.mark.asyncio
-    async def test_user_unavailable_considered_online(self) -> None:
-        """Test that 'unavailable' status is considered online for streaming."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "unavailable"  # Idle but client open
-        mock_response.last_active_ago = 300000  # 5 minutes
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_user_offline(self) -> None:
-        """Test detecting offline user."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "offline"
-        mock_response.last_active_ago = 3600000  # 1 hour
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_presence_error(self) -> None:
-        """Test handling presence API error."""
-        mock_client = AsyncMock()
-        mock_response = nio.PresenceGetError(message="Not found")
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_presence_exception(self) -> None:
-        """Test handling exception during presence check."""
-        mock_client = AsyncMock()
-        mock_client.get_presence.side_effect = Exception("Network error")
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False  # Defaults to False on error
-
-
-class TestShouldUseStreaming:
-    """Test the should_use_streaming function."""
-
-    @pytest.mark.asyncio
-    async def test_streaming_disabled_globally(self) -> None:
-        """Test that streaming is disabled when enable_streaming is False."""
-        mock_client = AsyncMock()
-
-        result = await should_use_streaming(
-            mock_client,
-            "!room:example.com",
-            "@user:example.com",
-            enable_streaming=False,
-        )
-
-        assert result is False
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_streaming_no_requester(self) -> None:
-        """Test defaulting to streaming when no requester specified."""
-        mock_client = AsyncMock()
-
-        result = await should_use_streaming(
-            mock_client,
-            "!room:example.com",
-            None,
-            enable_streaming=True,
-        )
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_streaming_user_online(self) -> None:
-        """Test enabling streaming when user is online."""
-        mock_client = AsyncMock()
-
-        with patch("mindroom.matrix.presence.is_user_online", return_value=True) as mock_is_online:
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                "@user:example.com",
-                enable_streaming=True,
-            )
-
-        assert result is True
-        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
-
-    @pytest.mark.asyncio
-    async def test_streaming_user_offline(self) -> None:
-        """Test disabling streaming when user is offline."""
-        mock_client = AsyncMock()
-
-        with patch("mindroom.matrix.presence.is_user_online", return_value=False) as mock_is_online:
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                "@user:example.com",
-                enable_streaming=True,
-            )
-
-        assert result is False
-        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")

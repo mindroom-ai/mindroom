@@ -18,6 +18,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
+from tests.ai_user_id_helpers import _mark_requester_online
 from tests.authorization_helpers import (
     make_test_bot_for_entity,
 )
@@ -116,10 +117,13 @@ class TestPresenceDetection:
     ) -> None:
         """An online or unavailable user counts as online; an offline user does not."""
         mock_client = make_matrix_client_mock()
-        mock_response = Mock(spec=nio.PresenceGetResponse)
-        mock_response.presence = presence
-        mock_response.last_active_ago = last_active_ago
-        mock_client.get_presence.return_value = mock_response
+        mock_client.get_presence.return_value = nio.PresenceGetResponse(
+            "@user:example.com",
+            presence,
+            last_active_ago,
+            None,
+            None,
+        )
 
         result = await is_user_online(mock_client, "@user:example.com")
 
@@ -156,15 +160,11 @@ class TestStreamingDecision:
     """Test streaming decision logic."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.presence.is_user_online")
-    async def test_should_use_streaming_when_user_online(
-        self,
-        mock_is_user_online: AsyncMock,
-    ) -> None:
-        """Test that streaming is used when user is online."""
-        mock_is_user_online.return_value = True
-
-        mock_client = AsyncMock(spec=nio.AsyncClient)
+    @pytest.mark.parametrize(("presence", "expected"), [("online", True), ("offline", False)])
+    async def test_should_use_streaming_follows_the_requesters_presence(self, presence: str, expected: bool) -> None:
+        """The reply streams only when the homeserver reports the requester online."""
+        mock_client = make_matrix_client_mock()
+        mock_client.get_presence.return_value = nio.PresenceGetResponse("@user:example.com", presence, None, None, None)
 
         result = await should_use_streaming(
             mock_client,
@@ -173,29 +173,8 @@ class TestStreamingDecision:
             enable_streaming=True,
         )
 
-        assert result is True
-        mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
-
-    @pytest.mark.asyncio
-    @patch("mindroom.matrix.presence.is_user_online")
-    async def test_should_use_streaming_when_user_offline(
-        self,
-        mock_is_user_online: AsyncMock,
-    ) -> None:
-        """Test that streaming is not used when user is offline."""
-        mock_is_user_online.return_value = False
-
-        mock_client = AsyncMock(spec=nio.AsyncClient)
-
-        result = await should_use_streaming(
-            mock_client,
-            "!room:example.com",
-            requester_user_id="@user:example.com",
-            enable_streaming=True,
-        )
-
-        assert result is False
-        mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
+        assert result is expected
+        mock_client.get_presence.assert_called_once_with("@user:example.com")
 
     @pytest.mark.asyncio
     async def test_should_use_streaming_when_globally_disabled(self) -> None:
@@ -214,11 +193,7 @@ class TestStreamingDecision:
         mock_client.get_presence.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.presence.is_user_online")
-    async def test_should_use_streaming_no_requester(
-        self,
-        mock_is_user_online: AsyncMock,
-    ) -> None:
+    async def test_should_use_streaming_no_requester(self) -> None:
         """Test that streaming defaults to True when no requester specified."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
@@ -231,7 +206,7 @@ class TestStreamingDecision:
 
         assert result is True
         # Should not check presence when no requester
-        mock_is_user_online.assert_not_called()
+        mock_client.get_presence.assert_not_called()
 
 
 class TestBotIntegration:
@@ -239,17 +214,12 @@ class TestBotIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_streaming_when_user_online(
         self,
-        mock_is_user_online: AsyncMock,
         mock_stream_agent_response: Mock,
         tmp_path: Path,
     ) -> None:
         """Test that bot streams its reply when user is online."""
-        # Setup mocks
-        mock_is_user_online.return_value = True
-
         async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test"
             yield " streaming"
@@ -257,6 +227,7 @@ class TestBotIntegration:
 
         mock_stream_agent_response.return_value = mock_streaming_response()
         bot = _presence_bot(tmp_path)
+        _mark_requester_online(bot.client, "@user:localhost")
 
         async def mock_edit_message_result(
             _client: object,
@@ -292,21 +263,17 @@ class TestBotIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_non_streaming_when_user_offline(
         self,
-        mock_is_user_online: AsyncMock,
         mock_stream_agent_response: Mock,
         tmp_path: Path,
     ) -> None:
         """Test that bot delivers its reply whole when user is offline."""
-        # Setup mocks
-        mock_is_user_online.return_value = False
-
         async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
+        # The mock client's homeserver reports every user offline.
         bot = _presence_bot(tmp_path)
 
         # Simulate a message from a user
