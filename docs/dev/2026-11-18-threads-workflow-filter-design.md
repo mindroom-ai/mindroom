@@ -75,6 +75,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    A card that can only be denied and a card for a scheduled call count too, because the client asks the person about both.
    When the thread is resolved, the card counts only if it was created after the resolve.
    Divergence: a card of another runtime's agent is not seen.
+   Known limit: a card is timed by when this runtime queued it, the client by its event's timestamp; a card whose first send failed and that was published after a resolve is `done` here and Needs you in MindRoom Chat.
 8. **A pending question is read from the root's bundled latest reply, which costs no request.**
    It counts when all of these hold: the requester started the thread; the bundled `io.mindroom.latest_reply` is from a MindRoom account of this runtime; its content as its newest same-sender edit shows it carries an `io.mindroom.interactive` prompt with question text and at least one option keyed by its reaction, not only by number (the client's `readInteractiveQuestion`); it does not name another person as its acting requester (`com.mindroom.acting_requester`, read from the newest edit first, as a streamed reply carries it there), as the client skips a question asked of someone else; it was asked less than seven days ago; and the thread was not resolved since.
    The client instead scans the newest 40 messages; the bundle agrees with it whenever the question is still the thread's newest event apart from title notices, which is the case until someone answers.
@@ -92,6 +93,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
     This is a privacy boundary: a thread of a room the requester is not in is never returned, whatever the agent itself can read, and a room whose membership cannot be read counts as not shared.
     Each row of such a call also has `room_id`.
     The literal `all` is taken before room names are resolved, for the `threads` action only.
+    Known limit: membership is read once, before a room's threads, as for a named room; a requester removed during that one request can receive a thread started within it.
 11. **`all` reads one page per room and does not paginate.**
     Each shared room contributes its newest `limit` thread roots; the matching rows are merged, the rows that wait on an approval or a question first and then the newest activity first, and cut to `limit`.
     `has_more` is true when rows were cut or a room has older threads, and `page_token` with `all` is an error; to go further the agent names one room and pages there.
