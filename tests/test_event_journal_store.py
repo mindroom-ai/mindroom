@@ -66,6 +66,7 @@ from mindroom.event_journal import (
     sqlite_backend,
     turn_rows,
 )
+from mindroom.event_journal import room_claims
 from mindroom.event_journal.approval_signals import ApprovalSignals, EndedApproval, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
@@ -10278,3 +10279,42 @@ async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_usable(
         assert not await store.still_usable()
     finally:
         await store.close()
+
+
+_CLAIM_ROOM = "!claims:localhost"
+
+
+@pytest.mark.asyncio
+async def test_claim_room_event_first_writer_wins(journal_store: EventJournalStore) -> None:
+    """The first owner saved for a room event and purpose stays; other purposes and rooms have their own claims."""
+    assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_joined", "alpha") == "alpha"
+    assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_joined", "beta") == "alpha"
+    assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_left", "beta") == "beta"
+    assert await journal_store.claim_room_event("!other:localhost", "$e1", "member_joined", "gamma") == "gamma"
+
+
+@pytest.mark.asyncio
+async def test_claim_room_event_same_owner_retry(journal_store: EventJournalStore) -> None:
+    """The owner that holds a claim gets itself back on every retry."""
+    for _ in range(2):
+        assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_joined", "alpha") == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_claim_rows_pruned_after_seven_days(journal_store: EventJournalStore) -> None:
+    """A claim write removes the claims saved more than seven days before it."""
+    week_ns = 7 * 24 * 60 * 60 * 10**9
+    now_ns = time.time_ns()
+    for event_id, age_ns in (("$old", week_ns + 10**9), ("$recent", week_ns - 60 * 10**9)):
+        await journal_store.backend.write(
+            lambda transaction, event_id=event_id, age_ns=age_ns: room_claims.claim(
+                transaction,
+                _CLAIM_ROOM,
+                event_id,
+                "member_joined",
+                "alpha",
+                now_ns=now_ns - age_ns,
+            ),
+        )
+    assert await journal_store.claim_room_event(_CLAIM_ROOM, "$old", "member_joined", "beta") == "beta"
+    assert await journal_store.claim_room_event(_CLAIM_ROOM, "$recent", "member_joined", "beta") == "alpha"

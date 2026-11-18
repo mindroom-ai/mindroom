@@ -575,6 +575,19 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS room_event_claims (
+        -- One saved owner per room event and purpose, such as the steward
+        -- that runs a member hook. It has no principal: every bot of the
+        -- install reads the same row, and the first writer wins.
+        room_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (room_id, event_id, purpose)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.
