@@ -672,6 +672,18 @@ def _ordinary_event_fit(
     return fits
 
 
+def is_ordinary_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+    size_limit: int | None,
+) -> bool:
+    """Return whether content goes out as it is: one event, with no sidecar and no segments."""
+    return _ordinary_event_fit(client, room_id, content, room_encrypted=room_encrypted, size_limit=size_limit)(content)
+
+
 def fit_ui_widgets_to_ordinary_event(
     client: nio.AsyncClient,
     room_id: str,

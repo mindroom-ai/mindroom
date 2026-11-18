@@ -88,6 +88,7 @@ from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import ProgressPermission, ProgressPublisher, ProgressState
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.turn_record import TurnRecord
+from mindroom.ui_widgets.render import render_ui_widgets
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     FakeOutbox,
@@ -2317,51 +2318,107 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert not_a_reply["body"] == text
         assert "io.mindroom.ui" not in not_a_reply
 
-    async def test_a_row_prepared_before_its_create_is_fitted_as_the_edit_it_becomes(
+    async def test_a_final_that_creates_the_reply_is_fitted_as_a_create(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """A final stored before the reply has an event is wrapped into an edit when claimed, with no second fit.
-
-        So its widgets are fitted against that edit before the row is frozen, and the wrapped edit carries them
-        only in the replacement.
-        """
+        """A final with no earlier row is the reply's create, so it keeps a widget an edit of its size would lose."""
         gateway = _gateway(tmp_path, alice)
         gateway.deps.runtime.config.agents["agent"].ui_widgets = True
-        chart = f"```ui\n{_CHART}\n```"
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$answer", {"body": "sent"}))
 
-        async def frozen_row(text: str, source_event_id: str) -> MatrixDelivery:
-            request = self._final_request(text)
-            identity = _identity(source_event_id=source_event_id)
-            send = AsyncMock(return_value=DeliveredMatrixEvent(f"{source_event_id}_answer", {"body": "sent"}))
-            with patch("mindroom.delivery_gateway.send_message_outcome", send):
-                outcome = await final_in_span(gateway, alice, replace(request, identity=identity))
-            assert outcome.ending == Completed()
-            return await _turn_row(alice, DeliveryStage.FINAL, source_event_id)
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            request = self._final_request(f"```ui\n{_CHART}\n```\n\n{'word ' * 2_400}")
+            outcome = await final_in_span(gateway, alice, request)
 
-        def as_claimed_edit(row: MatrixDelivery) -> dict[str, Any]:
-            return _reply_row_wire_content(replace(row, edits_event_id="$create", acknowledged_event_id=None))
+        assert outcome.ending == Completed()
+        row = await _turn_row(alice, DeliveryStage.FINAL)
+        assert row.payload["io.mindroom.ui"]["widgets"][0]["id"] == "df4d729a5d"
+        assert send.await_args.args[2]["io.mindroom.ui"] == row.payload["io.mindroom.ui"]
+        as_an_edit = _reply_row_wire_content(replace(row, edits_event_id="$create", acknowledged_event_id=None))
+        assert calculate_event_size(row.payload) <= 55_000
+        assert calculate_event_size(as_an_edit) > EDIT_MESSAGE_SIZE_LIMIT
 
-        long_row = await frozen_row(f"{chart}\n\n{'word ' * 2_400}", "$long")
-        with_key = {
-            **long_row.payload,
-            "io.mindroom.ui": {"version": 1, "widgets": [{"id": "df4d729a5d", "json": "{}"}]},
-        }
-        assert calculate_event_size(with_key) <= 55_000
-        assert calculate_event_size(as_claimed_edit(replace(long_row, payload=with_key))) > EDIT_MESSAGE_SIZE_LIMIT
-        assert "io.mindroom.ui" not in long_row.payload
-        assert _CHART_BLOCK in long_row.payload["body"]
+    @staticmethod
+    async def _final_claimed_after_its_create(
+        gateway: DeliveryGateway,
+        alice: PrincipalStore,
+        request: FinalDeliveryRequest,
+    ) -> dict[str, Any]:
+        """Deliver a final whose reply's create failed once; return the edit it is wrapped into when claimed."""
+        sent: list[dict[str, Any]] = []
 
-        short_row = await frozen_row(f"{chart}\n\nShort.", "$short")
-        assert short_row.payload["io.mindroom.ui"]["widgets"][0]["id"] == "df4d729a5d"
-        envelope = as_claimed_edit(short_row)
-        assert envelope["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$create"}
-        assert envelope["m.new_content"]["io.mindroom.ui"] == short_row.payload["io.mindroom.ui"]
+        async def send(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> object:
+            sent.append(content)
+            if len(sent) == 1:
+                return _failed_delivery()
+            return DeliveredMatrixEvent("$edit" if "m.new_content" in content else "$" + "c" * 43, content)
+
+        source_event_id = request.identity.response_envelope.source_event_id
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
+            async with reply_span(alice, source_event_id=source_event_id, room_id=_ROOM_ID) as handle:
+                placeholder = initial_write(handle, Presentation(), placeholder_only=True)
+                thinking = SendTextRequest(request.target, "Thinking...", reply_write=placeholder)
+                assert await gateway.send_text(thinking) is None
+                outcome = await gateway.deliver_final(request)
+        assert outcome.ending == Completed()
+        assert "m.new_content" not in (await _turn_row(alice, DeliveryStage.FINAL, source_event_id)).payload
+        envelope = sent[-1]
+        assert envelope["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$" + "c" * 43}
+        return envelope
+
+    @staticmethod
+    def _encrypted_size(content: dict[str, Any]) -> int:
+        return _calculate_delivery_event_size(content, room_id=_ROOM_ID, room_encrypted=True, device_id="DEVICE")
+
+    @pytest.mark.parametrize(
+        ("answer", "reasoning_chars", "strategy", "keeps_widget"),
+        [
+            ("Short.", 0, "sidecar", True),
+            ("word " * 1_000, 0, "sidecar", False),
+            # Reasoning rides in both copies of an edit wrapped this late.
+            ("Short.", 18_000, "sidecar", False),
+            ("Short.", 1_000, "sidecar", True),
+            # Under `split` an edit is segmented above 22,000 bytes.
+            ("word " * 750, 0, "split", False),
+        ],
+        ids=["short", "long-answer", "long-reasoning", "short-reasoning", "split"],
+    )
+    async def test_a_row_prepared_before_its_create_is_fitted_as_the_edit_it_becomes(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        answer: str,
+        reasoning_chars: int,
+        strategy: _LargeMessageStrategy,
+        keeps_widget: bool,
+    ) -> None:
+        """A final stored while the reply's create is still owed is wrapped into an edit when claimed, with no second fit.
+
+        So its widgets are fitted, before the row is frozen, against that edit as it is sent: both copies of the
+        text and of the reasoning, and the limit an edit has. It then carries them only in the replacement.
+        """
+        chart = json.dumps({**json.loads(_CHART), "labels": [f"day {n}" for n in range(120)]})
+        chart = chart.replace("[120, 180.5, 150]", str([n + 0.5 for n in range(120)]))
+        limit = 22_000 if strategy == "split" else EDIT_MESSAGE_SIZE_LIMIT
+        gateway = _gateway(tmp_path, alice, large_message_strategy=strategy)
+        gateway.deps.runtime.config.agents["agent"].ui_widgets = True
+        request = replace(
+            self._final_request(f"```ui\n{chart}\n```\n\n{answer}"),
+            extra_content={"io.mindroom.reasoning": {"text": "r" * reasoning_chars}} if reasoning_chars else None,
+        )
+
+        envelope = await self._final_claimed_after_its_create(gateway, alice, request)
+
+        widgets = render_ui_widgets(f"```ui\n{chart}\n```", in_progress=False).content
+        assert widgets is not None
         assert "io.mindroom.ui" not in envelope
-        assert calculate_event_size(envelope) <= EDIT_MESSAGE_SIZE_LIMIT
-        # A retry wraps the same row into the same bytes.
-        assert json.dumps(as_claimed_edit(short_row), sort_keys=True) == json.dumps(envelope, sort_keys=True)
+        assert envelope["m.new_content"].get("io.mindroom.ui") == (widgets if keeps_widget else None)
+        assert "day 119" in envelope["m.new_content"]["body"]
+        assert self._encrypted_size(envelope) <= _MATRIX_EVENT_HARD_LIMIT
+        with_widgets = {**envelope, "m.new_content": {**envelope["m.new_content"], "io.mindroom.ui": widgets}}
+        assert (calculate_event_size(with_widgets) <= limit) is keeps_widget
 
     @pytest.mark.parametrize("ui_widgets", [True, False])
     async def test_the_recorded_progress_has_no_open_ui_fence(

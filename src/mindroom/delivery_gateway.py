@@ -75,6 +75,7 @@ from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
     fit_reasoning_to_ordinary_event,
     fit_ui_widgets_to_ordinary_event,
+    is_ordinary_event,
     prepare_large_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -368,32 +369,18 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     if claimed.reply_id is None or claimed.edits_event_id is None or "m.new_content" in payload:
         return payload
     new_text = None if claimed.reply_row is None else claimed.reply_row.new_text
-    envelope = build_edit_event_content(
-        event_id=claimed.edits_event_id,
-        new_content=payload,
-        new_text=new_text if new_text is not None else str(payload.get("body", "")),
+    return _wrapped_as_edit(
+        payload,
+        claimed.edits_event_id,
+        new_text if new_text is not None else str(payload.get("body", "")),
     )
+
+
+def _wrapped_as_edit(payload: dict[str, Any], event_id: str, new_text: str) -> dict[str, Any]:
+    """Return the edit of ``event_id`` that carries one reply row's replacement content."""
+    envelope = build_edit_event_content(event_id=event_id, new_content=payload, new_text=new_text)
     envelope[DURABLE_DELIVERY_ID_KEY] = payload.get(DURABLE_DELIVERY_ID_KEY)
     return envelope
-
-
-def _fitted_as_the_edit_it_becomes(
-    client: nio.AsyncClient,
-    room_id: str,
-    payload: dict[str, Any],
-    new_text: str,
-) -> dict[str, Any]:
-    """Return a late-bound reply row's payload, without its widgets when the edit it becomes could not carry them.
-
-    ``_reply_row_wire_content`` wraps the frozen payload with no second fit, so the widgets are fitted here against
-    that edit; its target is not known yet, and every event ID has this one's length.
-    """
-    if UI_WIDGETS_CONTENT_KEY not in payload:
-        return payload
-    edit = build_edit_event_content(event_id="$" + "0" * 43, new_content=payload, new_text=new_text)
-    if fit_ui_widgets_to_ordinary_event(client, room_id, edit, room_encrypted=True) is edit:
-        return payload
-    return {key: value for key, value in payload.items() if key != UI_WIDGETS_CONTENT_KEY}
 
 
 class _DeliveryRefusedError(RuntimeError):
@@ -1032,9 +1019,12 @@ class DeliveryGateway:
                 if edits and event_id is not None
                 else content
             )
-            # Wrapped when the row is claimed, if the reply's create binds an event by then.
+            # Wrapped when the row is claimed, if an earlier row of the reply creates its event by then.
             late_edit_text = (
                 new_text or str(content.get("body", "")) if not edits and stage is not DeliveryStage.INITIAL else None
+            )
+            create_is_owed = late_edit_text is not None and await self.deps.outbox.replies.has_unresolved_rows(
+                write.reply_id,
             )
             prepared = await self._prepared_for_the_wire(
                 target.room_id,
@@ -1043,7 +1033,7 @@ class DeliveryGateway:
                 stage=stage,
                 continuation_thread_id=target.resolved_thread_id,
                 continuation_reply_to_event_id=event_id if edits else target.reply_to_event_id,
-                late_edit_text=late_edit_text,
+                late_edit_text=late_edit_text if create_is_owed else None,
             )
             failure_reason = None
             if isinstance(prepared, MatrixDeliveryFailure):
@@ -2322,18 +2312,30 @@ class DeliveryGateway:
             return encryption_outcome
         split = self.deps.runtime.config.defaults.large_message_strategy == "split"
         payload = matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content)
-        if late_edit_text is not None:
-            payload = _fitted_as_the_edit_it_becomes(client, room_id, payload, late_edit_text)
-        # Widgets, then reasoning, are fitted against what would otherwise segment the reply or move it to a sidecar;
-        # durable rows are sized for encrypted delivery, as prepare_large_message sizes them below.
-        size_limit = first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None
-        wire_content = fit_reasoning_to_ordinary_event(
-            client,
-            room_id,
-            fit_ui_widgets_to_ordinary_event(client, room_id, payload, room_encrypted=True, size_limit=size_limit),
-            room_encrypted=True,
-            size_limit=size_limit,
-        )
+
+        def size_limit(candidate: dict[str, Any]) -> int | None:
+            return first_segment_target_bytes(candidate, room_encrypted=encryption_outcome) if split else None
+
+        def fitted(candidate: dict[str, Any]) -> dict[str, Any]:
+            # Widgets, then reasoning, are fitted against what would otherwise segment the reply or move it to a
+            # sidecar; durable rows are sized for encrypted delivery, as prepare_large_message sizes them below.
+            limit = size_limit(candidate)
+            with_widgets = fit_ui_widgets_to_ordinary_event(
+                client,
+                room_id,
+                candidate,
+                room_encrypted=True,
+                size_limit=limit,
+            )
+            return fit_reasoning_to_ordinary_event(client, room_id, with_widgets, room_encrypted=True, size_limit=limit)
+
+        wire_content = fitted(payload)
+        if late_edit_text is not None and UI_WIDGETS_CONTENT_KEY in wire_content:
+            # The row is wrapped with no second fit, so its widgets stay only if that whole edit is an ordinary one.
+            # Its target is not known yet, and every event ID has this one's length.
+            edit = _wrapped_as_edit(wire_content, "$" + "0" * 43, late_edit_text)
+            if not is_ordinary_event(client, room_id, edit, room_encrypted=True, size_limit=size_limit(edit)):
+                wire_content = fitted({key: value for key, value in payload.items() if key != UI_WIDGETS_CONTENT_KEY})
         segmented = (
             segment_matrix_content(
                 wire_content,

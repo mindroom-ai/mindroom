@@ -270,7 +270,7 @@ Scope of the first slice: an agent's own replies only; not teams, the router, `m
 
 1. `build_matrix_edit_content` leaves `io.mindroom.ui` out of the outer copy (C7).
 2. `fit_ui_widgets_to_ordinary_event` in `matrix/large_messages.py` runs wherever `fit_reasoning_to_ordinary_event` runs, just before it: if the event with the key and without its reasoning is over the limit that would move it to a sidecar or split it (27,000 bytes for an edit, 55,000 otherwise, the first-segment target under `split`), or over the 64,000-byte hard limit as delivered, the key is removed. Reasoning is then fitted into what is left, as today.
-3. A reply row prepared before its create was acknowledged is stored as a standalone payload and wrapped into an edit when claimed, with no second fit. For such a row the key is fitted against the edit it will become, before the row is frozen.
+3. A reply row prepared while an earlier row of the reply still owes its create is stored as a standalone payload and wrapped into an edit when claimed, with no second fit. Such a row keeps the key only if that whole edit, built from the frozen payload with both copies of its text and reasoning, is an ordinary edit (27,000 bytes, or the edit's segment target under `split`, and the hard limit). A row with no earlier row owed is the reply's create and is fitted as one.
 4. The throttle for oversized progress edits (`should_send_oversized_nonterminal_streaming_edit`) sizes the edit as step 2 would send it, so a droppable key never slows ordinary updates.
 5. Live frames: the publisher drops `ui` first when a frame does not fit, and records the documents it sent, so the next frame that fits restores it (section 5.5).
 
