@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from time import monotonic
 from typing import Protocol
 
 import nio
@@ -15,6 +16,12 @@ from mindroom.matrix.room_membership import invalidate_membership_lookups
 from mindroom.matrix.transport_progress import is_transport_progress_source
 
 __all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
+
+# How long a batch that admits nothing new may go without waking the dispatcher.
+# Another agent's write can make this agent's pending work runnable without
+# waking it: a departing router fails the paused approvals its cards held.
+# Shorter than the 30 s idle sync, so an idle agent still looks on every sync.
+_RECHECK_SECONDS = 20.0
 
 
 class _OwnedIngestionSession(Protocol):
@@ -190,6 +197,7 @@ async def run_ingestion_pump(
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
+    last_wake = monotonic()
     while True:
         await asyncio.sleep(0)
         try:
@@ -211,12 +219,14 @@ async def run_ingestion_pump(
         if facts is None:
             await wait_for_work()
         else:
-            # Only a newly admitted actionable event gives the dispatcher anything
-            # new to find. Any other batch (the bot's own streaming edits, a sync
-            # with nothing in its timeline, a redelivered event) would only make
-            # it read the same pending rows again. A replay wakes too: it may be
-            # acknowledging work committed before the prior pump could notify it.
-            if facts.semantic_event_new or not facts.receipt_new:
+            # A new actionable event wakes the dispatcher, and so does a replay,
+            # which may be acknowledging work committed before the prior pump
+            # could notify it. Any other batch (the bot's own streaming edits, a
+            # sync with nothing in its timeline, a redelivered event) wakes it
+            # only once _RECHECK_SECONDS have passed since the last wake.
+            now = monotonic()
+            if facts.semantic_event_new or not facts.receipt_new or now - last_wake >= _RECHECK_SECONDS:
+                last_wake = now
                 wake_semantic_dispatch()
             if after_ack is not None:
                 after_ack()

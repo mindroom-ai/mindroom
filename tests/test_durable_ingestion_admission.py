@@ -39,7 +39,10 @@ from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch, valid
 from mindroom.matrix.journal_ingress import parse_journal_event
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.pending_event_worker import PendingEventWorker
+from tests import test_event_journal_store as event_journal_store_tests
 from tests.journal_helpers import membership_position
+from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +69,18 @@ def message(event_id: str) -> SyncRecord:
         },
         provenance=nio.TimelineEventProvenance.LIVE,
     )
+
+
+def own_streaming_edit(event_id: str) -> SyncRecord:
+    """Return this bot's own in-progress streaming edit, which ingestion skips as transport progress."""
+    source = message(event_id).source | {
+        "sender": ACCOUNT,
+        "content": {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            "m.new_content": {"msgtype": "m.text", "body": "...", STREAM_STATUS_KEY: "streaming"},
+        },
+    }
+    return replace(message(event_id), source=source)
 
 
 class Session:
@@ -176,13 +191,14 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
 async def test_pump_wakes_the_dispatcher_only_for_new_actionable_work_or_a_replay(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
-    """An empty sync or a redelivered event leaves nothing for the dispatcher to find."""
+    """An empty sync, the bot's own streaming edit or a redelivered event leaves nothing for the dispatcher to find."""
     stream = uuid4()
     principal = await principal_for(journal_database(), stream)
-    redelivered = SyncBatch(stream, 3, (message("$new"),))
+    redelivered = SyncBatch(stream, 4, (message("$new"),))
     batches = [
         SyncBatch(stream, 1, ()),
-        SyncBatch(stream, 2, (message("$new"),)),
+        SyncBatch(stream, 2, (own_streaming_edit("$progress"),)),
+        SyncBatch(stream, 3, (message("$new"),)),
         redelivered,
         # The same batch again: acknowledging it may finish a commit whose wake was lost.
         redelivered,
@@ -217,7 +233,82 @@ async def test_pump_wakes_the_dispatcher_only_for_new_actionable_work_or_a_repla
         pump.cancel()
         await asyncio.gather(pump, return_exceptions=True)
     assert acked == batches
-    assert wakes == [2, 4]
+    assert await principal.load_event("$progress") is None
+    assert wakes == [3, 5]
+
+
+@pytest.mark.asyncio
+async def test_pump_still_wakes_for_work_another_agent_made_runnable(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A departing router fails an agent's paused approval without waking it; the agent's later syncs find the source."""
+    paused = event_journal_store_tests.TestApprovalContinuations
+    alice = journal_store.principal("agent@alice")
+    await paused.admit_sources(alice)
+    await paused_for_approval(alice, replace(paused.continuation(state="waiting"), runtime_generation="runtime-a"))
+    await paused.remember_card(journal_store.principal("router@shared"))
+    stream = uuid4()
+    consumer = await alice.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await alice.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
+    now = [1_000.0]
+    monkeypatch.setattr(durable_ingestion, "monotonic", lambda: now[0])
+    handed: list[str] = []
+    handed_over = asyncio.Event()
+    scanned = asyncio.Event()
+
+    async def handle(event: JournalEvent) -> bool:
+        handed.append(event.event_id)
+        handed_over.set()
+        return True
+
+    worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="runtime-a")
+    dispatch = worker._dispatch_ready_rooms
+
+    async def dispatch_and_signal() -> None:
+        await dispatch()
+        scanned.set()
+
+    monkeypatch.setattr(worker, "_dispatch_ready_rooms", dispatch_and_signal)
+    batches = [SyncBatch(stream, 1, ()), SyncBatch(stream, 2, ()), SyncBatch(stream, 3, ())]
+    acked: list[SyncBatch] = []
+
+    class Batches(Session):
+        async def next_batch(self) -> SyncBatch | None:
+            if len(acked) == 2:
+                # The agent's syncs keep arriving; the last one comes after the recheck interval.
+                now[0] += durable_ingestion._RECHECK_SECONDS
+            return batches[len(acked)] if len(acked) < len(batches) else None
+
+        async def ack(self, batch: SyncBatch) -> None:
+            acked.append(batch)
+
+    async def wait_for_work() -> None:
+        await asyncio.Event().wait()
+
+    worker.start()
+    pump: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(scanned.wait(), 1)
+        assert handed == []
+        await admit_room_membership(journal_store.principal("router@shared"), ROOM, "leave")
+        pump = asyncio.create_task(
+            durable_ingestion.run_ingestion_pump(
+                Batches(batches[0]),
+                alice,
+                account_id=ACCOUNT,
+                wait_for_work=wait_for_work,
+                wake_semantic_dispatch=worker.wake,
+            ),
+        )
+        await asyncio.wait_for(handed_over.wait(), 1)
+        assert handed == ["$source-1"]
+        assert acked == batches
+    finally:
+        if pump is not None:
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
+        await worker.stop()
 
 
 @pytest.mark.asyncio
