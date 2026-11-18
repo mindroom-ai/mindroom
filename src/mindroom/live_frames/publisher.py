@@ -68,12 +68,13 @@ class LivePublisher:
         self.seq += 1
         frame = None
         if not snapshot_due and self.last_sent is not None:
-            frame = live_frame(
-                reply_event_id=reply_event_id,
-                publisher_id=self.publisher_id,
-                seq=self.seq,
-                delta=live_delta(self.last_sent, shown),
-            )
+            frame = self._delta(reply_event_id, self.last_sent, shown)
+            if shown.ui is not None and not self._fits(frame):
+                # Widgets are the first thing a delta too big sheds too, before a snapshot takes its place or, where
+                # none fits, the delta goes out as it is.
+                self.sheds_ui = True
+                shown = self._shown(docs, self.bare)
+                frame = self._delta(reply_event_id, self.last_sent, shown)
         if frame is None or not self._fits(frame):
             bare, sheds_ui = self.bare, self.sheds_ui
             snapshot, fitted = self._fitted_snapshot(reply_event_id, docs)
@@ -97,6 +98,14 @@ class LivePublisher:
         else:
             self.running = False
         return outcome
+
+    def _delta(self, reply_event_id: str, before: LiveDocs, after: LiveDocs) -> dict[str, object]:
+        return live_frame(
+            reply_event_id=reply_event_id,
+            publisher_id=self.publisher_id,
+            seq=self.seq,
+            delta=live_delta(before, after),
+        )
 
     def _fits(self, frame: dict[str, object]) -> bool:
         return frame_fits(self.client, self.room_id, frame, event_type=LIVE_EVENT_TYPE)

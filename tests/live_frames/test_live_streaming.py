@@ -1114,6 +1114,30 @@ async def test_a_delta_that_fits_carries_ui_whatever_a_snapshot_would_weigh(
 
 
 @pytest.mark.asyncio
+async def test_a_delta_too_big_with_ui_goes_out_without_it_where_no_snapshot_fits(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frames keep running: the delta sheds its widget, clearing one shown before, rather than go out too big."""
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+    docs = LiveDocs(md="text", reasoning="", tools=(), status="streaming", activity="")
+    await publisher._send_next("$reply", docs)
+    await publisher._send_next("$reply", replace(docs, ui=_UI_VALUE))
+    assert frames.sent[-1]["delta"] == {"ui": _UI_VALUE}
+
+    # No snapshot fits, and no delta that carries a widget.
+    monkeypatch.setattr(publisher, "_fits", lambda frame: frame.get("delta", {"ui": 1}).get("ui") is None)
+    other = {"version": 1, "widgets": [{"id": "0123456789", "json": "{}"}]}
+    await publisher._send_next("$reply", replace(docs, md="text more", ui=other))
+    assert set(frames.sent[-1]["delta"]) == {"md", "ui"}
+    assert frames.sent[-1]["delta"]["ui"] is None
+    assert publisher.last_sent.ui is None
+    await publisher._send_next("$reply", replace(docs, md="text more still", ui=other))
+    assert set(frames.sent[-1]["delta"]) == {"md"}
+    assert publisher.running
+
+
+@pytest.mark.asyncio
 async def test_ui_is_shed_before_tool_previews(frames: _Frames, monkeypatch: pytest.MonkeyPatch) -> None:
     """A frame too big with its widget value loses that value, not the previews of its tool calls."""
     publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
