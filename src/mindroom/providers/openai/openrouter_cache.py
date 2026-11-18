@@ -20,7 +20,7 @@ from mindroom.providers.cache_ladder import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ["openrouter_prompt_cache_control", "request_kwargs_with_prompt_cache"]
+__all__ = ["contains_cache_marker", "openrouter_prompt_cache_control", "request_kwargs_with_prompt_cache"]
 
 _ANTHROPIC_MODEL_PREFIXES = ("anthropic/", "~anthropic/")
 _SYSTEM_ROLES = frozenset({"system", "developer"})
@@ -63,11 +63,12 @@ def _with_text_part_content(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "content": [{"type": "text", "text": content}]}
 
 
-def _contains_cache_marker(value: object) -> bool:
+def contains_cache_marker(value: object) -> bool:
+    """Return whether ``value`` holds an authored ``cache_control``, which turns the automatic markers off."""
     if isinstance(value, dict):
-        return "cache_control" in value or any(_contains_cache_marker(item) for item in value.values())
+        return "cache_control" in value or any(contains_cache_marker(item) for item in value.values())
     if isinstance(value, list):
-        return any(_contains_cache_marker(item) for item in value)
+        return any(contains_cache_marker(item) for item in value)
     return False
 
 
@@ -85,7 +86,7 @@ def request_kwargs_with_prompt_cache(
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list) or any(
-        _contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
+        contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
     ):
         return request_kwargs
     # One system marker, the message rungs, and one tool marker always fit the four-marker limit.

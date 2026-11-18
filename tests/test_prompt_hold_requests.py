@@ -17,7 +17,7 @@ from mindroom.ai import ai_response
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.models import ModelConfig
-from mindroom.history.request_size import RequestSizer
+from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, system_text
@@ -48,9 +48,11 @@ from tests.test_approval_turn_continuation import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _OPUS = "anthropic/claude-opus-5.5"
 _HAIKU = "anthropic/claude-haiku-5.5"
@@ -58,6 +60,11 @@ _HEADER = "MindRoom system prompt update."
 _AMBER = "- End every reply with AMBER."
 _VIOLET = "- End every reply with VIOLET."
 _GREEN = "- End every reply with GREEN."
+_MARKED_TOOL = {
+    "type": "function",
+    "function": {"name": "sample", "parameters": {"type": "object"}},
+    "cache_control": {"type": "ephemeral"},
+}
 _SIGNED = {"type": "reasoning.text", "text": "Weather first.", "signature": "c2lnbmVk", "format": "anthropic-claude-v1"}
 
 
@@ -585,6 +592,14 @@ def _refuse(*_args: object, **_kwargs: object) -> None:
         # Without the hour-long cache the hold was measured with, there is no warm prefix an update would keep.
         {"cache_system_prompt": False},
         {"extended_cache_time": False},
+        # An authored marker turns the automatic hour-long markers off, wherever the settings put it.
+        {"extra_body": {"tools": [_MARKED_TOOL]}},
+        {"request_params": {"tools": [{**_MARKED_TOOL, "cache_control": {"type": "ephemeral", "ttl": "5m"}}]}},
+        {
+            "request_params": {
+                "extra_body": {"tools": [{**_MARKED_TOOL, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]},
+            },
+        },
     ],
 )
 async def test_a_route_that_may_reach_another_endpoint_or_model_is_sent_the_current_prompt(
@@ -728,13 +743,15 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
 ) -> None:
     """The resume is sent the prompt and update its paused run was, so its signed reasoning follows the same prefix.
 
-    After a compaction its messages no longer match the hold, so it is sent the prompt its run stored, as on main.
+    So is every request of its tool loop, though the hold runs out inside it. After a compaction its messages no
+    longer match the hold, so it is sent the prompt its run stored, as on main.
     """
     paths, config = _usage_config(tmp_path)
     # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
     config.background_tool_jobs.enabled = False
     identity = _identity("held-session")
-    turns = [answer("First."), answer("Second."), _add("approved", 10, 1), answer("Done."), answer("Later.")]
+    multiply = calls(tool_call("multiply", "call_2", a=2, b=3), metrics=usage(10, 1))
+    turns = [answer("First."), answer("Second."), _add("approved", 10, 1), multiply, answer("Done.")]
     model = _CheckedModel(turns, capabilities=Capabilities(system_updates=True))
     install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
     ctx = replace(
@@ -766,22 +783,32 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
 
     [hold] = paths.storage_root.rglob("prompt_holds/*.json")
     os.utime(hold, (time.time() - 60,) * 2)
-    before = (hold.read_bytes(), hold.stat().st_mtime)
+    before = hold.read_bytes()
+    expired = time.time() - 2 * 3600
+    stream = model.stream
 
+    async def answered_as_the_hold_runs_out(request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        async for event in stream(request):
+            yield event
+        os.utime(hold, (expired, expired))
+
+    monkeypatch.setattr(model, "stream", answered_as_the_hold_runs_out)
     await _approve_add(tmp_path, config, paths, identity, paused, "approved")
-    resumed = model.requests[-1]
+    resumed, after_multiplying = model.requests[-2:]
     assert resumed.prompt_hold is None
-    assert (hold.read_bytes(), hold.stat().st_mtime) == before
+    assert (hold.read_bytes(), hold.stat().st_mtime) == (before, expired)
     if compacted:
-        assert "Answer in Dutch." in system_text(resumed.messages)
-        assert "Answer in English." not in system_text(resumed.messages)
-        assert _told(resumed) == []
+        for request in (resumed, after_multiplying):
+            assert "Answer in Dutch." in system_text(request.messages)
+            assert "Answer in English." not in system_text(request.messages)
+            assert _told(request) == []
         return
-    assert system_text(resumed.messages) == system_text(pausing.messages)
-    assert _told(resumed) == _told(pausing)
     sent = len(pausing.messages)
-    assert [message.content for message in resumed.messages[:sent]] == [message.content for message in pausing.messages]
-    assert [message.role for message in resumed.messages[sent:]] == ["assistant", "tool"]
+    for request in (resumed, after_multiplying):
+        assert system_text(request.messages) == system_text(pausing.messages)
+        assert _told(request) == _told(pausing)
+        assert [message.content for message in request.messages[:sent]] == [m.content for m in pausing.messages]
+    assert [message.role for message in after_multiplying.messages[sent:]] == ["assistant", "tool", "assistant", "tool"]
 
 
 @pytest.mark.asyncio
@@ -851,7 +878,7 @@ async def test_a_skill_review_that_forks_an_earlier_request_late_leaves_the_conv
 
     # The review's request, as ``skill_learning.reviewer._fork`` builds it from the captured one.
     review = [*captured.request.messages, Message(role="user", content="Review the work.")]
-    await complete(captured.model, replace(captured.request, messages=review, prompt_hold_read_only=True))
+    await complete(captured.model, replace(captured.request, messages=review, prompt_hold_pin=[]))
     [forked] = [json.loads(request.content) for request in conversation.wire.requests[conversation.sent :]]
     conversation.sent = len(conversation.wire.requests)
     assert _AMBER in _system_texts(forked)[0]
@@ -861,32 +888,123 @@ async def test_a_skill_review_that_forks_an_earlier_request_late_leaves_the_conv
     assert [message["role"] for message in _extends(after, warm, _assistant())] == ["user"]
 
 
+def _billed(prompt_tokens: int = 8500) -> httpx.Response:
+    """Return an answer whose provider reports ``prompt_tokens`` for its request."""
+    reported = {"prompt_tokens": prompt_tokens, "completion_tokens": 5, "total_tokens": prompt_tokens + 5}
+    return sse_response(
+        [_chunk({"role": "assistant", "content": "ok"}), {**_chunk({}, "stop"), "usage": reported}, "[DONE]"],
+    )
+
+
+def _next_size(capture: SkillReviewCapture) -> tuple[RequestSize, int]:
+    """Return the size of the request after the captured one, and the full estimate of what it would be sent."""
+    captured = capture.latest
+    assert captured is not None
+    following = [*captured.request.messages, Message(role="user", content="Next question")]
+    request = replace(captured.request, messages=following)
+    return RequestSizer(captured.model, "openrouter").size(request), captured.model.request_tokens(request)
+
+
 @pytest.mark.asyncio
-async def test_usage_reported_for_a_held_request_sizes_no_request_sent_another_prompt(
+@pytest.mark.parametrize("meanwhile", ["nothing", "the hold runs out", "another request starts it over"])
+async def test_usage_reported_for_a_held_request_sizes_only_a_request_sent_the_same_prompt(
+    meanwhile: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A request extends an answer's request only when both are sent the same prompt and updates."""
-    billed = {**_chunk({}, "stop"), "usage": {"prompt_tokens": 8500, "completion_tokens": 5, "total_tokens": 8505}}
-    reply = sse_response([_chunk({"role": "assistant", "content": "ok"}), billed, "[DONE]"])
-    conversation = _Conversation.start(tmp_path, monkeypatch, _answer(), reply)
+    """The answer records what its request was sent, though the hold is gone or changed when the answer arrives."""
+    conversation = _Conversation.start(tmp_path, monkeypatch, _answer(), _billed())
     capture = SkillReviewCapture()
     conversation.write_rules("- " + "keep an old copy of these rules. " * 130)
     await conversation.turn("First question")
     conversation.write_rules(_VIOLET)
+    streamed: list[tuple[ModelProvider, ModelRequest]] = []
+
+    async def observed(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        streamed.append((inner, request))
+        async for event in prompt_hold.prompt_hold_stream(inner, request):
+            yield event
+
+    monkeypatch.setattr(compose, "prompt_hold_stream", observed)
+    respond = conversation.respond
+
+    def respond_while_the_hold_changes(request: httpx.Request) -> httpx.Response:
+        if meanwhile == "the hold runs out":
+            conversation.idle(2 * 3600)
+        elif meanwhile == "another request starts it over":
+            inner, sent = streamed[-1]
+            system = tuple(message for message in sent.messages if message.role == "system")
+            other = replace(sent, messages=(*system, Message(role="user", content="Another window.")))
+            assert prompt_hold._commit(inner, other).messages == other.messages
+        return respond(request)
+
+    monkeypatch.setattr(conversation, "respond", respond_while_the_hold_changes)
     [held] = await conversation.turn("Second question", skill_review_capture=capture)
     assert len(_updates(held)) == 1
-    captured = capture.latest
-    assert captured is not None
-    following = [*captured.request.messages, Message(role="user", content="Third question")]
-    request = replace(captured.request, messages=following)
-    sizer = RequestSizer(captured.model, "openrouter")
-    anchored = sizer.size(request)
-    assert anchored.reported
-    assert anchored.tokens > 8500
+    size, estimate = _next_size(capture)
+    if meanwhile == "nothing":
+        # The next request is sent the long held prompt and its update again, which the reported usage counted.
+        assert size.reported
+        assert size.tokens > 8500
+        return
+    # It is sent the short current prompt, which usage reported for the long one does not size.
+    assert not size.reported
+    assert size.tokens == estimate < 8500
 
-    # Once the hold is gone the request is sent the short current prompt, which the long one's usage does not size.
-    conversation.idle(2 * 3600)
-    released = sizer.size(request)
-    assert not released.reported
-    assert released.tokens == captured.model.request_tokens(request) < anchored.tokens - 500
+
+@pytest.mark.asyncio
+async def test_usage_reported_for_a_request_sent_as_built_sizes_only_requests_sent_as_built(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request that extends an answer's request, both sent as built, is sized from the usage the answer reported."""
+    conversation = _Conversation.start(tmp_path, monkeypatch, _billed(), _billed(7000), _billed())
+    capture = SkillReviewCapture()
+    await conversation.turn("First question", skill_review_capture=capture)
+    size, estimate = _next_size(capture)
+    assert size.reported
+    assert size.tokens > 8500 > estimate
+
+    # A request whose hold cannot be stored is sent as built, though the file tells an update. Once the file can be
+    # stored again the next request is sent that update, so the last answer whose request was sent it sizes it.
+    conversation.write_rules("- " + "a long rule replaces the short one. " * 130)
+    [edited] = await conversation.turn("Second question")
+    assert len(_updates(edited)) == 1
+    with monkeypatch.context() as unwritable:
+        unwritable.setattr(prompt_hold.os, "utime", _refuse)
+        [fresh] = await conversation.turn("Third question", skill_review_capture=capture)
+    assert _updates(fresh) == []
+    size, _estimate = _next_size(capture)
+    assert size.reported
+    assert 7000 < size.tokens < 8500
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_edited_every_turn_folds_no_history_a_conversation_without_a_hold_keeps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updates are sent again by every request; past eight the hold starts over, so they never fill the window."""
+
+    async def summaries(root: Path) -> tuple[int, int]:
+        conversation = _Conversation.start(root, monkeypatch)
+        conversation.config.defaults.compaction.threshold_tokens = 26_000
+        folds: list[None] = []
+
+        async def summarize(*_args: object, **_kwargs: object) -> str:
+            folds.append(None)
+            return "Short summary."
+
+        monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
+        await conversation.turn("First question")
+        most = 0
+        for revision in range(12):
+            conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
+            [body] = await conversation.turn(f"Question {revision}")
+            most = max(most, len(_updates(body)))
+        return len(folds), most
+
+    with monkeypatch.context() as unheld:
+        unheld.setattr("mindroom.ai._with_prompt_hold", lambda _ctx, build, _scope: build)
+        assert await summaries(tmp_path / "unheld") == (0, 0)
+    assert await summaries(tmp_path / "held") == (0, 8)

@@ -7,11 +7,16 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.messages import (
+    PROMPT_UPDATE_KEY,
+    QUEUED_MESSAGE_NOTICE_MARKER_KEY,
+    REWRITTEN_ATTEMPT_KEY,
+    Message,
+)
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -21,6 +26,7 @@ from mindroom.llm.provider import (
     ToolSpec,
     TurnCompleted,
 )
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.providers.pipeline import prompt_hold
 from mindroom.providers.pipeline.prompt_hold import held_request, prompt_hold_path, prompt_hold_stream
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
@@ -53,10 +59,12 @@ class _Model(PlainRequestSizing):
     token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)
+    answer_data: dict[str, Any] | None = None
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
-        yield TurnCompleted(message=Message(role="assistant", content="ok"), stop_reason="end")
+        answer = Message(role="assistant", content="ok", provider_data=self.answer_data)
+        yield TurnCompleted(message=answer, stop_reason="end")
 
 
 def _held(model: ModelProvider) -> WrappedProvider:
@@ -100,20 +108,27 @@ class _Conversation:
     model: _Model = field(default_factory=_Model)
     tools: tuple[ToolSpec, ...] = ()
     settings: ModelRequest = _SETTINGS
+    answers: list[StreamEvent] = field(default_factory=list)
 
-    def request(self, messages: Sequence[Message], *, read_only: bool = False) -> ModelRequest:
+    def request(self, messages: Sequence[Message], *, pin: list[dict[str, Any] | None] | None = None) -> ModelRequest:
         return replace(
             self.settings,
             messages=tuple(messages),
             tools=self.tools,
             prompt_hold=self.path,
-            prompt_hold_read_only=read_only,
+            prompt_hold_pin=pin,
         )
 
-    async def send(self, messages: Sequence[Message], *, read_only: bool = False) -> list[Message]:
-        """Send ``messages`` and return the messages the model received."""
-        async for _event in _held(self.model).stream(self.request(messages, read_only=read_only)):
-            pass
+    async def send(
+        self,
+        messages: Sequence[Message],
+        *,
+        read_only: bool = False,
+        pin: list[dict[str, Any] | None] | None = None,
+    ) -> list[Message]:
+        """Send ``messages`` and return the messages the model received; ``read_only`` as a run of that one request."""
+        request = self.request(messages, pin=[] if read_only else pin)
+        self.answers = [event async for event in _held(self.model).stream(request)]
         sent = self.model.requests[-1]
         assert sent.prompt_hold is None
         return list(sent.messages)
@@ -474,6 +489,103 @@ async def test_a_request_is_sized_and_identified_as_it_is_sent(conversation: _Co
     assert provider.context_key(conversation.request(third)) == held_key
     os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
     assert provider.context_key(conversation.request(third)) == model.context_key(sent_third) != held_key
+
+
+def _recorded(conversation: _Conversation) -> object:
+    """Return the request identity the last answer records."""
+    [answer] = conversation.answers
+    assert isinstance(answer, TurnCompleted)
+    return (answer.message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_records_the_identity_of_its_request_as_it_was_sent(
+    conversation: _Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What was sent decides it, when it was sent: the hold may be gone, or stand again, once the answer is there."""
+    provider, model = _held(conversation.model), conversation.model
+    first = [*_system(_A), _user("one")]
+    await conversation.send(first)
+    assert _recorded(conversation) == request_prefixes(model, conversation.request(first))[-1]
+    second, sent = await conversation.told()
+    assert _updates(sent)
+    held = _recorded(conversation)
+    as_built = request_prefixes(model, conversation.request(second))[-1]
+    assert held == request_prefixes(provider, conversation.request(second))[-1] != as_built
+
+    # A request whose hold cannot be stored is sent as it was built, though the file still tells its update.
+    monkeypatch.setattr(prompt_hold.os, "utime", _refuse)
+    assert await conversation.send(second) == second
+    assert _recorded(conversation) == as_built
+    monkeypatch.undo()
+    assert request_prefixes(provider, conversation.request(second))[-1] == held
+
+    # A run that pinned the hold is sent it after it ran out, when a request that reads the file is sent as built.
+    pin: list[dict[str, Any] | None] = []
+    await conversation.send(second, pin=pin)
+    os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
+    assert _updates(await conversation.send(second, pin=pin)) == _updates(sent)
+    assert _recorded(conversation) == held
+    assert request_prefixes(provider, conversation.request(second))[-1] == as_built
+
+    # An answer a stage inside got for another request records none: its usage is not this request's.
+    model.answer_data = {REWRITTEN_ATTEMPT_KEY: True}
+    await conversation.send(second, pin=pin)
+    assert _recorded(conversation) is None
+
+
+@pytest.mark.asyncio
+async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_prompt_its_first_was(
+    conversation: _Conversation,
+) -> None:
+    """A resumed run's tool loop keeps its prefix when the hold runs out or stands again meanwhile, and writes nothing."""
+    second, sent = await conversation.told()
+    loop = [*second, _answer("Adding."), Message(role="tool", content="11", tool_call_id="call_1")]
+    later = [*loop, _answer(), _user("three")]
+    contents = [message.content for message in sent]
+
+    pin: list[dict[str, Any] | None] = []
+    assert [message.content for message in await conversation.send(second, pin=pin)] == contents
+    os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
+    before = (conversation.path.read_bytes(), conversation.path.stat().st_mtime)
+    for messages in (loop, later):
+        resumed = await conversation.send(messages, pin=pin)
+        assert [message.content for message in resumed[: len(sent)]] == contents
+        assert _updates(resumed) == _updates(sent)
+    # The size counts what the run is sent, and messages the pinned hold does not match are sent as they are.
+    request = conversation.request(later, pin=pin)
+    assert _held(conversation.model).request_tokens(request) == conversation.model.request_tokens(
+        replace(request, messages=tuple(resumed)),
+    )
+    folded = [*_system(_B), _user("Summary of the conversation so far."), *later[3:]]
+    assert await conversation.send(folded, pin=pin) == folded
+
+    # A run whose first request found no hold to continue sends its own prompt, though the hold counts again later.
+    unheld: list[dict[str, Any] | None] = []
+    assert await conversation.send(second, pin=unheld) == second
+    assert (conversation.path.read_bytes(), conversation.path.stat().st_mtime) == before
+    os.utime(conversation.path)
+    assert await conversation.send(loop, pin=unheld) == loop
+    assert _updates(await conversation.send(loop, read_only=True)) == _updates(sent)
+    assert conversation.path.read_bytes() == before[0]
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_tells_eight_updates_and_starts_over_at_the_ninth(conversation: _Conversation) -> None:
+    """Every request sends each update again, so a prompt edited over and over is sent as it is, as without a hold."""
+    messages = [*_system(_A), _user("turn 0")]
+    await conversation.send(messages)
+    for turn in range(1, 9):
+        messages = [*_system(f"{_A}\n- Revision {turn}."), *messages[2:], _answer(), _user(f"turn {turn}")]
+        sent = await conversation.send(messages)
+        assert (sent[0].content, len(_updates(sent))) == (_A, turn)
+    # A turn that changes nothing adds none, so the eight stay; the next change starts the hold over.
+    messages = [*messages, _answer(), _user("turn 9")]
+    assert len(_updates(await conversation.send(messages))) == 8
+    ninth = [*_system(f"{_A}\n- Revision 9."), *messages[2:], _answer(), _user("turn 10")]
+    assert await conversation.send(ninth) == ninth
+    assert conversation.state()["updates"] == []
 
 
 @pytest.mark.asyncio

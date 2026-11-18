@@ -258,9 +258,9 @@ class ResumeRunner:
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.storage.session)
         template = with_native_history(build.request_template, native)
         if self.storage.store is not None and build.spec.model.capabilities.system_updates:
-            # The paused run was sent the system prompt its conversation held; the resume sends it again, read only.
+            # The paused run was sent the prompt its conversation held: the resume's requests all send it, read only.
             hold = prompt_hold_path(self.storage.store.path, self.storage.session.session_id)
-            template = replace(template, prompt_hold=hold, prompt_hold_read_only=True)
+            template = replace(template, prompt_hold=hold, prompt_hold_pin=[])
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
         events = resume_from_session(

@@ -13,9 +13,12 @@ request's messages. Any other request is sent exactly as it was built, and the h
 whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays the same
 messages, such as a retry or a resumed run, sends the same held prompt and updates.
 
-Only a conversation's own turns write its file. A read-only request (``ModelRequest.prompt_hold_read_only``), such
-as a skill review's fork or an approval resumed after its turn, is sent what the file holds when it continues it as
-it is, and its own request otherwise.
+Only a conversation's own turns write its file. A run that only reads it (``ModelRequest.prompt_hold_pin``), such
+as a skill review's fork or an approval resumed after its turn, is sent what the file held at its first request
+when it continues that as it is, and its own requests otherwise: every request of the run is sent the same prompt.
+
+The stage records on each answer the identity of its request as it was sent, so the usage a provider reported for
+it sizes only a later request sent the same prompt and updates: the file may hold another by then.
 
 The file lies in the agent's state root, so a restart keeps it and one requester's private prompt stays out of
 another's; its modification time is the last request of one of the conversation's own turns.
@@ -35,8 +38,16 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
 from mindroom.file_locks import advisory_file_lock
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, is_queued_notice_message, stable_serialize
-from mindroom.llm.request_identity import message_digest
+from mindroom.llm.messages import (
+    PROMPT_UPDATE_KEY,
+    REWRITTEN_ATTEMPT_KEY,
+    Message,
+    is_queued_notice_message,
+    stable_serialize,
+)
+from mindroom.llm.provider import TurnCompleted
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, message_digest, request_prefixes
+from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.yaml_io import write_text_atomic
 
@@ -54,8 +65,9 @@ type _Plan = tuple[Sequence[Message], _State]
 
 # A hold no request continues any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
-# A longer update reads better as a new prompt.
+# A longer update reads better as a new prompt, and so do more updates: every request sends each of them again.
 _MAX_UPDATE_CHARS = 8000
+_MAX_UPDATES = 8
 # The unchanged lines an update quotes around each change.
 _CONTEXT_LINES = 2
 _UPDATE_HEADER = (
@@ -163,7 +175,7 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         return None
     if fresh[0] != state["current"]:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text(held[0], fresh[0])
+        text = _update_text(held[0], fresh[0]) if len(updates) < _MAX_UPDATES else None
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
@@ -200,19 +212,23 @@ def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> 
         with suppress(KeyError, TypeError, ValueError, IndexError):
             continued = _continued(state, route, system, rest)
             # A read-only request continues the hold only as it is, without an update it would have to add.
-            if continued is not None and (continued[1] is state or not request.prompt_hold_read_only):
+            if continued is not None and (continued[1] is state or request.prompt_hold_pin is None):
                 return continued
-    if request.prompt_hold_read_only:
+    if request.prompt_hold_pin is not None:
         return None
     first = _anchors(rest, [1])[0]
     return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
 
 
 def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
-    """Return ``request`` as ``inner`` is sent it: with its conversation's held system prompt and updates, if any."""
+    """Return ``request`` as ``inner`` is sent it: with the held system prompt and updates, which a reading run pins."""
+    pin = request.prompt_hold_pin
     if request.prompt_hold is None:
         return request
-    plan = _plan(inner, request, _read(request.prompt_hold, time.time()))
+    state = pin[0] if pin else _read(request.prompt_hold, time.time())
+    plan = _plan(inner, request, state)
+    if pin is not None and not pin:
+        pin.append(None if plan is None else state)
     return replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
 
 
@@ -233,7 +249,8 @@ def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
                 return sent
             if plan[1] != state:
                 write_text_atomic(path, json.dumps(plan[1]))
-            os.utime(path, (now, now))
+            else:
+                os.utime(path, (now, now))
     except OSError:
         return sent
     return replace(sent, messages=plan[0])
@@ -241,9 +258,17 @@ def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
 
 async def prompt_hold_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with its conversation's held system prompt, which only a request that may write it records."""
+    sent = request
     if request.prompt_hold is not None:
-        request = await asyncio.to_thread(held_request if request.prompt_hold_read_only else _commit, inner, request)
-    events = inner.stream(request)
+        sent = await asyncio.to_thread(held_request if request.prompt_hold_pin is not None else _commit, inner, request)
+    events = inner.stream(sent)
     async with closing_async_stream(events):
         async for event in events:
+            if sent is not request and isinstance(event, TurnCompleted):
+                # The identity of the request as it was sent, which reading the hold again would not surely give.
+                as_sent = WrappedProvider(inner, prompt_hold_stream, RequestProjection(lambda _inner, _request: sent))
+                identity = (await asyncio.to_thread(request_prefixes, as_sent, request))[-1]
+                answered = event.message.provider_data or {}
+                if identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
+                    event.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: identity}
             yield event
