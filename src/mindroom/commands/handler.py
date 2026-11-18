@@ -190,7 +190,7 @@ class CommandHandlerContext:
     # Runs saved schedules.
     scheduled_tasks: ScheduledTaskRuntime
     # Writes one room state event through the room's steward: (room_id, event_type, content, state_key=...).
-    put_room_state: Callable[..., Awaitable[bool]]
+    put_room_state: Callable[..., Awaitable[bool | None]]
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:

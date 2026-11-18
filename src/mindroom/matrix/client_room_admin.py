@@ -277,13 +277,13 @@ async def ensure_room_encryption_enabled(
     room_id: str,
     *,
     snapshot: RoomStateSnapshot | None = None,
-    put_state: Callable[..., Awaitable[bool]] | None = None,
-) -> bool:
+    put_state: Callable[..., Awaitable[bool | None]] | None = None,
+) -> bool | None:
     """Enable Matrix encryption on a room if it is not already enabled.
 
     Enabling encryption is irreversible; this helper never disables it.
     A client that only answers writes through ``put_state``, the room steward's.
-    Returns whether the room is encrypted after the call.
+    Returns whether the room is encrypted after the call, None when ``put_state`` says the room refused the write.
     """
     enabled = await room_encryption_enabled(client, room_id, snapshot=snapshot)
     if enabled:
@@ -302,7 +302,7 @@ async def ensure_room_encryption_enabled(
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return True
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
-    return False
+    return None if response is None else False
 
 
 def _with_event_power_level(

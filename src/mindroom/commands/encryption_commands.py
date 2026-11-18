@@ -27,15 +27,18 @@ async def _confirm_encrypt(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
-    put_state: Callable[..., Awaitable[bool]] | None,
+    put_state: Callable[..., Awaitable[bool | None]] | None,
 ) -> str:
     """Enable encryption for a room admin through ``put_state``, the room steward's, or explain why not."""
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
     if admin_user_id is None:
         return "❌ Room admin only."
-    if await ensure_room_encryption_enabled(client, room_id, put_state=put_state):
+    enabled = await ensure_room_encryption_enabled(client, room_id, put_state=put_state)
+    if enabled:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
-    return moderator_rights_message("enable encryption")
+    if enabled is None:
+        return moderator_rights_message("enable encryption")
+    return "❌ Failed to enable encryption. Run the command again to retry."
 
 
 async def handle_encrypt_command(
@@ -45,7 +48,7 @@ async def handle_encrypt_command(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
-    put_state: Callable[..., Awaitable[bool]] | None = None,
+    put_state: Callable[..., Awaitable[bool | None]] | None = None,
 ) -> str:
     """Review or enable Matrix end-to-end encryption for the current room."""
     encrypted = await room_encryption_enabled(client, room_id)
