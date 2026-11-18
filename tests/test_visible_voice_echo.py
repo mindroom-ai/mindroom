@@ -343,6 +343,25 @@ async def test_adaptive_agent_posts_the_transcript_only_once_it_decides_to_answe
 
 
 @pytest.mark.asyncio
+async def test_contact_room_voice_is_answered_without_a_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contact room takes only sends its message policy approved, so its voice turn runs and posts no transcript."""
+    config = _config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    event, normalized = _voice_event(config)
+    _transcribes(monkeypatch, normalized)
+    monkeypatch.setattr("mindroom.ingress_validation.contact_room", lambda *_args: object())
+
+    await _deliver(harness, _room_with_members(config, "general"), event)
+
+    assert harness.gateway.sent == []
+    assert [request.prompt for request in harness.runner.requests] == [_TRANSCRIPT]
+    assert harness.retried_dispatch_sources == []
+
+
+@pytest.mark.asyncio
 async def test_echo_off_posts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With `voice.visible_router_echo` off, the bot only replies."""
     config = _config(tmp_path, visible_router_echo=False)

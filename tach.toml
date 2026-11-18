@@ -4062,6 +4062,7 @@ visibility = [
     "mindroom.ingress_validation",
     "mindroom.matrix.client_delivery",
     "mindroom.response_runner",
+    "mindroom.voice.visible_voice_echo",
 ]
 
 [[modules]]
@@ -6194,6 +6195,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.voice.visible_voice_echo"
 depends_on = [
+    "mindroom.matrix.guarded_rooms",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",

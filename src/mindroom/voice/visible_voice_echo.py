@@ -20,6 +20,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import turn_rows
+from mindroom.matrix.guarded_rooms import send_refused
 
 if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -59,7 +60,9 @@ class VisibleVoiceEchoLifecycle:
         The caller holds the reply decision's admission, so the config read here stays the one it decided on.
         """
         content = transcript.source["content"]
-        if not self.runtime.config.voice.visible_router_echo or content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True:
+        # A contact room takes only the sends its message policy approved, and no transcript is one.
+        unposted = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True or send_refused(room_id)
+        if unposted or not self.runtime.config.voice.visible_router_echo:
             return
         posting = _posting.setdefault((room_id, source_event_id), asyncio.Condition())
         async with posting:
