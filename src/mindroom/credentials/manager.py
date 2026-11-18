@@ -120,6 +120,10 @@ class WorkerCredentialPathError(RuntimeError):
     """Raised when a worker credential directory is not a real directory."""
 
 
+class CredentialsUnreadableError(RuntimeError):
+    """Raised when a saved credential document exists but cannot be read, for example under another key."""
+
+
 def validate_service_name(service: str) -> str:
     """Validate and normalize credential service names."""
     normalized = service.strip()
@@ -608,6 +612,18 @@ class CredentialsManager:
         credentials_path = self._credentials_file(normalized_service)
         return self._load_credentials_file(normalized_service, credentials_path)
 
+    def read_saved_credentials(self, service: str) -> dict[str, Any] | None:
+        """Return the document saved for ``service``, None when none is, never a declared one.
+
+        Unlike ``load_credentials``, a document that exists but cannot be read raises ``CredentialsUnreadableError``.
+        """
+        normalized_service = validate_service_name(service)
+        try:
+            return self._read_saved(normalized_service, self._credentials_file(normalized_service))
+        except _UNREADABLE_CREDENTIALS_ERRORS as exc:
+            msg = f"Stored credentials for {normalized_service} could not be loaded"
+            raise CredentialsUnreadableError(msg) from exc
+
     def _read_saved(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         """Return the document saved at ``credentials_path``, raising ``_UNREADABLE_CREDENTIALS_ERRORS`` if unreadable."""
         payload = _read_credentials_payload(credentials_path)
@@ -631,25 +647,34 @@ class CredentialsManager:
         declared = self._declared.get(normalized_service)
         return dict(declared.credentials) if declared is not None else None
 
-    def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
+    def save_credentials(self, service: str, credentials: dict[str, Any], *, replace_unreadable: bool = False) -> None:
         """Save credentials for a service.
 
         Args:
             service: Name of the service
             credentials: Credentials dictionary to save
+            replace_unreadable: Replace a saved document this store cannot read, which it refuses by default,
+                in the same one atomic publish as any save, so readers meet the old document or the new one.
 
         """
         normalized_service = validate_service_name(service)
         credentials_path = self._credentials_file(normalized_service)
-        self._save_credentials_file(normalized_service, credentials_path, credentials)
+        self._save_credentials_file(
+            normalized_service,
+            credentials_path,
+            credentials,
+            replace_unreadable=replace_unreadable,
+        )
 
     def _save_credentials_file(
         self,
         normalized_service: str,
         credentials_path: Path,
         credentials: dict[str, Any],
+        *,
+        replace_unreadable: bool = False,
     ) -> None:
-        stored_payload = _read_credentials_payload(credentials_path)
+        stored_payload = None if replace_unreadable else _read_credentials_payload(credentials_path)
         if stored_payload is not None:
             if (
                 self._encryption_key is not None

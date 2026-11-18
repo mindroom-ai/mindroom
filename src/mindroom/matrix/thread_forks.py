@@ -57,6 +57,18 @@ def is_thread_fork_root(content: Mapping[str, Any]) -> bool:
     return _thread_fork_reference(content) is not None
 
 
+def fork_parent_thread_id(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str | None:
+    """Return the thread a thread was forked from, read from its root in ``history``, or None for a plain thread."""
+    reference = _root_reference(history, thread_id)
+    return None if reference is None else reference.thread_id
+
+
+def fork_reference(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> tuple[str, str] | None:
+    """Return the parent thread and fork point a thread was forked from, read from its root in ``history``."""
+    reference = _root_reference(history, thread_id)
+    return None if reference is None else (reference.thread_id, reference.event_id)
+
+
 def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:
     """Return the parent threads whose messages a fork's resolved history holds, none for a plain thread."""
     thread_ids = {thread_id}

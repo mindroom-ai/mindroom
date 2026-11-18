@@ -3374,6 +3374,7 @@ expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
+    "thread_fork_item",
     "with_matrix_message_target",
     "with_silent_schedule_delivery",
 ]
@@ -6295,6 +6296,7 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_sources",
     "mindroom.teams",
+    "mindroom.thread_models",
     "mindroom.thread_summary",
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",

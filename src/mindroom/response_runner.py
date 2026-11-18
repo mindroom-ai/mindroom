@@ -81,6 +81,7 @@ from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
     prepare_memory_and_model_context,
+    thread_fork_item,
     with_matrix_message_target,
     with_silent_schedule_delivery,
 )
@@ -973,6 +974,9 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
         target = runtime.tool_context.target
+        fork_item = thread_fork_item(thread_history, target.resolved_thread_id, self.deps.runtime.config)
+        if fork_item is not None:
+            transient_enrichment_items = (*transient_enrichment_items, fork_item)
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
             session_id=runtime.tool_context.target.session_id,

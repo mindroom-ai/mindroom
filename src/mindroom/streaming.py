@@ -75,6 +75,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CANCELLED_RESPONSE_NOTE",
+    "CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE",
     "INTERRUPTED_RESPONSE_NOTE",
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
@@ -141,6 +142,7 @@ CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted: agent restarted to apply a config change]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
 StreamInputChunk = (
@@ -207,7 +209,12 @@ def format_stream_error_note(error: Exception | str) -> str:
 
 
 # The notes that end a reply a Stop, a restart, or an interruption cut short, in the order their stripping checks them.
-_PARTIAL_REPLY_NOTES = (CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)
+_PARTIAL_REPLY_NOTES = (
+    CANCELLED_RESPONSE_NOTE,
+    _INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
+)
 
 
 def is_interrupted_partial_reply(text: object) -> bool:
@@ -238,12 +245,12 @@ def clean_partial_reply_text(text: str) -> str:
     return cleaned
 
 
-def build_restart_interrupted_body(text: str) -> str:
+def build_restart_interrupted_body(text: str, note: str = RESTART_INTERRUPTED_RESPONSE_NOTE) -> str:
     """Return restart-note text for a stale in-progress message body."""
     stripped_text = text.rstrip()
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
-        return RESTART_INTERRUPTED_RESPONSE_NOTE
-    return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+        return note
+    return f"{stripped_text}\n\n{note}"
 
 
 @dataclass(frozen=True)
@@ -253,6 +260,8 @@ class UnfinishedStreamedReply:
     # The visible text as the user saw it, tool markers included.
     visible_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
+    # The note below it, which names why the attempt stopped.
+    restart_note: str = RESTART_INTERRUPTED_RESPONSE_NOTE
 
     @property
     def partial_text(self) -> str:
@@ -262,7 +271,7 @@ class UnfinishedStreamedReply:
     @property
     def resumed_text(self) -> str:
         """Return the text a continuation streams below: what was shown, then the restart note."""
-        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
+        return f"{build_restart_interrupted_body(self.visible_text, self.restart_note)}\n\n"
 
 
 @dataclass(frozen=True)

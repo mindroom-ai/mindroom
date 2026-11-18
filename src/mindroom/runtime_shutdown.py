@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.cancellation import TaskCancelSource
 
 __all__ = [
+    "CONFIG_RELOAD_SHUTDOWN",
     "ENTITY_REMOVED_SHUTDOWN",
     "GENERIC_SHUTDOWN",
     "ORDERLY_SHUTDOWN",
@@ -108,6 +109,8 @@ class RuntimeShutdownIntent:
 
     stop_reason: StopReason | None
     cancel_source: TaskCancelSource | None = None
+    # A config reload, rather than another refresh, replaces the entity.
+    config_reload: bool = False
 
     @property
     def hands_off_unfinished_work(self) -> bool:
@@ -147,6 +150,7 @@ GENERIC_SHUTDOWN = RuntimeShutdownIntent(stop_reason=None, cancel_source=None)
 ORDERLY_SHUTDOWN = RuntimeShutdownIntent(stop_reason="shutdown", cancel_source=None)
 ENTITY_REMOVED_SHUTDOWN = RuntimeShutdownIntent(stop_reason="entity_removed", cancel_source=None)
 SYNC_RESTART_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_source="sync_restart")
+CONFIG_RELOAD_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_source="sync_restart", config_reload=True)
 
 
 def restart_reason_category_for(shutdown_intent: RuntimeShutdownIntent) -> RestartReasonCategory:
