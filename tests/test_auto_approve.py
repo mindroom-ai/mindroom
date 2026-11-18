@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -22,6 +23,7 @@ from mindroom.approval.auto_approve_windows import (
 )
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.response import plan_approval_calls
+from mindroom.approval.tool_approval import human_gate
 from mindroom.commands import auto_approve_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
@@ -294,17 +296,66 @@ async def test_auto_approve_command_publishes_the_rooms_open_windows_for_clients
     assert client.room_put_state.await_args.args[2] == {"windows": []}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("refusal", [{"return_value": False}, {"side_effect": OSError("connection reset")}])
-async def test_auto_approve_command_asks_for_moderator_rights_when_its_state_is_refused(
-    tmp_path: Path,
-    refusal: dict[str, Any],
-) -> None:
-    """A window the room's clients cannot show is not opened."""
-    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30", put_room_state=AsyncMock(**refusal))
+def _window(runtime_paths: RuntimePaths) -> datetime | None:
+    return auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "reply_start"),
+    [
+        # None is a refusal: no steward, or one without the power.
+        ({"return_value": None}, "I need moderator rights in this room to turn on auto-approve."),
+        ({"return_value": False}, "⚠️ Auto-approve was not turned on"),
+        ({"side_effect": OSError("connection reset")}, "⚠️ Auto-approve was not turned on"),
+    ],
+)
+async def test_auto_approve_window_opens_only_after_the_room_shows_it(
+    tmp_path: Path,
+    failure: dict[str, Any],
+    reply_start: str,
+) -> None:
+    """A window the room's clients cannot show is not opened, and only a refusal asks for moderator rights."""
+    await _send(tmp_path, "!auto_approve 30")
+    opened = _window(test_runtime_paths(tmp_path))
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 2h", put_room_state=AsyncMock(**failure))
+
+    assert reply.startswith(reply_start)
+    # The window that was open stays as it was.
+    assert _window(runtime_paths) == opened
+
+
+@pytest.mark.asyncio
+async def test_tool_call_needs_approval_while_the_window_is_being_published(tmp_path: Path) -> None:
+    """Until the room's state shows the window, a tool call still asks its approver."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    publishing, published = asyncio.Event(), asyncio.Event()
+
+    async def put_room_state(*_args: object, **_kwargs: object) -> None:
+        publishing.set()
+        await published.wait()
+
+    command = asyncio.create_task(_send(tmp_path, "!auto_approve 30", put_room_state=put_room_state))
+    await publishing.wait()
+    gate = human_gate(runtime_paths, approver_id=HUMAN, room_id=ROOM_ID, thread_id=THREAD_ID)
+    published.set()
+    reply, _ = await command
+
+    assert gate is None
     assert reply == "I need moderator rights in this room to turn on auto-approve."
-    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert _window(runtime_paths) is None
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_off_says_when_the_room_refuses_to_show_it(tmp_path: Path) -> None:
+    """Ending a window always ends it here, and a refused state write asks for moderator rights."""
+    await _send(tmp_path, "!auto_approve 30")
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(return_value=None))
+
+    assert reply == "I need moderator rights in this room to show that auto-approve is off."
+    assert _window(runtime_paths) is None
 
 
 @pytest.mark.asyncio

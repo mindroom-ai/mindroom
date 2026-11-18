@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -22,7 +22,6 @@ from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from datetime import datetime
 
     import nio
     import structlog
@@ -49,20 +48,21 @@ def _until(expires_at: datetime, config: Config) -> str:
 
 
 async def _publish_windows(
-    put_room_state: Callable[..., Awaitable[bool]],
+    put_room_state: Callable[..., Awaitable[bool | None]],
     runtime_paths: RuntimePaths,
     room_id: str,
     logger: structlog.stdlib.BoundLogger,
-) -> bool:
-    """Publish the room's open windows as the room steward's own state, for clients; False when the room refuses."""
+    opening: dict[tuple[str | None, str], datetime] | None = None,
+) -> bool | None:
+    """Publish the room's open windows, and the one ``opening``, as the room steward's own state, for clients.
+
+    None when the room refuses the write, False when it fails for another reason.
+    """
+    windows = {(w.thread_id, w.requester_id): w.expires_at for w in room_auto_approve_windows(runtime_paths, room_id)}
     content = {
         "windows": [
-            {
-                "thread_id": window.thread_id,
-                "requester_id": window.requester_id,
-                "expires_at": window.expires_at.isoformat(),
-            }
-            for window in room_auto_approve_windows(runtime_paths, room_id)
+            {"thread_id": thread_id, "requester_id": requester_id, "expires_at": expires_at.isoformat()}
+            for (thread_id, requester_id), expires_at in (windows | (opening or {})).items()
         ],
     }
     try:
@@ -112,7 +112,7 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    put_room_state: Callable[..., Awaitable[bool]],
+    put_room_state: Callable[..., Awaitable[bool | None]],
     room: nio.MatrixRoom,
     thread_id: str | None,
     requester_user_id: str,
@@ -143,7 +143,8 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
     if requested == "off":
         if not end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
             return f"Auto-approve for all your tool calls is not on in {place}."
-        await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
+        if await _publish_windows(put_room_state, runtime_paths, room.room_id, logger) is None:
+            return moderator_rights_message("show that auto-approve is off")
         return (
             f"✅ Auto-approve for all your tool calls is off in {place}; they follow the usual approval rules again. "
             "A tool you auto-approved from an approval card stays approved until you stop it on that card or its time ends."
@@ -152,17 +153,22 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
     duration = _parse_duration(requested)
     if duration is None or not timedelta(minutes=1) <= duration <= AUTO_APPROVE_MAX_DURATION:
         return f"❌ Choose a duration from 1 minute to 24 hours, such as `30` or `2h`.\n\n{_USAGE}"
+    # The room shows the window before it opens here, so no tool call runs unasked under a window the room refuses.
+    now = datetime.now(UTC)
+    opening = {(thread_id, approver_id): now + duration}
+    published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger, opening)
+    if published is None:
+        return moderator_rights_message("turn on auto-approve")
+    if not published:
+        return "⚠️ Auto-approve was not turned on because publishing it failed. Run the command again to retry."
     expires_at = start_auto_approve(
         runtime_paths,
         room_id=room.room_id,
         thread_id=thread_id,
         requester_id=approver_id,
         duration=duration,
+        now=now,
     )
-    if not await _publish_windows(put_room_state, runtime_paths, room.room_id, logger):
-        # A window the room's clients cannot show stays closed.
-        end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
-        return moderator_rights_message("turn on auto-approve")
     approved = await _approve_pending_cards(
         config=config,
         runtime_paths=runtime_paths,

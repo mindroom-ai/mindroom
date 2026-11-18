@@ -75,6 +75,8 @@ In a room that uses `thread_mode: room`, the window covers the whole room.
 `!auto_approve` shows when the window ends and `!auto_approve off` ends it early; restarts and config reloads keep it.
 `!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card.
 A window needs a MindRoom account that may send the `io.mindroom.auto_approve` state event, which the rooms MindRoom creates allow; elsewhere the command answers `I need moderator rights in this room to turn on auto-approve.`
+The window opens only after the room shows it, so a refused window never approves a tool call.
+`/auto_approve off` always ends the window, and says when the room refuses to show that.
 MindRoom Chat shows the open window in the thread header.
 
 ## Approval Card Contents
