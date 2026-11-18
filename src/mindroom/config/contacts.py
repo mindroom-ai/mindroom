@@ -18,6 +18,7 @@ CONTACT_CONTROL_TOOLS = frozenset(
         "claude_agent",
         "skill_manage",
         "dynamic_tools",
+        "matrix_user",
     },
 )
 
