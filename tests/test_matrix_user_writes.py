@@ -90,6 +90,9 @@ DM_NOT_LISTED = (
 )
 # A reply's quote, which a bridge drops before it looks for a command, then a command.
 QUOTED_COMMAND = "> <@alice:example.com> quoted text\n\n!tg logout"
+ROOM_UNCONFIRMED = (
+    "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
+)
 UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 
 
@@ -1525,6 +1528,67 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
 
     assert {result["status"] for result in results[:12]} == {"ok"}
     assert results[12] == error_result("create_room", "Rate limit exceeded for matrix_user writes (12 per 30s).")
+
+
+@pytest.mark.asyncio
+async def test_a_create_room_the_homeserver_refused_says_why(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """The homeserver's own refusal proves no room was made, so it is passed on as it is."""
+    homeserver.answers[CREATE_PATH] = matrix_error(403, "M_FORBIDDEN", "You cannot make rooms")
+
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, action="create_room", name="Trip")
+
+    refusal = "Matrix answered 403 M_FORBIDDEN: You cannot make rooms"
+    assert result == error_result("create_room", refusal)
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["error"]) == ("error", refusal)
+    assert homeserver.paths()[-1] == CREATE_PATH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [matrix_error(500, "M_UNKNOWN", "Database unavailable"), TimeoutError(), aiohttp.ClientConnectionError()],
+    ids=["server-error", "timeout", "transport"],
+)
+async def test_a_create_room_the_homeserver_did_not_confirm_says_it_may_exist(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    failure: Answer | Exception,
+) -> None:
+    """Without the homeserver's answer the room may have been made, and making it again would make a second one."""
+    homeserver.answers[CREATE_PATH] = failure
+
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, action="create_room", name="Trip", user_id=BOB)
+
+    assert result == error_result("create_room", ROOM_UNCONFIRMED)
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["error"]) == ("error", ROOM_UNCONFIRMED)
+    assert homeserver.paths()[-1] == CREATE_PATH
+
+
+@pytest.mark.asyncio
+async def test_a_dm_the_homeserver_did_not_confirm_says_it_may_exist(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A DM made for a send whose answer was lost may exist, with the person invited, so nothing more is sent."""
+    homeserver.answers.update({DIRECT_PATH: {}, CREATE_PATH: TimeoutError()})
+
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
+
+    assert result == error_result("send", ROOM_UNCONFIRMED)
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["error"]) == ("error", ROOM_UNCONFIRMED)
+    assert homeserver.paths()[-1] == CREATE_PATH
 
 
 @pytest.mark.asyncio

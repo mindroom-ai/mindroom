@@ -81,6 +81,9 @@ _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
 _COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 _ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
+_ROOM_UNCONFIRMED = (
+    "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
+)
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 # The send failures that prove nothing was sent: each is known before the event is requested, or, for one too large,
 # may also be the homeserver's refusal of it.
@@ -270,7 +273,7 @@ async def _write(
         # A plain request: the homeserver's default power levels, as a room the person makes in their own client has.
         invite = {"invite": [write.user_id]} if write.user_id is not None else {}
         body = {"name": write.name, "preset": "private_chat", **invite}
-        written.room_id = _created_room(await matrix_json(client, "POST", "/createRoom", body))
+        written.room_id = await _create_room(client, body)
         return {"room_id": written.room_id}
     room_id, room = str(write.room_id), quote(str(write.room_id), safe="")
     if write.action == "join":
@@ -318,11 +321,21 @@ def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord
     return record
 
 
-def _created_room(answer: dict[str, Any]) -> str:
-    room_id = answer.get("room_id")
+async def _create_room(client: nio.AsyncClient, body: dict[str, object]) -> str:
+    """Make a room and return its ID, saying that none was made only when the homeserver's refusal proves it.
+
+    A refusal has a 4xx status. After any other failure the room may exist, with whom it invited, and a second request
+    would make another.
+    """
+    try:
+        room_id = (await matrix_json(client, "POST", "/createRoom", body)).get("room_id")
+    except REQUEST_FAILURES as error:
+        status = error.status if isinstance(error, MatrixRequestError) else None
+        if status is not None and HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR:
+            raise
+        raise MatrixRequestError(_ROOM_UNCONFIRMED) from None
     if not isinstance(room_id, str):
-        msg = "The homeserver's answer named no room."
-        raise MatrixRequestError(msg)
+        raise MatrixRequestError(_ROOM_UNCONFIRMED)
     return room_id
 
 
@@ -569,13 +582,7 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str, written:
             if isinstance(room_id, str) and await _only_the_two(client, room_id, person, them):
                 written.room_id = room_id
                 return room_id, False
-        created = await matrix_json(
-            client,
-            "POST",
-            "/createRoom",
-            {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]},
-        )
-        room_id = _created_room(created)
+        room_id = await _create_room(client, {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]})
         written.room_id, written.invited = room_id, them
         written.dm_not_listed = await _record_direct_room(client, direct_path, them, room_id)
         return room_id, True
