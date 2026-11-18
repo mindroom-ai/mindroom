@@ -1,7 +1,8 @@
 """Plugin routes and chat commands change a room's thread and reply modes along one path.
 
 A route changes them only for a room admin, and a thread mode change republishes `io.mindroom.thread_mode`, the state
-clients choose a room's view by, so the stored override and the published state agree.
+clients choose a room's view by, so the stored override and the published state agree. The reply mode override is the
+room's `reply_mode` setting in `io.mindroom.room_settings` state.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import RoomModes, RoomReader, require_room_reader
-from mindroom.room_reply_modes import resolve_room_reply_mode_override, set_room_reply_mode_override
+from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
 from mindroom.room_thread_modes import resolve_room_thread_mode_override, set_room_thread_mode_override
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -35,12 +36,14 @@ if TYPE_CHECKING:
     from collections.abc import Coroutine
     from pathlib import Path
 
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
 
 ROOM_ID = "!room:localhost"
 ALICE = "@alice:localhost"
 BOB = "@bob:localhost"
 THREAD_MODE = "io.mindroom.thread_mode"
+REPLY_SETTING = ("io.mindroom.room_settings", "reply_mode")
 
 
 @dataclass
@@ -81,6 +84,10 @@ class _Room:
 
     def published(self) -> dict[str, Any] | None:
         return self.events.get((THREAD_MODE, ""))
+
+    async def set_reply_setting(self, mode: RoomReplyMode) -> None:
+        """A room admin sets the room's reply mode setting, which the runtime then knows."""
+        assert await write_room_reply_mode(self.client, self.paths, ROOM_ID, mode)
 
 
 @pytest.fixture
@@ -152,14 +159,14 @@ async def test_modes_give_each_override_and_the_reply_mode_in_effect(room: _Room
     room.config.rooms[ROOM_ID] = RoomConfig(reply_mode="mentions")
     assert reader.modes() == RoomModes(thread=None, reply=None, reply_in_effect="mentions")
     set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
-    set_room_reply_mode_override(room.paths, room_id=ROOM_ID, mode="auto")
+    await room.set_reply_setting("auto")
     assert reader.modes() == RoomModes(thread="room", reply="auto", reply_in_effect="auto")
 
 
 @pytest.mark.asyncio
 async def test_an_admin_sets_and_clears_the_thread_mode_and_the_router_publishes_each(room: _Room) -> None:
     """The router publishes the override, and once it is cleared, the agents' configured mode; the reply mode stays."""
-    set_room_reply_mode_override(room.paths, room_id=ROOM_ID, mode="mentions")
+    await room.set_reply_setting("mentions")
     reader = await room.reader()
     await reader.set_modes(thread="room")
     assert room.stored() == ("room", "mentions")
@@ -171,14 +178,16 @@ async def test_an_admin_sets_and_clears_the_thread_mode_and_the_router_publishes
 
 @pytest.mark.asyncio
 async def test_an_admin_sets_and_clears_the_reply_mode_and_the_thread_mode_stays(room: _Room) -> None:
-    """A reply mode change keeps the thread mode override and publishes nothing."""
+    """A reply mode change sets the room's reply mode setting, keeps the thread mode override and publishes no view."""
     set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
     reader = await room.reader()
     await reader.set_modes(reply="mentions")
     assert reader.modes() == RoomModes(thread="room", reply="mentions", reply_in_effect="mentions")
+    assert room.events[REPLY_SETTING] == {"value": "mentions"}
     await reader.set_modes(reply=None)
     assert reader.modes() == RoomModes(thread="room", reply=None, reply_in_effect="auto")
-    room.client.room_put_state.assert_not_awaited()
+    assert room.events[REPLY_SETTING] == {}
+    assert room.published() is None
 
 
 @pytest.mark.asyncio
@@ -188,6 +197,7 @@ async def test_one_call_changes_both_modes(room: _Room) -> None:
     await reader.set_modes(thread="room", reply="mentions")
     assert room.stored() == ("room", "mentions")
     assert room.published() == {"mode": "room"}
+    assert room.events[REPLY_SETTING] == {"value": "mentions"}
 
 
 @pytest.mark.asyncio
@@ -232,18 +242,34 @@ async def test_a_refused_change_writes_and_publishes_nothing(
 
 @pytest.mark.asyncio
 async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room: _Room) -> None:
-    """When the homeserver refuses the state write, both modes stay saved and the route says the thread mode is not published."""
+    """When the homeserver refuses the state write, the thread mode stays saved and the route says it is not published."""
     room.client.room_put_state.side_effect = None
     room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     reader = await room.reader()
     with pytest.raises(HTTPException) as unpublished:
-        await reader.set_modes(thread="room", reply="mentions")
+        await reader.set_modes(thread="room")
     assert (unpublished.value.status_code, unpublished.value.detail) == (
         503,
         "The modes were saved, but the room's thread mode is not published yet; try again.",
     )
-    assert room.stored() == ("room", "mentions")
+    assert room.stored() == ("room", None)
     assert room.published() is None
+
+
+@pytest.mark.asyncio
+async def test_a_reply_mode_the_room_refuses_changes_nothing(room: _Room) -> None:
+    """When the homeserver refuses the reply mode setting, the route answers 503 before it touches the thread mode."""
+    room.client.room_put_state.side_effect = None
+    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    reader = await room.reader()
+    with pytest.raises(HTTPException) as refused:
+        await reader.set_modes(thread="room", reply="mentions")
+    assert (refused.value.status_code, refused.value.detail) == (
+        503,
+        "The room did not take its reply mode; nothing was changed.",
+    )
+    assert room.stored() == (None, None)
+    assert REPLY_SETTING not in room.events
 
 
 @pytest.mark.asyncio

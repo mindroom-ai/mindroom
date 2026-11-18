@@ -5,12 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
-from mindroom.room_reply_modes import (
-    ROOM_REPLY_MODES,
-    clear_room_reply_mode_override,
-    resolve_room_reply_mode_override,
-    set_room_reply_mode_override,
-)
+from mindroom.room_reply_modes import ROOM_REPLY_MODES, ReplyModeRead, refresh_room_reply_mode, write_room_reply_mode
 
 if TYPE_CHECKING:
     import nio
@@ -22,6 +17,7 @@ if TYPE_CHECKING:
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _USAGE = "Usage: `/reply_mode [auto|mentions|reset|show]`"
+_WRITE_FAILED = "❌ The room did not take the change; check that MindRoom's router may change the room's settings."
 _MODE_EFFECTS: dict[RoomReplyMode, str] = {
     "auto": "The router or the room's only agent or team may answer a message that mentions no one.",
     "mentions": (
@@ -31,10 +27,10 @@ _MODE_EFFECTS: dict[RoomReplyMode, str] = {
 }
 
 
-def _show_room_reply_mode(config: Config, runtime_paths: RuntimePaths, room_id: str) -> str:
-    mode = resolve_room_reply_mode_override(runtime_paths, room_id)
+def _show_room_reply_mode(config: Config, runtime_paths: RuntimePaths, room_id: str, read: ReplyModeRead) -> str:
+    mode = read.mode
     if mode is None:
-        configured = config.get_room_reply_mode(runtime_paths, room_id)
+        configured = config.get_room_reply_mode(runtime_paths, room_id, read)
         return (
             f"No room reply mode override is set. This room uses its configured `{configured}` reply mode.\n\n"
             f"{_MODE_EFFECTS[configured]}\n\n{_USAGE}"
@@ -45,7 +41,7 @@ def _show_room_reply_mode(config: Config, runtime_paths: RuntimePaths, room_id: 
     )
 
 
-async def handle_reply_mode_command(
+async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
     args_text: str,
     *,
     client: nio.AsyncClient,
@@ -55,10 +51,14 @@ async def handle_reply_mode_command(
     requester_user_id: str,
     sender_user_id: str,
 ) -> str:
-    """Show, set, or clear the room-level reply mode override."""
+    """Show, set, or clear the room-level reply mode override, the room's `reply_mode` setting."""
     requested = args_text.strip().lower()
+    # A command reads the room's state itself, so it never trusts a copy that missed a change.
+    read = await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
     if not requested or requested in _LIST_ARGUMENTS:
-        return _show_room_reply_mode(config, runtime_paths, room_id)
+        if not read.ok:
+            return "❌ Could not read this room's reply mode setting. Try again."
+        return _show_room_reply_mode(config, runtime_paths, room_id, read)
 
     if requested not in ROOM_REPLY_MODES and requested not in _RESET_ARGUMENTS:
         return f"❌ Unknown reply mode `{args_text.strip()}`.\n\n{_USAGE}"
@@ -67,15 +67,16 @@ async def handle_reply_mode_command(
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
-        if clear_room_reply_mode_override(runtime_paths, room_id):
-            configured = config.get_room_reply_mode(runtime_paths, room_id)
-            return (
-                f"✅ Room reply mode override removed. This room uses its configured `{configured}` reply mode again."
-            )
-        return "This room has no reply mode override."
+        if read.ok and read.mode is None:
+            return "This room has no reply mode override."
+        if not await write_room_reply_mode(client, runtime_paths, room_id, None):
+            return _WRITE_FAILED
+        configured = config.get_room_reply_mode(runtime_paths, room_id, ReplyModeRead(ok=True, mode=None))
+        return f"✅ Room reply mode override removed. This room uses its configured `{configured}` reply mode again."
 
     mode = cast("RoomReplyMode", requested)
-    set_room_reply_mode_override(runtime_paths, room_id=room_id, mode=mode)
+    if not await write_room_reply_mode(client, runtime_paths, room_id, mode):
+        return _WRITE_FAILED
     return (
         f"✅ This room now uses `{mode}` reply mode.\n\n{_MODE_EFFECTS[mode]}\n\n"
         "Use `/reply_mode reset` to restore the configured mode."

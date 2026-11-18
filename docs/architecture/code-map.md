@@ -639,7 +639,7 @@ Matrix sync callback
 | `turn_model.py` | The model one turn runs: explicit choice, thread and room overrides, authored model, the team rule, then the budget fallback |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
-| `room_reply_modes.py` | Durable per-room reply mode overrides backing `!reply_mode` and plugin routes |
+| `room_reply_modes.py` | A room's reply mode override, its `reply_mode` room setting in room state, backing `!reply_mode`, plugin routes and clients |
 | `room_modes.py` | The one path `!thread_mode` and plugin routes take to change a room's thread mode override and republish it |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |

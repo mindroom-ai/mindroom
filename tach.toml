@@ -3287,6 +3287,7 @@ depends_on = [
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
     "mindroom.constants",
+    "mindroom.room_reply_modes",
     "mindroom.thread_snooze",
     "mindroom.thread_tags",
 ]
@@ -5086,6 +5087,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.reply_turn.locked_turn",
     "mindroom.thread_tags",
+    "mindroom.room_reply_modes",
 ]
 
 [[modules]]
@@ -6392,6 +6394,7 @@ depends_on = [
     "mindroom.managed_room_notice",
     "mindroom.matrix.rooms",
     "mindroom.responder_availability",
+    "mindroom.room_reply_modes",
     "mindroom.runtime_protocols",
     "mindroom.teams",
 ]
