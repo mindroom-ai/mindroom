@@ -371,6 +371,9 @@ class _RecordingDeliveryGateway:
         self.routes.append(content)
         return f"$route-{len(self.routes)}:localhost"
 
+    async def sent_route(self, _room_id: str, _source_event_ids: object) -> str | None:
+        return None
+
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
         return True
@@ -1412,28 +1415,6 @@ async def test_recovery_prefers_untracked_terminal_fallback_over_persisted_place
             },
         },
     )
-
-
-@pytest.mark.asyncio
-async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_path: Path) -> None:
-    """Router recovery must distinguish its relay from an earlier visible voice echo."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    pending_turn = await harness.turn_store.record_pending_turn(
-        _in_room(TurnRecord.create([_EVENT_ID], completed=False)),
-    )
-    assert pending_turn is not None
-
-    with patch(
-        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-        return_value=frozenset({"$voice-echo:localhost", "$relay:localhost"}),
-    ):
-        recovered = await harness.dispatcher.deps.visible_responses.recovered_response_event_id(
-            pending_turn.record,
-            room_id=_ROOM_ID,
-            excluded_event_ids=("$voice-echo:localhost",),
-        )
-
-    assert recovered == "$relay:localhost"
 
 
 @pytest.mark.asyncio

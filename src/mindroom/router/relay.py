@@ -119,12 +119,7 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
         return None
     if earlier.history_scope is not None:
         return await _still_steward(deps, room_id, earlier)
-    sent_route = await deps.visible_responses.recovered_response_event_id(
-        earlier,
-        room_id=room_id,
-        # The router's own voice echoes are publication, never the route this turn still owes.
-        excluded_event_ids=await deps.turn_store.finalized_visible_echoes(earlier.source_event_ids),
-    )
+    sent_route = earlier.response_event_id or await deps.delivery_gateway.sent_route(room_id, earlier.source_event_ids)
     if sent_route is None:
         return None
     await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent_route))

@@ -1704,7 +1704,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
             return_value=ResponderSelection("home"),
         ),
         patch(
-            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
+            "mindroom.delivery_gateway.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
             return_value=frozenset(),
         ),
@@ -1782,7 +1782,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
             return_value=ResponderSelection("home"),
         ),
         patch(
-            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
+            "mindroom.delivery_gateway.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
             return_value=frozenset(),
         ),

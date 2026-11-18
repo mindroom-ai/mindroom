@@ -19,7 +19,7 @@ from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     import nio
     import structlog
@@ -65,7 +65,6 @@ class VisibleResponseReconciler:
         handled_turn: TurnRecord,
         *,
         room_id: str,
-        excluded_event_ids: Collection[str] = (),
     ) -> str | None:
         """Return the durable visible response owned by a replayed turn."""
         incomplete_records = [
@@ -77,7 +76,6 @@ class VisibleResponseReconciler:
         response_event_ids = {
             record.response_event_id for record in incomplete_records if record.response_event_id is not None
         }
-        response_event_ids.difference_update(excluded_event_ids)
         if len(response_event_ids) > 1:
             msg = "Recovered coalesced turn has conflicting visible response event IDs"
             raise RuntimeError(msg)
@@ -104,7 +102,6 @@ class VisibleResponseReconciler:
                     response_source_filter=response_source_is_terminal,
                 ),
             )
-            terminal_response_event_ids.difference_update(excluded_event_ids)
             if len(terminal_response_event_ids) > 1:
                 msg = "Recovered turn has multiple terminal visible Matrix responses"
                 raise RuntimeError(msg)
@@ -122,7 +119,6 @@ class VisibleResponseReconciler:
                     response_source_filter=response_source_is_canonical,
                 ),
             )
-            response_event_ids.difference_update(excluded_event_ids)
             self.deps.logger.info(
                 "dispatch_recovery_response_lookup",
                 room_id=room_id,

@@ -839,6 +839,62 @@ class TestRoutingRegression:
         stuck_bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_route_of_some_of_a_batch_s_messages_does_not_answer_the_batch(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A replay adopts only a route of exactly its batch: one that names fewer messages leaves the batch to route."""
+        router_bot, _healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        mock_suggest_responder.return_value = ResponderSelection("healthy")
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$route-of-both"},
+            room_id=room.room_id,
+        )
+        batch = TurnRecord.create(["$first", "$second"], completed=False, requester_id="@user:localhost")
+        turn_store = router_bot._turn_store
+        # As a crashed attempt at the batch left it: pending, and with no route recorded.
+        await turn_store.record_pending_turn(
+            turn_store.attach_response_context(
+                batch,
+                history_scope=None,
+                conversation_target=MessageTarget.resolve(room.room_id, None, "$second"),
+            ),
+        )
+        route_of_the_first = nio.Event.parse_event(
+            {
+                "type": ROUTE_EVENT_TYPE,
+                "event_id": "$route-of-the-first",
+                "sender": router_bot.client.user_id,
+                "origin_server_ts": 900,
+                "content": {ROUTE_EVENT_TYPE: {"entity": "@mindroom_healthy:localhost", "event_ids": ["$first"]}},
+            },
+        )
+        router_bot.client.room_messages.return_value = nio.RoomMessagesResponse(
+            room_id=room.room_id,
+            chunk=[_router_readiness_event("$second"), route_of_the_first, _router_readiness_event("$first")],
+            start="",
+            end=None,
+        )
+
+        routed = await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
+            room,
+            _router_readiness_event("$second"),
+            [],
+            requester_user_id="@user:localhost",
+            handled_turn=batch,
+        )
+
+        assert routed is False
+        route = router_bot.client.room_send.await_args.kwargs["content"][ROUTE_EVENT_TYPE]
+        assert route["event_ids"] == ["$first", "$second"]
+        record = await turn_store.get_turn_record("$second")
+        assert record is not None
+        assert (record.completed, record.response_event_id) == (True, "$route-of-both")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("still_steward", [True, False])
     @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
     async def test_a_steward_that_had_selected_itself_answers_again_without_selecting_anew(

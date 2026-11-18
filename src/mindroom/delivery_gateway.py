@@ -79,6 +79,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
+    find_response_event_ids_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.matrix.segmented_messages import first_segment_target_bytes, segment_matrix_content
@@ -1572,6 +1573,28 @@ class DeliveryGateway:
         """Send a steward's hidden route event, which no client shows, and return its event ID."""
         outcome = await send_message_outcome(self._ready_client(), room_id, content, message_type=ROUTE_EVENT_TYPE)
         return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
+
+    async def sent_route(self, room_id: str, source_event_ids: Sequence[str]) -> str | None:
+        """Return the route this bot sent for exactly these messages, when the room's history since them holds one."""
+        sources = sorted(source_event_ids)
+
+        def routes_them(source: Mapping[str, Any]) -> bool:
+            content = source.get("content")
+            route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
+            event_ids = route.get("event_ids") if isinstance(route, dict) else None
+            named = sorted(map(str, event_ids)) if isinstance(event_ids, list) else None
+            return source.get("type") == ROUTE_EVENT_TYPE and named == sources
+
+        client = self._ready_client()
+        found = await find_response_event_ids_via_room_messages(
+            client,
+            room_id,
+            response_sender=client.user_id,
+            source_event_ids=sources,
+            event_types=("m.room.message", "m.room.encrypted", ROUTE_EVENT_TYPE),
+            answers=routes_them,
+        )
+        return min(found, default=None)
 
     async def _edit_content(
         self,

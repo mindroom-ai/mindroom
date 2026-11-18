@@ -16,7 +16,6 @@ import nio
 from aiohttp import ClientError
 from nio.responses import RoomThreadsResponse
 
-from mindroom.constants import ROUTE_EVENT_TYPE
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted", ROUTE_EVENT_TYPE)
+_ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
@@ -87,18 +86,6 @@ def _room_threads_page_error_from_exception(exc: BaseException) -> RoomThreadsPa
     return RoomThreadsPageError(response=response)
 
 
-def _routes_a_source(event_source: Mapping[str, Any], sources: Collection[str]) -> bool:
-    """Return whether an event is a hidden route of one of these messages, which it names in its content."""
-    content = event_source.get("content")
-    route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
-    event_ids = route.get("event_ids") if isinstance(route, dict) else None
-    return (
-        event_source.get("type") == ROUTE_EVENT_TYPE
-        and isinstance(event_ids, list)
-        and any(isinstance(event_id, str) and event_id in sources for event_id in event_ids)
-    )
-
-
 async def find_response_event_ids_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
@@ -108,8 +95,9 @@ async def find_response_event_ids_via_room_messages(
     response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
     response_content: Mapping[str, Any] | None = None,
     event_types: Collection[str] = _ROOM_HISTORY_MESSAGE_TYPES,
+    answers: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> frozenset[str]:
-    """Find responses by source relation or exact frozen content; a hidden route answers the sources it names."""
+    """Find responses by source relation or exact frozen content, or by ``answers`` for ones with no relation."""
     sources = set(source_event_ids)
     remaining_sources = set(sources)
     response_event_ids: set[str] = set()
@@ -144,10 +132,11 @@ async def find_response_event_ids_via_room_messages(
             exact_content = response_content is not None and event_source.get("content") == response_content
             replies_to_source = (
                 not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
-            ) or _routes_a_source(event_source, sources)
+            )
+            answers_source = replies_to_source if answers is None else answers(event_source)
             if (
                 event_source.get("sender") == response_sender
-                and (exact_content if response_content is not None else replies_to_source)
+                and (exact_content if response_content is not None else answers_source)
                 and (response_source_filter is None or response_source_filter(event_source))
             ):
                 response_event_ids.add(event.event_id)
