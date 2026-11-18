@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
+from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
     from ._backend import ResolvedMemoryBackend
+    from ._entrypoint_snapshots import ConversationRef
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
@@ -32,17 +35,10 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class MemoryPromptParts:
-    """Stable and turn-local prompt fragments used by the AI layer.
-
-    ``entrypoint_body`` is the MEMORY.md part of ``session_preamble`` without its truncation marker, and
-    ``entrypoint_path`` the file it was read from, which decide whether a conversation may keep the system prompt it
-    last sent (``_prompt_snapshots``).
-    """
+    """Stable and turn-local prompt fragments used by the AI layer."""
 
     session_preamble: str = ""
     transient_turn_context: str = ""
-    entrypoint_body: str = ""
-    entrypoint_path: str | None = None
 
 
 async def add_agent_memory(
@@ -184,13 +180,17 @@ async def delete_agent_memory(
     )
 
 
-def _render_entrypoint_body(entrypoint: MemoryEntrypointContext, config: Config) -> str:
-    """Frame the preloaded memory entrypoint as already-inlined context, without its truncation marker."""
+def _render_entrypoint_body(entrypoint: MemoryEntrypointContext, config: Config, *, kept_copy: bool) -> str:
+    """Frame the preloaded memory entrypoint as already-inlined context, without its truncation marker.
+
+    A ``kept_copy`` body, one a conversation may keep while entries are added, says newer entries may be missing.
+    """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
         memory_path=entrypoint.source_path,
     )
-    return "\n".join(part for part in (header, entrypoint.text) if part)
+    kept_copy_notice = config.get_prompt("FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE") if kept_copy else ""
+    return "\n".join(part for part in (header, kept_copy_notice, entrypoint.text) if part)
 
 
 def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Config) -> str:
@@ -212,12 +212,10 @@ async def _entrypoint_preamble(
     agent_name: str,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
     counter: TokenCounter,
-) -> tuple[str, str, str | None]:
-    """Render the agent's `MEMORY.md` preamble, sized with ``counter``; return it, its body, and the file's path.
-
-    The body is the preamble without its truncation marker, whose counts change as lines are added past a cap.
-    """
+) -> str:
+    """Render the agent's `MEMORY.md` preamble, or the copy ``conversation`` keeps of it, sized with ``counter``."""
     # The file backend reads the scoped MEMORY.md from disk; keep it off the
     # event loop (#1260).
     entrypoint = await asyncio.to_thread(
@@ -227,9 +225,47 @@ async def _entrypoint_preamble(
         execution_identity=execution_identity,
     )
     entrypoint = await asyncio.to_thread(cap_entrypoint, entrypoint, config, counter)
-    body = _render_entrypoint_body(entrypoint, config) if entrypoint.text or entrypoint.omitted_lines else ""
+    body = (
+        _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
+        if entrypoint.text or entrypoint.omitted_lines
+        else ""
+    )
     preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
-    return preamble, body, None if entrypoint.source_path is None else str(entrypoint.source_path)
+    if conversation is None or entrypoint.source_path is None:
+        return preamble
+    return await asyncio.to_thread(
+        stable_entrypoint_preamble,
+        conversation,
+        entrypoint.source_path,
+        body,
+        preamble,
+        now=time.time(),
+    )
+
+
+async def conversation_entrypoint_preamble(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    conversation: ConversationRef,
+    counter: TokenCounter,
+) -> str:
+    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted.
+
+    ``counter`` counts tokens for the model the preamble goes to.
+    """
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
+        return ""
+    return await _entrypoint_preamble(
+        backend,
+        agent_name,
+        config,
+        execution_identity,
+        conversation,
+        counter,
+    )
 
 
 @timed("system_prompt_assembly.memory_enhancement")
@@ -240,11 +276,13 @@ async def build_memory_prompt_parts(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     *,
+    conversation: ConversationRef | None = None,
     counter: TokenCounter,
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
-    ``counter`` counts tokens for the model the turn runs on.
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines
+    and its prompt cache may be warm. ``counter`` counts tokens for the model the turn runs on.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
@@ -262,11 +300,12 @@ async def build_memory_prompt_parts(
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    session_preamble, entrypoint_body, entrypoint_path = await _entrypoint_preamble(
+    session_preamble = await _entrypoint_preamble(
         backend,
         agent_name,
         config,
         execution_identity,
+        conversation,
         counter,
     )
 
@@ -293,8 +332,6 @@ async def build_memory_prompt_parts(
     return MemoryPromptParts(
         session_preamble=session_preamble,
         transient_turn_context=transient_turn_context,
-        entrypoint_body=entrypoint_body,
-        entrypoint_path=entrypoint_path,
     )
 
 

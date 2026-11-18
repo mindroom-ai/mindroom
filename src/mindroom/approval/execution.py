@@ -13,12 +13,7 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
-from mindroom.ai import (
-    agent_run_metadata_content,
-    run_delegated_child_response,
-    stream_agent_response,
-    turn_local_context,
-)
+from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
@@ -211,8 +206,6 @@ async def _continue_persisted_agent(
         storage=storage,
         user_id=continuation.requester_id,
         steering=True,
-        # The paused run keeps its system prompt; what the resuming turn's hooks say for this turn ends its requests.
-        turn_local_context=turn_local_context(system_enrichment_items, minimal=build.surface.mode == "minimal"),
     )
     native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(

@@ -114,9 +114,9 @@ Skills without `metadata.openclaw` are always eligible.
 
 ## Using skills at runtime
 
-Agents see their available skills in the system prompt and load details with these tools:
+Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` loads the full instructions for a skill
+- `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
 - `get_skill_reference(skill_name, reference_path)` reads a reference document
 - `get_skill_script(skill_name, script_path)` reads a script
 

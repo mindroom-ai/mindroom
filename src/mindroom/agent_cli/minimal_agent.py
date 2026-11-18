@@ -106,10 +106,9 @@ def minimal_turn(
 ) -> MinimalTurn:
     """Keep optional current context discoverable and trusted runtime assignments inline.
 
-    Only enrichment marked ``minimal_required`` reaches the model directly: stable system items in the turn part
-    after the date and session context, and transient ones in the transient context; the turn ends its requests
-    with the required volatile system items, which would otherwise change the system prompt between turns
-    (``ai.turn_local_context``). Everything else, memory included, is a context document.
+    Only enrichment marked ``minimal_required`` reaches the model directly: system items in the turn part after the
+    date and session context, transient ones in the transient context. Everything else, memory included, is a context
+    document.
     """
     surface = build.surface
     bootstrap = minimal_system_message(
@@ -123,8 +122,8 @@ def minimal_turn(
         memory_root=surface.memory_root,
         runtime_context=surface.runtime_context,
     )
-    stable = [item for item in system_enrichment if item.minimal_required and item.cache_policy == "stable"]
-    turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(stable)))
+    required = [item for item in system_enrichment if item.minimal_required]
+    turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(required) if required else None))
     documents = minimal_context_documents(build)
     documents["memory"] = render_transient_context((session_preamble, transient_memory))
     documents["enrichment"] = render_enrichment_block([*system_enrichment, *transient_enrichment])

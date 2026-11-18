@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.ai import _prompt_conversation, ai_response
+from mindroom.ai import _memory_conversation, ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -20,7 +20,8 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.hooks import render_transient_context
-from mindroom.memory import ConversationRef, MemoryPromptParts
+from mindroom.memory import ConversationRef, MemoryPromptParts, entrypoint_snapshot_path
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import install_model_providers, make_turn_context
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -97,13 +98,16 @@ class TestMemoryIntegration:
         # Verify response
         assert response.text == "Test response"
 
-        # Verify memory enhancement was applied
+        # Verify memory enhancement was applied; the scripted model keeps a prompt cache for five minutes.
+        database = create_session_storage("general", config, runtime_paths, execution_identity=None).path
+        conversation = ConversationRef((None, None), entrypoint_snapshot_path(database, "test_session"), 300)
         mock_build.assert_called_once_with(
             "What is 2+2?",
             "general",
             config,
             runtime_paths,
             execution_identity=None,
+            conversation=conversation,
             counter=ANY,
         )
 
@@ -144,6 +148,7 @@ class TestMemoryIntegration:
             config,
             runtime_paths,
             execution_identity=None,
+            conversation=None,
             counter=ANY,
         )
 
@@ -220,13 +225,14 @@ class TestMemoryIntegration:
     "history_limit",
     [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}, {"compaction": {"enabled": False}}],
 )
-def test_prompt_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
+def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     history_limit: dict[str, object],
+    tmp_path: Path,
 ) -> None:
-    """Only a conversation whose system prompt can stay cached keeps the prompt it last sent.
+    """Only a file-memory conversation whose system prompt can stay cached keeps a MEMORY.md copy.
 
-    A minimal agent's short prompt is not kept, and a replay limit shifts the history; without compaction, fitting a
-    long conversation into the context window drops its oldest runs, which acts as one.
+    A persona recalls no memory, a minimal agent reads it on demand, and a replay limit shifts the history; without
+    compaction, fitting a long conversation into the context window drops its oldest runs, which acts as one.
     """
     session = ConversationSession(
         session_id="thread",
@@ -234,9 +240,11 @@ def test_prompt_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         owner_id="general",
         summary=ScopeSummary(text=" Earlier work. ", updated_at=datetime.now(UTC)),
     )
+    database = tmp_path / "general" / "sessions" / "general.db"
+    model = ScriptedModel([], model_params={"extended_cache_time": True})
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
-        storage=MagicMock(),
+        storage=MagicMock(path=database),
         session=session,
         session_id="thread",
         storage_factory=lambda: MagicMock(),
@@ -254,15 +262,19 @@ def test_prompt_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         memory={"backend": "file"},
     )
 
-    kept = ConversationRef("thread", ("Earlier work.", None))
-    assert _prompt_conversation(ctx, config, scope_context) == kept
-    assert _prompt_conversation(ctx, mem0, scope_context) == kept
-    persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
-    assert _prompt_conversation(persona, config, scope_context) == kept
-    assert _prompt_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
-    assert _prompt_conversation(ctx, limited, scope_context) is None
+    assert _memory_conversation(ctx, config, scope_context, model) == ConversationRef(
+        ("Earlier work.", None),
+        entrypoint_snapshot_path(database, "thread"),
+        3600,
+    )
+    assert _memory_conversation(ctx, config, scope_context, ScriptedModel([])).cache_ttl == 300
+    assert _memory_conversation(ctx, mem0, scope_context, model) is None
+    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context, model) is None
+    assert _memory_conversation(ctx, limited, scope_context, model) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
-    assert _prompt_conversation(scheduled, config, scope_context) is None
+    assert _memory_conversation(scheduled, config, scope_context, model) is None
+    persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
+    assert _memory_conversation(persona, config, scope_context, model) is None
     # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
     unauthored = Config(
         agents={"general": AgentConfig(display_name="General")},
@@ -270,4 +282,4 @@ def test_prompt_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         models={"default": ModelConfig(provider="openai", id="test-model")},
         memory={"backend": "file"},
     )
-    assert _prompt_conversation(ctx, unauthored, scope_context) is None
+    assert _memory_conversation(ctx, unauthored, scope_context, model) is None

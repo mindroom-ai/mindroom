@@ -76,8 +76,7 @@ class LoopState:
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
     paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a
     hook may replace for the rest of the run (mid-turn compaction turning the provider's compaction off after it
-    compacted as text); ``tail`` holds messages a hook sets that every request ends with and the run never stores
-    (context that holds for this turn only), so they sit after everything a later request or turn repeats.
+    compacted as text).
     """
 
     messages: list[Message]
@@ -87,12 +86,11 @@ class LoopState:
     record: AnyRunRecord
     request_index: int
     request_template: ModelRequest
-    tail: tuple[Message, ...] = ()
 
     def request(self, messages: Sequence[Message] | None = None) -> ModelRequest:
-        """Return the request the loop sends with ``messages``, the live messages unless given, then the ``tail``."""
+        """Return the request the loop sends with ``messages``, the live messages unless given."""
         sent = self.messages if messages is None else messages
-        return replace(self.request_template, messages=(*sent, *self.tail), tools=self.tools)
+        return replace(self.request_template, messages=tuple(sent), tools=self.tools)
 
 
 @dataclass(frozen=True, slots=True)

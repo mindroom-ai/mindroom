@@ -28,10 +28,9 @@ from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
-from mindroom.memory import prompt_snapshot_path, stamp_prompt_request
+from mindroom.memory import entrypoint_snapshot_path, stamp_entrypoint_snapshot
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
@@ -46,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, StopReason
     from mindroom.participation import ParticipationGate
     from mindroom.run_storage import RunStorage
@@ -64,9 +64,7 @@ class HookTurn:
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
     member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
-    resume, whose paused row is what settles it when it is cut short. ``turn_local_context`` is context that holds
-    for this turn only, such as volatile system enrichment and what changed in a system prompt the conversation
-    keeps: every request of the run ends with it, and the run never stores it, so no later turn replays it.
+    resume, whose paused row is what settles it when it is cut short.
     """
 
     config: Config
@@ -78,7 +76,6 @@ class HookTurn:
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
     checkpoints: bool = True
-    turn_local_context: str = ""
 
 
 def agent_loop_hooks(
@@ -96,7 +93,7 @@ def agent_loop_hooks(
     for a team member, whose leader owns the turn's notices; ``steering`` is on for a run that owns its reply, which a
     completed batch then ends for a steering message, and off for a delegated child, whose owner it leaves that to.
     ``skill_review_capture`` records the run's final request. Every request a stored run sends, a resume's included,
-    restarts the idle time after which its conversation takes a fresh system prompt (``memory._prompt_snapshots``).
+    restarts the idle time after which its conversation loads MEMORY.md again (``memory._entrypoint_snapshots``).
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
@@ -118,11 +115,11 @@ def agent_loop_hooks(
     )
     if turn.storage is None or turn.storage.store is None:
         return hooks
-    kept_prompt = prompt_snapshot_path(turn.storage.store.path, turn.storage.session.session_id)
+    snapshot = entrypoint_snapshot_path(turn.storage.store.path, turn.storage.session.session_id)
 
     async def stamp_request(_state: LoopState) -> SendRequest:
         """Stamp the conversation's prompt cache as read now; last, so only for a request that is sent."""
-        stamp_prompt_request(kept_prompt, now=time.time())
+        stamp_entrypoint_snapshot(snapshot, now=time.time())
         return SendRequest()
 
     return replace(hooks, before_request=(*hooks.before_request, stamp_request))
@@ -155,17 +152,6 @@ def leader_loop_hooks(
     )
 
 
-def _turn_local_hook(context: str) -> BeforeRequestHook:
-    """Return the hook that ends every request of a run with ``context``, which the run never stores."""
-    tail = (Message(role="user", content=context, add_to_agent_memory=False),)
-
-    async def end_with_turn_local_context(state: LoopState) -> SendRequest:
-        state.tail = tail
-        return SendRequest()
-
-    return end_with_turn_local_context
-
-
 def _loop_hooks(
     turn: HookTurn,
     *,
@@ -187,8 +173,7 @@ def _loop_hooks(
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
-    it, before its first request as a reader; the turn's ``turn_local_context`` then becomes the tail of every
-    request; mid-turn compaction last sizes the request that is sent, rewrites the
+    it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
     live messages, keeping the receipt, and folds into the scope only when the run replays it; the checkpoint then
     saves the run as that request finds it, and again before each tool batch runs. Queued-message notices
     follow every tool batch and a resume's entry when ``queued_notices`` is on, and a ``steering`` run ends at such a
@@ -201,8 +186,6 @@ def _loop_hooks(
     if participation is not None:
         before_request.append(participation_hook(participation, model))
     before_request.append(approval_receipt_hook)
-    if turn.turn_local_context:
-        before_request.append(_turn_local_hook(turn.turn_local_context))
     before_request.append(
         mid_turn_compaction_hook(
             config=turn.config,

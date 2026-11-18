@@ -11,7 +11,6 @@ from mindroom import agents
 from mindroom.agent_cli.minimal_agent import minimal_context_documents, minimal_turn, prepare_minimal_catalog
 from mindroom.agent_cli.response_owner import tool_catalog
 from mindroom.agent_loop.spec import RunContext
-from mindroom.ai import turn_local_context
 from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
 from mindroom.hooks import EnrichmentItem
@@ -54,27 +53,16 @@ def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("sh
 
 
 def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Path) -> None:
-    """The full prompt, memory, and optional enrichment are documents; required enrichment stays inline.
-
-    Required system enrichment that may differ between turns ends the turn's requests, unstored, so the system prompt
-    stays the same and no later turn replays it.
-    """
+    """The full prompt, memory, and optional enrichment are documents; required enrichment stays inline."""
     build = _minimal_build(_runtime_context(tmp_path))
-    system_enrichment = (
-        EnrichmentItem(
-            key="required_system",
-            text="Assigned task: rotate the logs.",
-            minimal_required=True,
-            cache_policy="stable",
-        ),
-        EnrichmentItem(key="required_volatile", text="Stay quiet when nothing changed.", minimal_required=True),
-        EnrichmentItem(key="optional_system", text="The weather is sunny."),
-    )
     turn = minimal_turn(
         build,
         session_preamble="Earlier the disk was nearly full.",
         transient_memory="The user prefers short answers.",
-        system_enrichment=system_enrichment,
+        system_enrichment=(
+            EnrichmentItem(key="required_system", text="Assigned task: rotate the logs.", minimal_required=True),
+            EnrichmentItem(key="optional_system", text="The weather is sunny."),
+        ),
         transient_enrichment=(
             EnrichmentItem(key="required_turn", text="Reply in the thread.", minimal_required=True),
             EnrichmentItem(key="optional_turn", text="A colleague mentioned lunch."),
@@ -87,14 +75,9 @@ def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Pa
     # The build's turn context, such as the current date, stays inline.
     assert build.prompt.turn_context
     assert build.prompt.turn_context in system
-    for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch", "Stay quiet"):
+    for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch"):
         assert hidden not in system
     assert "Reply in the thread." in turn.transient_context
-    assert "Stay quiet" not in turn.transient_context
-    turn_local = turn_local_context(system_enrichment, minimal=True)
-    assert '<mindroom_system_context>\n<item key="required_volatile"' in turn_local
-    assert "sunny" not in turn_local
-    assert "rotate the logs" not in turn_local
     assert "lunch" not in turn.transient_context
     documents = turn.context_documents
     assert "Keep the build machine healthy." in documents["agent-context"]

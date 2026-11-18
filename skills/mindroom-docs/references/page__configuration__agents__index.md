@@ -181,7 +181,7 @@ How a private agent behaves:
   With `memory_backend: file`, the same workspace holds the agent's file memory.
 - Files load in list order, each headed by its resolved path so the agent knows where to edit it.
 - Missing files are skipped with a warning in the logs.
-- Edits take effect on the next reply without a restart; an ongoing conversation is told them in a note with each reply ([Prompt Caching](https://docs.mindroom.chat/configuration/models/#prompt-caching)).
+- Edits take effect on the next reply without a restart.
 
 `defaults.max_preload_chars` (default `50000`) caps the section.
 When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.

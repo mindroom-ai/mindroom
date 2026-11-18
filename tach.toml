@@ -3697,7 +3697,7 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
-    "mindroom.memory._prompt_snapshots",
+    "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
@@ -3802,14 +3802,15 @@ depends_on = ["mindroom.history.session_runs"]
 visibility = ["mindroom.memory.auto_flush"]
 
 [[modules]]
-path = "mindroom.memory._prompt_snapshots"
+path = "mindroom.memory._entrypoint_snapshots"
 depends_on = ["mindroom.constants"]
-visibility = ["mindroom.memory"]
+visibility = ["mindroom.memory", "mindroom.memory.functions"]
 
 [[modules]]
 path = "mindroom.memory.functions"
 depends_on = [
     "mindroom.memory._backend",
+    "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
@@ -6810,7 +6811,6 @@ expose = [
     "stream_agent_response",
     "run_delegated_child_response",
     "agent_run_metadata_content",
-    "turn_local_context",
 ]
 from = ["mindroom.ai"]
 
@@ -6881,25 +6881,24 @@ from = ["mindroom.config.memory"]
 [[interfaces]]
 expose = [
     "ConversationRef",
-    "FreshPrompt",
     "MemoryAutoFlushService",
     "MemoryPromptParts",
     "add_agent_memory",
     "append_agent_daily_memory",
     "build_memory_prompt_parts",
+    "conversation_entrypoint_preamble",
     "delete_agent_memory",
+    "entrypoint_snapshot_path",
     "entrypoint_tokens",
     "entrypoint_withholds_lines",
     "get_agent_memory",
-    "held_system_prompt",
     "list_all_agent_memories",
     "prompt_cache_ttl_seconds",
-    "prompt_snapshot_path",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",
     "search_agent_memories",
-    "stamp_prompt_request",
+    "stamp_entrypoint_snapshot",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",

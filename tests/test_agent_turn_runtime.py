@@ -1550,9 +1550,8 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 ) -> None:
     """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
-    The checkpoint then saves what is sent, and saves again before a tool batch runs; the conversation's prompt
-    cache is stamped last, for a request that is sent. The rest of the hooks are wired. A reply with a job actor
-    projects its job definitions before participation.
+    The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
+    wired. A reply with a job actor projects its job definitions before participation.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}

@@ -1071,31 +1071,6 @@ async def test_every_hook_fires_at_its_documented_point() -> None:
     ]
 
 
-async def test_a_tail_ends_every_request_and_is_never_part_of_the_run() -> None:
-    """Turn-local context a hook sets as the tail follows whatever the run's messages hold, and no message keeps it.
-
-    Each request therefore repeats the one before it without its tail, so the tail never moves the cached prefix.
-    """
-    tail = Message(role="user", content="For this turn only.", add_to_agent_memory=False)
-
-    async def set_tail(state: LoopState) -> SendRequest:
-        state.tail = (tail,)
-        return SendRequest()
-
-    model = ScriptedModel([calls(tool_call("echo", "c1", text="x"), metrics=usage(1, 1)), answer("done")])
-    messages = _prompt()
-
-    await _run(spec(model, toolkit(echo)), messages, hooks=LoopHooks(before_request=(set_tail,)))
-
-    first, second = (list(request.messages) for request in model.requests)
-    assert first[-1] is tail
-    assert second[-1] is tail
-    assert second[: len(first) - 1] == first[:-1]
-    assert [message.role for message in second] == ["system", "user", "assistant", "tool", "user"]
-    assert tail not in messages
-    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "assistant"]
-
-
 async def test_a_hook_that_ends_the_run_stops_before_the_request_and_later_hooks() -> None:
     seen: list[str] = []
 

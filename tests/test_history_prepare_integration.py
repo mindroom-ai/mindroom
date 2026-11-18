@@ -20,7 +20,7 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
-from mindroom.ai import _presented_tools, ai_response
+from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -36,14 +36,13 @@ from mindroom.history.storage import (
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
-from mindroom.hooks import EnrichmentItem, render_transient_context
+from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
-from mindroom.llm.provider import DeferredTools
 from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, prompt_snapshot_path
+from mindroom.memory import MemoryPromptParts, entrypoint_snapshot_path
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -57,7 +56,7 @@ from tests.conftest import (
     prepare_agent_and_prompt_for_test,
     seed_session,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
@@ -988,199 +987,91 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
 
 
-def _texts(request: ModelRequest) -> list[str]:
-    """Return the text of every message of ``request``, system messages included, in order."""
-    return [str(message.content) for message in request.messages]
+@pytest.mark.asyncio
+async def test_a_new_skill_file_leaves_the_system_prompt_unchanged(tmp_path: Path, provider: _Provider) -> None:
+    """The skill catalog names no reference or script file, so adding one rewrites no conversation's prompt cache."""
+    config, runtime_paths = _make_config(tmp_path)
+    skill = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "skills" / "deploying"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: deploying\ndescription: Use when deploying\n---\n\nSteps.\n", "utf-8")
 
-
-@dataclass
-class _KeptPromptConversation:
-    """One conversation of the test agent, whose AGENTS.md and ``deploying`` skill the system prompt inlines."""
-
-    config: Config
-    runtime_paths: RuntimePaths
-    provider: _Provider
-    agents_md: Path
-    skill: Path
-    failed: bool = False
-
-    @classmethod
-    def start(cls, tmp_path: Path, provider: _Provider) -> _KeptPromptConversation:
-        config, runtime_paths = _make_config(tmp_path)
-        config.agents["test_agent"].context_files = ["AGENTS.md"]
-        workspace = agent_workspace_root_path(runtime_paths.storage_root, "test_agent")
-        skill = workspace / "skills" / "deploying"
-        (skill / "references").mkdir(parents=True)
-        (skill / "SKILL.md").write_text(
-            "---\nname: deploying\ndescription: Use when deploying\n---\n\nSteps.\n",
-            "utf-8",
-        )
-        provider.model.turns += [answer("ok") for _ in range(3)]
-        return cls(config, runtime_paths, provider, workspace / "AGENTS.md", skill)
-
-    def write_agents_md(self, version: str) -> None:
-        self.agents_md.write_text(f"Answer in version {version}.\n", encoding="utf-8")
-
-    async def turn(self, prompt: str, *system_enrichment: EnrichmentItem) -> tuple[list[str], list[str]]:
-        """Reply to ``prompt`` and return the whole request: its system texts, then every message after them."""
-        ctx = make_turn_context("test_agent", session_id="session-1", system_enrichment_items=system_enrichment)
+    async def system_prompt_of_turn(prompt: str) -> str:
         with _no_memory():
-            result = await ai_response(replace(ctx, prompt=prompt), self.runtime_paths, self.config)
-        self.failed = result.failed is not None
-        messages = self.provider.model.requests[-1].messages
-        return (
-            [str(message.content) for message in messages if message.role == "system"],
-            [str(message.content) for message in messages if message.role != "system"],
-        )
+            await ai_response(
+                replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt),
+                runtime_paths,
+                config,
+            )
+        return system_text(provider.model.requests[-1].messages)
 
-    def idle_for(self, seconds: float) -> None:
-        """Move the conversation's last model request ``seconds`` into the past."""
-        [kept] = self.runtime_paths.storage_root.rglob("prompt_snapshots/*.json")
-        os.utime(kept, (time.time() - seconds,) * 2)
+    first = await system_prompt_of_turn("First prompt")
+    assert "<name>deploying</name>" in first
+    (skill / "references" / "rollback.md").write_text("How to roll back.\n", encoding="utf-8")
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "deploy.sh").write_text("echo deploy\n", encoding="utf-8")
+    assert await system_prompt_of_turn("Second prompt") == first
 
 
 @pytest.mark.asyncio
-async def test_warm_conversation_keeps_its_system_messages_and_every_turn_ends_with_what_changed(
+async def test_memory_md_stays_while_its_models_cache_is_warm_and_reloads_once_it_is_gone(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
-    """Nothing before a conversation changes while its prompt cache may be warm; what changed ends its requests.
+    """A conversation idle past its model's cache lifetime rewrites its cache anyway, so MEMORY.md loads again.
 
-    An edited AGENTS.md, a new skill reference file, and a volatile enrichment item leave the system messages byte
-    for byte the same. The change and the item end the turn's request and are stored nowhere, so the next request
-    holds the change once, as its own ending, and the item not at all; a request that carries a compaction takes the
-    fresh prompt.
+    The copy and the time of the last request are a file in the agent's state root, so a restart changes neither.
     """
-    conversation = _KeptPromptConversation.start(tmp_path, provider)
-    conversation.write_agents_md("one")
-    volatile = EnrichmentItem(key="silent_schedule_delivery", text="Stay quiet when nothing changed.")
-
-    first, sent = await conversation.turn("First prompt")
-    assert "Answer in version one." in first[0]
-    assert "<name>deploying</name>" in first[0]
-    assert sent == ["First prompt"]
-
-    conversation.write_agents_md("two")
-    (conversation.skill / "references" / "rollback.md").write_text("How to roll back.\n", encoding="utf-8")
-    second, sent = await conversation.turn("Second prompt", volatile)
-    assert second == first
-    assert sent[:-1] == ["First prompt", "ok", "Second prompt"]
-    assert "-Answer in version one." in sent[-1]
-    assert "+Answer in version two." in sent[-1]
-    assert "replace the corresponding parts of your system prompt above" in sent[-1]
-    assert "Stay quiet when nothing changed." in sent[-1]
-    assert "rollback.md" not in sent[-1]
-
-    # Neither was stored: the next request repeats the conversation alone, and ends with what still holds.
-    third, sent = await conversation.turn("Third prompt")
-    assert third == first
-    assert sent[:-1] == ["First prompt", "ok", "Second prompt", "ok", "Third prompt"]
-    assert "+Answer in version two." in sent[-1]
-    assert "Stay quiet" not in "".join([*third, *sent])
-
-    # A change that is taken back leaves nothing to say, in the whole request.
-    conversation.write_agents_md("one")
-    fourth, sent = await conversation.turn("Fourth prompt")
-    assert fourth == first
-    assert sent == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok", "Fourth prompt"]
-
-    # A compaction changes the request after the system prompt anyway, so its request takes the fresh prompt.
-    conversation.write_agents_md("two")
-    storage = create_session_storage(
-        "test_agent",
-        conversation.config,
-        conversation.runtime_paths,
-        execution_identity=None,
-    )
-    session = storage.load_session("session-1")
-    assert session is not None
-    storage.update_metadata(session, with_force_compaction)
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
-        compacted, sent = await conversation.turn("Fifth prompt")
-    assert "Answer in version two." in compacted[0]
-    assert "version one" not in "".join([*compacted, *sent])
-    assert sent[-1] == "Fifth prompt"
-    assert (await conversation.turn("Sixth prompt"))[0] == compacted
-
-
-@pytest.mark.asyncio
-async def test_a_failed_turn_loses_no_change_to_the_kept_system_prompt(
-    tmp_path: Path,
-    provider: _Provider,
-) -> None:
-    """The turn after one whose request failed still ends with the change, though another message started it."""
-    conversation = _KeptPromptConversation.start(tmp_path, provider)
-    conversation.write_agents_md("one")
-    first, _ = await conversation.turn("First prompt")
-
-    async def fail() -> None:
-        msg = "provider down"
-        raise RuntimeError(msg)
-
-    conversation.write_agents_md("two")
-    provider.model.turns.insert(0, [Await(fail)])
-    failed, sent = await conversation.turn("Second prompt")
-    assert conversation.failed
-    assert failed == first
-    assert "+Answer in version two." in sent[-1]
-
-    after, sent = await conversation.turn("Another prompt")
-    assert not conversation.failed
-    assert after == first
-    assert sent[-2] == "Another prompt"
-    assert "+Answer in version two." in sent[-1]
-    assert "".join(sent[:-1]).count("version two") == 0
-
-
-@pytest.mark.asyncio
-async def test_a_memory_added_then_deleted_is_in_no_later_request(
-    tmp_path: Path,
-    provider: _Provider,
-) -> None:
-    """A memory a kept prompt only heard of at a request's end is gone from every request once it is deleted."""
     config, runtime_paths = _make_config(tmp_path)
     config.memory.backend = "file"
     memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
+    provider.model.turns += [answer("ok") for _ in range(3)]
 
-    async def request_of_turn(prompt: str) -> list[str]:
-        ctx = make_turn_context("test_agent", session_id="session-1")
-        await ai_response(replace(ctx, prompt=prompt), runtime_paths, config)
-        return _texts(provider.model.requests[-1])
+    async def system_prompt_after(idle_seconds: float, fact: str) -> str:
+        """Add ``fact`` to MEMORY.md, let the conversation idle, and return the next turn's system prompt."""
+        with memory_path.open("a", encoding="utf-8") as memory_file:
+            memory_file.write(f"{fact}\n")
+        [snapshot] = runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+        os.utime(snapshot, (time.time() - idle_seconds,) * 2)
+        await ai_response(
+            replace(make_turn_context("test_agent", session_id="session-1"), prompt="Next prompt"),
+            runtime_paths,
+            config,
+        )
+        return system_text(provider.model.requests[-1].messages)
 
-    first = await request_of_turn("First prompt")
-    assert "Fact one." in first[1]
+    await ai_response(
+        replace(make_turn_context("test_agent", session_id="session-1"), prompt="First prompt"),
+        runtime_paths,
+        config,
+    )
+    first = system_text(provider.model.requests[-1].messages)
+    assert "Fact one." in first
 
-    memory_path.write_text("# Memory\nFact one.\nThe door code is 4711.\n", encoding="utf-8")
-    second = await request_of_turn("Second prompt")
-    assert second[:2] == first[:2]
-    assert "+The door code is 4711." in second[-1]
-    assert "4711" not in "".join(second[:-1])
+    # The scripted model keeps a cache for five minutes: within them the copy stays, after them the file loads.
+    assert await system_prompt_after(200, "Fact two.") == first
+    cold = await system_prompt_after(500, "Fact three.")
+    assert "Fact three." in cold
 
-    memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
-    third = await request_of_turn("Third prompt")
-    assert "4711" not in "".join(third)
-    assert third[:2] == first[:2]
-
-    # A deleted line of the kept copy itself takes the fresh prompt at once.
-    memory_path.write_text("# Memory\n", encoding="utf-8")
-    fourth = await request_of_turn("Fourth prompt")
-    assert "Fact one." not in "".join(fourth[:2])
-    assert fourth[-1] == "Fourth prompt"
+    # A model with the extended cache keeps its copy for an hour.
+    provider.model.model_params["extended_cache_time"] = True
+    assert await system_prompt_after(500, "Fact four.") == cold
+    assert "Fact five." in await system_prompt_after(4000, "Fact five.")
 
 
 @pytest.mark.asyncio
-async def test_two_requesters_private_instances_never_share_a_kept_system_prompt(
+async def test_two_requesters_private_instances_keep_their_memory_copies_apart(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
-    """A private agent keeps each requester's prompt in that requester's state root, though they share a session."""
+    """A private agent keeps each requester's MEMORY.md copy in that requester's state root, though they share a session."""
     config, runtime_paths = _make_config(tmp_path)
-    config.agents["test_agent"].private = AgentPrivateConfig(per="user", root="data", context_files=["USER.md"])
+    config.agents["test_agent"].private = AgentPrivateConfig(per="user", root="data")
     config = bind_runtime_paths(config, runtime_paths)
+    config.memory.backend = "file"
 
-    async def request_of(requester: str, about: str) -> list[str]:
+    async def system_prompt_of(requester: str, fact: str) -> str:
         identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="test_agent",
@@ -1191,82 +1082,26 @@ async def test_two_requesters_private_instances_never_share_a_kept_system_prompt
             session_id="session-1",
         )
         runtime = resolve_agent_runtime("test_agent", config, runtime_paths, execution_identity=identity, create=True)
-        (runtime.workspace.root / "USER.md").write_text(f"{about}\n", encoding="utf-8")
+        assert runtime.workspace.file_memory_path is not None
+        (runtime.workspace.file_memory_path / "MEMORY.md").write_text(f"# Memory\n{fact}\n", encoding="utf-8")
         ctx = make_turn_context("test_agent", session_id="session-1", requester_id=requester)
-        with _no_memory():
-            await ai_response(replace(ctx, prompt="Hello", execution_identity=identity), runtime_paths, config)
-        return _texts(provider.model.requests[-1])
+        await ai_response(replace(ctx, prompt="Hello", execution_identity=identity), runtime_paths, config)
+        return system_text(provider.model.requests[-1].messages)
 
-    alice = await request_of("@alice:localhost", "Alice is allergic to peanuts.")
-    assert "Alice is allergic to peanuts." in alice[0]
-
-    bob = await request_of("@bob:localhost", "Bob collects stamps.")
-    assert "Bob collects stamps." in bob[0]
-    assert "Alice" not in "".join(bob)
-    kept = sorted(runtime_paths.storage_root.rglob("prompt_snapshots/*.json"))
-    assert len(kept) == 2
-    assert len({path.parent for path in kept}) == 2
-
-
-@pytest.mark.asyncio
-async def test_conversation_takes_the_fresh_system_prompt_once_its_models_cache_is_gone(
-    tmp_path: Path,
-    provider: _Provider,
-) -> None:
-    """A conversation idle past its model's cache lifetime rewrites its cache anyway, so it takes the fresh prompt."""
-    conversation = _KeptPromptConversation.start(tmp_path, provider)
-    conversation.write_agents_md("one")
-    first, _ = await conversation.turn("First prompt")
-
-    # The scripted model keeps a cache for five minutes: within them the prompt stays, after them it is fresh.
-    conversation.write_agents_md("two")
-    conversation.idle_for(200)
-    warm, sent = await conversation.turn("Second prompt")
-    assert warm == first
-    assert "+Answer in version two." in sent[-1]
-    conversation.idle_for(500)
-    cold, sent = await conversation.turn("Third prompt")
-    assert "Answer in version two." in cold[0]
-    assert sent[-1] == "Third prompt"
-
-    # A model with the extended cache keeps its prompt for an hour.
-    provider.model.model_params["extended_cache_time"] = True
-    conversation.write_agents_md("three")
-    conversation.idle_for(500)
-    assert (await conversation.turn("Fourth prompt"))[0] == cold
-    conversation.idle_for(4000)
-    assert "Answer in version three." in (await conversation.turn("Fifth prompt"))[0][0]
-
-
-def test_tools_that_move_between_the_prompt_and_tool_search_are_other_tools(
-    tmp_path: Path,
-    provider: _Provider,
-) -> None:
-    """Deferring a tool changes what a request sends before the conversation though no definition changed."""
-    config, runtime_paths = _make_config(tmp_path)
-    build = create_agent(
-        "test_agent",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        include_interactive_questions=False,
-        knowledge=None,
-        model=turn_model(config, runtime_paths, "test_agent"),
-        plugins=config_plugins(config, runtime_paths),
+    assert "Alice is allergic to peanuts." in await system_prompt_of(
+        "@alice:localhost",
+        "Alice is allergic to peanuts.",
     )
-    assert provider.model_names
-    [name, *_] = build.spec.functions or ["search"]
-
-    def deferring(deferred: DeferredTools) -> str:
-        return _presented_tools(
-            replace(build, request_template=replace(build.request_template, deferred_tools=deferred)),
-        )
-
-    eager = deferring(DeferredTools())
-    assert eager == deferring(DeferredTools())
-    native = deferring(DeferredTools(names=frozenset({name})))
-    portable = deferring(DeferredTools(names=frozenset({name}), portable=True))
-    assert len({eager, native, portable}) == 3
+    bob = await system_prompt_of("@bob:localhost", "Bob collects stamps.")
+    assert "Bob collects stamps." in bob
+    assert "Alice" not in bob
+    alice_copy, bob_copy = sorted(
+        runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json"),
+        key=lambda path: "Bob" in path.read_text(encoding="utf-8"),
+    )
+    assert alice_copy.parent != bob_copy.parent
+    assert "Alice" in alice_copy.read_text(encoding="utf-8")
+    assert "Alice" not in bob_copy.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -1281,11 +1116,11 @@ async def test_every_model_request_restarts_the_conversations_idle_time(
         assert now == pytest.approx(time.time(), abs=60)
         stamped.append(path)
 
-    with patch("mindroom.loop_hooks.stamp_prompt_request", new=stamp):
-        _requests, _config, runtime_paths = await _three_turns(tmp_path, provider)
+    with patch("mindroom.loop_hooks.stamp_entrypoint_snapshot", new=stamp):
+        _requests, config, runtime_paths = await _three_turns(tmp_path, provider)
 
-    database = create_session_storage("test_agent", _config, runtime_paths, execution_identity=None).path
-    assert stamped == [prompt_snapshot_path(database, "session-1")] * len(provider.model.requests)
+    database = create_session_storage("test_agent", config, runtime_paths, execution_identity=None).path
+    assert stamped == [entrypoint_snapshot_path(database, "session-1")] * len(provider.model.requests)
     assert len(stamped) == 3
 
 
