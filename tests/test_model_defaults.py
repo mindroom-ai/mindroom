@@ -115,7 +115,7 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
 
 
 def test_saas_default_uses_current_gemini_hydrogen() -> None:
-    """The SaaS default and named Flash preset should use the current Gemini Flash model."""
+    """The SaaS default and named Hydrogen preset should use the current Gemini 4 Hydrogen model."""
     expected_model = "google/gemini-4-hydrogen"
     superseded_models = {
         "google/gemini-3-flash-preview",
