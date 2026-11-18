@@ -20,6 +20,7 @@ from mindroom.event_journal import (
     EventClass,
     EventKind,
     InboundEvent,
+    IngestionRecordAdmission,
     IngestionRecordDisposition,
 )
 from mindroom.matrix.state import MatrixState
@@ -583,6 +584,64 @@ async def test_one_failed_joined_rooms_keeps_discovery_unknown(tmp_path: Path) -
     assert not index.needs_refresh(config)
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert index.is_current_room_member(_BOB, _OTHER, config, runtime_paths)
+
+
+def _own_join(previous_membership: str | None) -> IngestionRecordAdmission:
+    """Return an account's own join of ``_ROOM`` as its journal admits it: a lifecycle record, no timeline event."""
+    return _ingestion_admission(
+        IngestionRecordDisposition.ROOM_LIFECYCLE,
+        source=DepartureSource.REPORTED,
+        room_id=_ROOM,
+        previous_membership=previous_membership,
+        membership="join",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_membership", [None, "invite", "leave"])
+async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_read(
+    tmp_path: Path,
+    previous_membership: str | None,
+) -> None:
+    """A new DM: the agent's own join, with no live member event, makes the first message wait for the room's read."""
+    config, runtime_paths = _config(tmp_path)
+    a = _Account(_A, {})
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    await _refresh(index, config, runtime_paths, a)
+    assert index.knows_joined_rooms()
+    assert not index.needs_refresh(config)
+    assert not index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
+
+    membership_sync.pre_admit_ingestion(
+        config, runtime_paths, _own_join(previous_membership), None, observer_user_id=_A
+    )
+
+    assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
+    assert index.needs_refresh(config)
+
+    a.answers[_ROOM] = (_A, _ALICE)
+    await _refresh(index, config, runtime_paths, a)
+
+    assert _observers(index) == {_ROOM: _A}
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert not index.needs_refresh(config)
+
+
+@pytest.mark.asyncio
+async def test_own_join_of_a_room_another_account_observes_changes_nothing(tmp_path: Path) -> None:
+    """A second account joining a room that already has a ready row neither revokes its grants nor asks for a read."""
+    config, runtime_paths = _config(tmp_path)
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    await _refresh(index, config, runtime_paths, _Account(_A, {_ROOM: (_A, _ALICE)}), _Account(_B, {}))
+
+    membership_sync.pre_admit_ingestion(config, runtime_paths, _own_join("invite"), None, observer_user_id=_B)
+
+    assert _observers(index) == {_ROOM: _A}
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert not index.needs_refresh(config)
 
 
 @pytest.mark.asyncio

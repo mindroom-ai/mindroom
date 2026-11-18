@@ -86,6 +86,8 @@ class AgentReplyMembershipSync:
 
         A departure counts whether the account's sync reported it or its own leave command made it: the command's
         record carries no timeline event, and no later sync need report that leave again.
+        The account's own join never grants: it makes the room one whose members must be read, so a new DM's first
+        message waits for that read instead of being denied by a room list taken before the join.
         """
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
@@ -99,12 +101,11 @@ class AgentReplyMembershipSync:
             reason = "recovered_membership"
         elif (
             admission.membership is not None
-            and admission.previous_membership == "join"
-            and admission.membership != "join"
             and admission.room_id is not None
+            and (admission.previous_membership == "join") != (admission.membership == "join")
         ):
             room_id = admission.room_id
-            reason = "control_client_departed"
+            reason = "observer_joined" if admission.membership == "join" else "control_client_departed"
         else:
             return
         if self._memberships.mark_room_unready(
@@ -114,16 +115,16 @@ class AgentReplyMembershipSync:
             observer_user_id=observer_user_id,
             reason=reason,
         ):
-            self._grants_lost()
+            self._grants_lost(revoke=reason != "observer_joined")
 
-    def _grants_lost(self) -> None:
+    def _grants_lost(self, *, revoke: bool = True) -> None:
         """Rebuild at the next due check without an earlier backoff, and end every bot's denied calls without waiting.
 
-        This never starts a call.
+        This never starts a call. An own join only asks for the rebuild: it revokes nothing.
         """
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
-        for bot in self._bots():
+        for bot in self._bots() if revoke else ():
             bot.schedule_reply_authorized_call_revocation()
 
     async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:

@@ -220,24 +220,8 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
     assert calls.log == ([("router", "scheduled_revoke"), ("voice", "scheduled_revoke")] if grant_changed else [])
 
 
-@pytest.mark.parametrize(
-    "admission",
-    [
-        _ingestion_admission(IngestionRecordDisposition.COMPATIBILITY_ONLY),
-        _ingestion_admission(
-            IngestionRecordDisposition.ROOM_LIFECYCLE,
-            source=DepartureSource.REPORTED,
-            room_id="!joined:localhost",
-            previous_membership="leave",
-            membership="join",
-        ),
-    ],
-)
-def test_non_departure_carriers_do_not_change_reply_memberships(
-    tmp_path: Path,
-    admission: IngestionRecordAdmission,
-) -> None:
-    """Non-departure carriers leave reply authorization and every call unchanged."""
+def test_carrier_without_membership_does_not_change_reply_memberships(tmp_path: Path) -> None:
+    """A carrier without an own-membership change leaves reply authorization and every call unchanged."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     bots, calls = _fleet("router")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
@@ -245,13 +229,48 @@ def test_non_departure_carriers_do_not_change_reply_memberships(
     membership_sync.pre_admit_ingestion(
         Config(),
         test_runtime_paths(tmp_path),
-        admission,
+        _ingestion_admission(IngestionRecordDisposition.COMPATIBILITY_ONLY),
         None,
         observer_user_id=_OBSERVER,
     )
 
     memberships.invalidate_observer.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
+    assert calls.log == []
+
+
+def test_own_join_asks_for_the_rooms_read_and_revokes_no_call(tmp_path: Path) -> None:
+    """An account's own join marks the room for a read without a backoff; it loses no grant, so no call is revoked."""
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.mark_room_unready.return_value = True
+    bots, calls = _fleet("router")
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
+    membership_sync._refresh_retry_at = float("inf")
+    config = Config()
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    membership_sync.pre_admit_ingestion(
+        config,
+        runtime_paths,
+        _ingestion_admission(
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            source=DepartureSource.REPORTED,
+            room_id="!joined:localhost",
+            previous_membership="leave",
+            membership="join",
+        ),
+        None,
+        observer_user_id=_OBSERVER,
+    )
+
+    memberships.mark_room_unready.assert_called_once_with(
+        config,
+        runtime_paths,
+        "!joined:localhost",
+        observer_user_id=_OBSERVER,
+        reason="observer_joined",
+    )
+    assert membership_sync._refresh_retry_at == 0.0
     assert calls.log == []
 
 
