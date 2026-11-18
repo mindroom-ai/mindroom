@@ -470,7 +470,7 @@ Matrix sync callback
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |
-| `matrix/user_masquerade.py` | HTTP-only client that acts as one person through an application service's token and marks every event it sends as the agent's |
+| `matrix/user_masquerade.py` | HTTP-only client that acts as one person through an application service's token and marks each message event, redaction, and state event it sends as the agent's |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
 | `matrix/sync_continuity.py` | Durable pending join-fence persistence |
