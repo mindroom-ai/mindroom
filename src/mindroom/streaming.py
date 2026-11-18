@@ -2282,9 +2282,9 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         live_task = _start_live_frames(client, streaming, delivery_queue)
         if compactions is not None:
             # A compaction anchors after the tool calls shown so far, and each change is shown at once, like a
-            # worker's progress, even over the placeholder. It only edits an event that shows this stream: a reply
-            # not yet visible may wait for its participation decision, and an earlier answer a regeneration replaces
-            # stays until replacement text arrives. The stream's first write carries the entries.
+            # worker's progress, even over the placeholder. It only edits an event that shows this stream, never
+            # creating a reply that has no placeholder yet or blanking an earlier answer this stream has not written;
+            # the stream's first write carries the entries then.
             def _compaction_changed() -> None:
                 if not streaming._shows_stream:
                     return
