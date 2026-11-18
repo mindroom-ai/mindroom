@@ -57,34 +57,31 @@ class KnowledgeRerankerConfig(BaseModel):
     )
 
 
-_JUDGMENT_RECALL_THRESHOLD_DESCRIPTION = (
-    "Minimum probability, from 0 to 1, of a memory recalled without being asked for; "
-    "0.3 is the value the recall benchmark picked"
-)
+#: A judgment reranker's recall threshold: 0.3, the value the recall benchmark picked, not the judgment default 0.8.
+_RecallThreshold = Annotated[
+    float,
+    Field(
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Minimum probability, from 0 to 1, of a memory recalled without being asked for; "
+            "0.3 is the value the recall benchmark picked"
+        ),
+    ),
+]
 
 
 class _TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
     """System One as the reranker: one probability per candidate, and recall keeps those at its threshold."""
 
-    threshold: float = Field(
-        default=0.3,
-        ge=0.0,
-        le=1.0,
-        allow_inf_nan=False,
-        description=_JUDGMENT_RECALL_THRESHOLD_DESCRIPTION,
-    )
+    threshold: _RecallThreshold = 0.3
 
 
 class _OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
     """OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold."""
 
-    threshold: float = Field(
-        default=0.3,
-        ge=0.0,
-        le=1.0,
-        allow_inf_nan=False,
-        description=_JUDGMENT_RECALL_THRESHOLD_DESCRIPTION,
-    )
+    threshold: _RecallThreshold = 0.3
 
 
 #: A judgment provider scores each candidate with its probability. As the reranker its ``threshold`` defaults to 0.3,

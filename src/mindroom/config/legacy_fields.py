@@ -113,7 +113,7 @@ def reject_legacy_defaults_fields(value: object) -> object:
 # Coverage: tests/test_config_validation_helpers.py::test_knowledge_reranker_key_still_loads,
 #   tests/test_config_validation_helpers.py::test_both_reranker_keys_rejected.
 def rename_legacy_knowledge_reranker(data: dict[str, object]) -> dict[str, object]:
-    """Return root config ``data`` with a retired ``knowledge_reranker`` key renamed to ``reranker``."""
+    """Rename a retired ``knowledge_reranker`` key of root config ``data`` to ``reranker`` in place, and return ``data``."""
     if "knowledge_reranker" not in data:
         return data
     if "reranker" in data:
@@ -121,9 +121,8 @@ def rename_legacy_knowledge_reranker(data: dict[str, object]) -> dict[str, objec
             "Both 'knowledge_reranker' and 'reranker' are set; 'knowledge_reranker' is the retired name, so remove it."
         )
         raise ValueError(msg)
-    renamed = {key: value for key, value in data.items() if key != "knowledge_reranker"}
-    renamed["reranker"] = data["knowledge_reranker"]
-    return renamed
+    data["reranker"] = data.pop("knowledge_reranker")
+    return data
 
 
 # LEGACY_COMPAT: Retired push-model auto-flush settings.
