@@ -59,15 +59,13 @@ Client tolerance: parse defensively. Drop an entry that lacks a string `id`, a k
 
 ## Backend (mindroom)
 
-Detailed wiring with file:line evidence: [`2026-11-17-inline-compaction-backend-wiring.md`](2026-11-17-inline-compaction-backend-wiring.md) ("Recommended wiring", T1-T9). Summary:
-
 - `CompactionLifecycleStart` gains `phase: CompactionPhase = "pre_turn"`; `compact_scope_mid_turn` passes `"mid_turn"`.
 - New `history/reply_compactions.py`: `ReplyCompactions` (per-reply recorder; `bind(tool_count, changed)`, `start`, `update`, `content`) and `ReplyCompactionLifecycle` (implements `CompactionLifecycle`; `mode == "manual"` delegates to `MatrixCompactionLifecycle`, which still sends the notice; everything else records into the recorder and sends no notice).
 - `response_runner._deliver_turn` creates one recorder per reply, hands it to the lifecycle and to streamed and collected delivery; `final_extra_content()` adds the key.
 - `StreamingResponse` adds the key to every durable write (progress and final) and puts the list into `LiveDocs`, which the frame publisher sends on its next tick. A compaction change never triggers, gates or requires a durable write: entries ride on the writes the stream makes anyway (text and tool progress, checkpoints due for other reasons, the placeholder send, the terminal write).
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
 - Unchanged: quiet/contact/participation turns and callers without a lifecycle stay silent; run-local summaries never use the lifecycle.
-- Known limits: a reply keeps only its newest 8 compactions (`MAX_REPLY_COMPACTIONS`), in its writes and frames alike. Without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
+- Known limits: a reply keeps only its newest 8 compactions (`MAX_REPLY_COMPACTIONS`), fewer when their JSON as Matrix sends it (ASCII escapes) exceeds 8 KiB (`MAX_REPLY_COMPACTIONS_BYTES`), in its writes and frames alike. Without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
 
 ## Client (mindroom-chat)
 

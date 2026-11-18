@@ -6,11 +6,11 @@
 
 **Goal:** Record each automatic compaction on the agent's reply event (`io.mindroom.compactions`) at the spot it happened, instead of posting a separate notice.
 
-**Architecture:** A per-reply recorder (`ReplyCompactions`) is written by a new `CompactionLifecycle` implementation and read by `StreamingResponse` on every durable write and live frame, with a refresh nudge on change, the same side channel worker warm-up progress uses. Manual compactions keep the old notice.
+**Architecture:** A per-reply recorder (`ReplyCompactions`) is written by a new `CompactionLifecycle` implementation and read by `StreamingResponse` on every durable write and live frame~~, with a refresh nudge on change, the same side channel worker warm-up progress uses~~ (nudge Superseded by 6f751569e: a compaction never triggers, gates or requires a durable write; live frames show it on the next tick, and the entries ride on the next write the stream makes anyway.). Manual compactions keep the old notice.
 
 **Tech Stack:** Python 3.13, asyncio, pytest (`pytest_asyncio` fixtures), nix-shell + uv.
 
-**Spec:** `docs/baspowers/specs/2026-11-17-inline-compaction-marker-design.md` (event contract), wiring evidence in `docs/baspowers/specs/2026-11-17-inline-compaction-backend-wiring.md` (section "Recommended wiring", T1-T9, with file:line refs on `origin/main` 125b6efa2).
+**Spec:** `docs/baspowers/specs/2026-11-17-inline-compaction-marker-design.md` (event contract).
 
 ## Global Constraints
 
@@ -59,7 +59,7 @@
   - In `tests/test_mid_turn_compaction.py`: recorded starts carry `phase == "mid_turn"`; in `tests/test_history_prepare_lifecycle.py`: one assertion that the pre-turn start has `phase == "pre_turn"`.
   - In `tests/test_response_runner_agent.py`: switch `test_generate_response_keeps_first_turn_follow_up_effects_in_new_thread` to `mode="manual"` (keeps the notice-routing assertion), and add `test_auto_compaction_records_on_reply_without_notice`: `_send_compaction_lifecycle_start` is not awaited and the final `$response` content has `io.mindroom.compactions[0]` with `status "success"`, `phase "pre_turn"`, `after_tool 0`.
 - [ ] **Step 2: Run them, expect failures** (import error / missing key).
-- [ ] **Step 3: Implement** per wiring doc T1-T5. `start` sets `started_at = time.time_ns() // 1_000_000`, `status = "running"`, `id = uuid4().hex`, `mode = event.mode`, `phase = event.phase`. The lifecycle remembers notice-routed ids in a `set[str]`. In `_deliver_collected`, bind the recorder to the collected presentation's tool count and a no-op `changed`.
+- [ ] **Step 3: Implement** ~~per wiring doc T1-T5~~ (wiring doc deleted). `start` sets `started_at = time.time_ns() // 1_000_000`, `status = "running"`, `id = uuid4().hex`, `mode = event.mode`, `phase = event.phase`. The lifecycle remembers notice-routed ids in a `set[str]`. In `_deliver_collected`, bind the recorder to the collected presentation's tool count~~ and a no-op `changed`~~ (callback removed in 6f751569e).
 - [ ] **Step 4: Run the touched test files** plus `tests/test_response_delivery_gateway.py`, `tests/test_partial_reply_context.py`; all pass.
 - [ ] **Step 5: Commit** (`git commit --trailer "Assisted-by: ..."`).
 
@@ -77,11 +77,11 @@
 - [ ] **Step 1: Write failing tests:**
   - `test_compaction_after_two_visible_tools_anchors_after_tool_2` and `test_compaction_with_hidden_tool_calls_anchors_at_zero` (live streaming harness next to the reasoning-segment tests).
   - `test_live_frames_carry_compactions_in_snapshot_and_delta` (frame unit: snapshot has `compactions`; a changed list yields a delta with the whole list; unchanged yields no key).
-  - `test_compaction_start_on_placeholder_sends_progress_edit` (no text yet: an edit of the placeholder carries the key), with live frames off; and `test_compaction_change_schedules_checkpoint_with_live_frames` (live on: `has_uncommitted_presentation` true and a checkpoint edit carries the key).
+  - ~~`test_compaction_start_on_placeholder_sends_progress_edit` (no text yet: an edit of the placeholder carries the key), with live frames off; and `test_compaction_change_schedules_checkpoint_with_live_frames` (live on: `has_uncommitted_presentation` true and a checkpoint edit carries the key).~~ Superseded by 6f751569e: a compaction never triggers, gates or requires a durable write; live frames show it on the next tick, and the entries ride on the next write the stream makes anyway.
   - `test_final_event_keeps_success_entry` and `test_failed_compaction_is_terminal_on_final_event`.
   - `test_split_reply_keeps_compactions_on_first_segment_only` (next to `test_split_reply_keeps_no_reasoning`).
   - `test_reply_with_compactions_is_not_skipped_from_unseen_context` (old singular notice still skipped).
 - [ ] **Step 2: Run, expect failures.**
-- [ ] **Step 3: Implement** per wiring doc T6-T8. The `changed` callback queues `_queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=not streaming.accumulated_text.strip())`, like `_drain_worker_progress_events`. Add the key to every durable write only when `content()` is not `None`.
+- [ ] **Step 3: Implement** ~~per wiring doc T6-T8. The `changed` callback queues `_queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=not streaming.accumulated_text.strip())`, like `_drain_worker_progress_events`.~~ (Superseded by 6f751569e: a compaction never triggers, gates or requires a durable write; live frames show it on the next tick, and the entries ride on the next write the stream makes anyway.) Add the key to every durable write only when `content()` is not `None`.
 - [ ] **Step 4: Run** the touched files plus `tests/test_streaming*.py tests/live_frames tests/test_large_messages_integration.py tests/test_response_runner_agent.py tests/test_reply_compactions.py`; all pass. (The controller runs the full suite afterwards on another machine.)
 - [ ] **Step 5: Commit.**
