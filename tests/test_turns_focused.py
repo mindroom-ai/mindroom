@@ -126,6 +126,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -4583,8 +4584,8 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     )
     router_harness = _build_harness(config, tmp_path / "router", agent_name=ROUTER_AGENT_NAME)
 
-    async def _route_to_general(*_args: object, **_kwargs: object) -> str:
-        return "general"
+    async def _route_to_general(*_args: object, **_kwargs: object) -> ResponderSelection:
+        return ResponderSelection("general")
 
     monkeypatch.setattr("mindroom.router.relay.suggest_responder_for_message", _route_to_general)
 

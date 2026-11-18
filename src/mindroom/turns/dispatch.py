@@ -342,10 +342,8 @@ class TurnDispatcher:
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
-                # Only a turn someone will answer: routed, or answered by this agent or its team.
-                if plan.kind == "route" or (
-                    plan.response_action is not None and plan.response_action.kind in {"individual", "team"}
-                ):
+                # Only a turn this agent or its team answers; a routed one gets its title from its responder.
+                if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
                     self._queue_prompt_summary(prepared)
                 await self._apply_turn_plan(
                     turn.room,
@@ -362,7 +360,7 @@ class TurnDispatcher:
                 timing_scope_context.reset(timing_scope_token)
 
     def _queue_prompt_summary(self, prepared: _PreparedTextDispatch) -> None:
-        """Start a new thread's title once selected to route or respond, before execution can block."""
+        """Start a new thread's title once selected to respond, before execution can block."""
         turn = prepared.turn
         thread_id = prepared.dispatch.target.resolved_thread_id
         if (
@@ -521,11 +519,14 @@ class TurnDispatcher:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return
         if plan.kind == "route":
-            await self._execute_route_plan(room, prepared, plan)
-            return
-
-        response_action = plan.response_action
-        assert response_action is not None
+            if not await self._execute_route_plan(room, prepared, plan):
+                return
+            # The steward selected itself, so it answers as if the message had named it.
+            self._queue_prompt_summary(prepared)
+            response_action = ResponseAction(kind="individual")
+        else:
+            assert plan.response_action is not None
+            response_action = plan.response_action
         # Orderly shutdown has closed task ownership, so no response is planned after it.
         if self.deps.runtime.phase is RunPhase.SHUTTING_DOWN:
             raise ResponseAdmissionRefusedError
@@ -598,7 +599,8 @@ class TurnDispatcher:
         room: nio.MatrixRoom,
         prepared: _PreparedTextDispatch,
         plan: DispatchPlan,
-    ) -> None:
+    ) -> bool:
+        """Route a turn as the room's steward; return whether the steward itself was selected and answers it."""
         turn = prepared.turn
         route_event = plan.router_event or turn.event
         single_direct_media_route = (
@@ -620,9 +622,9 @@ class TurnDispatcher:
             if tracked_turn is not None
             else None
         )
-        # Config application waits until the router's selection and its relay delivery finish.
+        # Config application waits until the selection and its relay delivery finish.
         async with self.deps.runtime.admission_fence():
-            await execute_router_relay(
+            return await execute_router_relay(
                 self.deps,
                 room,
                 route_event,

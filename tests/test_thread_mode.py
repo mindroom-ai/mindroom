@@ -33,6 +33,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.turn_record import TurnRecord
@@ -467,7 +468,10 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                AsyncMock(return_value=ResponderSelection("assistant")),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
@@ -504,7 +508,10 @@ class TestRouterHandoffThreadMode:
         room = _matrix_room("!room:localhost")
 
         with (
-            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                AsyncMock(return_value=ResponderSelection("coder")),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",

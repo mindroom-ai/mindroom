@@ -19,6 +19,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import MessageContext
@@ -73,13 +74,16 @@ def config(tmp_path: Path) -> Config:
     )
 
 
-def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
+def _policy_for(config: Config, agent_name: str, *, steward: str | None = ROUTER_AGENT_NAME) -> TurnPolicy:
+    """Return one bot's policy in a process whose rooms have ``steward`` as their steward."""
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
+    orchestrator = ready_runtime(config, runtime_paths)
+    orchestrator.steward = steward
     return TurnPolicy(
         make_test_turn_policy_deps(
             runtime=BotRuntimeState(
-                orchestrator=ready_runtime(config, runtime_paths),
+                orchestrator=orchestrator,
                 client=make_matrix_client_mock(),
             ),
             logger=get_logger("test_turn_policy"),
@@ -608,6 +612,86 @@ async def test_router_routes_untagged_message_with_multiple_candidates(config: C
 
     assert plan.kind == "route"
     assert plan.router_event is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general", "research", None])
+async def test_only_the_rooms_steward_routes_an_untagged_message(config: Config, steward: str | None) -> None:
+    """One bot per room routes a message that names nobody: its steward, the owner account or a candidate."""
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+
+    plans = {
+        name: await _plan(_policy_for(config, name, steward=steward), room, _dispatch(_context(), agent_name=name))
+        for name in (ROUTER_AGENT_NAME, "general", "research")
+    }
+
+    assert {name: plan.kind for name, plan in plans.items()} == {
+        name: "route" if name == steward else "ignore" for name in plans
+    }
+    assert plans[ROUTER_AGENT_NAME].ignore_reason == (None if steward == ROUTER_AGENT_NAME else "router")
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_steward_answers_by_its_own_rules_before_it_routes(config: Config) -> None:
+    """A steward that is a candidate answers its mention and its own thread itself, and routes neither."""
+    policy = _policy_for(config, "general", steward="general")
+    general_id = _entity_id(config, "general")
+    room = _room_with_members(_SENDER, general_id.full_id, _entity_id(config, "research").full_id)
+    mention = _context(mentioned=[general_id], am_i_mentioned=True)
+    own_thread = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender=_SENDER, body="please help"),
+            make_visible_message(sender=general_id.full_id, body="answering"),
+        ],
+    )
+    other_mention = _context(mentioned=[_entity_id(config, "research")])
+    other_thread = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender=_SENDER, body="please help"),
+            make_visible_message(sender=_entity_id(config, "research").full_id, body="answering"),
+        ],
+    )
+
+    plans = [
+        await _plan(policy, room, _dispatch(context, agent_name="general"))
+        for context in (mention, own_thread, other_mention, other_thread)
+    ]
+
+    assert [plan.kind for plan in plans] == ["respond", "respond", "ignore", "ignore"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general"])
+@pytest.mark.parametrize("router_admits", [True, False])
+async def test_router_access_restricts_routing_for_every_steward(
+    tmp_path: Path,
+    steward: str,
+    router_admits: bool,
+) -> None:
+    """`router.access`, when set, stays a restriction on whose message is routed, whoever the steward is."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name.title(), access=ResponderAccessConfig(users=[_SENDER]))
+                for name in ("general", "research")
+            },
+            router=RouterConfig(
+                access=ResponderAccessConfig(
+                    users=[_SENDER if router_admits else "@owner:localhost"],
+                    current_room_members=False,
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+
+    plan = await _plan(_policy_for(config, steward, steward=steward), room, _dispatch(_context(), agent_name=steward))
+
+    assert plan.kind == ("route" if router_admits else "ignore")
 
 
 @pytest.mark.asyncio

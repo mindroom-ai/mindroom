@@ -1,9 +1,8 @@
-"""Router relay delivery: target readiness, handoff metadata, and visible delivery."""
+"""Routing a turn that names nobody: the room's steward selects a responder and relays the turn to it."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.attachments.ids import merge_attachment_ids
@@ -13,17 +12,15 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
 )
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.routing import suggest_responder_for_message
-from mindroom.turn_origin import original_sender_for_router_handoff
+from mindroom.turn_origin import original_sender_for_router_relay
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -40,16 +37,9 @@ if TYPE_CHECKING:
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
-
-_ROUTER_TARGET_STARTING_TEXT = "That agent is still starting. Please try again shortly."
-_ROUTER_TARGET_UNAVAILABLE_TEXT = (
-    "⚠️ I couldn't determine which agent or team should help with this. "
-    "Please try mentioning an agent or team directly with @ or rephrase your request."
-)
 
 
 class _RouterRelaySupport(Protocol):
@@ -68,90 +58,53 @@ class _RouterRelaySupport(Protocol):
     normalizer: InboundTurnNormalizer
 
 
-@dataclass(frozen=True)
-class _RouterTargetResolution:
-    """One router target after its runtime readiness check."""
-
-    selected_entity: str | None
-    suggested_entity: str | None
-    response_text: str
-    target_unavailable: bool
-
-
-def _resolve_router_target(
-    orchestrator: OrchestratorRuntime,
-    suggested_entity: str | None,
-    scheduled_prompt: str | None,
-) -> _RouterTargetResolution | None:
-    """Resolve one target or retain recovered work until its runtime is ready."""
-    selected_entity = suggested_entity
-    target_starting = False
-    if suggested_entity is not None:
-        first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
-        suggested_entity = suggested_entity if first_sync_complete is True else None
-        target_starting = first_sync_complete is False
-    if target_starting and turn_dispatch_recovery_active():
+async def _select_responder(
+    deps: _RouterRelaySupport,
+    room: nio.MatrixRoom,
+    event: DispatchEvent,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    thread_id: str | None,
+    message: str | None,
+    requester_user_id: str,
+) -> str | None:
+    """Return the entity selected to answer one turn, or None when no candidate fits it."""
+    responder_candidates = await deps.turn_policy.responder_candidates_for_room(room, requester_user_id)
+    if not responder_candidates:
+        deps.logger.debug("No responders to route to in this room for sender", sender=requester_user_id)
         return None
-    if target_starting:
-        response_text = _ROUTER_TARGET_STARTING_TEXT
-    elif suggested_entity is None:
-        response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
-    else:
-        response_text = (
-            f"@{suggested_entity} {scheduled_prompt}"
-            if scheduled_prompt is not None
-            else f"@{suggested_entity} could you help with this?"
-        )
-    return _RouterTargetResolution(
-        selected_entity=selected_entity,
-        suggested_entity=suggested_entity,
-        response_text=response_text,
-        target_unavailable=not target_starting and suggested_entity is None,
-    )
+    with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+        if len(responder_candidates) > 1:
+            deps.logger.info("Handling AI routing", event_id=event.event_id)
+            selection = await suggest_responder_for_message(
+                message or event.body,
+                responder_candidates,
+                deps.runtime.config,
+                deps.runtime_paths,
+                thread_history,
+                room_id=room.room_id,
+                thread_id=thread_id,
+            )
+            if selection is not None:
+                return selection.entity_name
+            # A failed selection must not leave the person without an answer.
+            deps.logger.warning("Routing failed; the candidate with the lowest Matrix ID answers")
+        else:
+            deps.logger.info("Handling deterministic routing", event_id=event.event_id)
+        fallback = min(responder_candidates, key=lambda candidate: candidate.full_id)
+        return deps.ingress.managed_entity_name_for_sender(fallback.full_id)
 
 
-@dataclass(frozen=True)
-class _RouterRelayDelivery:
-    """One final router relay delivery decision."""
+async def _responder_ready(deps: _RouterRelaySupport, entity_name: str, turn: TurnRecord) -> bool:
+    """Return whether the selected responder can take the turn now.
 
-    event_id: str | None
-    suggested_entity: str | None
-    deferred_for_recovery: bool = False
-
-
-async def _send_router_relay_after_readiness_recheck(
-    *,
-    orchestrator: OrchestratorRuntime,
-    delivery_gateway: DeliveryGateway,
-    selected_entity: str | None,
-    suggested_entity: str | None,
-    delivery_request: SendTextRequest,
-) -> _RouterRelayDelivery:
-    """Recheck one sampled target immediately before sending its relay."""
-    final_readiness = None if selected_entity is None else orchestrator.entity_first_sync_complete(selected_entity)
-    if selected_entity is None or final_readiness is True:
-        return _RouterRelayDelivery(
-            event_id=await delivery_gateway.send_text(delivery_request),
-            suggested_entity=suggested_entity,
-        )
-    if final_readiness is False and turn_dispatch_recovery_active():
-        return _RouterRelayDelivery(
-            event_id=None,
-            suggested_entity=suggested_entity,
-            deferred_for_recovery=True,
-        )
-    fallback_extra_content = dict(delivery_request.extra_content or {})
-    fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
-    fallback_extra_content.pop(SOURCE_KIND_KEY, None)
-    fallback_request = replace(
-        delivery_request,
-        response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
-        extra_content=fallback_extra_content or None,
-    )
-    return _RouterRelayDelivery(
-        event_id=await delivery_gateway.send_text(fallback_request),
-        suggested_entity=None,
-    )
+    A turn whose responder is still starting stays pending, and is routed again once that responder is ready.
+    One whose responder stopped meanwhile settles unanswered.
+    """
+    readiness = deps.runtime.orchestrator.entity_first_sync_complete(entity_name)
+    if readiness is None:
+        deps.logger.warning("Selected responder is not running", entity=entity_name)
+        await deps.visible_responses.settle_source_events_ignored(turn)
+    return readiness is True
 
 
 def _router_handoff_extra_content(
@@ -159,7 +112,6 @@ def _router_handoff_extra_content(
     *,
     event: DispatchEvent,
     extra_content: dict[str, Any] | None,
-    suggested_entity: str | None,
     requester_user_id: str,
     thread_event_id: str | None,
 ) -> dict[str, Any]:
@@ -169,8 +121,7 @@ def _router_handoff_extra_content(
     routed_extra_content.pop(PER_FIRE_THREAD_ROOT_KEY, None)
     inherited_original_sender = routed_extra_content.get(ORIGINAL_SENDER_KEY)
     inherited_original_sender = inherited_original_sender if isinstance(inherited_original_sender, str) else None
-    handoff_original_sender = original_sender_for_router_handoff(
-        target_entity_name=suggested_entity,
+    handoff_original_sender = original_sender_for_router_relay(
         requester_id=requester_user_id,
         requester_entity_name=deps.ingress.managed_entity_name_for_sender(requester_user_id),
         inherited_original_sender=inherited_original_sender,
@@ -238,7 +189,7 @@ async def _router_handoff_with_attachments(
     return extra_content
 
 
-async def execute_router_relay(
+async def execute_router_relay(  # noqa: PLR0911
     deps: _RouterRelaySupport,
     room: nio.MatrixRoom,
     event: DispatchEvent,
@@ -251,76 +202,45 @@ async def execute_router_relay(
     media_events: list[MediaDispatchEvent] | None = None,
     handled_turn: TurnRecord | None = None,
     scheduled_prompt: str | None = None,
-) -> None:
-    """Run one explicit router relay from turn dispatch."""
-    assert deps.agent_name == ROUTER_AGENT_NAME
+) -> bool:
+    """Route one turn as the room's steward; return whether the steward itself was selected and answers it.
 
+    Nobody answers a turn that no candidate fits.
+    """
     source_turn = handled_turn or TurnRecord.create([event.event_id])
-    responder_candidates = await deps.turn_policy.responder_candidates_for_room(room, requester_user_id)
-    if not responder_candidates:
-        deps.logger.debug(
-            "No responders to route to in this room for sender",
-            sender=requester_user_id,
-        )
+    suggested_entity = await _select_responder(
+        deps,
+        room,
+        event,
+        thread_history,
+        thread_id,
+        message,
+        requester_user_id,
+    )
+    if suggested_entity is None:
         await deps.visible_responses.settle_source_events_ignored(source_turn)
-        return
+        return False
+    if suggested_entity == deps.agent_name:
+        return True
+    if not await _responder_ready(deps, suggested_entity, source_turn):
+        return False
 
-    with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-        if len(responder_candidates) == 1:
-            suggested_entity = deps.ingress.managed_entity_name_for_sender(responder_candidates[0].full_id)
-            deps.logger.info("Handling deterministic routing", event_id=event.event_id)
-        else:
-            deps.logger.info("Handling AI routing", event_id=event.event_id)
-
-            routing_text = message or event.body
-            suggested_entity = await suggest_responder_for_message(
-                routing_text,
-                responder_candidates,
-                deps.runtime.config,
-                deps.runtime_paths,
-                thread_history,
-                room_id=room.room_id,
-                thread_id=thread_id,
-            )
-
-    target_resolution = _resolve_router_target(
-        deps.runtime.orchestrator,
-        suggested_entity,
-        scheduled_prompt,
-    )
-    if target_resolution is None:
-        return
-    selected_entity, suggested_entity, response_text = (
-        target_resolution.selected_entity,
-        target_resolution.suggested_entity,
-        target_resolution.response_text,
-    )
-    if target_resolution.target_unavailable:
-        with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-            deps.logger.warning("Router failed to determine entity")
-
-    target_thread_mode = (
-        deps.runtime.config.get_entity_thread_mode(
-            suggested_entity,
-            deps.runtime_paths,
-            room_id=room.room_id,
-        )
-        if suggested_entity
-        else None
-    )
     resolved_target = deps.resolver.build_message_target(
         room_id=room.room_id,
         thread_id=thread_id,
         reply_to_event_id=event.event_id,
         event_source=event.source,
-        thread_mode_override=target_thread_mode,
+        thread_mode_override=deps.runtime.config.get_entity_thread_mode(
+            suggested_entity,
+            deps.runtime_paths,
+            room_id=room.room_id,
+        ),
     )
     thread_event_id = resolved_target.resolved_thread_id
     routed_extra_content = _router_handoff_extra_content(
         deps,
         event=event,
         extra_content=extra_content,
-        suggested_entity=suggested_entity,
         requester_user_id=requester_user_id,
         thread_event_id=thread_event_id,
     )
@@ -333,11 +253,6 @@ async def execute_router_relay(
         extra_content=routed_extra_content,
     )
 
-    delivery_request = SendTextRequest(
-        target=resolved_target,
-        response_text=response_text,
-        extra_content=routed_extra_content or None,
-    )
     (
         tracked_handled_turn,
         recovered_response_event_id,
@@ -349,32 +264,35 @@ async def execute_router_relay(
         excluded_event_ids=await deps.turn_store.finalized_visible_echoes(source_turn.source_event_ids),
     )
     if tracked_handled_turn is None:
-        return
+        return False
     if recovered_response_event_id is not None:
         await deps.turn_store.record_responded_turn(
             canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
         )
-        return
-    relay_delivery = await _send_router_relay_after_readiness_recheck(
-        orchestrator=deps.runtime.orchestrator,
-        delivery_gateway=deps.delivery_gateway,
-        selected_entity=selected_entity,
-        suggested_entity=suggested_entity,
-        delivery_request=delivery_request,
+        return False
+    # The responder may have stopped or restarted while the relay was prepared.
+    if not await _responder_ready(deps, suggested_entity, tracked_handled_turn):
+        return False
+    event_id = await deps.delivery_gateway.send_text(
+        SendTextRequest(
+            target=resolved_target,
+            response_text=(
+                f"@{suggested_entity} {scheduled_prompt}"
+                if scheduled_prompt is not None
+                else f"@{suggested_entity} could you help with this?"
+            ),
+            extra_content=routed_extra_content or None,
+        ),
     )
-    if relay_delivery.deferred_for_recovery:
-        return
-    event_id = relay_delivery.event_id
-    suggested_entity = relay_delivery.suggested_entity
     with bound_log_context(**resolved_target.log_context):
-        if event_id:
-            deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-            # The relay is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
-            await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
-            await deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
-            )
-        else:
+        if not event_id:
             deps.logger.error("Failed to route to entity", entity=suggested_entity)
             msg = f"Failed to route to entity {suggested_entity!r}"
             raise RuntimeError(msg)
+        deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
+        # The relay is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
+        await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
+        await deps.turn_store.record_responded_turn(
+            canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
+        )
+    return False

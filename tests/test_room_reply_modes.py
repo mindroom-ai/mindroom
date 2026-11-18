@@ -683,7 +683,7 @@ async def _who_acts(
     voice_audio = Audio(content=b"voice", mime_type="audio/ogg")
 
     with (
-        patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as relay,
+        patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock, return_value=False) as relay,
         patch(
             "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
             new=AsyncMock(return_value=attachment),

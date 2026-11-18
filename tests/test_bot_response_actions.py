@@ -1295,7 +1295,7 @@ class TestAgentBot(AgentBotTestBase):
             envelope=envelope,
         )
 
-        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
+        plan = await bot._turn_policy._plan_routing(room, event, dispatch)
 
         assert plan is not None
         assert plan.kind == "route"
@@ -1743,6 +1743,6 @@ class TestAgentBot(AgentBotTestBase):
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
-        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
+        plan = await bot._turn_policy._plan_routing(room, event, dispatch)
 
         assert plan == DispatchPlan(kind="ignore", ignore_reason="router")

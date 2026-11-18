@@ -1642,7 +1642,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -1729,7 +1733,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -1837,7 +1845,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -2072,7 +2084,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,

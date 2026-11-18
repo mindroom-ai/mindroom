@@ -213,6 +213,9 @@ def _router_readiness_runtime(
     )
     room = nio.MatrixRoom(room_id=room_id, own_user_id=ids["router"].full_id)
     room.users = {ids["general"].full_id: MagicMock(), "@user:localhost": MagicMock()}
+    # The owner account holds power in the rooms it created, which makes it their steward.
+    room.power_levels.users[ids["router"].full_id] = 100
+    router_bot.client.rooms[room_id] = room
     return router_bot, target_bot, orchestrator, room
 
 
@@ -254,6 +257,8 @@ def _selective_router_recovery_runtime(
         ids["stuck"].full_id: MagicMock(),
         "@user:localhost": MagicMock(),
     }
+    # The owner account holds power in the rooms it created, which makes it their steward.
+    room.power_levels.users[ids["router"].full_id] = 100
     router_bot.client.rooms[room_id] = room
     return router_bot, healthy_bot, stuck_bot, room
 
@@ -270,7 +275,7 @@ def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
     )
 
 
-def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[None]:
+def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[bool]:
     return execute_router_relay(
         router_bot._turn_dispatcher.deps,
         room,
@@ -321,7 +326,7 @@ async def test_suggest_responder_for_message_returns_aliases_for_actual_ids(
         thread_id="$thread",
     )
 
-    assert result == "news"
+    assert result == ResponderSelection("news")
     mock_suggest_responder.assert_awaited_once()
     assert mock_suggest_responder.await_args.args[1] == ["news", "facts"]
     assert mock_suggest_responder.await_args.args[4][0].sender == "facts"
@@ -555,7 +560,7 @@ class TestRoutingRegression:
             {"event_id": "$router-response"},
             room_id=room_id,
         )
-        mock_suggest_responder.return_value = "healthy"
+        mock_suggest_responder.return_value = ResponderSelection("healthy")
         await admit_dispatch_event(
             router_bot._journal_dispatcher,
             room,
@@ -573,7 +578,7 @@ class TestRoutingRegression:
 
         blocked_event = _router_readiness_event("$blocked-recovery")
         mock_suggest_responder.reset_mock(return_value=True)
-        mock_suggest_responder.return_value = "stuck"
+        mock_suggest_responder.return_value = ResponderSelection("stuck")
         router_bot.client.room_send.reset_mock()
         await admit_dispatch_event(
             router_bot._journal_dispatcher,
@@ -605,18 +610,19 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
-        """An unavailable target gets a visible status, then one relay after readiness."""
+        """A turn whose responder is still starting stays pending with nothing sent, and is relayed once it is ready."""
         router_bot, target_bot, _, room = _router_readiness_runtime(tmp_path)
         await _router_relay(router_bot, room, "$before-ready")
+        router_bot.client.room_send.assert_not_awaited()
+        assert not await router_bot._turn_store.is_handled(room.room_id, "$before-ready")
         target_bot._first_sync_done = True
-        await _router_relay(router_bot, room, "$after-ready")
+        await _router_relay(router_bot, room, "$before-ready")
         sent_contents = [call.kwargs["content"] for call in router_bot.client.room_send.await_args_list]
-        assert sent_contents[0]["body"] == "That agent is still starting. Please try again shortly."
-        assert ORIGINAL_SENDER_KEY not in sent_contents[0]
-        assert SOURCE_KIND_KEY not in sent_contents[0]
-        assert sent_contents[1][SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-        assert sent_contents[1]["body"] == "@mindroom_general:localhost could you help with this?"
-        assert sent_contents[1][ORIGINAL_SENDER_KEY] == "@user:localhost"
+        assert len(sent_contents) == 1
+        assert sent_contents[0][SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        assert sent_contents[0]["body"] == "@mindroom_general:localhost could you help with this?"
+        assert sent_contents[0][ORIGINAL_SENDER_KEY] == "@user:localhost"
+        assert await router_bot._turn_store.is_handled(room.room_id, "$before-ready")
 
     @pytest.mark.asyncio
     async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
@@ -651,7 +657,8 @@ class TestRoutingRegression:
         swap_fleet_bot(orchestrator, "general", replacement)
         admission_gate.reopen()
         await target_reload_task
-        assert router_bot.client.room_send.await_count == 1
+        # The replacement is still starting, so the turn stays pending with nothing sent.
+        router_bot.client.room_send.assert_not_awaited()
         replacement.first_sync_complete = True
 
         router_bot.client.room_send.side_effect = blocking_room_send
@@ -663,10 +670,9 @@ class TestRoutingRegression:
         await asyncio.gather(relay_task, replacement_task)
 
         assert orchestrator.agent_bots["general"] is fresh_replacement
+        sends_before = router_bot.client.room_send.await_count
         await admitted_relay("$replacement-starting")
-        content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "That agent is still starting. Please try again shortly."
-        assert SOURCE_KIND_KEY not in content
+        assert router_bot.client.room_send.await_count == sends_before
 
         coalescing_gate = CoalescingGate(
             dispatch_turn=lambda _: admitted_relay("$router-shutdown"),
@@ -687,6 +693,23 @@ class TestRoutingRegression:
         )
         await coalescing_gate.drain_all()
         await router_bot.prepare_for_sync_shutdown()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_steward_the_selection_names_sends_no_relay(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A candidate that routes as the room's steward and is selected answers itself: no relay, nothing settled."""
+        _router_bot, healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        mock_suggest_responder.return_value = ResponderSelection("healthy")
+
+        answers_itself = await _router_relay(healthy_bot, room, "$routes-to-itself")
+
+        assert answers_itself is True
+        healthy_bot.client.room_send.assert_not_awaited()
+        assert not await healthy_bot._turn_store.is_handled(room.room_id, "$routes-to-itself")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(
@@ -781,7 +804,7 @@ class TestRoutingRegression:
         mock_ai_response = AsyncMock()
         mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that research!"
-        mock_suggest_responder.return_value = "news"  # Router would pick news
+        mock_suggest_responder.return_value = ResponderSelection("news")  # Router would pick news
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -883,7 +906,7 @@ class TestRoutingRegression:
         mock_ai_response = AsyncMock()
         mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that!"
-        mock_suggest_responder.return_value = "research"  # Router picks research
+        mock_suggest_responder.return_value = ResponderSelection("research")  # Router picks research
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -1067,7 +1090,7 @@ class TestRoutingRegression:
             config=test_config,
         )
 
-        mock_suggest_responder.return_value = "beta"
+        mock_suggest_responder.return_value = ResponderSelection("beta")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$managed_requester_response"
@@ -1109,13 +1132,20 @@ class TestRoutingRegression:
             assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("selection", "relayed_to"),
+        [(None, "alpha"), (ResponderSelection(None), None), (ResponderSelection("beta"), "beta")],
+        ids=["selector-fails", "no-fit", "selected"],
+    )
     @patch("mindroom.router.relay.suggest_responder_for_message")
-    async def test_router_relay_failure_does_not_stamp_original_sender(
+    async def test_a_failed_selection_falls_back_and_a_turn_nobody_fits_stays_unanswered(
         self,
         mock_suggest_responder: AsyncMock,
         tmp_path: Path,
+        selection: ResponderSelection | None,
+        relayed_to: str | None,
     ) -> None:
-        """Router failure notices are not trusted handoffs to another responder."""
+        """A failed selection goes to the candidate with the lowest Matrix ID; a turn nobody fits gets no relay."""
         test_room_id = "!router-failure:localhost"
         test_config = _runtime_bound_config(
             with_current_room_member_access(
@@ -1146,7 +1176,7 @@ class TestRoutingRegression:
             config=test_config,
         )
 
-        mock_suggest_responder.return_value = None
+        mock_suggest_responder.return_value = selection
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$router_failure_response"
@@ -1180,11 +1210,14 @@ class TestRoutingRegression:
             requester_user_id="@user:localhost",
         )
 
+        if relayed_to is None:
+            router_bot.client.room_send.assert_not_awaited()
+            return
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert "couldn't determine which agent or team should help" in content["body"]
-        assert ORIGINAL_SENDER_KEY not in content
-        assert SOURCE_KIND_KEY not in content
+        assert content["body"] == f"{ids[relayed_to].full_id} could you help with this?"
+        assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
+        assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     def test_router_original_sender_metadata_requires_canonical_relay_source_kind(
         self,
@@ -1553,7 +1586,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_responder.return_value = "news"
+        mock_suggest_responder.return_value = ResponderSelection("news")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_789_multi"
@@ -1635,7 +1668,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_responder.return_value = "research"
+        mock_suggest_responder.return_value = ResponderSelection("research")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_791"
@@ -1716,7 +1749,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_responder.return_value = "research"
+        mock_suggest_responder.return_value = ResponderSelection("research")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_790"

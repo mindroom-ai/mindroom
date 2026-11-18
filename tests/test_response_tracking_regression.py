@@ -20,6 +20,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -266,7 +267,7 @@ class TestResponseTrackingRegression:
         bot.client.room_send.return_value = mock_send_response
 
         # Mock suggest_responder to return "research"
-        mock_suggest_responder.return_value = "research"
+        mock_suggest_responder.return_value = ResponderSelection("research")
 
         # Create a regular message (no mentions)
         message_event = MagicMock(spec=nio.RoomMessageText)

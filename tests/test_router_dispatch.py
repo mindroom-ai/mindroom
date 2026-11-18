@@ -21,13 +21,13 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import prepare_media_ingress
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router.relay import _send_router_relay_after_readiness_recheck, execute_router_relay
+from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_record import TurnRecord
@@ -110,7 +110,11 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
@@ -250,7 +254,11 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
@@ -349,7 +357,11 @@ class TestAgentBot(AgentBotTestBase):
             plans.append((plan.kind, plan.ignore_reason, tuple(prepared.handled_turn.source_event_ids)))
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(TurnDispatcher, "_apply_turn_plan", new=record_plan),
@@ -434,7 +446,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
-                return_value="general",
+                return_value=ResponderSelection("general"),
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -643,7 +655,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
-                return_value="general",
+                return_value=ResponderSelection("general"),
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -706,7 +718,11 @@ class TestAgentBot(AgentBotTestBase):
         image_event.source = {"content": {"body": "image.jpg"}}
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
@@ -787,7 +803,11 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
@@ -803,7 +823,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
-                return_value="general",
+                return_value=ResponderSelection("general"),
             ),
         ):
             await bot._on_message(room, event)
@@ -953,7 +973,11 @@ class TestAgentBot(AgentBotTestBase):
         image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$skip_img")
 
         with (
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
@@ -1103,28 +1127,3 @@ class TestAgentBot(AgentBotTestBase):
         assert list(call_kwargs["media"].images) == []
         assert call_kwargs["attachment_ids"] == ["att_img_root"]
         assert call_kwargs["model_prompt"] is None
-
-
-@pytest.mark.asyncio
-async def test_a_relay_that_selected_no_agent_sends_its_reply_unchanged() -> None:
-    """With no agent selected there is no readiness to recheck, so the router's reply goes out as built."""
-    orchestrator = MagicMock()
-    delivery_gateway = MagicMock()
-    delivery_gateway.send_text = AsyncMock(return_value="$relay")
-    request = SendTextRequest(
-        target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        response_text="No agent fits this request.",
-        extra_content={ORIGINAL_SENDER_KEY: "@alice:localhost"},
-    )
-
-    delivery = await _send_router_relay_after_readiness_recheck(
-        orchestrator=orchestrator,
-        delivery_gateway=delivery_gateway,
-        selected_entity=None,
-        suggested_entity=None,
-        delivery_request=request,
-    )
-
-    delivery_gateway.send_text.assert_awaited_once_with(request)
-    orchestrator.entity_first_sync_complete.assert_not_called()
-    assert delivery.event_id == "$relay"

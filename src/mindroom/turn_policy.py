@@ -581,7 +581,27 @@ class TurnPolicy:
             available_responders=await self.responder_candidates_for_room(room, requester_user_id),
         )
 
-    async def _plan_router_dispatch(  # noqa: PLR0911
+    def _is_room_steward(self, room_id: str) -> bool:
+        """Return whether this bot is the room's steward, the one bot that routes there."""
+        steward = self.deps.runtime.orchestrator.room_steward(room_id)
+        return steward is not None and steward.agent_name == self.deps.agent_name
+
+    def _routing_admits(self, requester_user_id: str, room_id: str) -> bool:
+        """Return whether this requester's message may be routed: `router.access`, when set, restricts routing.
+
+        Unset, it restricts nothing more: the owner account's ingress applied its default, and each candidate its own.
+        """
+        return self.deps.runtime.config.router.access is None or is_sender_allowed_for_agent_reply_in_room(
+            requester_user_id,
+            ROUTER_AGENT_NAME,
+            self.deps.runtime.config,
+            room_id,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+            require_resolved_membership=True,
+        )
+
+    async def _plan_routing(  # noqa: PLR0911
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -591,21 +611,25 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> DispatchPlan | None:
-        """Return one router-specific dispatch plan when this entity is the router."""
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            return None
+    ) -> DispatchPlan:
+        """Plan a turn this entity does not answer by its own rules: the room's steward routes one that names nobody.
 
+        The steward is the owner account, which answers no message, or a candidate whose own rules skipped the turn.
+        """
+        is_router = self.deps.agent_name == ROUTER_AGENT_NAME
+        is_steward = self._is_room_steward(room.room_id)
+        ignore = DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
+        if not is_router and not is_steward:
+            return ignore
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
         mention = self._router_mention(context.mentioned_agents, has_non_agent_mentions=context.has_non_agent_mentions)
-        ignore = DispatchPlan(kind="ignore", ignore_reason="router")
-        if mention == "addressed_elsewhere":
+        if mention is not None and not (is_router and mention == "router_only"):
             return ignore
         if mention is None and context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             return ignore
-        if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+        if not self._routing_admits(requester_user_id, room.room_id):
             return ignore
         if mention == "router_only":
             reply_mode = self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room.room_id)
@@ -614,6 +638,8 @@ class TurnPolicy:
                 kind="respond",
                 response_action=ResponseAction(kind="reject", rejection_message=guidance),
             )
+        if not is_steward:
+            return ignore
         available_responders = await self.responder_candidates_for_room(room, requester_user_id)
         if context.is_thread and self._thread_defers_to_named_responders(
             context.planning_thread_history,
@@ -645,16 +671,27 @@ class TurnPolicy:
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
-        """Return the explicit policy plan for one prepared inbound turn."""
+        """Return the explicit policy plan for one prepared inbound turn.
+
+        A bot answers by its own rules first; a turn they leave unanswered is routed by the room's steward alone.
+        """
+        is_router = self.deps.agent_name == ROUTER_AGENT_NAME
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
             if dispatch.context.planning_thread_history_unavailable:
-                # As the router's own skip below does, say when an unread thread, not the message, decided it.
+                # As the routing skip does, say when an unread thread, not the message, decided it.
                 self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
             else:
                 self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
-            is_router = self.deps.agent_name == ROUTER_AGENT_NAME
             return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
-        router_plan = await self._plan_router_dispatch(
+        if not is_router:
+            action = await self._resolve_response_action(
+                dispatch,
+                room,
+                has_active_response_for_target=has_active_response_for_target,
+            )
+            if action.kind != "skip":
+                return DispatchPlan(kind="respond", response_action=action)
+        return await self._plan_routing(
             room,
             event,
             dispatch,
@@ -663,17 +700,6 @@ class TurnPolicy:
             media_events=media_events,
             router_event=router_event,
         )
-        if router_plan is not None:
-            return router_plan
-
-        action = await self._resolve_response_action(
-            dispatch,
-            room,
-            has_active_response_for_target=has_active_response_for_target,
-        )
-        if action.kind == "skip":
-            return DispatchPlan(kind="ignore")
-        return DispatchPlan(kind="respond", response_action=action)
 
     def _reply_mode_awaits_mention(
         self,

@@ -1111,6 +1111,58 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_a_candidate_steward_that_selects_itself_answers_the_turn_itself(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A steward the selection names answers as if the message had named it, and its title is queued."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$prompt",
+            body="Plan a trip",
+            source={"content": {"body": "Plan a trip", "msgtype": "m.text"}},
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id="$prompt", reply_to_event_id="$prompt")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$prompt",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$prompt",
+            envelope=_hook_envelope(body="Plan a trip", source_event_id="$prompt", target=target),
+        )
+        replace_turn_deps(
+            bot,
+            turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=DispatchPlan(kind="route"))),
+        )
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock()) as respond,
+            patch("mindroom.turns.dispatch.execute_router_relay", new=AsyncMock(return_value=True)) as relay,
+            patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as summary,
+        ):
+            await dispatch_test_turn(bot._turn_dispatcher, room, event, event.sender)
+
+        relay.assert_awaited_once()
+        respond.assert_awaited_once()
+        assert respond.await_args.args[3] == ResponseAction(kind="individual")
+        summary.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_trusted_internal_router_relays_use_gate_bypass(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -2740,7 +2792,10 @@ class TestAgentBot(AgentBotTestBase):
         prompt_kind: Literal["text", "voice_transcript", "raw_audio_fallback"],
         action: Literal["ignore", "route", "individual", "team", "skip", "reject"],
     ) -> None:
-        """Turns that will be answered queue their prompt without waiting; others, and untranscribed audio, never do."""
+        """Turns this bot answers queue their prompt without waiting; others, and untranscribed audio, never do.
+
+        A routed turn gets its title from its responder, never from the steward that routes it.
+        """
         voice = prompt_kind != "text"
         config = self._config_for_storage(tmp_path)
         config.defaults.thread_summary_first_threshold = 1
@@ -2781,7 +2836,7 @@ class TestAgentBot(AgentBotTestBase):
             if action in {"ignore", "route"}
             else DispatchPlan(kind="respond", response_action=ResponseAction(kind=action))
         )
-        queued = action in {"route", "individual", "team"} and prompt_kind != "raw_audio_fallback"
+        queued = action in {"individual", "team"} and prompt_kind != "raw_audio_fallback"
         replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
 
         async def summarize(*_args: object, **kwargs: object) -> None:
