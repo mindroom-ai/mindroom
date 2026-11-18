@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-# A busy room otherwise starts a pass about every 10 seconds, nearly every one finding all its threads unchanged.
+# Long enough that a busy room is not re-exported every few seconds with nearly all of its threads unchanged.
 _DEBOUNCE_SECONDS = 60.0
 
 
@@ -108,7 +108,7 @@ class WorkspaceThreadExportRunner:
         self._exported: dict[str, ExportedThreads] = {}
 
     async def sync(self, config: Config) -> None:  # noqa: ARG002 - each pass reads the active config
-        """Start the loop, and reconcile every workspace against a changed config right away.
+        """Start the loop, and queue a pass that reconciles every workspace against a changed config.
 
         The first sync, from startup maintenance, finds the startup pass already queued once bots ran, so only later syncs queue one.
         """

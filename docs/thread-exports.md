@@ -41,7 +41,7 @@ Size limits:
 
 ## When Workspace Exports Update
 
-MindRoom re-exports a room about a minute after a message, edit, redaction, or membership change in it, and runs a full pass at startup and after every config reload.
+MindRoom re-exports a room about a minute after a message, edit, redaction, or membership change in it, and runs a full pass about a minute after startup and after every config reload.
 A full pass removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any agent whose `thread_exports` was removed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 
@@ -87,7 +87,7 @@ agents:
         description: Your exported conversation history
 ```
 
-The active thread's file is rewritten on every message, so a watching index re-embeds that thread per message.
+While a room is busy, its active thread's file is rewritten about once a minute, and a watching index re-embeds that thread each time.
 This is negligible with a local embedder but costs real money with paid embedding APIs in busy rooms.
 
 ## threads export
