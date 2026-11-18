@@ -3821,6 +3821,7 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 | `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
 
 Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
 `memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
@@ -4211,7 +4212,7 @@ A base whose folder sandboxed workers can write, or that contains such a folder,
 ### Reranking
 
 A reranker reads the query together with each candidate chunk and reorders them.
-A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3` (measured before MindRoom capped its input at 1024 tokens), and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
 Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
@@ -4242,6 +4243,8 @@ If the reranker fails, the search returns its results in the merged order and lo
 
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, or to the model's own limit if that is shorter, which cuts ordinary default chunks too, since most full 5,000-character chunks exceed 1024 `BAAI/bge-reranker-v2-m3` tokens.
+The cap limits how much memory one search can need, but it does not guarantee a peak.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 #### Judgment rerankers
@@ -6238,10 +6241,11 @@ MindRoom Chat marks each event of such a submission so MindRoom does not have to
 ```
 
 - `more: true` says the client sends another event of this submission without the person doing anything, so MindRoom waits up to 10 seconds after that event for the next one instead of `debounce_ms`, which covers sync delays between the events.
-- The submission's last event carries `more: false`, read as `false` when missing, and MindRoom replies at once, even when that event is a file.
+- The submission's last event carries `more: false`, and MindRoom replies at once, even when that event is a file.
 - When the last event never arrives, MindRoom answers what did after those 10 seconds; shutdown never waits for an open submission.
 - A text-only message carries no marker.
-  A marker that is not an object with a non-empty string `id` and a boolean `more` is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
+  MindRoom Chat always writes both fields; MindRoom reads a missing `more` as `false`.
+  A marker that is not an object with a non-empty string `id`, or whose `more` is present but not a boolean, is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
 
 The wait only holds the sender's own submission, and only while no response to its conversation is already running.
 
@@ -6799,7 +6803,7 @@ Size limits:
 
 ## When Workspace Exports Update
 
-MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, and runs a full pass at startup and after every config reload.
+MindRoom re-exports a room about a minute after a message, edit, redaction, or membership change in it, and runs a full pass about a minute after startup and after every config reload.
 A full pass removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any agent whose `thread_exports` was removed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 
@@ -6845,7 +6849,7 @@ agents:
         description: Your exported conversation history
 ```
 
-The active thread's file is rewritten on every message, so a watching index re-embeds that thread per message.
+While a room is busy, its active thread's file is rewritten about once a minute, and a watching index re-embeds that thread each time.
 This is negligible with a local embedder but costs real money with paid embedding APIs in busy rooms.
 
 ## threads export

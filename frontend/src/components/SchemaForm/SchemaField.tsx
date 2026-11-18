@@ -893,8 +893,13 @@ function UnionEditor({
             schema={selected.schema}
             root={root}
             value={effective}
-            // Pydantic reports discriminated-union errors under the tag value.
-            path={[...path, selected.errorTag ?? ""]}
+            // Pydantic reports discriminated-union errors under the tag value,
+            // which a variant with a free tag takes from the entry itself.
+            path={[
+              ...path,
+              selected.errorTag ??
+                String((effective as Record<string, unknown>)[discriminator]),
+            ]}
             // A variant with a fixed tag sets it itself; the fallback variant lets the user type it.
             exclude={
               selected.discriminatorValue === undefined ? [] : [discriminator]

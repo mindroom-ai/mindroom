@@ -3094,7 +3094,7 @@
         "provider",
         "model"
       ],
-      "title": "KnowledgeRerankerConfig",
+      "title": "Cohere, Sentence Transformers or Vertex AI",
       "type": "object"
     },
     "LLMJudgmentConfig": {
