@@ -681,7 +681,7 @@ class StreamingResponse:
             self._reasoning_segments.append(
                 {
                     "start": utf16_length(self.reasoning_text),
-                    "after_tool": len(self.tool_trace) if self.show_tool_calls else 0,
+                    "after_tool": self.visible_tool_count(),
                 },
             )
         self.reasoning_text += text
@@ -693,6 +693,10 @@ class StreamingResponse:
             self._reasoning_seconds += elapsed
             self._reasoning_segments[-1]["duration_ms"] = round(elapsed * 1000)
             self._reasoning_segment_started_at = None
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far, where a new reasoning segment or compaction anchors."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
 
     @property
     def live_active(self) -> bool:
@@ -2273,7 +2277,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         if compactions is not None:
             # A compaction anchors after the tool calls shown so far. Its entries ride on the writes the stream makes
             # anyway and on its live frames; a change alone never asks for a durable write.
-            compactions.bind(tool_count=lambda: len(streaming.tool_trace) if streaming.show_tool_calls else 0)
+            compactions.bind(tool_count=streaming.visible_tool_count)
         try:
             try:
                 await _consume_stream_with_progress_supervision(

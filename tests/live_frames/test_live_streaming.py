@@ -478,8 +478,14 @@ async def test_compaction_with_hidden_tool_calls_anchors_at_zero(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(tmp_path: Path, frames: _Frames) -> None:
-    """A resumed reply's earlier tool calls count: a compaction before any new tool sits after them."""
+@pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 1), (False, 0)])
+async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(
+    tmp_path: Path,
+    frames: _Frames,
+    show_tool_calls: bool,
+    after_tool: int,
+) -> None:
+    """A resumed reply's earlier tool calls count when shown: a compaction before any new tool sits after them."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()
     compaction = _Compaction(recorder)
     resumed = UnfinishedStreamedReply(
@@ -495,13 +501,14 @@ async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(tmp
         records,
         edits,
         placeholder_event_id="$placeholder",
+        show_tool_calls=show_tool_calls,
         compactions=recorder,
         resumed=resumed,
     )
 
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
-    assert entry["after_tool"] == 1
-    assert [live["after_tool"] for live in _live_compactions(frames.sent)] == [1]
+    assert entry["after_tool"] == after_tool
+    assert [live["after_tool"] for live in _live_compactions(frames.sent)] == [after_tool]
 
 
 @pytest.mark.asyncio
