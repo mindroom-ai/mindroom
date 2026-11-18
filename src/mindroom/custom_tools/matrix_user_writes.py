@@ -80,11 +80,9 @@ _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not
 _ROOM_UNCONFIRMED = (
     "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
 )
-# The message types whose text an edit replaces with text; any other, such as a photo's, an edit would turn into text.
-_EDITABLE_MSGTYPES = frozenset({"m.text", "m.emote", "m.notice"})
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 # The send failures that prove nothing was sent: each is known before the event is requested, or, for one too large,
-# may also be the homeserver's refusal of it.
+# is the homeserver's refusal of an event it cannot hold.
 _PROVES_NOTHING_SENT = frozenset(
     {
         MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
@@ -160,8 +158,6 @@ class _Written:
 
     room_id: str | None
     event_id: str | None = None
-    # Whom an invite invited.
-    invited: str | None = None
 
 
 async def write_as_person(
@@ -206,7 +202,8 @@ def _audit(
         status=status,
         event_id=written.event_id,
         attachments=int(write.attachment is not None),
-        **({} if written.invited is None else {"invited": written.invited}),
+        **({} if write.event_id is None else {"target": write.event_id}),
+        **({"invited": write.user_id} if write.action == "invite" else {}),
         **({} if error is None else {"error": error}),
     )
 
@@ -250,7 +247,6 @@ async def _write(
         await matrix_json(client, "POST", f"/rooms/{room}/leave", {})
         return {"room_id": room_id}
     # The only action left: invite.
-    written.invited = write.user_id
     await matrix_json(client, "POST", f"/rooms/{room}/invite", {"user_id": write.user_id})
     return {"room_id": room_id}
 
@@ -316,16 +312,21 @@ async def _require_unencrypted(client: nio.AsyncClient, room_id: str) -> None:
 def _delivered(outcome: MatrixSendOutcome) -> str:
     """Return the ID of the event a send delivered, saying that nothing was sent only when its failure proves it.
 
-    A failure before the request, and the homeserver's own refusal, which has a 4xx status, prove it. After any other
-    failure the request may have reached the homeserver, and a retry is a new transaction: a second message.
+    A failure before the request proves it. The homeserver's own refusal, which has a 4xx status, is reported as its
+    refusal, in its words: the client repeats a request whose answer was lost, and the homeserver may refuse the
+    repeat of one it took, as it does a reaction that is already there. After any other failure the request may have
+    reached the homeserver, and a retry is a new transaction: a second message.
     """
     if isinstance(outcome, DeliveredMatrixEvent):
         return outcome.event_id
-    refused = outcome.status is not None and HTTPStatus.BAD_REQUEST <= outcome.status < HTTPStatus.INTERNAL_SERVER_ERROR
-    if outcome.kind not in _PROVES_NOTHING_SENT and not refused:
-        raise MatrixRequestError(_UNCONFIRMED)
-    msg = f"Nothing was sent: {outcome.detail.rstrip('.')}."
-    raise MatrixRequestError(msg)
+    why = outcome.detail.rstrip(".")
+    if outcome.kind in _PROVES_NOTHING_SENT:
+        msg = f"Nothing was sent: {why}."
+        raise MatrixRequestError(msg)
+    if outcome.status is not None and HTTPStatus.BAD_REQUEST <= outcome.status < HTTPStatus.INTERNAL_SERVER_ERROR:
+        msg = f"The homeserver refused it: {why}."
+        raise MatrixRequestError(msg)
+    raise MatrixRequestError(_UNCONFIRMED)
 
 
 async def _send(
@@ -357,6 +358,9 @@ async def _send_into(
     """Send one event into ``room_id``: the file, or the text formatted as the agent's own messages are."""
     await _require_unencrypted(client, room_id)
     latest = None if write.thread_id is None else await _newest_in_thread(client, room_id, write.thread_id)
+    if write.event_id is not None:
+        # The homeserver takes a reply to an event the room does not hold, and no client shows what it answers.
+        await read_event(client, room_id, write.event_id)
     if file is not None:
         outcome = await send_file_message_outcome(
             client,
@@ -416,7 +420,8 @@ async def _event_write(
         redaction = await matrix_json(client, "PUT", path, body)
         if isinstance(redaction.get("event_id"), str):
             written.event_id = redaction["event_id"]
-        return {"room_id": room_id, "event_id": redaction.get("event_id")}
+        # The event named may be an edit's replacement, so the result says which event is gone.
+        return {"room_id": room_id, "event_id": redaction.get("event_id"), "redacted": event_id}
     await _require_unencrypted(client, room_id)
     event_id = await _target(client, room_id, str(write.event_id), actor.person_user_id, write.action)
     if write.action == "react":
@@ -487,7 +492,8 @@ async def _target(
             msg = f"Only messages can be edited, and {event_id} is of type {event_type}."
             raise MatrixRequestError(msg)
         msgtype = content.get("msgtype") if isinstance(content := event.get("content"), dict) else None
-        if msgtype not in _EDITABLE_MSGTYPES:
+        # An edit sends an `m.text` message, which would replace a photo, a file, or an emote with plain text.
+        if msgtype != "m.text":
             msg = f"Only text messages can be edited, and {event_id} is a message of type {msgtype}."
             raise MatrixRequestError(msg)
     return event_id
@@ -514,14 +520,20 @@ async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: st
     """Return the newest event of a thread, which a reply that answers none of them follows; its root if it has none.
 
     Some homeservers answer an empty thread for an event they do not know, and take a reply to it that nobody sees, so
-    the root of a thread without replies is read in the room first, as a reaction's target is.
+    the root of a thread without replies is read in the room first, as a reaction's target is. A thread's own reply has
+    no replies either, and a thread started from it is one no client shows, so it is refused with its thread's root.
     """
     path = f"/rooms/{quote(room_id, safe='')}/relations/{quote(thread_id, safe='')}/m.thread"
     page = await matrix_json(client, "GET", f"{path}?{urlencode({'dir': 'b', 'limit': 1})}", version="v1")
     newest = next(iter(json_objects(page, "chunk")), {}).get("event_id")
     if isinstance(newest, str):
         return newest
-    await read_event(client, room_id, thread_id)
+    content = (await read_event(client, room_id, thread_id)).get("content")
+    relation = content.get("m.relates_to") if isinstance(content, dict) else None
+    if isinstance(relation, dict) and relation.get("rel_type") == "m.thread":
+        root = relation.get("event_id")
+        msg = f"{thread_id} is a reply in the thread {root}: use {root} as thread_id."
+        raise MatrixRequestError(msg)
     return thread_id
 
 

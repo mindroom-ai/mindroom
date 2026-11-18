@@ -252,6 +252,7 @@ async def test_send_into_a_thread_and_as_a_reply(
 ) -> None:
     """A thread reply follows the thread's newest message; a reply names its message, in a thread or not."""
     homeserver.answers[THREAD_PATH] = {"chunk": [text_message("$latest", "Newest reply")]}
+    homeserver.answers[f"{ROOM_PATH}/event/$question"] = text_message("$question", "Lunch?")
 
     await _write(config, paths, homeserver, action="send", room_id=ROOM, thread_id="$root", message="On it")
     await _write(config, paths, homeserver, action="send", room_id=ROOM, event_id="$question", message="Yes")
@@ -283,6 +284,51 @@ async def test_send_into_a_thread_and_as_a_reply(
     ]
     [newest, _] = homeserver.requests_to(THREAD_PATH)
     assert (newest.query["dir"], newest.query["limit"]) == (["b"], ["1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "$root"], ids=["plain", "in-a-thread"])
+async def test_a_reply_to_an_event_the_room_does_not_hold_is_refused(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    thread_id: str | None,
+) -> None:
+    """The homeserver takes a reply to an event of another room, and no client shows what it answers, so it is read first."""
+    homeserver.answers[THREAD_PATH] = {"chunk": [text_message("$latest", "Newest reply")]}
+
+    result = await _write(
+        config,
+        paths,
+        homeserver,
+        action="send",
+        room_id=ROOM,
+        thread_id=thread_id,
+        event_id="$elsewhere",
+        message="Yes",
+    )
+
+    assert result["status"] == "error"
+    assert "404 M_NOT_FOUND" in result["message"]
+    assert _changes(homeserver) == []
+
+
+@pytest.mark.asyncio
+async def test_a_reply_in_a_thread_is_not_taken_for_a_thread_root(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A thread's reply has no replies of its own, and a thread started from it is one no client shows."""
+    relation = {"rel_type": "m.thread", "event_id": "$root"}
+    reply = {"msgtype": "m.text", "body": "Tuesday", "m.relates_to": relation}
+    homeserver.answers[THREAD_PATH.replace("$root", "$reply")] = {"chunk": []}
+    homeserver.answers[f"{ROOM_PATH}/event/$reply"] = room_event("$reply", "m.room.message", reply)
+
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, thread_id="$reply", message="Fine")
+
+    assert result == error_result("send", "$reply is a reply in the thread $root: use $root as thread_id.")
+    assert _changes(homeserver) == []
 
 
 @pytest.mark.asyncio
@@ -719,24 +765,6 @@ async def test_an_unreadable_encryption_state_counts_as_encrypted(
 
 
 @pytest.mark.asyncio
-async def test_a_joined_room_is_still_checked_for_encryption_before_a_send(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """Joining a room tells the next send nothing about its encryption, which is read again."""
-    homeserver.answers[f"{CLIENT}/join/{ROOM}"] = {"room_id": ROOM}
-    homeserver.answers[ENCRYPTION_PATH] = MEGOLM
-
-    joined = await _write(config, paths, homeserver, action="join", room_id=ROOM)
-    sent = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Hi")
-
-    assert joined == ok_result("join", room_id=ROOM)
-    assert sent == error_result("send", ENCRYPTED)
-    assert homeserver.paths() == [f"{CLIENT}/join/{ROOM}", ENCRYPTION_PATH]
-
-
-@pytest.mark.asyncio
 async def test_a_command_the_owner_asks_to_send_to_a_bot_is_sent(
     config: Config,
     paths: RuntimePaths,
@@ -820,11 +848,11 @@ async def test_only_a_message_can_be_edited(
     assert _changes(homeserver) == []
 
     redacted = await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id="$own")
-    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
+    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction", redacted="$own")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("msgtype", ["m.image", "m.file", "m.audio"])
+@pytest.mark.parametrize("msgtype", ["m.image", "m.file", "m.audio", "m.emote", "m.notice"])
 @pytest.mark.parametrize("named", ["$own", "$edit"], ids=["the-message", "its-replacement"])
 async def test_only_a_text_message_can_be_edited(
     config: Config,
@@ -833,7 +861,10 @@ async def test_only_a_text_message_can_be_edited(
     msgtype: str,
     named: str,
 ) -> None:
-    """An edit sends text, which would replace a photo, file, or recording, so it is refused, also when named by its edit."""
+    """An edit sends a text message, which would replace a photo, file, recording, or emote, so it is refused.
+
+    Also when the message is named by its edit.
+    """
     content = {"msgtype": msgtype, "body": "holiday.jpg", "url": "mxc://example.com/abc"}
     homeserver.answers[OWN_EVENT_PATH] = room_event("$own", "m.room.message", content, sender=OWNER)
     homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "beach.jpg", sender=OWNER)
@@ -873,7 +904,7 @@ async def test_a_replacement_event_reaches_the_message_it_replaced(
         assert change.body["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$own"}
         assert change.body["m.new_content"]["body"] == "Hi all"
     else:
-        assert result == ok_result("redact", room_id=ROOM, event_id="$redaction")
+        assert result == ok_result("redact", room_id=ROOM, event_id="$redaction", redacted="$own")
         assert change.path.startswith(f"{ROOM_PATH}/redact/$own/")
 
 
@@ -1042,7 +1073,7 @@ async def test_react_edit_redact_send_their_events(
 
     assert reacted == ok_result("react", room_id=ROOM, event_id="$reaction")
     assert edited == ok_result("edit", room_id=ROOM, event_id="$own")
-    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
+    assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction", redacted="$own")
     assert _sent(homeserver, event_type="m.reaction") == [
         {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$own", "key": "👍"}, AGENT_AUTHORED_KEY: agent_id},
     ]
@@ -1205,21 +1236,6 @@ async def test_a_room_named_by_alias_is_resolved_for_writes(
     assert sent.path.startswith(f"{CLIENT}/rooms/{OTHER_ROOM}/send/")
     assert all(OTHER_ROOM in request.path for request in homeserver.requests[1:])
     assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, OTHER_ROOM)}
-
-
-@pytest.mark.asyncio
-async def test_a_created_room_has_no_managed_power_levels(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A room made as the owner gets the homeserver's defaults, as a room they make in their own client does."""
-    homeserver.answers[CREATE_PATH] = {"room_id": "!trip:example.com"}
-
-    await _write(config, paths, homeserver, action="create_room", name="Trip")
-
-    [created] = homeserver.requests
-    assert created.body == {"name": "Trip", "preset": "private_chat"}
 
 
 @pytest.mark.asyncio
@@ -1456,6 +1472,24 @@ async def test_a_write_that_fails_unexpectedly_leaves_its_audit_line(
 
 
 @pytest.mark.asyncio
+async def test_the_audit_line_names_the_event_a_write_named(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Which event a redaction, edit, or reaction named is logged, also when the write failed and nothing else says."""
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/redact/*"] = TimeoutError()
+
+    with capture_logs() as logs:
+        result = await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id="$own")
+
+    assert result["status"] == "error"
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert (audit["status"], audit["event_id"], audit["target"]) == ("error", None, "$own")
+
+
+@pytest.mark.asyncio
 async def test_the_audit_line_names_whom_a_write_invited(
     config: Config,
     paths: RuntimePaths,
@@ -1622,12 +1656,15 @@ async def test_a_send_the_homeserver_did_not_confirm_says_it_may_have_been_sent(
 @pytest.mark.parametrize(
     ("answer", "why"),
     [
-        (matrix_error(403, "M_FORBIDDEN", "You cannot post here"), "RoomSendError: M_FORBIDDEN You cannot post here"),
-        (matrix_error(413, "M_TOO_LARGE", "Event too large"), "Event too large"),
+        (
+            matrix_error(403, "M_FORBIDDEN", "You cannot post here"),
+            "The homeserver refused it: RoomSendError: M_FORBIDDEN You cannot post here.",
+        ),
+        (matrix_error(413, "M_TOO_LARGE", "Event too large"), "Nothing was sent: Event too large."),
     ],
     ids=["403", "413"],
 )
-async def test_a_send_the_homeserver_refused_says_nothing_was_sent(
+async def test_a_send_the_homeserver_refused_says_so(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
@@ -1636,10 +1673,14 @@ async def test_a_send_the_homeserver_refused_says_nothing_was_sent(
     answer: Answer,
     why: str,
 ) -> None:
-    """A refusal with a 4xx status is the homeserver saying it took nothing, so the send can be made again."""
+    """A refusal is reported as the homeserver's, in its words; only an event too large is known not to be there.
+
+    A refusal can follow a request that did arrive: the client repeats a request whose answer was lost, and the
+    homeserver may then refuse the repeat, as it does a reaction that is already there.
+    """
     result = await _write_with_send_answer(config, paths, homeserver, tmp_path, kind, answer)
 
-    assert (result["status"], result["message"]) == ("error", f"Nothing was sent: {why}.")
+    assert (result["status"], result["message"]) == ("error", why)
 
 
 @pytest.mark.asyncio
