@@ -276,6 +276,7 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 | `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
 
 Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
 `memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.

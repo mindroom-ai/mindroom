@@ -15,7 +15,12 @@ from nio.crypto.device import TrustState
 from PIL import Image
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ReasoningConfig
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.model_catalog_receiver import (
     _DEADLINE_SECONDS,
     _MAX_USER_REQUESTS,
@@ -24,8 +29,8 @@ from mindroom.model_catalog_receiver import (
 )
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
-from tests.conftest import runtime_paths_for
-from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup
 from tests.test_olm_to_device import olm_transport
 
 if TYPE_CHECKING:
@@ -113,7 +118,10 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
     assert content["capabilities"] == ["model_selection"]
-    assert content["selection"] == {"override": None, "inherited": [{"entity": "helper", "model": "default"}]}
+    assert content["selection"] == {
+        "override": None,
+        "inherited": [{"entity": "helper", "user_id": agent, "model": "default", "source": "agent"}],
+    }
     assert content["request_id"] == "request-1"
     old_revision = content["catalog_revision"]
     current[0] = current[0].model_copy(deep=True)
@@ -412,7 +420,7 @@ async def test_non_router_does_not_register(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The reset explanation retains room model while actual override stays separate."""
-    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
     config = current[0]
     paths = runtime_paths_for(config)
     config.models["room"] = ModelConfig(provider="openai", id="room-model")
@@ -428,7 +436,7 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     await callback(request())
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
-        "inherited": [{"entity": "helper", "model": "room"}],
+        "inherited": [{"entity": "helper", "user_id": agent, "model": "room", "source": "room"}],
     }
     del config.models["thread"]
     await callback(request(request_id="next"))
@@ -441,12 +449,73 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_inherited_model_from_room_models_config_names_its_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authored `room_models` entry is reported apart from a saved room override and the entity's own model."""
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    config.models["lobby"] = ModelConfig(provider="openai", id="lobby-model")
+    config.room_models[ROOM] = "lobby"
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"]["inherited"] == [
+        {"entity": "helper", "user_id": agent, "model": "lobby", "source": "room_config"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inherited_team_and_stale_room_override_name_their_accounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team reports its own account and model; a saved room model that left the config falls back to each own."""
+    access = ResponderAccessConfig(users=[USER])
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", access=access)},
+            teams={"crew": TeamConfig(display_name="Crew", role="Work", agents=["helper"], model="big", access=access)},
+            models={name: ModelConfig(provider="openai", id=f"{name}-model") for name in ("default", "big", "gone")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    registry = entity_identity_registry(config, paths)
+    agent, team = (registry.current_id(name).full_id for name in ("helper", "crew"))
+    client = picker_client(config, paths, USER, agent, team)
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+    client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
+    register_model_catalog_receiver(
+        client=client,
+        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=AgentReplyMembershipIndex(),
+        callback_wrapper=lambda callback: callback,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+    set_room_model_override(paths, room_id=ROOM, model_name="gone")
+    del config.models["gone"]
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"]["inherited"] == [
+        {"entity": "crew", "user_id": team, "model": "big", "source": "agent"},
+        {"entity": "helper", "user_id": agent, "model": "default", "source": "agent"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_selection_reports_model_keys_and_their_reasoning_levels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An override or inherited model at a level reports its catalog key and the level beside it."""
-    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
     config = current[0]
     paths = runtime_paths_for(config)
     reasoning = ReasoningConfig(levels=["low", "high"], default="low")
@@ -466,7 +535,9 @@ async def test_selection_reports_model_keys_and_their_reasoning_levels(
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
         "reasoning": "high",
-        "inherited": [{"entity": "helper", "model": "room", "reasoning": "high"}],
+        "inherited": [
+            {"entity": "helper", "user_id": agent, "model": "room", "reasoning": "high", "source": "room"},
+        ],
     }
 
 

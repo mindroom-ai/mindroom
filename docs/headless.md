@@ -18,7 +18,7 @@ from mindroom.headless import run_turn
 
 config = {
     "administrators": ["@me:localhost"],
-    "models": {"default": {"provider": "openai", "id": "gpt-6.1-sol"}},
+    "models": {"default": {"provider": "openai", "id": "gpt-6.2-sol"}},
     "memory": "none",
     "defaults": {"allow_shell_without_worker": True},
     "agents": {"coder": {"display_name": "Coder", "tools": ["shell", "file"], "delegate_to": ["coder"]}},

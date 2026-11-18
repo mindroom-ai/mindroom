@@ -658,7 +658,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
 
 defaults:
   tools: [scheduler]
@@ -2111,7 +2111,7 @@ It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Quick helper
     icon: icons/helper.png
 ```
@@ -2139,13 +2139,13 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     context_window: 1050000
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.8-flash
+    id: gemini-4-hydrogen
     context_window: 1048576
 
   # Anthropic Claude on Vertex AI
@@ -2211,7 +2211,8 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces th
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on OpenRouter.
+`bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
@@ -2322,14 +2323,14 @@ The endpoint must support the selected API.
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     api: responses
     extra_kwargs:
       base_url: http://localhost:4000/v1
       reasoning_effort: high
 ```
 
-[GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
+[GPT-6.2 Astra, GPT-6.2 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
@@ -2366,12 +2367,12 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
-| GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-6.2 Sol | `gpt-6.2-sol` | Near-Astra reasoning for long-running work; the starter default |
+| GPT-6.2 Astra | `gpt-6.2-astra` | The hardest end-to-end reasoning and agentic work |
 | GPT-6.1 Terra | `gpt-6.1-terra` | Fast everyday coding, writing, screenshots, and computer use |
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
-Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
+Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.2-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
 If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.codex_home`; `~` prefixes are expanded.
 `mindroom config init --provider codex` generates this config (see [CLI](https://docs.mindroom.chat/cli/)):
 
@@ -2379,14 +2380,14 @@ If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `
 models:
   default:
     provider: codex
-    id: gpt-6.1-sol
+    id: gpt-6.2-sol
     display_name: Sol
     context_window: 258000
     extra_kwargs:
       reasoning_effort: medium
   astra:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Astra
     context_window: 258000
     extra_kwargs:
@@ -2407,7 +2408,7 @@ defaults:
 ```
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
-Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
@@ -2496,7 +2497,7 @@ models:
     context_window: 1000000
 ```
 
-Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
+Bedrock lists Fable 5.1 and Sonnet 5 as open access (Fable 5.2 is served only on the `bedrock-runtime` endpoint, which `bedrock_claude` does not call), while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
 
 ## Ollama Context Size
@@ -2574,7 +2575,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
-A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-3.8-flash`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-4-hydrogen`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its maximum output on `anthropic`, 128,000 tokens for Claude 5 models, except Claude Sonnet 4.5 and models older than Claude 4.5, which write up to 8,192 tokens, as every model does on `bedrock_claude` and `vertexai_claude`, whose quotas count the requested output when a request starts; set `max_tokens` to choose another limit.
@@ -2582,8 +2583,8 @@ A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its max
 Some models reject sampling controls:
 
 - Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
-- MindRoom also omits those controls for direct Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
-- [GPT-6 Astra and GPT-6.1 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
+- MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
+- [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
 ## Prompt Caching
 
@@ -2688,7 +2689,7 @@ models:
     stream_idle_timeout_seconds: 1800  # longest wait for a queued request plus model load
   deep_thinker:
     provider: openrouter
-    id: openai/gpt-6-astra
+    id: openai/gpt-6.2-astra
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
 
@@ -3822,6 +3823,7 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 | `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
 
 Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
 `memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
@@ -4212,7 +4214,7 @@ A base whose folder sandboxed workers can write, or that contains such a folder,
 ### Reranking
 
 A reranker reads the query together with each candidate chunk and reorders them.
-A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3` (measured before MindRoom capped its input at 1024 tokens), and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
 Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
@@ -4243,6 +4245,8 @@ If the reranker fails, the search returns its results in the merged order and lo
 
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, or to the model's own limit if that is shorter, which cuts ordinary default chunks too, since most full 5,000-character chunks exceed 1024 `BAAI/bge-reranker-v2-m3` tokens.
+The cap limits how much memory one search can need, but it does not guarantee a peak.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 #### Judgment rerankers
@@ -5411,7 +5415,7 @@ Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 /config get agents
 /config get agents.analyst.display_name
 /config set agents.analyst.display_name "Research Expert"
-/config set models.default.id gpt-6-astra
+/config set models.default.id gpt-6.2-astra
 /config set defaults.markdown false
 /config set agents.analyst.tools [shell, file]
 ```
@@ -6181,7 +6185,7 @@ Images follow the same rules as other attachments for captions, routing, encrypt
 ## Sending Images
 
 Send an image in a room and mention the agent or team in the caption, for example `@assistant What does this diagram show?`.
-No configuration is needed; the image is passed to the responder's model as vision input, so that model must support vision (for example Claude or GPT-6 Astra).
+No configuration is needed; the image is passed to the responder's model as vision input, so that model must support vision (for example Claude or GPT-6.2 Astra).
 A model without vision answers through the [media fallback](#media-fallback).
 
 Captions from bridges trigger a response when they mention the agent through Matrix mention metadata, an HTML mention pill, or plain `@name` text.
@@ -7513,12 +7517,12 @@ Budgets need prices for the models you pay for and a `budgets` section:
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     pricing:
-      input: 10.0
-      output: 50.0
-      cache_read: 1.0
-      cache_write: 12.5
+      input: 8.0
+      output: 40.0
+      cache_read: 0.4
+      cache_write: 10.0
   luna:
     provider: openai
     id: gpt-6-luna
@@ -7791,7 +7795,7 @@ Every agent, team, and managed room gets a Matrix avatar by default, chosen from
 To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 Run `mindroom avatars sync --force` to reset every managed room and the root Space to its default avatar: its own file, its single agent's or team's avatar, or its stock pick.
 
-`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6-astra` to write prompts and `gpt-image-2.5-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
+`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6.2-astra` to write prompts and `gpt-image-2.6-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
 Run `mindroom avatars generate --force` to overwrite existing workspace avatar files after changing prompts or styles.
 Override the generation styles with the root `prompts` block:
 
@@ -12514,7 +12518,7 @@ The path follows the agent's [`file_access`](https://docs.mindroom.chat/architec
 | `text_to_speech_voice` | `text` | `alloy` | Voice for `generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
 | `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
 | `text_to_speech_format` | `text` | `wav` | Speech format; `gpt-realtime` models return only `wav` or `pcm` (24 kHz mono), and speech-endpoint models also take `mp3`, `opus`, `aac`, or `flac`. |
-| `image_model` | `text` | `gpt-image-2.5-sunburst` | Model for `generate_image()`. |
+| `image_model` | `text` | `gpt-image-2.6-sunburst` | Model for `generate_image()`. |
 | `image_quality` | `text` | `null` | Passed through to the image API. |
 | `image_size` | `text` | `null` | Passed through to the image API. |
 | `image_style` | `text` | `null` | Passed through to the image API. |
@@ -13348,7 +13352,7 @@ room_thread_summary_models:
 ```
 
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
-These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
+These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
 MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
@@ -21917,7 +21921,7 @@ from mindroom.headless import run_turn
 
 config = {
     "administrators": ["@me:localhost"],
-    "models": {"default": {"provider": "openai", "id": "gpt-6.1-sol"}},
+    "models": {"default": {"provider": "openai", "id": "gpt-6.2-sol"}},
     "memory": "none",
     "defaults": {"allow_shell_without_worker": True},
     "agents": {"coder": {"display_name": "Coder", "tools": ["shell", "file"], "delegate_to": ["coder"]}},

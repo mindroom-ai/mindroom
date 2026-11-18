@@ -102,6 +102,12 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
+    id: "search",
+    title: "Search",
+    description: "How knowledge and memory searches rank their results.",
+    entries: [{ root: "reranker" }],
+  },
+  {
     id: "router",
     title: "Router",
     description:

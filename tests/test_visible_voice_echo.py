@@ -12,7 +12,14 @@ import pytest
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    ROUTER_AGENT_NAME,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
+)
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
@@ -50,14 +57,18 @@ class _RecordingEchoGateway:
     send_started: asyncio.Event = field(default_factory=asyncio.Event)
     release_send: asyncio.Event = field(default_factory=asyncio.Event)
     block_send: bool = False
+    sent: list[SendTextRequest] = field(default_factory=list)
+    edited: list[EditTextRequest] = field(default_factory=list)
 
-    async def send_text(self, request: SendTextRequest) -> str | None:  # noqa: ARG002
+    async def send_text(self, request: SendTextRequest) -> str | None:
+        self.sent.append(request)
         self.send_started.set()
         if self.block_send:
             await self.release_send.wait()
         return self.send_result
 
-    async def edit_text(self, request: EditTextRequest) -> bool:  # noqa: ARG002
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        self.edited.append(request)
         return True
 
 
@@ -215,6 +226,31 @@ async def test_responder_waits_for_claimed_echo_publication(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_every_echo_names_its_voice_source(tmp_path: Path) -> None:
+    """Clients fold an echo into its voice message only when each echo payload names that message."""
+    placeholder = _echo_harness(tmp_path / "placeholder", voice_enabled=True)
+    handle = placeholder.router.start(_request("$voice-with-placeholder"))
+    assert await placeholder.router.finish(handle, _normalized_event("$voice-with-placeholder")) is True
+    [placeholder_send] = placeholder.gateway.sent
+    [settled_edit] = placeholder.gateway.edited
+    assert placeholder_send.extra_content is not None
+    assert placeholder_send.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+    assert placeholder_send.extra_content[VOICE_SOURCE_EVENT_ID_KEY] == "$voice-with-placeholder"
+    assert settled_edit.extra_content is not None
+    assert settled_edit.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert settled_edit.extra_content[VOICE_SOURCE_EVENT_ID_KEY] == "$voice-with-placeholder"
+
+    direct = _echo_harness(tmp_path / "direct")
+    handle = direct.router.start(_request("$voice-without-placeholder"))
+    assert await direct.router.finish(handle, _normalized_event("$voice-without-placeholder")) is True
+    [settled_send] = direct.gateway.sent
+    assert not direct.gateway.edited
+    assert settled_send.extra_content is not None
+    assert settled_send.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert settled_send.extra_content[VOICE_SOURCE_EVENT_ID_KEY] == "$voice-without-placeholder"
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
     """A voice echo started before reload must not publish after the requester is revoked."""
@@ -263,6 +299,7 @@ async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Pa
     send_text.assert_not_awaited()
     edit_text.assert_awaited_once()
     assert edit_text.await_args.args[0].event_id == "$orphaned-echo"
+    assert edit_text.await_args.args[0].extra_content[VOICE_SOURCE_EVENT_ID_KEY] == source_event_id
     assert await harness.router.deps.turn_store.visible_echo(source_event_id) == SourceVisibleEcho("$orphaned-echo")
     response_filter = find_echo.await_args.kwargs["response_source_filter"]
     assert response_filter({"content": {VISIBLE_ROUTER_VOICE_ECHO_KEY: True}})

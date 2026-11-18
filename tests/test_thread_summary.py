@@ -2591,7 +2591,14 @@ class TestGenerateSummary:
             ),
             *(
                 pytest.param({"provider": "google", "id": model_id}, False, id=f"google-{model_id}")
-                for model_id in ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+                for model_id in (
+                    "gemini-4-carbon",
+                    "gemini-4-argon",
+                    "gemini-4-hydrogen",
+                    "gemini-3.8-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash-lite",
+                )
             ),
             pytest.param({"provider": "google", "id": "gemini-3.1-pro-preview"}, True, id="google-gemini-3.1-pro"),
         ],

@@ -5689,7 +5689,7 @@
         },
         {
           "authored_override": true,
-          "default": "gpt-image-2.5-sunburst",
+          "default": "gpt-image-2.6-sunburst",
           "description": null,
           "env": [],
           "label": "Image Model",

@@ -6,7 +6,7 @@ Images follow the same rules as other attachments for captions, routing, encrypt
 ## Sending Images
 
 Send an image in a room and mention the agent or team in the caption, for example `@assistant What does this diagram show?`.
-No configuration is needed; the image is passed to the responder's model as vision input, so that model must support vision (for example Claude or GPT-6 Astra).
+No configuration is needed; the image is passed to the responder's model as vision input, so that model must support vision (for example Claude or GPT-6.2 Astra).
 A model without vision answers through the [media fallback](#media-fallback).
 
 Captions from bridges trigger a response when they mention the agent through Matrix mention metadata, an HTML mention pill, or plain `@name` text.

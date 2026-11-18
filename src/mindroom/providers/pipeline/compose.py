@@ -1,10 +1,11 @@
 """Compose the request pipeline around one provider adapter.
 
-Outermost first: portable deferred tool search, media fallback, remote media downloads, the malformed tool-call
-guidance retry, stream retry with the idle limit, the safeguard refusal, and request logging. Each attempt the adapter
-sends is therefore logged, a refused one included; a URL that cannot be downloaded fails inside the media fallback,
-which sends its note instead; and retries never resend media a route rejected or download media again, since the
-guidance retry resends the request the downloads produced.
+Outermost first: the conversation's held system prompt, portable deferred tool search, media fallback, remote media
+downloads, the malformed tool-call guidance retry, stream retry with the idle limit, the safeguard refusal, and request
+logging. Each attempt the adapter sends is therefore logged, a refused one included; a URL that cannot be downloaded
+fails inside the media fallback, which sends its note instead; retries never resend media a route rejected or download
+media again, since the guidance retry resends the request the downloads produced; and every attempt of a request
+sends the system prompt its conversation held when the request began.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 from mindroom.llm.tool_search import portable_tool_search_request, portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
+from mindroom.providers.pipeline.prompt_hold import held_request, prompt_hold_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.remote_media import remote_media_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
@@ -45,8 +47,9 @@ def wrap_provider(
         partial(media_fallback_stream, fallback_prompt=media_fallback_prompt),
         media_fallback_projection(media_fallback_prompt),
     )
-    return WrappedProvider(
+    provider = WrappedProvider(
         provider,
         portable_tool_search_stream,
         RequestProjection(lambda _inner, request: portable_tool_search_request(request)),
     )
+    return WrappedProvider(provider, prompt_hold_stream, RequestProjection(held_request))

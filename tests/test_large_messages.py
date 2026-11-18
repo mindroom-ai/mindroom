@@ -31,6 +31,7 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -944,6 +945,38 @@ async def test_a_long_marked_edit_keeps_its_marker_on_both_layers() -> None:
     assert "io.mindroom.long_text" in result["m.new_content"]
     assert result[AGENT_AUTHORED_KEY] is True
     assert result["m.new_content"][AGENT_AUTHORED_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_a_long_voice_echo_keeps_its_echo_link_on_send_and_edit() -> None:
+    """Clients fold a long transcript into its voice message only if the sidecar preview keeps the echo link."""
+    echo_keys = {VISIBLE_ROUTER_VOICE_ECHO_KEY: True, VOICE_SOURCE_EVENT_ID_KEY: "$voice:server"}
+    text = "🎤 placeholder transcript " * 3000
+    client = _UploadClient(nio.UploadResponse("mxc://server/long-echo"))
+
+    sent = await prepare_large_message(
+        client,
+        "!room:server",
+        {"body": text, "msgtype": "m.text", **echo_keys},
+        room_encrypted=False,
+    )
+    edited = await prepare_large_message(
+        client,
+        "!room:server",
+        {
+            "body": f"* {text}",
+            "m.new_content": {"body": text, "msgtype": "m.text", **echo_keys},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$placeholder:server"},
+            "msgtype": "m.text",
+            **echo_keys,
+        },
+        room_encrypted=False,
+    )
+
+    assert "io.mindroom.long_text" in sent
+    assert {key: sent[key] for key in echo_keys} == echo_keys
+    assert "io.mindroom.long_text" in edited["m.new_content"]
+    assert {key: edited["m.new_content"][key] for key in echo_keys} == echo_keys
 
 
 @pytest.mark.asyncio

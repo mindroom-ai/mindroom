@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
 
-__all__ = ["REQUEST_IDENTITY_KEY", "request_prefixes"]
+__all__ = ["REQUEST_IDENTITY_KEY", "message_digest", "request_prefixes"]
 
 # ``Message.provider_data`` key holding the identity of the request an assistant message answered.
 REQUEST_IDENTITY_KEY = "mindroom_request"
@@ -37,15 +37,15 @@ def request_prefixes(model: ModelProvider, request: ModelRequest) -> list[str | 
     digest = hashlib.sha256(model.context_key(request).encode())
     identities: list[str | None] = [digest.hexdigest()]
     for message in request.messages:
-        if identities[-1] is None or (message_digest := _digest_of(message)) is None:
+        if identities[-1] is None or (piece := message_digest(message)) is None:
             identities.append(None)
             continue
-        digest.update(message_digest)
+        digest.update(piece)
         identities.append(digest.hexdigest())
     return identities
 
 
-def _digest_of(message: Message) -> bytes | None:
+def message_digest(message: Message) -> bytes | None:
     """Return the digest of what ``message`` can give a model, empty for a queued-message notice.
 
     None when its content cannot be known here: a media item at a URL, or a local file that is gone.

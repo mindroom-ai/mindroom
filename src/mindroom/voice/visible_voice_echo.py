@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
@@ -450,10 +451,7 @@ class VisibleVoiceEchoLifecycle:
                     skip_mentions=True,
                     # Clients show the conversation as working until the transcript edit completes it.
                     extra_content={
-                        **self._extra_content(
-                            requester_user_id=request.requester_user_id,
-                            normalized_source=request.raw_source,
-                        ),
+                        **self._extra_content(request, normalized_source=request.raw_source),
                         STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
                     },
                 ),
@@ -494,10 +492,7 @@ class VisibleVoiceEchoLifecycle:
 
             event_id = placeholder_event_id or (None if tracked is None else tracked.event_id)
             extra_content = {
-                **self._extra_content(
-                    requester_user_id=request.requester_user_id,
-                    normalized_source=normalized_event.source,
-                ),
+                **self._extra_content(request, normalized_source=normalized_event.source),
                 STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
             }
             if event_id is None:
@@ -581,10 +576,11 @@ class VisibleVoiceEchoLifecycle:
 
     def _extra_content(
         self,
+        request: VisibleVoiceEchoRequest,
         *,
-        requester_user_id: str,
         normalized_source: dict[str, Any],
     ) -> dict[str, Any]:
+        requester_user_id = request.requester_user_id
         payload_metadata = payload_metadata_from_source(normalized_source, trust_internal_metadata=True)
         inherited_original_sender = payload_metadata.original_sender
         relay_original_sender = original_sender_for_router_relay(
@@ -600,6 +596,7 @@ class VisibleVoiceEchoLifecycle:
         extra_content: dict[str, Any] = {
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            VOICE_SOURCE_EVENT_ID_KEY: request.source_event_id,
         }
         if relay_original_sender is not None:
             extra_content[ORIGINAL_SENDER_KEY] = relay_original_sender
