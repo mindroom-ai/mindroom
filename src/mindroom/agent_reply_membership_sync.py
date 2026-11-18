@@ -11,7 +11,6 @@ import nio
 
 from mindroom.background_tasks import create_background_task, retry_delay_seconds
 from mindroom.event_journal import (
-    DepartureSource,
     EventKind,
     IngestionRecordAdmission,
     IngestionRecordDisposition,
@@ -83,7 +82,11 @@ class AgentReplyMembershipSync:
         *,
         observer_user_id: str,
     ) -> None:
-        """Fence one account's sync uncertainty and reported departures before admission, revoking the calls they deny."""
+        """Fence one account's sync uncertainty and its own departures before admission, revoking the calls they deny.
+
+        A departure counts whether the account's sync reported it or its own leave command made it: the command's
+        record carries no timeline event, and no later sync need report that leave again.
+        """
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
             return
@@ -96,7 +99,6 @@ class AgentReplyMembershipSync:
             reason = "recovered_membership"
         elif (
             admission.membership is not None
-            and admission.source is DepartureSource.REPORTED
             and admission.previous_membership == "join"
             and admission.membership != "join"
             and admission.room_id is not None

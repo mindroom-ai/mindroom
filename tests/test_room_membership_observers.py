@@ -222,9 +222,12 @@ async def test_observer_kick_event_revokes_grant(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("departure", ["admitted", "reported"])
+@pytest.mark.parametrize("departure", ["admitted", "reported", "local"])
 async def test_observer_departure_fails_room_closed_then_refresh_repins(tmp_path: Path, departure: str) -> None:
-    """A room whose observer left denies until the next refresh reads it through an account that is still joined."""
+    """A room whose observer left denies until the next refresh reads it through an account that is still joined.
+
+    The account's own leave command reaches its journal as a ``local`` lifecycle record with no timeline event.
+    """
     config, runtime_paths = _config(tmp_path)
     a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
     b = _Account(_B, {_ROOM: (_A, _B, _ALICE)})
@@ -241,7 +244,7 @@ async def test_observer_departure_fails_room_closed_then_refresh_repins(tmp_path
             runtime_paths,
             _ingestion_admission(
                 IngestionRecordDisposition.ROOM_LIFECYCLE,
-                source=DepartureSource.REPORTED,
+                source=DepartureSource(departure),
                 room_id=_ROOM,
                 previous_membership="join",
                 membership="leave",
@@ -376,8 +379,10 @@ async def test_observer_stop_during_refresh_voids_its_rows(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", list(DepartureSource))
 async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_room_to_it_voids_the_room(
     tmp_path: Path,
+    source: DepartureSource,
 ) -> None:
     """A refresh moving a room to an account whose sync reports it left meanwhile must not publish the room ready."""
     config, runtime_paths = _config(tmp_path)
@@ -397,7 +402,7 @@ async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_ro
         runtime_paths,
         _ingestion_admission(
             IngestionRecordDisposition.ROOM_LIFECYCLE,
-            source=DepartureSource.REPORTED,
+            source=source,
             room_id=_ROOM,
             previous_membership="join",
             membership="leave",

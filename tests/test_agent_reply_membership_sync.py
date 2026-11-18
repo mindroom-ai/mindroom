@@ -226,13 +226,6 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
         _ingestion_admission(IngestionRecordDisposition.COMPATIBILITY_ONLY),
         _ingestion_admission(
             IngestionRecordDisposition.ROOM_LIFECYCLE,
-            source=DepartureSource.LOCAL,
-            room_id="!local:localhost",
-            previous_membership="join",
-            membership="leave",
-        ),
-        _ingestion_admission(
-            IngestionRecordDisposition.ROOM_LIFECYCLE,
             source=DepartureSource.REPORTED,
             room_id="!joined:localhost",
             previous_membership="leave",
@@ -240,7 +233,7 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
         ),
     ],
 )
-def test_non_reported_departure_carriers_do_not_change_reply_memberships(
+def test_non_departure_carriers_do_not_change_reply_memberships(
     tmp_path: Path,
     admission: IngestionRecordAdmission,
 ) -> None:
