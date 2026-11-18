@@ -529,6 +529,7 @@ class TestAgentBot(AgentBotTestBase):
         turn_store.record_pending_turn = AsyncMock(return_value=SimpleNamespace(record=source_turn))
         turn_store.record_placeholder = AsyncMock()
         turn_store.record_responded_turn = AsyncMock()
+        turn_store.prepared_voice_for_source = AsyncMock(return_value=None)
         delivery_gateway = MagicMock()
         delivery_gateway.send_route = AsyncMock(return_value="$route")
 
