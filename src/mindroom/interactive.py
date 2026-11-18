@@ -317,10 +317,13 @@ def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]
     def look(emoji: str) -> str:
         return emoji.replace("\ufe0f", "").replace("\ufe0e", "")
 
-    used = {look(opt["emoji"]) for opt in options if not opt["emoji"].isdigit()}
+    def is_number(emoji: str) -> bool:
+        return emoji.isascii() and emoji.isdigit()
+
+    used = {look(opt["emoji"]) for opt in options if not is_number(opt["emoji"])}
     seen: set[str] = set()
     for position, opt in enumerate(options):
-        if look(opt["emoji"]) in seen or opt["emoji"].isdigit():
+        if look(opt["emoji"]) in seen or is_number(opt["emoji"]):
             candidates = (_KEYCAP_EMOJIS[position], *_SPARE_EMOJIS)
             opt["emoji"] = next(key for key in candidates if look(key) not in used)
             used.add(look(opt["emoji"]))
