@@ -4766,6 +4766,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.thread_workflow"
+depends_on = []
+
+[[modules]]
 path = "mindroom.thread_snooze"
 depends_on = [
     "mindroom.thread_tags",
