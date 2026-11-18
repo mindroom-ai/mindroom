@@ -9,7 +9,7 @@ Every history compaction posts its own `m.notice` ("Compacting history...", edit
 
 ## What Bas picked
 
-Variant C, "Seam", from the mockup `~/.mindroom-chat/mindroom_data/agents/mindroom_dev/workspace/mockups/compaction-inline/mockup.html` (render `?v=c&on=all`, PNG `variant-c.png` beside it). The mockup is the visual source of truth: its CSS (`.seamrow`, `.seam`, `.mk`, `.card`, `.gauge`, `.kv`, `.tag`, the running `slide` animation) and its JS `restLabel`, `card`, `gauge` functions give the exact copy, layout and states. Build all scenes as drawn:
+Variant C, "Seam", from the mockup (mockup in the paired MindRoom Chat PR's screenshots). The mockup is the visual source of truth: its CSS (`.seamrow`, `.seam`, `.mk`, `.card`, `.gauge`, `.kv`, `.tag`, the running `slide` animation) and its JS `restLabel`, `card`, `gauge` functions give the exact copy, layout and states. Build all scenes as drawn:
 
 1. Mid-turn, tool calls open: a seam row right after the tool call it followed, splitting the tool run in two. Hover (tap on touch) opens the card.
 2. Tool calls hidden by the cog: the seam stays visible between the texts (it is a notice, not a tool call).
@@ -57,7 +57,7 @@ Client tolerance: parse defensively. Drop an entry that lacks a string `id`, a k
 
 ## Backend (mindroom)
 
-Detailed wiring with file:line evidence: `~/.mindroom-chat/mindroom_data/agents/mindroom_dev/workspace/compaction-inline/backend-wiring.md` ("Recommended wiring", T1-T9). Summary:
+Detailed wiring with file:line evidence: [`2026-11-17-inline-compaction-backend-wiring.md`](2026-11-17-inline-compaction-backend-wiring.md) ("Recommended wiring", T1-T9). Summary:
 
 - `CompactionLifecycleStart` gains `phase: CompactionPhase = "pre_turn"`; `compact_scope_mid_turn` passes `"mid_turn"`.
 - New `history/reply_compactions.py`: `ReplyCompactions` (per-reply recorder; `bind(tool_count, changed)`, `start`, `update`, `content`) and `ReplyCompactionLifecycle` (implements `CompactionLifecycle`; `mode == "manual"` delegates to `MatrixCompactionLifecycle`, which still sends the notice; everything else records into the recorder and sends no notice).
