@@ -102,6 +102,17 @@ async def test_the_owner_reads_their_rooms(config: Config, paths: RuntimePaths, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("call", "action"),
+    [
+        pytest.param(lambda toolkit: toolkit.matrix_user_read(action="rooms"), "rooms", id="read"),
+        pytest.param(
+            lambda toolkit: toolkit.matrix_user_write(action="send", room_id=ROOM, message="Hi"),
+            "send",
+            id="write",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("requester_id", "agent_name", "message"),
     [
         (STRANGER, AGENT, "Only the agent's owner may use matrix_user."),
@@ -113,15 +124,17 @@ async def test_a_refused_caller_gets_the_refusal_and_no_request_is_made(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    call: Callable[[MatrixUserTools], Awaitable[str]],
+    action: str,
     requester_id: str,
     agent_name: str,
     message: str,
 ) -> None:
-    """Anyone but the owner, or a toolkit built for another agent, is refused before any request."""
+    """Anyone but the owner, or a toolkit built for another agent, is refused before any request, to read or write."""
     with owner_turn(config, paths, requester_id), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths, agent_name).matrix_user_read(action="rooms")
+        result = await call(owner_toolkit(config, paths, agent_name))
 
-    assert json.loads(result) == error_result("rooms", message)
+    assert json.loads(result) == error_result(action, message)
     assert homeserver.requests == []
 
 
