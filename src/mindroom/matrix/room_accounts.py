@@ -81,13 +81,16 @@ async def reconcile_room_router_binding(
     try:
         async with asyncio.timeout(10):
             current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
-            if isinstance(current, nio.RoomGetStateEventResponse) and isinstance(
-                bound := current.content.get("user_id"),
-                str,
-            ):
-                if bound != client.user_id:
-                    logger.debug("room_router_binding_held_by_other", room_id=room_id, router_user_id=bound)
-                return True
+            if isinstance(current, nio.RoomGetStateEventResponse):
+                bound = current.content.get("user_id")
+                if isinstance(bound, str) and bound.startswith("@") and ":" in bound:
+                    if bound != client.user_id:
+                        logger.debug("room_router_binding_held_by_other", room_id=room_id, router_user_id=bound)
+                    return True
+            elif not (isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"):
+                # An unreadable binding may name another router, so only absent or malformed state is claimed.
+                logger.warning("room_router_binding_publish_failed", room_id=room_id, error=str(current))
+                return False
             response = await client.room_put_state(
                 room_id,
                 ROUTER_BINDING_EVENT_TYPE,

@@ -291,7 +291,7 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing", [None, {}, {"user_id": 7}])
+@pytest.mark.parametrize("existing", [None, {}, {"user_id": 7}, {"user_id": ""}, {"user_id": "router"}])
 async def test_router_binding_claims_an_absent_or_malformed_binding_once(
     room_state: RoomState,
     existing: dict[str, object] | None,
@@ -306,6 +306,24 @@ async def test_router_binding_claims_an_absent_or_malformed_binding_once(
     assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
     assert len(_writes(client, ROUTER_EVENT_TYPE)) == 1
     assert _writes(client, ROUTER_EVENT_TYPE)[0].kwargs["state_key"] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_router_binding_is_not_claimed(room_state: RoomState) -> None:
+    """A failed read is not an absent binding: it warns and retries later instead of overwriting."""
+    config, paths, _, _, client = room_state
+    read = client.room_get_state_event.side_effect
+
+    async def fail_binding_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ROUTER_EVENT_TYPE:
+            return nio.RoomGetStateEventError("Server error", "M_UNKNOWN", room_id=room_id)
+        return await read(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = fail_binding_read
+    with capture_logs() as logs:
+        assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is False
+    assert not _writes(client, ROUTER_EVENT_TYPE)
+    assert [(log["event"], log["log_level"]) for log in logs] == [("room_router_binding_publish_failed", "warning")]
 
 
 @pytest.mark.asyncio
