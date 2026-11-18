@@ -96,8 +96,8 @@ def request_kwargs_with_prompt_cache(
     """Return Chat Completions kwargs with Claude ladder breakpoints; ``system`` holds the request's system texts.
 
     A request that does not take the automatic markers (``takes_automatic_markers``) is left untouched, so they never
-    exceed the limit or mix TTLs with authored ones. Otherwise the system prompt, conversation rungs, and last tool take markers in that order, at
-    most four.
+    exceed the limit or mix TTLs with authored ones. Otherwise the system prompt, conversation rungs, and last tool
+    take markers in that order, at most four.
     """
     if not takes_automatic_markers(request_kwargs):
         return request_kwargs

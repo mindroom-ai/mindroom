@@ -122,9 +122,13 @@ class ChatAdapter:
         """Return whether the body ``stream`` sends for ``request`` caches the system prompt, which an update keeps.
 
         ``Capabilities.system_updates`` of a route proven to take an update; anything the request authors turns the
-        automatic markers off (``takes_automatic_markers``).
+        automatic markers off (``takes_automatic_markers``). The attachments are left out of the body it checks: their
+        parts carry no marker, and reading them belongs to the send, whose pipeline stands in for one it cannot read.
         """
-        return self._cache_control(request) is not None and takes_automatic_markers(self._chat_kwargs(request))
+        if self._cache_control(request) is None:
+            return False
+        bare = [replace(message, images=None, audio=None, videos=None, files=None) for message in request.messages]
+        return takes_automatic_markers(self._chat_kwargs(replace(request, messages=bare)))
 
     def _cache_control(self, request: ModelRequest) -> dict[str, str] | None:
         if self.wire.route != "openrouter":

@@ -27,6 +27,7 @@ from mindroom.llm.provider import Capabilities, ModelRequest, ToolSpec, complete
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
 from mindroom.media_inputs import MediaInputs
 from mindroom.participation import ParticipationGate
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import compose, prompt_hold
 from mindroom.response_runner import _paused_with_committed_presentation
@@ -663,6 +664,39 @@ async def test_a_request_whose_own_content_turns_the_hour_cache_off_is_sent_the_
     assert _VIOLET in json.dumps(edited["messages"][0])
     assert _AMBER not in json.dumps(edited)
     assert not hold.parent.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_local_image_on_a_held_route_is_sized_and_sent_with_the_fallback_note(tmp_path: Path) -> None:
+    """Whether a request caches its prompt never reads its attachments, whose fallback belongs to the send.
+
+    So an image whose file is gone is sized and sent with the missing-media note, as on a request without a hold.
+    """
+    extra = {"api_key": "test-key", "cache_system_prompt": True, "extended_cache_time": True}
+    image = Image(filepath=str(tmp_path / "missing.png"))
+    messages = (Message(role="system", content="Be brief."), Message(role="user", content="Look", images=[image]))
+    hold = prompt_hold.prompt_hold_path(tmp_path / "sessions" / "agent.db", "session-1")
+    results = []
+    for path in (hold, None):
+        wire = Wire(_answer())
+        root = tmp_path / ("held" if path else "plain")
+        root.mkdir()
+        adapter = openai_family_adapter(
+            {"provider": "openrouter", "id": _OPUS, "extra_kwargs": extra},
+            root,
+            wire.respond,
+        )
+        model = pipeline_provider(adapter)
+        request = ModelRequest(messages=messages, prompt_hold=path)
+        size = model.request_tokens(request)
+        turn = await complete(model, request)
+        [sent] = wire.requests
+        results.append((size, turn.content, json.loads(sent.content)))
+    held, plain = results
+    assert held == plain
+    assert held[1] == "ok"
+    assert INLINE_MEDIA_FALLBACK_PROMPT in json.dumps(held[2]["messages"][-1])
+    assert hold.exists()
 
 
 @pytest.mark.asyncio
