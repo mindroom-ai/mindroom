@@ -29,6 +29,7 @@ _FAILURE_REASON_MAX_CHARS = 300
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
 MAX_REPLY_COMPACTIONS = 8
 # ...and within this many bytes as Matrix sends them (ASCII escapes), since an edit carries the list twice.
+# The newest entry is always kept, whatever its size.
 MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
 
 
