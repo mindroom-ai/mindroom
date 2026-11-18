@@ -11,7 +11,7 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 
 Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
 File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
-With [`rerank`](#searching-file-memory), a reranker chooses the semantic matches instead.
+With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](https://docs.mindroom.chat/knowledge/#reranking), a reranker chooses the semantic matches instead.
 `search_memories` returns up to its own `limit` in every mode.
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
@@ -248,7 +248,7 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
 | `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
-| `rerank` | `false` | In `semantic` mode, rerank the hits with the root [`reranker`](https://docs.mindroom.chat/knowledge/#reranking) |
+| `rerank` | unset | In `semantic` mode, rerank the hits with the root [`reranker`](https://docs.mindroom.chat/knowledge/#reranking); unset reranks only when that reranker's `provider` is `openai_decisions` or `typesafe` |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
 Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
@@ -259,10 +259,24 @@ Until the index is ready, or when embeddings fail, search falls back to keyword 
 Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
-With `rerank: true` and a [`reranker`](https://docs.mindroom.chat/knowledge/#reranking) configured, semantic searches fetch 20 hits and the reranker orders them.
-Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.8` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
+Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker`](https://docs.mindroom.chat/knowledge/#reranking) is `openai_decisions` or `typesafe`, the two that improved recall in the benchmark below; `rerank: false` turns it off, globally or in `agents.<name>.memory_search`.
+With reranking on and a reranker configured, semantic searches fetch 20 hits and the reranker orders them.
+Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](https://docs.mindroom.chat/knowledge/#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 Reranking sends those 20 memory entries and the message to the reranker, which for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` is a hosted service, and a hosted reranker adds its response time to every reply.
+So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+
+On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
+
+| Reranker | Turns with a relevant memory | Relevant memories per 1,000 recalled tokens | Recalled tokens per turn | Added latency (median / 95th percentile) | Cost per turn |
+|---|---|---|---|---|---|
+| none | 36.6% to 76.2% | baseline | 633 to 701 | none | none |
+| `typesafe` | +5.3 to +31.3 points | 1.59 to 2.36 times | 412 to 553 | 118 ms / 178 ms | $0.00023 to $0.00033 |
+| `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
+
+Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking, and a second judge model gave gains of the same sign on those turns.
+
+**Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before; set `memory.search.rerank: false` to keep memory entries away from those providers.
 
 ```yaml
 agents:

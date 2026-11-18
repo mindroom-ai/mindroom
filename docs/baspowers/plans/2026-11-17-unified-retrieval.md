@@ -208,3 +208,24 @@ Expected per turn: 20 candidates × (≤ 300 text + about 60 rubric tokens) + qu
 5. **Local cross-encoder on the per-turn path.** Its scoring thread cannot be cancelled, so abandoned calls queue up. I recommend documenting `sentence_transformers` recall rerank as GPU-only and treating A5 as a measurement (80%).
 6. **Latency.** A passing arm may still add up to 1 s at p95 before the first token. I recommend accepting that for PR 6 and moving recall off the serial path as a follow-up (60%).
 7. **`jev-1.14.0`.** The pin is shared with routing and mid-turn judgments. I recommend a separate bump PR after this work (75%).
+
+## Results
+
+Judge `deepseek/deepseek-v4.1-flash-1017` (unchanged PROMPT_VERSION), split seed 0, thresholds swept 0.2–0.9 (step 0.1; widened from 0.3/0.5/0.7/0.8 because TypeSafe scores rarely exceed 0.7). Threshold picked on the tuning halves: **0.3**, one value for all runs (best relevant-per-1K among thresholds that pass guard on every tuning split; 0.2 passes too but saves fewer tokens; 0.5 fails the guard on Harry-all).
+
+Held-out halves, shipped vs arm @0.3 (turns_with_relevant Δ in points; relevant_per_1k ratio; mean tokens):
+
+| Run (held-out n) | shipped tokens / twr | A6t@0.3 | A6o@0.3 | A7t@0.3 |
+|---|---|---|---|---|
+| Harry all (1,247) | 633 / 76.2% | +5.9 pt, ×1.59, 553 tok | +2.0 pt, ×1.46, 528 tok | −13.8 pt |
+| Harry recent (132) | 701 / 44.7% | +5.3 pt, ×2.27, 412 tok | +3.0 pt, ×2.22, 410 tok | −11.4 pt |
+| DevAgent (415) | 669 / 36.6% | +31.3 pt, ×2.36, 521 tok | +4.8 pt, ×1.86, 431 tok | +25.8 pt |
+
+Latency (DevAgent, 200 held-out turns, uncached, sequential, production 1.5 s timeout): A6t p50 +118 ms, p95 +178 ms, 0% fallback; A6o p50 +290 ms, p95 +578 ms, 0% fallback.
+Cost (billed input tokens, list price): A6t $0.00023–0.00033/turn, A6o $0.00060–0.00088/turn.
+Second judge (`google/gemini-3.8-flash`, DevAgent, 199 paired held-out turns): A6t@0.3 +9.0 pt, ×2.19; A6o@0.3 +8.0 pt, ×2.56 — same sign as DeepSeek. (Harry-all second judge: pending, appended when done.)
+A7 (gate) fails the guard on Harry all and Harry recent; with OpenAI the gate abstains on >90% of turns. Not shipped.
+A5 (bge-reranker-v2-m3): not run (GPU-only per ruling 5; measurement only).
+Search errors (embedder HTTP 500 after 4 retries) were ~1–2% of turns, excluded from every arm alike.
+
+**Verdict:** A6t and A6o both pass every rule at threshold 0.3 on every run; A6t dominates (larger gain, ~1/3 the cost, ~2.5× faster). A7 does not replace A6.
