@@ -157,6 +157,14 @@ def show_reasoning(config: Config, name: str | None) -> bool:
     return config.defaults.show_reasoning
 
 
+def ui_widgets(config: Config, name: str | None) -> bool:
+    """Return whether an agent's replies draw `ui` blocks as native widgets; false for any name no agent has."""
+    agent = config.agents.get(name) if name is not None else None
+    if agent is None:
+        return False
+    return agent.ui_widgets if agent.ui_widgets is not None else config.defaults.ui_widgets
+
+
 def file_access(config: Config, name: str | None) -> FileAccess:
     """Return an agent's effective file_access; every other scope, and a name no agent has, uses the default."""
     agent = config.agents.get(name) if name is not None else None
@@ -409,6 +417,7 @@ class ResolvedAgent(ResolvedScope):
     automations: tuple[Automation, ...]
     markdown: bool
     knowledge_graph: bool
+    ui_widgets: bool
 
 
 def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
@@ -456,4 +465,5 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
         automations=agent_automations(config, name),
         markdown=agent.markdown if agent.markdown is not None else config.defaults.markdown,
         knowledge_graph=uses_knowledge_graph(config, name),
+        ui_widgets=ui_widgets(config, name),
     )

@@ -1577,6 +1577,8 @@ def _build_agent_instructions(
 
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
+        # Widgets are drawn only in the agent's own replies, the same turns that may ask interactive questions.
+        instructions.extend((config.get_prompt("UI_WIDGETS_PROMPT"),) if agent.ui_widgets else ())
 
     return instructions
 
@@ -1961,6 +1963,9 @@ def create_agent(
             minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
             interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
             if include_interactive_questions
+            else "",
+            ui_prompt=config.get_prompt("UI_WIDGETS_PROMPT")
+            if include_interactive_questions and agent.ui_widgets
             else "",
             skills=() if offered_skills is None else offered_skills.skills,
         )

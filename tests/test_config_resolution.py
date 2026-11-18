@@ -19,7 +19,7 @@ from mindroom.config.models import (
     ModelConfig,
     ToolConfigEntry,
 )
-from mindroom.config.resolution import ResolvedAgent, entity_model_name, memory_search
+from mindroom.config.resolution import ResolvedAgent, entity_model_name, memory_search, ui_widgets
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -329,3 +329,27 @@ def test_thread_mode_of_an_unknown_entity_is_thread(tmp_path: Path) -> None:
     config = Config.model_validate({"agents": {"chat": {"display_name": "Chat", "thread_mode": "room"}}})
     assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, test_runtime_paths(tmp_path)) == "room"
     assert config.get_entity_thread_mode("nobody", test_runtime_paths(tmp_path)) == "thread"
+
+
+def test_ui_widgets_is_off_unless_the_agent_or_the_defaults_turn_it_on() -> None:
+    def config(default: bool) -> Config:
+        return Config(
+            agents={
+                "unset": AgentConfig(display_name="Unset"),
+                "on": AgentConfig(display_name="On", ui_widgets=True),
+                "off": AgentConfig(display_name="Off", ui_widgets=False),
+            },
+            teams={"team": TeamConfig(display_name="Team", role="Work together", agents=["unset", "on"])},
+            defaults=DefaultsConfig(ui_widgets=default),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        )
+
+    assert not DefaultsConfig().ui_widgets
+    by_default_off, by_default_on = config(False), config(True)
+    assert [ui_widgets(by_default_off, name) for name in ("unset", "on", "off")] == [False, True, False]
+    assert [ui_widgets(by_default_on, name) for name in ("unset", "on", "off")] == [True, True, False]
+    # Only an agent's own replies render widgets, so no other name is ever on.
+    for name in ("team", ROUTER_AGENT_NAME, "nobody", None):
+        assert not ui_widgets(by_default_on, name)
+    assert by_default_on.resolve_agent("unset").ui_widgets
+    assert not by_default_on.resolve_agent("off").ui_widgets

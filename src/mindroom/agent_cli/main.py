@@ -75,7 +75,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
             )
     context = groups.add_parser(
         "context",
-        help="list, read NAME (read interactive before emitting an interactive question)",
+        help="list, read NAME (read interactive before emitting an interactive question, ui before a chart)",
     ).add_subparsers(dest="action", required=True)
     listing = context.add_parser("list")
     listing.add_argument("--cursor")

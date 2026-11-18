@@ -531,6 +531,10 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Whether streamed replies show the model's reasoning to the room",
     )
+    ui_widgets: bool = Field(
+        default=False,
+        description="Whether valid ui chart blocks in an agent's replies are drawn as native widgets",
+    )
     file_access: FileAccess = Field(
         default="workspace",
         description=(

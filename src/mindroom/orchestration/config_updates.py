@@ -42,6 +42,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
         "PERSONALITY_CONTEXT_SECTION_HEADING",
         "QUEUED_MESSAGE_NOTICE_TEXT",
         "SKILLS_TOOL_USAGE_PROMPT",
+        "UI_WIDGETS_PROMPT",
         "WORKSPACE_SKILL_AUTHORING_PROMPT",
     },
 )
@@ -100,6 +101,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "thread_mode",
         "timezone",
         "tools",
+        "ui_widgets",
         "worker_scope",
         "worker_tools",
     },

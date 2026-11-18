@@ -71,6 +71,7 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
         "role": build.prompt.role or "",
         "instructions": "\n\n".join(build.prompt.instructions),
         "interactive": surface.interactive_prompt,
+        "ui": surface.ui_prompt,
         "knowledge": "\n".join(f"{source.base_id}: {source.description}" for source in surface.knowledge_sources),
     }
     for index, document in enumerate(surface.context_documents):
@@ -121,6 +122,7 @@ def minimal_turn(
         skill_names=[skill.name for skill in surface.skills],
         memory_root=surface.memory_root,
         runtime_context=surface.runtime_context,
+        ui_widgets=bool(surface.ui_prompt),
     )
     required = [item for item in system_enrichment if item.minimal_required]
     turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(required) if required else None))

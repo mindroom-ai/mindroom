@@ -36,8 +36,8 @@ class AgentSurface:
 
     Minimal mode's bootstrap message names the agent by ``identity`` when an authored persona replaces it, lists
     ``toolkit_names`` as its roster, points at its file memory under ``memory_root``, and ends with the Mind agent's
-    ``runtime_context`` and the ``minimal_instructions``; ``interactive_prompt`` and ``skills`` are context documents
-    beside the role and instructions. ``output_file_policy`` saves large CLI results and their media in the agent's
+    ``runtime_context`` and the ``minimal_instructions``; ``interactive_prompt``, ``ui_prompt`` and ``skills`` are context
+    documents beside the role and instructions. ``output_file_policy`` saves large CLI results and their media in the agent's
     workspace.
     """
 
@@ -53,6 +53,7 @@ class AgentSurface:
     runtime_context: str = ""
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
+    ui_prompt: str = ""
     skills: tuple[Skill, ...] = ()
     output_file_policy: ToolOutputFilePolicy
 

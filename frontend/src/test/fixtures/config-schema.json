@@ -472,6 +472,19 @@
           "description": "Whether streamed replies show the model's reasoning to the room (per-agent override)",
           "title": "Show Reasoning"
         },
+        "ui_widgets": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether valid ui chart blocks in the agent's replies are drawn as native widgets (per-agent override)",
+          "title": "Ui Widgets"
+        },
         "worker_tools": {
           "anyOf": [
             {
@@ -1764,6 +1777,12 @@
           "default": true,
           "description": "Whether streamed replies show the model's reasoning to the room",
           "title": "Show Reasoning",
+          "type": "boolean"
+        },
+        "ui_widgets": {
+          "default": false,
+          "description": "Whether valid ui chart blocks in an agent's replies are drawn as native widgets",
+          "title": "Ui Widgets",
           "type": "boolean"
         },
         "file_access": {
@@ -6211,6 +6230,7 @@
         "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
         "show_reasoning": true,
+        "ui_widgets": false,
         "file_access": "workspace",
         "worker_tools": null,
         "worker_scope": null,

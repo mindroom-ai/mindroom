@@ -55,6 +55,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "show_stop_button",
           "show_tool_calls",
           "show_reasoning",
+          "ui_widgets",
           "coalescing",
         ],
       },

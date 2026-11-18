@@ -20,6 +20,7 @@ def minimal_system_message(
     skill_names: Sequence[str] = (),
     memory_root: Path | None = None,
     runtime_context: str = "",
+    ui_widgets: bool = False,
 ) -> str:
     """Identify the same agent's workspace, memory, and discoverable CLI tools.
 
@@ -48,6 +49,9 @@ def minimal_system_message(
         guidance.append(
             f"File memory: `{(memory_root / 'MEMORY.md').as_posix()}`, `{(memory_root / 'memory').as_posix()}/`.",
         )
+    if ui_widgets:
+        # A minimal agent never sees the document list unless it asks, so one line says widgets exist.
+        guidance.append("Charts in replies: read `mindroom-agent context read ui` first.")
     return "\n".join(
         part.strip()
         for part in [

@@ -432,6 +432,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether streamed replies show the model's reasoning to the room (per-agent override)",
     )
+    ui_widgets: bool | None = Field(
+        default=None,
+        description="Whether valid ui chart blocks in the agent's replies are drawn as native widgets (per-agent override)",
+    )
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",

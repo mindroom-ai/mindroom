@@ -64,6 +64,7 @@ __all__ = [
     "THREAD_SUMMARY_INSTRUCTIONS",
     "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
+    "UI_WIDGETS_PROMPT",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
     "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     "WORKSPACE_SKILL_AUTHORING_PROMPT",
@@ -160,6 +161,22 @@ The user can respond by:
 
 Keep it simple: max 5 options with clear, concise labels, and give each option a different emoji.
 """
+
+# For agents with `ui_widgets`; the chart-only cut of the measured prompt, forms come later.
+UI_WIDGETS_PROMPT = """To show a native widget, write one JSON object in a ```ui code block. The default is prose; use a widget only when it clearly beats text:
+
+- `chart`: the user asks for a chart or plot, or wants a trend or breakdown of numbers you have.
+
+```ui
+{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],"series":[{"name":"Signups","data":[120,180,150]}],"y":"users"}
+```
+
+Rules:
+- Chart kinds: bar, line, area, pie. Use only the keys shown. Max 8 series, 200 points; for more, answer in prose, don't sample or average.
+- Never invent data. Chart only numbers the user gave or a tool returned, unchanged; otherwise say you don't have them.
+- Write prose that stands alone: state the takeaway in a sentence, since some clients show only text. Don't write "here is the chart".
+- No widget for definitions, how-tos, code questions, yes/no answers, single numbers or small comparisons (use a table).
+- To show widget JSON as code, use ```json, not ```ui."""
 
 SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools:
 - get_skill_instructions(...)

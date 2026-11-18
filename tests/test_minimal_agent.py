@@ -39,6 +39,7 @@ from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.memory.functions import MemoryPromptParts
+from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -338,6 +339,45 @@ def test_minimal_prompt_keeps_context_with_custom_instructions(instructions: lis
     assert "context/notes.md" in message
     if instructions:
         assert message.endswith(instructions[0])
+
+
+@pytest.mark.parametrize("ui_widgets", [True, False])
+def test_a_minimal_agent_reads_the_widget_prompt_as_a_context_document(tmp_path: Path, ui_widgets: bool) -> None:
+    """An agent with `ui_widgets` gets the prompt as the `ui` document and one line naming it; another agent neither."""
+
+    def bootstrap_and_ui_document(agent: AgentConfig) -> tuple[str, str]:
+        config = Config(
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            agents={"helper": agent},
+        )
+        runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        persist_entity_accounts(config, runtime)
+        build = agents.create_agent(
+            "helper",
+            config,
+            runtime,
+            None,
+            agent_mode="minimal",
+            knowledge=None,
+            model=turn_model(config, runtime, "helper"),
+            plugins=config_plugins(config, runtime),
+        )
+        return system_text(_turn(build).system_messages), minimal_context_documents(build)["ui"]
+
+    line = "Charts in replies: read `mindroom-agent context read ui` first."
+    today, no_document = bootstrap_and_ui_document(AgentConfig(display_name="Helper", role="role", tools=["shell"]))
+    bootstrap, document = bootstrap_and_ui_document(
+        AgentConfig(display_name="Helper", role="role", tools=["shell"], ui_widgets=ui_widgets),
+    )
+    assert line not in today
+    assert no_document == ""
+    if ui_widgets:
+        assert document == PROMPT_DEFAULTS["UI_WIDGETS_PROMPT"]
+        assert bootstrap.replace(f"{line}\n", "") == today
+        assert bootstrap.index(line) < bootstrap.index("Other tools and full agent context")
+    else:
+        assert document == ""
+        assert bootstrap == today
 
 
 def test_minimal_context_roster_is_bounded() -> None:

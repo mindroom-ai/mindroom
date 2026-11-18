@@ -5470,3 +5470,54 @@ def test_team_member_matches_solo_agent_construction() -> None:
     assert list(member.prompt.instructions) == [
         instruction for instruction in solo.prompt.instructions if instruction != interactive_prompt
     ]
+
+
+def _solo_instructions(config: Config, *, include_interactive_questions: bool = True) -> list[str]:
+    runtime_paths = runtime_paths_for(config)
+    build = create_agent(
+        "calculator",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "calculator"),
+        plugins=config_plugins(config, runtime_paths),
+        include_interactive_questions=include_interactive_questions,
+    )
+    return list(build.prompt.instructions)
+
+
+def test_the_widget_prompt_follows_the_interactive_prompt_when_enabled() -> None:
+    """An agent with `ui_widgets` is told about widgets right after interactive questions, and no other agent is."""
+    off = _test_config()
+    on = _test_config()
+    on.agents["calculator"].ui_widgets = True
+    today = _solo_instructions(off)
+    interactive_prompt = on.get_prompt("INTERACTIVE_QUESTION_PROMPT")
+    widget_prompt = on.get_prompt("UI_WIDGETS_PROMPT")
+    assert widget_prompt not in today
+
+    instructions = _solo_instructions(on)
+    index = instructions.index(interactive_prompt)
+    assert instructions[index + 1] == widget_prompt
+    assert [instruction for instruction in instructions if instruction != widget_prompt] == today
+    # No interactive questions means not the agent's own reply to a person: no widgets either.
+    assert _solo_instructions(on, include_interactive_questions=False) == _solo_instructions(
+        off,
+        include_interactive_questions=False,
+    )
+
+
+def test_the_stage_1_prompt_is_the_spec_text() -> None:
+    """The chart-only prompt is the measured prompt with every form part removed."""
+    prompt = _test_config().get_prompt("UI_WIDGETS_PROMPT")
+    assert prompt.startswith("To show a native widget")
+    assert (
+        '{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],'
+        '"series":[{"name":"Signups","data":[120,180,150]}],"y":"users"}'
+    ) in prompt
+    assert "since some clients show only text" in prompt
+    assert "form" not in prompt
+    assert "interactive" not in prompt
+    spec = (Path(__file__).parents[1] / "docs/baspowers/specs/2026-11-18-genui-widgets-design.md").read_text()
+    assert f"`````text\n{prompt}\n`````" in spec
