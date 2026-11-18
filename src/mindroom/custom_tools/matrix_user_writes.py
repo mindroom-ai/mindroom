@@ -494,7 +494,9 @@ async def _event_write(
             sidecar_required=True,
         )
     written.event_id = _delivered(outcome)
-    return {"room_id": room_id, "event_id": written.event_id}
+    # An edit's result names the message it edited: a later redaction or reaction naming the replacement event would
+    # act on the edit alone. The audit line names the replacement, which is what this write sent.
+    return {"room_id": room_id, "event_id": written.event_id if write.action == "react" else event_id}
 
 
 async def _require_changeable(

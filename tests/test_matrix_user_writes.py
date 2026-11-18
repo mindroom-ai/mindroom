@@ -233,7 +233,7 @@ async def test_a_long_message_uploads_its_full_text_with_the_marker(
     edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message=text)
 
     assert sent == ok_result("send", room_id=ROOM, event_id="$sent")
-    assert edited == ok_result("edit", room_id=ROOM, event_id="$sent")
+    assert edited == ok_result("edit", room_id=ROOM, event_id="$own")
     [message_upload, edit_upload] = homeserver.requests_to(UPLOAD_PATH)
     assert message_upload.uploaded is not None
     full = json.loads(message_upload.uploaded)
@@ -1127,7 +1127,7 @@ async def test_an_edit_of_an_edit_replaces_the_original_message(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """An edit's result names its replacement event, and editing that again edits the message it replaced.
+    """An edit named by its replacement event, as a read lists it, edits the message it replaced.
 
     Clients ignore a replacement of a replacement, so sent as named it would change nothing anyone sees.
     """
@@ -1136,10 +1136,34 @@ async def test_an_edit_of_an_edit_replaces_the_original_message(
 
     result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$edit", message="Hi all")
 
-    assert result == ok_result("edit", room_id=ROOM, event_id="$sent")
+    assert result == ok_result("edit", room_id=ROOM, event_id="$own")
     [edit] = _sent(homeserver)
     assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$own"}
     assert edit["m.new_content"]["body"] == "Hi all"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_names_the_message_it_edited(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An edit's result names the edited message, so a redaction of that ID deletes the message, not only the edit.
+
+    The audit line names the replacement event, which is what the edit sent.
+    """
+    homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/redact/*"] = {"event_id": "$redaction"}
+
+    with capture_logs() as logs:
+        edited = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$own", message="Hi")
+    await _write(config, paths, homeserver, action="redact", room_id=ROOM, event_id=edited["event_id"])
+
+    assert edited == ok_result("edit", room_id=ROOM, event_id="$own")
+    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert audit["event_id"] == "$sent"
+    [redaction] = [request for request in _changes(homeserver) if "/redact/" in request.path]
+    assert redaction.path.startswith(f"{ROOM_PATH}/redact/$own/")
 
 
 @pytest.mark.asyncio
@@ -1258,7 +1282,7 @@ async def test_react_edit_redact_send_their_events(
     )
 
     assert reacted == ok_result("react", room_id=ROOM, event_id="$reaction")
-    assert edited == ok_result("edit", room_id=ROOM, event_id="$sent")
+    assert edited == ok_result("edit", room_id=ROOM, event_id="$own")
     assert redacted == ok_result("redact", room_id=ROOM, event_id="$redaction")
     assert _sent(homeserver, event_type="m.reaction") == [
         {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$own", "key": "👍"}, AGENT_AUTHORED_KEY: agent_id},
