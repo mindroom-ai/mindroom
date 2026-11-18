@@ -20,6 +20,7 @@ class LiveDocs:
     """What one reply shows live: Markdown, reasoning, public tool-trace events, stream status, and worker activity.
 
     ``segments`` says where each reasoning segment begins in ``reasoning`` and how many tool calls preceded it.
+    ``compactions`` holds the reply's automatic compaction entries, in start order.
     """
 
     md: str
@@ -28,6 +29,7 @@ class LiveDocs:
     status: str
     activity: str
     segments: tuple[dict[str, int], ...] = ()
+    compactions: tuple[dict[str, object], ...] = ()
 
     def to_json(self) -> dict[str, object]:
         """Return the snapshot form of these documents."""
@@ -38,6 +40,7 @@ class LiveDocs:
             "status": self.status,
             "activity": self.activity,
             "segments": [dict(segment) for segment in self.segments],
+            "compactions": [dict(entry) for entry in self.compactions],
         }
 
 
@@ -148,6 +151,8 @@ def live_delta(before: LiveDocs, after: LiveDocs) -> dict[str, object]:
         delta["activity"] = after.activity
     if before.segments != after.segments:
         delta["segments"] = [dict(segment) for segment in after.segments]
+    if before.compactions != after.compactions:
+        delta["compactions"] = [dict(entry) for entry in after.compactions]
     return delta
 
 

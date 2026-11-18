@@ -76,6 +76,18 @@ def test_publisher_ids_order_by_start_time() -> None:
     assert first.split("-")[0] <= second.split("-")[0]
 
 
+def test_live_frames_carry_compactions_in_snapshot_and_delta() -> None:
+    """A snapshot carries the compaction entries; a delta carries the whole list, and only when it changed."""
+    running = {"id": "c1", "phase": "mid_turn", "after_tool": 2, "status": "running"}
+    before = LiveDocs(md="a", reasoning="", tools=(), status="streaming", activity="", compactions=(running,))
+    assert before.to_json()["compactions"] == [running]
+
+    assert "compactions" not in live_delta(before, replace(before, md="ab"))
+    finished = {**running, "status": "success", "after_tokens": 4_000}
+    after = replace(before, compactions=(finished,))
+    assert live_delta(before, after) == {"compactions": [finished]}
+
+
 def test_fitted_tools_cut_long_previews_and_leave_the_oldest_bare() -> None:
     """Frames cut each preview to the cap, drop the oldest entries' previews, and mark only the entries they changed."""
     short = {"type": "tool_call_completed", "tool_name": "a", "args_preview": "x", "result_preview": "ok"}

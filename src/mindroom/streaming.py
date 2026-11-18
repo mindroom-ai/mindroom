@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
 from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
     REASONING_CONTENT_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
@@ -607,6 +609,8 @@ class StreamingResponse:
     # the first trace slots so the continuation's markers number after them.
     resumed_text: str = ""
     resumed_tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # The reply's automatic compactions, which every write and frame shows.
+    compactions: ReplyCompactions | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -677,7 +681,7 @@ class StreamingResponse:
             self._reasoning_segments.append(
                 {
                     "start": utf16_length(self.reasoning_text),
-                    "after_tool": len(self.tool_trace) if self.show_tool_calls else 0,
+                    "after_tool": self.visible_tool_count(),
                 },
             )
         self.reasoning_text += text
@@ -689,6 +693,17 @@ class StreamingResponse:
             self._reasoning_seconds += elapsed
             self._reasoning_segments[-1]["duration_ms"] = round(elapsed * 1000)
             self._reasoning_segment_started_at = None
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far, where a new reasoning segment or compaction anchors."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
+
+    def has_progress(self) -> bool:
+        """Return whether the reply produced any text or tool call yet, a resumed attempt's included.
+
+        A hidden tool call leaves its gap in the text (``_ensure_hidden_tool_gap``).
+        """
+        return bool(self.accumulated_text or self.tool_trace)
 
     @property
     def live_active(self) -> bool:
@@ -730,6 +745,7 @@ class StreamingResponse:
             segments=tuple(
                 {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
             ),
+            compactions=tuple(self.compactions.content() or ()) if self.compactions is not None else (),
         )
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
@@ -1167,7 +1183,7 @@ class StreamingResponse:
         )
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
-        """Return the extra content of one durable write: the caller's, the live watermark, and the reasoning.
+        """Return the extra content of one durable write: the caller's, the live watermark, compactions, and reasoning.
 
         Reasoning rides the terminal write, and every edit made while live frames do not carry the reply's progress
         (no relay, frames switched off, or frames stopped), so the reply keeps showing its reasoning. The first send
@@ -1177,6 +1193,10 @@ class StreamingResponse:
         checkpoint = self.live.checkpoint() if self.live is not None else None
         if checkpoint is not None:
             extra_content[LIVE_CHECKPOINT_KEY] = checkpoint
+        # Compactions show their running status on every durable write.
+        compactions = self.compactions.content() if self.compactions is not None else None
+        if compactions is not None:
+            extra_content[COMPACTIONS_CONTENT_KEY] = compactions
         durable_reasoning = is_final or (self.event_id is not None and not self.live_active)
         if durable_reasoning and self.reasoning_text.strip():
             reasoning_seconds = self._reasoning_seconds
@@ -2191,6 +2211,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     extra_content: Mapping[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    compactions: ReplyCompactions | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
@@ -2208,6 +2229,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
     stream continues below it instead of replacing it. ``placeholder_ready``
     resolves ``True`` once a reply that started without a placeholder may show one.
+    ``compactions`` records the reply's automatic compactions, which every write and frame of the stream shows.
     """
     sc = config.defaults.streaming
     streaming = streaming_cls(
@@ -2233,6 +2255,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         allow_new_terminal_message=allow_new_terminal_message,
         resumed_text=resumed.resumed_text if resumed is not None else "",
         resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
+        compactions=compactions,
         initial_send=initial_send,
         progress_write_ahead=progress_write_ahead,
         progress_delivered=progress_delivered,
@@ -2258,6 +2281,10 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
         )
         live_task = _start_live_frames(client, streaming, delivery_queue)
+        if compactions is not None:
+            # A compaction anchors after the tool calls shown so far. Its entries ride on the writes the stream makes
+            # anyway and on its live frames; a change alone never asks for a durable write.
+            compactions.bind(streaming)
         try:
             try:
                 await _consume_stream_with_progress_supervision(
@@ -2327,6 +2354,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         finally:
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
+            if compactions is not None:
+                compactions.unbind()
 
     return transport_outcome
 
