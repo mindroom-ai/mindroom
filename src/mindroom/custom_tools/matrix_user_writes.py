@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from http import HTTPStatus
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
@@ -404,10 +404,10 @@ async def _event_write(
     marker: dict[str, str],
 ) -> dict[str, object]:
     """React to an event, edit one of the person's own messages, or redact one of their own messages or reactions."""
-    room_id, event_id = str(write.room_id), str(write.event_id)
+    room_id = str(write.room_id)
     if write.action == "redact":
         # A redaction carries no text that encryption would protect.
-        await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=False)
+        event_id = await _target(client, room_id, str(write.event_id), actor.person_user_id, write.action)
         reason = (write.message or "").strip()
         body = {**({"reason": reason} if reason else {}), **marker}
         path = f"/rooms/{quote(room_id, safe='')}/redact/{quote(event_id, safe='')}/{uuid4().hex}"
@@ -416,10 +416,8 @@ async def _event_write(
             written.event_id = redaction["event_id"]
         return {"room_id": room_id, "event_id": redaction.get("event_id")}
     await _require_unencrypted(client, room_id)
+    event_id = await _target(client, room_id, str(write.event_id), actor.person_user_id, write.action)
     if write.action == "react":
-        # The homeserver takes a reaction to an event the room does not hold, such as one of another room, and nobody
-        # sees it, so the event is read in the room first, as the `react` tool reads it.
-        await read_event(client, room_id, event_id)
         outcome = await send_message_outcome(
             client,
             room_id,
@@ -428,22 +426,6 @@ async def _event_write(
             operation="matrix_user_react",
         )
     else:
-        named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
-        replaced = _replaced_event_id(named)
-        if replaced is not None:
-            # An event ID from elsewhere, such as a read of the room, may name an edit's replacement event. Clients
-            # ignore a replacement of a replacement, so the message it replaced is the one to edit, if it too may be.
-            event_id = replaced
-            named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
-        if redacted(named):
-            # The homeserver takes a replacement of a deleted message, and nobody sees it.
-            msg = f"{event_id} was deleted, so it cannot be edited."
-            raise MatrixRequestError(msg)
-        original = named.get("content")
-        msgtype = original.get("msgtype") if isinstance(original, dict) else None
-        if msgtype not in _EDITABLE_MSGTYPES:
-            msg = f"Only text messages can be edited, and {event_id} is a message of type {msgtype}."
-            raise MatrixRequestError(msg)
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
         # ``extra_content`` puts the marker on both layers, as history keeps the edit's replacement content.
@@ -466,20 +448,37 @@ async def _event_write(
     return {"room_id": room_id, "event_id": written.event_id if write.action == "react" else event_id}
 
 
-async def _require_changeable(
+async def _target(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
     person: str,
-    *,
-    edit: bool,
-) -> dict[str, Any]:
-    """Return the event, refusing one that is not the person's own message or reaction, or, for an edit, their message.
+    action: str,
+) -> str:
+    """Return the ID of the event that ``action`` on ``event_id`` acts on, refusing one it may not act on.
 
-    The events that made a room and set its name, topic, and members are state, many of them the person's own; the
-    toolkit offers to change none of them.
+    An edit's replacement event stands for the message it replaced: clients ignore a reaction to a replacement and a
+    replacement of one, and redacting one removes only the edit, so the message shows its earlier text again. A
+    reaction is no replacement, so the person's own reaction is redacted as named. The homeserver takes a change to a
+    deleted message, and to an event the room does not hold, such as one of another room, and nobody sees it, so the
+    event is read in the room and a deleted one refused. ``react`` may then act on any event; ``edit`` and ``redact``
+    only on the person's own message or reaction, never on state such as the events that made a room and set its name,
+    topic, and members, many of them the person's own; ``edit`` only on a text message.
     """
     event = await read_event(client, room_id, event_id)
+    content = event.get("content")
+    relation = content.get("m.relates_to") if isinstance(content, dict) else None
+    if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+        replaced = relation.get("event_id")
+        if isinstance(replaced, str):
+            event_id = replaced
+            event = await read_event(client, room_id, event_id)
+    if redacted(event):
+        verb = {"react": "reacted to", "edit": "edited", "redact": "redacted"}[action]
+        msg = f"{event_id} was deleted, so it cannot be {verb}."
+        raise MatrixRequestError(msg)
+    if action == "react":
+        return event_id
     sender, event_type = event.get("sender"), event.get("type")
     if sender != person:
         msg = f"Only your owner's own events can be changed, and {event_id} was sent by {sender}."
@@ -487,20 +486,15 @@ async def _require_changeable(
     if "state_key" in event:
         msg = f"Only messages and reactions can be changed this way, and {event_id} is room state of type {event_type}."
         raise MatrixRequestError(msg)
-    if edit and event_type != "m.room.message":
-        msg = f"Only messages can be edited, and {event_id} is of type {event_type}."
-        raise MatrixRequestError(msg)
-    return event
-
-
-def _replaced_event_id(event: dict[str, Any]) -> str | None:
-    """Return the ID of the message that ``event`` replaces, when it is an edit's replacement event."""
-    content = event.get("content")
-    relation = content.get("m.relates_to") if isinstance(content, dict) else None
-    if not isinstance(relation, dict) or relation.get("rel_type") != "m.replace":
-        return None
-    replaced = relation.get("event_id")
-    return replaced if isinstance(replaced, str) else None
+    if action == "edit":
+        if event_type != "m.room.message":
+            msg = f"Only messages can be edited, and {event_id} is of type {event_type}."
+            raise MatrixRequestError(msg)
+        msgtype = content.get("msgtype") if isinstance(content := event.get("content"), dict) else None
+        if msgtype not in _EDITABLE_MSGTYPES:
+            msg = f"Only text messages can be edited, and {event_id} is a message of type {msgtype}."
+            raise MatrixRequestError(msg)
+    return event_id
 
 
 async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: str) -> str:

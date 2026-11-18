@@ -845,24 +845,36 @@ async def test_only_a_text_message_can_be_edited(
 
 
 @pytest.mark.asyncio
-async def test_an_edit_of_an_edit_replaces_the_original_message(
+@pytest.mark.parametrize("action", ["react", "edit", "redact"])
+async def test_a_replacement_event_reaches_the_message_it_replaced(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    action: str,
 ) -> None:
-    """An edit named by its replacement event, as a read lists it, edits the message it replaced.
+    """An edit's replacement event, whose ID another tool or the conversation may give, names the message it edited.
 
-    Clients ignore a replacement of a replacement, so sent as named it would change nothing anyone sees.
+    Clients ignore a reaction to a replacement and a replacement of one, and a redaction of one removes only the edit,
+    so the message would show its earlier text again.
     """
     homeserver.answers[OWN_EVENT_PATH] = text_message("$own", "Helo", sender=OWNER)
     homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "Hello", sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/redact/*"] = {"event_id": "$redaction"}
+    arguments = {"react": {"emoji": "👍"}, "edit": {"message": "Hi all"}, "redact": {}}[action]
 
-    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$edit", message="Hi all")
+    result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$edit", **arguments)
 
-    assert result == ok_result("edit", room_id=ROOM, event_id="$own")
-    [edit] = _sent(homeserver)
-    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$own"}
-    assert edit["m.new_content"]["body"] == "Hi all"
+    [change] = _changes(homeserver)
+    if action == "react":
+        assert result == ok_result("react", room_id=ROOM, event_id="$reaction")
+        assert change.body["m.relates_to"]["event_id"] == "$own"
+    elif action == "edit":
+        assert result == ok_result("edit", room_id=ROOM, event_id="$own")
+        assert change.body["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$own"}
+        assert change.body["m.new_content"]["body"] == "Hi all"
+    else:
+        assert result == ok_result("redact", room_id=ROOM, event_id="$redaction")
+        assert change.path.startswith(f"{ROOM_PATH}/redact/$own/")
 
 
 @pytest.mark.asyncio
@@ -890,38 +902,56 @@ async def test_an_edit_names_the_message_it_edited(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "verb"),
+    [
+        ("react", {"emoji": "👍"}, "reacted to"),
+        ("edit", {"message": "Hi all"}, "edited"),
+        ("redact", {}, "redacted"),
+    ],
+    ids=["react", "edit", "redact"],
+)
 @pytest.mark.parametrize("named", ["$own", "$edit"], ids=["the-message", "its-edit"])
-async def test_an_edit_of_a_deleted_message_is_refused(
+async def test_a_deleted_message_is_refused(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    action: str,
+    arguments: dict[str, str],
+    verb: str,
     named: str,
 ) -> None:
-    """A deleted message keeps its sender and type, and the homeserver takes a replacement nobody would ever see."""
+    """A deleted message keeps its sender and type, and the homeserver takes a change to it that nobody would ever see."""
     deleted = {"redacted_because": {"type": "m.room.redaction", "sender": OWNER}}
     homeserver.answers[OWN_EVENT_PATH] = room_event("$own", "m.room.message", {}, sender=OWNER, unsigned=deleted)
     homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "Hello", sender=OWNER)
 
-    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id=named, message="Hi all")
+    result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id=named, **arguments)
 
-    assert result == error_result("edit", "$own was deleted, so it cannot be edited.")
+    assert result == error_result(action, f"$own was deleted, so it cannot be {verb}.")
     assert _changes(homeserver) == []
 
 
 @pytest.mark.asyncio
-async def test_an_edit_of_an_edit_checks_the_message_it_replaced(
+@pytest.mark.parametrize(
+    "arguments",
+    [{"action": "edit", "message": "Hi all"}, {"action": "redact"}],
+    ids=["edit", "redact"],
+)
+async def test_a_replacement_events_message_must_be_the_owners_too(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    arguments: dict[str, str],
 ) -> None:
-    """The message an edit names, through the owner's own replacement event, must be the owner's too."""
+    """The message an edit or redaction names, through the owner's own replacement event, must be the owner's too."""
     homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$theirs", "Hello", sender=OWNER)
     homeserver.answers[f"{ROOM_PATH}/event/$theirs"] = text_message("$theirs", "Hi", sender=BOB)
 
-    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id="$edit", message="Hi all")
+    result = await _write(config, paths, homeserver, room_id=ROOM, event_id="$edit", **arguments)
 
     assert result == error_result(
-        "edit",
+        arguments["action"],
         f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
     )
     assert _changes(homeserver) == []
