@@ -1108,6 +1108,8 @@ COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 COMPACTIONS_CONTENT_KEY = "io.mindroom.compactions"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
+# The native widgets of a reply: each valid `ui` block as canonical JSON text, drawn where its `mindroom-ui-<id>` block is.
+UI_WIDGETS_CONTENT_KEY = "io.mindroom.ui"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 # Marks a notice that asks its reader to reply in its thread, so clients show it as a conversation, not a status.
 CONVERSATION_CONTENT_KEY = "io.mindroom.conversation"

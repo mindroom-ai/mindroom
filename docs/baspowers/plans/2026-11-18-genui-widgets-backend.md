@@ -82,14 +82,15 @@ def test_parse_widget_never_raises_and_never_echoes_input() -> None:
 
 **Files:**
 - Create: `src/mindroom/ui_widgets/render.py`, `tests/ui_widgets/test_render.py`
-- Modify: `src/mindroom/constants.py`, `tests/ui_widgets/fixtures/ui-widgets-v1.json`, `tests/ui_widgets/test_models.py`
+- Modify: `src/mindroom/constants.py`, `tests/ui_widgets/fixtures/ui-widgets-v1.json`
 
 **Interfaces:**
 - Consumes: `parse_widget`, `Chart`.
 - Produces:
   - `UI_WIDGETS_CONTENT_KEY = "io.mindroom.ui"`
-  - `canonical_widget_json(widget: Chart) -> str`, `widget_id(canonical: str, taken: Collection[str] = ()) -> str`
-  - `fallback_block(widget: Chart, widget_id: str) -> str` (the whole fenced block, no trailing newline)
+  - `_canonical_widget_json(widget: Chart) -> str`, `_widget_id(canonical: str, taken: Collection[str] = ()) -> str`
+  - `_fallback_block(widget: Chart, widget_id: str) -> str` (the whole fenced block, no trailing newline)
+  - These three are private (only `render.py` and its tests use them; privata rejects a public name nothing else imports), so the test snippets below call them with the underscore.
   - `@dataclass(frozen=True, slots=True) class UiRender: text: str; content: dict[str, object] | None`
   - `render_ui_widgets(text: str, *, in_progress: bool) -> UiRender`
   - `without_open_ui_fence(text: str) -> str` (the text cut where an open column-0 `ui` fence begins, else the same object)
@@ -134,7 +135,7 @@ def test_text_without_a_ui_fence_is_returned_as_is() -> None:
 - [ ] **Step 3: Add the fixture's `responses` case** exactly as spec 5.6 with `"stage": 2` (no backend code reads it).
 - [ ] **Step 4: Run.** Expected: FAIL, `ImportError: render`.
 - [ ] **Step 5: Implement `render.py`.** One pass over the lines tracks the open fence (any column-0 or indented fence opens a code block; only column-0 `ui` fences are candidates). Collect the ids of literal `mindroom-ui-` fences first. Replace valid closed blocks in place with blank-line separation; in progress, cut at an open `ui` fence whose opening line is complete. Memoize `(canonical, fallback lines)` by block text with `functools.lru_cache(maxsize=64)`. With `in_progress=False`, log one warning per closed `ui` block that failed validation, with its error list only. Fallback rules are spec 5.3.
-- [ ] **Step 6: Fill `canonical` and `id` for every valid `widgets` case** from the implementation, check the spec's values by eye, and extend `test_models.py` to assert them.
+- [ ] **Step 6: Fill `canonical` and `id` for every valid `widgets` case** from the implementation, check the spec's values by eye, and assert them in `test_render.py` (`test_canonical_json_and_id_agree_with_the_shared_fixture`), next to the functions that produce them.
 - [ ] **Step 7: Run both test files.** Expected: PASS.
 - [ ] **Step 8: Commit** (message `feat(ui-widgets): fallback text, ids and the idempotent render`).
 

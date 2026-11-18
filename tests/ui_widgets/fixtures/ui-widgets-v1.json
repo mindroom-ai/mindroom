@@ -5,61 +5,81 @@
       "name": "a bar chart",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "15a2d22c55"
     },
     {
       "name": "axis titles",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}],\"x\":\"Quarter\",\"y\":\"orders\"}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\",\"x\":\"Quarter\",\"y\":\"orders\"}",
+      "id": "307c82dc3d"
     },
     {
       "name": "a null optional key",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}],\"x\":null}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "15a2d22c55"
     },
     {
       "name": "200 labels and points",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"d0\",\"d1\",\"d2\",\"d3\",\"d4\",\"d5\",\"d6\",\"d7\",\"d8\",\"d9\",\"d10\",\"d11\",\"d12\",\"d13\",\"d14\",\"d15\",\"d16\",\"d17\",\"d18\",\"d19\",\"d20\",\"d21\",\"d22\",\"d23\",\"d24\",\"d25\",\"d26\",\"d27\",\"d28\",\"d29\",\"d30\",\"d31\",\"d32\",\"d33\",\"d34\",\"d35\",\"d36\",\"d37\",\"d38\",\"d39\",\"d40\",\"d41\",\"d42\",\"d43\",\"d44\",\"d45\",\"d46\",\"d47\",\"d48\",\"d49\",\"d50\",\"d51\",\"d52\",\"d53\",\"d54\",\"d55\",\"d56\",\"d57\",\"d58\",\"d59\",\"d60\",\"d61\",\"d62\",\"d63\",\"d64\",\"d65\",\"d66\",\"d67\",\"d68\",\"d69\",\"d70\",\"d71\",\"d72\",\"d73\",\"d74\",\"d75\",\"d76\",\"d77\",\"d78\",\"d79\",\"d80\",\"d81\",\"d82\",\"d83\",\"d84\",\"d85\",\"d86\",\"d87\",\"d88\",\"d89\",\"d90\",\"d91\",\"d92\",\"d93\",\"d94\",\"d95\",\"d96\",\"d97\",\"d98\",\"d99\",\"d100\",\"d101\",\"d102\",\"d103\",\"d104\",\"d105\",\"d106\",\"d107\",\"d108\",\"d109\",\"d110\",\"d111\",\"d112\",\"d113\",\"d114\",\"d115\",\"d116\",\"d117\",\"d118\",\"d119\",\"d120\",\"d121\",\"d122\",\"d123\",\"d124\",\"d125\",\"d126\",\"d127\",\"d128\",\"d129\",\"d130\",\"d131\",\"d132\",\"d133\",\"d134\",\"d135\",\"d136\",\"d137\",\"d138\",\"d139\",\"d140\",\"d141\",\"d142\",\"d143\",\"d144\",\"d145\",\"d146\",\"d147\",\"d148\",\"d149\",\"d150\",\"d151\",\"d152\",\"d153\",\"d154\",\"d155\",\"d156\",\"d157\",\"d158\",\"d159\",\"d160\",\"d161\",\"d162\",\"d163\",\"d164\",\"d165\",\"d166\",\"d167\",\"d168\",\"d169\",\"d170\",\"d171\",\"d172\",\"d173\",\"d174\",\"d175\",\"d176\",\"d177\",\"d178\",\"d179\",\"d180\",\"d181\",\"d182\",\"d183\",\"d184\",\"d185\",\"d186\",\"d187\",\"d188\",\"d189\",\"d190\",\"d191\",\"d192\",\"d193\",\"d194\",\"d195\",\"d196\",\"d197\",\"d198\",\"d199\"],\"series\":[{\"name\":\"Orders\",\"data\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"d0\",\"d1\",\"d2\",\"d3\",\"d4\",\"d5\",\"d6\",\"d7\",\"d8\",\"d9\",\"d10\",\"d11\",\"d12\",\"d13\",\"d14\",\"d15\",\"d16\",\"d17\",\"d18\",\"d19\",\"d20\",\"d21\",\"d22\",\"d23\",\"d24\",\"d25\",\"d26\",\"d27\",\"d28\",\"d29\",\"d30\",\"d31\",\"d32\",\"d33\",\"d34\",\"d35\",\"d36\",\"d37\",\"d38\",\"d39\",\"d40\",\"d41\",\"d42\",\"d43\",\"d44\",\"d45\",\"d46\",\"d47\",\"d48\",\"d49\",\"d50\",\"d51\",\"d52\",\"d53\",\"d54\",\"d55\",\"d56\",\"d57\",\"d58\",\"d59\",\"d60\",\"d61\",\"d62\",\"d63\",\"d64\",\"d65\",\"d66\",\"d67\",\"d68\",\"d69\",\"d70\",\"d71\",\"d72\",\"d73\",\"d74\",\"d75\",\"d76\",\"d77\",\"d78\",\"d79\",\"d80\",\"d81\",\"d82\",\"d83\",\"d84\",\"d85\",\"d86\",\"d87\",\"d88\",\"d89\",\"d90\",\"d91\",\"d92\",\"d93\",\"d94\",\"d95\",\"d96\",\"d97\",\"d98\",\"d99\",\"d100\",\"d101\",\"d102\",\"d103\",\"d104\",\"d105\",\"d106\",\"d107\",\"d108\",\"d109\",\"d110\",\"d111\",\"d112\",\"d113\",\"d114\",\"d115\",\"d116\",\"d117\",\"d118\",\"d119\",\"d120\",\"d121\",\"d122\",\"d123\",\"d124\",\"d125\",\"d126\",\"d127\",\"d128\",\"d129\",\"d130\",\"d131\",\"d132\",\"d133\",\"d134\",\"d135\",\"d136\",\"d137\",\"d138\",\"d139\",\"d140\",\"d141\",\"d142\",\"d143\",\"d144\",\"d145\",\"d146\",\"d147\",\"d148\",\"d149\",\"d150\",\"d151\",\"d152\",\"d153\",\"d154\",\"d155\",\"d156\",\"d157\",\"d158\",\"d159\",\"d160\",\"d161\",\"d162\",\"d163\",\"d164\",\"d165\",\"d166\",\"d167\",\"d168\",\"d169\",\"d170\",\"d171\",\"d172\",\"d173\",\"d174\",\"d175\",\"d176\",\"d177\",\"d178\",\"d179\",\"d180\",\"d181\",\"d182\",\"d183\",\"d184\",\"d185\",\"d186\",\"d187\",\"d188\",\"d189\",\"d190\",\"d191\",\"d192\",\"d193\",\"d194\",\"d195\",\"d196\",\"d197\",\"d198\",\"d199\"],\"series\":[{\"data\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "a1b5c29c62"
     },
     {
       "name": "numeric labels become strings",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[2021,2022.0],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"2021\",\"2022\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "8cfd542c13"
     },
     {
       "name": "a title of 80 emoji",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\",\"type\":\"chart\"}",
+      "id": "31089ae31b"
     },
     {
       "name": "subnormal and extreme finite values",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\",\"Q3\"],\"series\":[{\"name\":\"Orders\",\"data\":[1e-320,1.5e300,-1e308]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\",\"Q3\"],\"series\":[{\"data\":[1e-320,1.5e+300,-1e+308],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "0e52a276ff"
     },
     {
       "name": "a whole number above 2^53 keeps its exponent",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\"],\"series\":[{\"name\":\"Orders\",\"data\":[1e21]}]}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\"],\"series\":[{\"data\":[1e+21],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "28f6e2b2bc"
     },
     {
       "name": "a block of exactly 16384 bytes",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             }",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"Orders\",\"type\":\"chart\"}",
+      "id": "15a2d22c55"
     },
     {
       "name": "the spec's chart",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}",
-      "valid": true
+      "valid": true,
+      "canonical": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}",
+      "id": "df4d729a5d"
     },
     {
       "name": "an unknown key",
@@ -200,6 +220,202 @@
       "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\",\"x\":null}"
     }
   ],
-  "renders": [],
-  "responses": []
+  "renders": [
+    {
+      "name": "the spec's finished reply",
+      "stage": 1,
+      "markdown": "Signups peaked in February.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n\nMarch is still 25% above January.",
+      "in_progress": false,
+      "text": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nMarch is still 25% above January.",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<p>Signups peaked in February.</p>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>March is still 25% above January.</p>\n"
+    },
+    {
+      "name": "an unknown type stays a code block",
+      "stage": 1,
+      "markdown": "A map:\n\n```ui\n{\"type\":\"map\"}\n```",
+      "in_progress": false,
+      "text": "A map:\n\n```ui\n{\"type\":\"map\"}\n```",
+      "ui": null,
+      "html": "<p>A map:</p>\n<pre><code class=\"language-ui\">{&quot;type&quot;:&quot;map&quot;}\n</code></pre>\n"
+    },
+    {
+      "name": "nested, list-indented, quoted and tilde fences",
+      "stage": 1,
+      "markdown": "- item\n\n  ```ui\n  {\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n  ```\n\n> ```ui\n> {\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n> ```\n\n````\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n````\n\n~~~ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n~~~\n\nDone.",
+      "in_progress": false,
+      "text": "- item\n\n  ```ui\n  {\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n  ```\n\n> ```ui\n> {\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n> ```\n\n````\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n````\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nDone.",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<ul>\n<li>\n<p>item</p>\n<pre><code class=\"language-ui\">{&quot;type&quot;:&quot;chart&quot;,&quot;kind&quot;:&quot;line&quot;,&quot;title&quot;:&quot;Signups&quot;,&quot;labels&quot;:[&quot;Jan&quot;,&quot;Feb&quot;,&quot;Mar&quot;],&quot;series&quot;:[{&quot;name&quot;:&quot;Signups&quot;,&quot;data&quot;:[120,180.5,150]}],&quot;y&quot;:&quot;users&quot;}\n</code></pre>\n</li>\n</ul>\n<blockquote>\n<pre><code class=\"language-ui\">{&quot;type&quot;:&quot;chart&quot;,&quot;kind&quot;:&quot;line&quot;,&quot;title&quot;:&quot;Signups&quot;,&quot;labels&quot;:[&quot;Jan&quot;,&quot;Feb&quot;,&quot;Mar&quot;],&quot;series&quot;:[{&quot;name&quot;:&quot;Signups&quot;,&quot;data&quot;:[120,180.5,150]}],&quot;y&quot;:&quot;users&quot;}\n</code></pre>\n</blockquote>\n<pre><code>```ui\n{&quot;type&quot;:&quot;chart&quot;,&quot;kind&quot;:&quot;line&quot;,&quot;title&quot;:&quot;Signups&quot;,&quot;labels&quot;:[&quot;Jan&quot;,&quot;Feb&quot;,&quot;Mar&quot;],&quot;series&quot;:[{&quot;name&quot;:&quot;Signups&quot;,&quot;data&quot;:[120,180.5,150]}],&quot;y&quot;:&quot;users&quot;}\n```\n</code></pre>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>Done.</p>\n"
+    },
+    {
+      "name": "two identical charts",
+      "stage": 1,
+      "markdown": "```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n\nAgain:\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nAgain:\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>Again:</p>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "an open chart fence in progress",
+      "stage": 1,
+      "markdown": "Signups peaked.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "in_progress": true,
+      "text": "Signups peaked.",
+      "ui": null,
+      "html": "<p>Signups peaked.</p>\n"
+    },
+    {
+      "name": "a closed chart followed by an open fence in progress",
+      "stage": 1,
+      "markdown": "```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n\nSignups peaked.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "in_progress": true,
+      "text": "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nSignups peaked.",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>Signups peaked.</p>\n"
+    },
+    {
+      "name": "an open fence in a finished reply",
+      "stage": 1,
+      "markdown": "Signups peaked.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "in_progress": false,
+      "text": "Signups peaked.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "ui": null,
+      "html": "<p>Signups peaked.</p>\n<pre><code class=\"language-ui\">{&quot;type&quot;:&quot;chart&quot;,&quot;kind&quot;:&quot;line&quot;,</code></pre>\n"
+    },
+    {
+      "name": "only an open fence in progress",
+      "stage": 1,
+      "markdown": "```ui\n{\"type\":\"chart\",",
+      "in_progress": true,
+      "text": "",
+      "ui": null,
+      "html": ""
+    },
+    {
+      "name": "a literal marker block beside a new identical chart",
+      "stage": 1,
+      "markdown": "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\n```mindroom-ui-ff73cd868c\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "ff73cd868c",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<pre><code class=\"language-mindroom-ui-ff73cd868c\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "a form entry",
+      "stage": 2,
+      "markdown": "Tell me how you like to travel.\n\n```ui\n{\"fields\":[{\"kind\":\"radio\",\"label\":\"Pace\",\"name\":\"pace\",\"options\":[\"Relaxed\",\"Packed\"],\"required\":true},{\"kind\":\"checkbox\",\"label\":\"Interests\",\"name\":\"interests\",\"options\":[\"Food\",\"Museums\"]},{\"kind\":\"slider\",\"label\":\"Daily budget\",\"max\":500,\"min\":50,\"name\":\"budget\",\"step\":10,\"unit\":\"USD\",\"value\":150},{\"kind\":\"date\",\"label\":\"Start date\",\"min\":\"2026-12-01\",\"name\":\"start\"},{\"kind\":\"text\",\"label\":\"Notes\",\"name\":\"notes\",\"placeholder\":\"Anything else\"}],\"submit\":\"Plan my trip\",\"title\":\"Plan the trip\",\"type\":\"form\"}\n```",
+      "in_progress": false,
+      "text": "Tell me how you like to travel.\n\n```mindroom-ui-0fd993d70d\nPlan the trip (form)\n1. Pace (choose one): Relaxed | Packed (required)\n2. Interests (choose any): Food | Museums\n3. Daily budget (50 to 500 USD, step 10) [default: 150]\n4. Start date (date, from 2026-12-01)\n5. Notes (text)\nReply in your own words.\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "0fd993d70d",
+            "json": "{\"fields\":[{\"kind\":\"radio\",\"label\":\"Pace\",\"name\":\"pace\",\"options\":[\"Relaxed\",\"Packed\"],\"required\":true},{\"kind\":\"checkbox\",\"label\":\"Interests\",\"name\":\"interests\",\"options\":[\"Food\",\"Museums\"]},{\"kind\":\"slider\",\"label\":\"Daily budget\",\"max\":500,\"min\":50,\"name\":\"budget\",\"step\":10,\"unit\":\"USD\",\"value\":150},{\"kind\":\"date\",\"label\":\"Start date\",\"min\":\"2026-12-01\",\"name\":\"start\"},{\"kind\":\"text\",\"label\":\"Notes\",\"name\":\"notes\",\"placeholder\":\"Anything else\"}],\"submit\":\"Plan my trip\",\"title\":\"Plan the trip\",\"type\":\"form\"}"
+          }
+        ]
+      },
+      "html": "<p>Tell me how you like to travel.</p>\n<pre><code class=\"language-mindroom-ui-0fd993d70d\">Plan the trip (form)\n1. Pace (choose one): Relaxed | Packed (required)\n2. Interests (choose any): Food | Museums\n3. Daily budget (50 to 500 USD, step 10) [default: 150]\n4. Start date (date, from 2026-12-01)\n5. Notes (text)\nReply in your own words.\n</code></pre>\n"
+    }
+  ],
+  "responses": [
+    {
+      "name": "the spec's form answer",
+      "stage": 2,
+      "form": {
+        "event_id": "$form:example.org",
+        "thread_id": "$root:example.org",
+        "sender": "@mindroom_atlas:example.org",
+        "sender_name": "Atlas",
+        "widget": {
+          "id": "0fd993d70d",
+          "json": "{\"fields\":[{\"kind\":\"radio\",\"label\":\"Pace\",\"name\":\"pace\",\"options\":[\"Relaxed\",\"Packed\"],\"required\":true},{\"kind\":\"checkbox\",\"label\":\"Interests\",\"name\":\"interests\",\"options\":[\"Food\",\"Museums\"]},{\"kind\":\"slider\",\"label\":\"Daily budget\",\"max\":500,\"min\":50,\"name\":\"budget\",\"step\":10,\"unit\":\"USD\",\"value\":150},{\"kind\":\"date\",\"label\":\"Start date\",\"min\":\"2026-12-01\",\"name\":\"start\"},{\"kind\":\"text\",\"label\":\"Notes\",\"name\":\"notes\",\"placeholder\":\"Anything else\"}],\"submit\":\"Plan my trip\",\"title\":\"Plan the trip\",\"type\":\"form\"}"
+        }
+      },
+      "values": {
+        "pace": "Relaxed",
+        "interests": [
+          "Food",
+          "Museums"
+        ],
+        "budget": 150,
+        "start": "2026-12-05"
+      },
+      "content": {
+        "msgtype": "m.text",
+        "body": "@mindroom_atlas:example.org Plan the trip:\n- Pace: Relaxed\n- Interests: Food, Museums\n- Daily budget: 150 USD\n- Start date: 2026-12-05",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<a href=\"https://matrix.to/#/%40mindroom_atlas%3Aexample.org\">Atlas</a> Plan the trip:<ul><li>Pace: Relaxed</li><li>Interests: Food, Museums</li><li>Daily budget: 150 USD</li><li>Start date: 2026-12-05</li></ul>",
+        "m.mentions": {
+          "user_ids": [
+            "@mindroom_atlas:example.org"
+          ]
+        },
+        "m.relates_to": {
+          "rel_type": "m.thread",
+          "event_id": "$root:example.org",
+          "is_falling_back": false,
+          "m.in_reply_to": {
+            "event_id": "$form:example.org"
+          }
+        },
+        "io.mindroom.ui_response": {
+          "version": 1,
+          "event_id": "$form:example.org",
+          "widget": "0fd993d70d",
+          "values": {
+            "pace": "Relaxed",
+            "interests": [
+              "Food",
+              "Museums"
+            ],
+            "budget": 150,
+            "start": "2026-12-05"
+          }
+        }
+      }
+    }
+  ]
 }
