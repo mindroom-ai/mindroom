@@ -1246,6 +1246,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.credentials"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.config.schema_hints",
     "mindroom.constants",
     "mindroom.providers.names",
@@ -1684,6 +1685,7 @@ depends_on = [
 path = "mindroom.custom_tools.dynamic_workflow"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
+    "mindroom.config.models",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agents",
@@ -5379,6 +5381,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.room_model_commands"
 depends_on = [
+    "mindroom.commands.model_commands",
     "mindroom.matrix.client_room_admin",
     "mindroom.room_model_overrides",
 ]
@@ -6095,6 +6098,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.entity_resolution",
@@ -8804,6 +8808,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.model_catalog_receiver"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.matrix.olm_to_device",
     "mindroom.model_catalog",

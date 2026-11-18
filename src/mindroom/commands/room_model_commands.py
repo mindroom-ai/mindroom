@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.commands.model_commands import available_models_text
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_model_overrides import (
     clear_room_model_override,
@@ -21,10 +22,6 @@ _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 
 
-def _available_models_text(config: Config) -> str:
-    return "\n".join(f"- `{name}` ({model.provider} {model.id})" for name, model in config.models.items())
-
-
 def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) -> str:
     state = resolve_room_model_override(runtime_paths, room_id, configured_models=config.models)
     if state.active is not None:
@@ -38,8 +35,9 @@ def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) 
             "Thread model overrides still take precedence."
         )
     return (
-        f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
-        "Use `/room_model <name>` to switch this room, or `/room_model reset` to remove the override."
+        f"{current}\n\n**Available models:**\n{available_models_text(config)}\n\n"
+        "Use `/room_model <name>` or `/room_model <name>@<level>` to switch this room, "
+        "or `/room_model reset` to remove the override."
     )
 
 
@@ -59,7 +57,7 @@ async def handle_room_model_command(
         if not requested or requested.lower() in _LIST_ARGUMENTS:
             return _show_room_model(config, runtime_paths, room_id)
         if requested.lower() not in _RESET_ARGUMENTS:
-            return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
+            return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}"
 
     if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."

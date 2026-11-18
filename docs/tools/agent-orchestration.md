@@ -84,7 +84,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
-Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
+Set `model` to an alias from `models:`, or `name@level` for one of its [reasoning levels](../configuration/models.md#reasoning-levels), to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), which saves tokens when the child does not need its full system prompt.
 Set `dedicated_worker=True` to run the child's worker tools in a worker of its own; see [Dedicated Workers](#dedicated-workers).
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
@@ -424,6 +424,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
     Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
+    A model with [reasoning levels](../configuration/models.md#reasoning-levels) that is named without a level keeps the level that was its default when the run started.
     Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
     It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
@@ -438,6 +439,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
   - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
   - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
   - `models` lists the models participants may use, and a non-empty `tools` lists every toolkit or `toolkit.function` a participant may name, inline or in its profile.
+    A `models` entry `name@level` admits only that model at that level, which a participant naming plain `name` runs at only while `level` is its default; an alias or model ID admits every level.
   - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
 
 ```python

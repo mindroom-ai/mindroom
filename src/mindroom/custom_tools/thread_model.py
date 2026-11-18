@@ -70,6 +70,7 @@ class ThreadModelTools(Toolkit):
                     "name": name,
                     "provider": model.provider,
                     "model_id": model.id,
+                    **({"reasoning": model.reasoning.model_dump()} if model.reasoning else {}),
                 }
                 for name, model in sorted(context.config.models.items())
             ],
@@ -110,7 +111,8 @@ class ThreadModelTools(Toolkit):
 
         Args:
             model_name: Configured model name from the `models:` section of
-                config.yaml (for example "default" or "opus").
+                config.yaml (for example "default" or "opus"), or `name@level`
+                for one of the reasoning levels `list_models` shows (for example "sol@high").
             when: Whether the current response continues with the new model or
                 the change starts on the next turn.
 

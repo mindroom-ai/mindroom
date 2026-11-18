@@ -45,6 +45,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
 | `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/) and [reply costs](https://docs.mindroom.chat/usage/#reply-cost): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
+| `reasoning` | No | `null` | Reasoning levels the model offers: `levels` (non-empty, no repeats) and `default` (one of `levels`), each one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning Levels](#reasoning-levels)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
 It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
@@ -603,7 +604,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line.
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
 
 ## Stalled Streams
 
@@ -635,6 +636,47 @@ models:
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
 
+## Reasoning Levels
+
+A `reasoning` block lets one model entry run at several reasoning levels, so `sol` and `sol_high` need not be two entries:
+
+```yaml
+models:
+  sol:
+    provider: codex
+    id: gpt-6.2-sol
+    display_name: Sol
+    reasoning:
+      levels: [low, medium, high, xhigh]  # what clients offer, in this order
+      default: high                       # what plain `sol` runs at
+```
+
+Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
+`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
+`!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
+
+MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
+
+| Provider | A level `L` | `off` |
+|----------|-------------|-------|
+| `openai`, `codex`, `azure`, `openrouter`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `zai` | `reasoning_effort: L` | no `off` level |
+| `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
+| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `google` | `thinking_level: L` | `thinking_budget: 0` |
+| `ollama` | `think: L` | `think: false` |
+
+Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, because YAML reads a bare `off` as false.
+`groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
+Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
+MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
+For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+`request_params` and `extra_body` still win over the block.
+
+To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
+Thread and room overrides that named the deleted entry, or a level later removed from `levels`, are ignored like any override naming a removed model, so room-level model selection applies again.
+
 ## Hot Reload
 
 After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
@@ -654,7 +696,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
 The picker works in encrypted and unencrypted rooms when the router and at least one agent you may address are joined; teams alone do not qualify.
-It shows each model's key, display name, provider, model ID, and icon, never API keys, hosts, local paths, or `extra_kwargs`.
+It shows each model's key, display name, provider, model ID, icon, and [reasoning levels](#reasoning-levels), never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](https://docs.mindroom.chat/architecture/matrix/#model-selection-protocol).
 
@@ -666,6 +708,7 @@ Show or switch the model that the agents, teams, and router you may address use 
 !model
 !model list
 !model opus
+!model sol@high
 !model reset
 ```
 
@@ -712,9 +755,9 @@ agents:
       - thread_model
 ```
 
-- `list_models()` returns every configured model name with its provider and model ID and works outside a thread.
+- `list_models()` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
 - `get_thread_model()` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `switch_thread_model(model_name, when)` accepts a configured model name and rejects unknown names with the available list.
+- `switch_thread_model(model_name, when)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
 - `reset_thread_model()` removes the thread override so room-level selection applies again.
 

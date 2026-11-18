@@ -10,6 +10,7 @@ import nio
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.config.models import ModelTable, split_model_reference
 from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
@@ -71,10 +72,14 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
     the route keeps its provider's sampling default. Ollama authors sampling in ``options`` instead: it sends the
     value as ``options.temperature``, and keeps an authored ``options.temperature`` when the value is None.
     """
-    model_config = config.models.get(model_name)
+    # ``name@level`` runs ``name``, so the temperature comes off ``name`` and the table keeps reading the reference.
+    base_name, _level = split_model_reference(model_name)
+    model_config = config.models.get(base_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
         extra_kwargs = {key: value for key, value in model_config.extra_kwargs.items() if key != "temperature"}
-        models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
+        models = ModelTable(
+            {**config.models, base_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})},
+        )
         config = config.model_copy(update={"models": models})
     return provider_registry.build_model_provider(config, runtime_paths, model_name)
 

@@ -63,6 +63,7 @@ describe("ModelConfig", () => {
           provider: "anthropic",
           id: "claude-haiku-4-5",
           pricing: { input: 1, output: 5 },
+          reasoning: { levels: ["low", "high"], default: "low" },
         },
         openrouter: { provider: "openrouter", id: "z-ai/glm-5.3" },
         openrouter_backup: {
@@ -221,6 +222,8 @@ describe("ModelConfig", () => {
           id: "claude-sonnet-5",
           // Budget prices are edited on the Budgets page and survive row edits.
           pricing: { input: 1, output: 5 },
+          // Reasoning levels are authored in YAML or More settings and survive row edits.
+          reasoning: { levels: ["low", "high"], default: "low" },
         }),
       );
       expect(mockStore.deleteModel).toHaveBeenCalledWith("anthropic");

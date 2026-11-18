@@ -76,8 +76,8 @@ The private reply type is `io.mindroom.models.response`:
   "capabilities": ["model_selection"],
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
-  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image"}],
-  "selection": {"override":null,"inherited":[{"entity":"helper","model":"fast"}]}
+  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
+  "selection": {"override":"fast","reasoning":"high","inherited":[{"entity":"helper","model":"fast"}]}
 }
 ```
 
@@ -85,6 +85,8 @@ The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
 It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
+`reasoning_levels` and `reasoning_default` appear only on models with [reasoning levels](../configuration/models.md#reasoning-levels).
+`selection.override` and each `inherited[].model` are catalog keys; when the chosen reference is `key@level`, a `reasoning` field beside them carries the level, and it is absent otherwise.
 This explains what resetting the thread will use, including different defaults across agents and teams.
 
 Each request reads current config.
@@ -111,6 +113,7 @@ Mutations use the ordinary `m.room.message` / `m.text` path with readable body `
 ```
 
 `operation` is `set` or `reset`; reset omits `model`.
+`model` is a catalog key or `key@level` for one of the key's `reasoning_levels`, and the result's `override` echoes it as sent.
 Explicit set permits keys such as `default`, `reset`, or `list`.
 The required runtime device ID comes from authenticated discovery, routes the command, and grants no authority.
 Actual room and canonical thread come from Matrix event routing.

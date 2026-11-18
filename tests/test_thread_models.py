@@ -20,7 +20,7 @@ from mindroom.commands.parsing import CommandType, command_parser, get_command_h
 from mindroom.config.agent import AgentConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.llm.runs import RunStatus
@@ -31,6 +31,7 @@ from mindroom.thread_models import (
     _store_path,
     clear_thread_model_override,
     copy_thread_model_override,
+    resolve_thread_model_override,
     set_thread_model_override,
 )
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -470,6 +471,32 @@ def test_resolve_turn_model_ignores_stale_thread_override(tmp_path: Path) -> Non
     )
 
     assert runtime_model.model_name == "default"
+
+
+def test_resolve_turn_model_ignores_a_thread_override_at_a_level_the_model_no_longer_lists(tmp_path: Path) -> None:
+    """A stored ``name@level`` whose level was removed is stale like a removed model; a listed one applies."""
+    config = _config_with_models(tmp_path)
+    config.models["default"] = config.models["default"].model_copy(
+        update={"reasoning": ReasoningConfig(levels=["low", "high"], default="low")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    scope = ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="default@high",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    assert resolve_turn_model(config, runtime_paths, scope, None).model_name == "default@high"
+
+    config.models["default"] = config.models["default"].model_copy(
+        update={"reasoning": ReasoningConfig(levels=["low"], default="low")},
+    )
+
+    assert resolve_turn_model(config, runtime_paths, scope, None).model_name == "default"
+    override = resolve_thread_model_override(runtime_paths, THREAD_ID, config=config)
+    assert override.stale == {"test_agent": "default@high"}
 
 
 def test_resolve_turn_model_without_thread_id_keeps_authored_model(tmp_path: Path) -> None:
