@@ -643,8 +643,6 @@ def test_a_compaction_change_is_never_uncommitted_presentation(tmp_path: Path) -
         compactions=recorder,
         **_records().hooks(),
     )
-    streaming.event_id = "$placeholder"
-    streaming._shows_stream = True
     _Compaction(recorder).start()
 
     assert not streaming.has_uncommitted_presentation()

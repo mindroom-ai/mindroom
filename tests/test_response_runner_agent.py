@@ -29,6 +29,7 @@ from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
+    COMPACTION_NOTICE_CONTENT_KEY,
     COMPACTIONS_CONTENT_KEY,
     FORK_CONTENT_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -2865,10 +2866,6 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=None,
             ),
             patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
-            patch(
-                "mindroom.delivery_gateway.DeliveryGateway._send_compaction_lifecycle_start",
-                new=AsyncMock(return_value="$notice"),
-            ) as mock_send_compaction_lifecycle_start,
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
@@ -2884,7 +2881,7 @@ class TestAgentBot(AgentBotTestBase):
             )
         assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
-        mock_send_compaction_lifecycle_start.assert_not_awaited()
+        assert not any(COMPACTION_NOTICE_CONTENT_KEY in content for content in sent_contents)
         # The final answer edits the reply's placeholder; its new content carries the compaction.
         placeholder, final_edit = sent_contents[0], sent_contents[-1]
         assert "m.new_content" not in placeholder
