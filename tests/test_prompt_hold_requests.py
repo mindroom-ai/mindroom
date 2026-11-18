@@ -249,19 +249,16 @@ async def test_an_edited_file_reaches_a_warm_conversation_as_one_system_message_
     [(index, update)] = _updates(second)
     assert index == len(second["messages"]) - 1
     assert update.splitlines()[1:] == [
-        "Replace these lines of the system prompt:",
-        "| ",
-        "| ## Replies",
-        f"| {_AMBER}",
-        "| ",
-        "| ## Tools",
-        "with these lines:",
-        "| ",
-        "| ## Replies",
-        f"| {_VIOLET}",
-        "| - Stay brief.",
-        "| ",
-        "| ## Tools",
+        "Change the system prompt as this diff shows:",
+        "```diff",
+        " ",
+        " ## Replies",
+        f"-{_AMBER}",
+        f"+{_VIOLET}",
+        "+- Stay brief.",
+        " ",
+        " ## Tools",
+        "```",
     ]
     # The cache ladder marks the held prompt and the newest input, never the update.
     assert second["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
@@ -384,7 +381,7 @@ async def test_a_change_no_update_may_tell_sends_the_current_prompt_without_one(
     conversation.write_rules(*rules, _GREEN)
     [third] = await conversation.turn("Third question", **context)
     assert [message["role"] for message in _extends(third, second, _assistant())] == ["user", "system"]
-    assert f"| {_GREEN}" in _updates(third)[0][1].split("\nwith these lines:\n")[1].splitlines()
+    assert f"+{_GREEN}" in _updates(third)[0][1].splitlines()
 
 
 @pytest.mark.asyncio
@@ -545,9 +542,9 @@ async def test_two_requesters_private_instances_hold_their_prompts_apart(
     await turn("@alice:localhost", "Alice is allergic to peanuts.", "Answer in English.")
     alice = await turn("@alice:localhost", "Alice is allergic to peanuts.", "Answer in Dutch.")
     [(_index, update)] = _updates(alice)
-    replaced, by = (part.splitlines() for part in update.split("\nwith these lines:\n"))
-    assert ("| - Answer in English." in replaced, "| - Answer in Dutch." in by) == (True, True)
-    assert "| - Answer in Dutch." not in replaced
+    lines = update.splitlines()
+    assert ("-- Answer in English." in lines, "+- Answer in Dutch." in lines) == (True, True)
+    assert "-- Answer in Dutch." not in lines
 
     bob = await turn("@bob:localhost", "Bob collects stamps.", "Answer in Dutch.")
     assert "Bob collects stamps." in _system_texts(bob)[1]
@@ -676,7 +673,7 @@ async def test_an_update_follows_what_a_request_hook_adds_after_it(
         )
     [(index, update)] = _updates(deciding)
     assert index == len(deciding["messages"]) - 1
-    assert f"| {_VIOLET}" in update
+    assert f"+{_VIOLET}" in update.splitlines()
     assert json.dumps(_plain(deciding["messages"][: len(first["messages"])])) == json.dumps(_plain(first["messages"]))
     assert "respond or stay_silent" in json.dumps(deciding["messages"][-2])
     assert "respond or stay_silent" not in json.dumps(replying)
@@ -726,7 +723,7 @@ async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_pre
     _first, opening, after_fold, next_turn = reply.model.requests
     assert "Answer in English." in system_text(opening.messages)
     [update] = _told(opening)
-    assert "| - Answer in Dutch." in update
+    assert "+- Answer in Dutch." in update.splitlines()
     assert any(is_compaction_summary(message) for message in after_fold.messages) == folds
     if not folds:
         for request in (after_fold, next_turn):

@@ -31,6 +31,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from contextlib import suppress
 from dataclasses import asdict, replace
@@ -94,9 +95,10 @@ def prompt_hold_path(database: Path, session_id: str) -> Path:
 def _update_text(held: str, fresh: str) -> str | None:
     """Return the update that tells a model sent the ``held`` text that ``fresh`` is in force, or None when none may.
 
-    It states the whole difference, so the newest update alone says what is in force: each changed passage, quoted
-    with the lines around it, and the lines that replace it. Every quoted passage stands exactly once in ``held``,
-    so the update and ``held`` give ``fresh`` and no other text; a change that cannot be told so is not told.
+    It states the whole difference, so the newest update alone says what is in force: a unified diff without line
+    numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Every
+    hunk's old side stands exactly once in ``held``, so the update and ``held`` give ``fresh`` and no other text; a
+    change that cannot be told so is not told.
     Nor is any change to a prompt that inlines a ``MEMORY.md``, whose every preloaded file follows a heading of its
     path: an update quotes lines and is sent again, so it would keep a memory the user asked to forget.
     """
@@ -105,14 +107,19 @@ def _update_text(held: str, fresh: str) -> str | None:
     old, new = held.split("\n"), fresh.split("\n")
     if any(line.startswith("### ") and line.lower().endswith("/memory.md") for line in (*old, *new)):
         return None
-    parts = [_UPDATE_HEADER]
+    body: list[str] = []
     for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
-        before, after = old[group[0][1] : group[-1][2]], new[group[0][3] : group[-1][4]]
+        before = old[group[0][1] : group[-1][2]]
         if sum(old[start : start + len(before)] == before for start in range(len(old) - len(before) + 1)) != 1:
             return None
-        parts += ["Replace these lines of the system prompt:", *(f"| {line}" for line in before)]
-        parts += ["with these lines:", *(f"| {line}" for line in after)]
-    text = "\n".join(parts)
+        body += ["@@"] if body else []
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                body += [f" {line}" for line in old[i1:i2]]
+            else:
+                body += [f"-{line}" for line in old[i1:i2]] + [f"+{line}" for line in new[j1:j2]]
+    fence = "`" * max([3, *(len(run) + 1 for line in body for run in re.findall(r"`+", line))])
+    text = "\n".join([_UPDATE_HEADER, "Change the system prompt as this diff shows:", f"{fence}diff", *body, fence])
     return text if len(text) <= _MAX_UPDATE_CHARS else None
 
 

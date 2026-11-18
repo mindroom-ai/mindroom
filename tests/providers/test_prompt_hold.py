@@ -190,18 +190,15 @@ async def test_a_changed_prompt_is_sent_as_the_held_one_and_one_update_after_the
     assert sent[2:5] == second[2:5]
     [update] = _updates(sent)
     assert update.splitlines()[1:] == [
-        "Replace these lines of the system prompt:",
-        "| ",
-        "| ## Replies",
-        "| - End every reply with AMBER.",
-        "| ",
-        "| ## Tools",
-        "with these lines:",
-        "| ",
-        "| ## Replies",
-        "| - End every reply with VIOLET.",
-        "| ",
-        "| ## Tools",
+        "Change the system prompt as this diff shows:",
+        "```diff",
+        " ",
+        " ## Replies",
+        "-- End every reply with AMBER.",
+        "+- End every reply with VIOLET.",
+        " ",
+        " ## Tools",
+        "```",
     ]
 
     # The tool loop and the next turn extend the request around the update's one place, and tell nothing new.
@@ -342,11 +339,15 @@ async def test_a_prompt_that_inlines_a_memory_file_is_never_told_as_an_update(
 
 
 def _applied(held: str, update: str) -> str:
-    """Return the text ``update`` turns ``held`` into, read as a model must: each quoted passage replaced where it stands."""
+    """Return the text ``update`` turns ``held`` into, read as a model must: each hunk's old side replaced where it stands."""
+    body = update.split("\nChange the system prompt as this diff shows:\n", 1)[1].split("\n")
+    fence = body[0].removesuffix("diff")
+    assert set(fence) == {"`"}
+    assert body[-1] == fence
     lines = held.split("\n")
-    passages = update.split("\nReplace these lines of the system prompt:\n")[1:]
-    for passage in reversed(passages):
-        before, after = ([line[2:] for line in part.split("\n")] for part in passage.split("\nwith these lines:\n"))
+    for hunk in reversed("\n".join(body[1:-1]).split("\n@@\n")):
+        before = [line[1:] for line in hunk.split("\n") if line[0] in " -"]
+        after = [line[1:] for line in hunk.split("\n") if line[0] in " +"]
         [start] = [at for at in range(len(lines)) if lines[at : at + len(before)] == before]
         lines[start : start + len(before)] = after
     return "\n".join(lines)
@@ -370,6 +371,38 @@ def test_an_update_and_the_held_prompt_give_the_current_prompt_and_no_other(fres
     update = prompt_hold._update_text(held, fresh)
     assert update is not None
     assert _applied(held, update) == fresh
+
+
+def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_backticks() -> None:
+    """Each change is quoted with two lines around it, and no line of the prompt can close the diff early."""
+    held = "\n".join(
+        ["## Reply rules", "Be terse.", "End with AMBER.", "", *[f"n{i}" for i in range(10)], "Last AMBER."],
+    )
+    fresh = held.replace("AMBER", "VIOLET")
+    update = prompt_hold._update_text(held, fresh)
+    assert update is not None
+    assert update.split("\n")[2:] == [
+        "```diff",
+        " ## Reply rules",
+        " Be terse.",
+        "-End with AMBER.",
+        "+End with VIOLET.",
+        " ",
+        " n0",
+        "@@",
+        " n8",
+        " n9",
+        "-Last AMBER.",
+        "+Last VIOLET.",
+        "```",
+    ]
+    assert _applied(held, update) == fresh
+    fenced = prompt_hold._update_text("a\n```\nb", "a\n```\nc")
+    assert fenced is not None
+    assert "\n````diff\n" in fenced
+    assert fenced.endswith("\n````")
+    assert _applied("a\n```\nb", fenced) == "a\n```\nc"
+    assert prompt_hold._update_text("a\nb", "a\n" + "c" * 9000) is None
 
 
 def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() -> None:
