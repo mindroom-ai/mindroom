@@ -69,7 +69,6 @@ import mindroom.live_frames.subagents as subagent_frames_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
-import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
@@ -3826,12 +3825,6 @@ def real_shell_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put the real `shell_refuses_commands` back where `_shell_runs_without_worker` replaced it."""
     for module in (shell_tool_module, agent_cli_shell_access_module):
         monkeypatch.setattr(module, "shell_refuses_commands", _real_shell_refuses_commands)
-
-
-@pytest.fixture(autouse=True)
-def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
-    monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
 
 
 @pytest.fixture(autouse=True)

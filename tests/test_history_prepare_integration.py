@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -34,7 +36,7 @@ from mindroom.history.storage import (
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
-from mindroom.hooks import render_transient_context
+from mindroom.hooks import EnrichmentItem, render_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
@@ -982,6 +984,106 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     with memory_path.open("a", encoding="utf-8") as memory_file:
         memory_file.write("Fact three.\n")
     assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
+
+
+@pytest.mark.asyncio
+async def test_warm_conversation_keeps_its_system_messages_and_hears_changes_at_its_tail(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Nothing before a conversation changes while its prompt cache may be warm; what changed follows it instead.
+
+    An edited AGENTS.md, a new skill reference file, and a volatile enrichment item leave the system messages byte
+    for byte the same, and a compaction or an idle time past the model's cache lifetime takes the fresh prompt.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    config.agents["test_agent"].context_files = ["AGENTS.md"]
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "test_agent")
+    skill = workspace / "skills" / "deploying"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: deploying\ndescription: Use when deploying\n---\n\nSteps.\n", "utf-8")
+    agents_md = workspace / "AGENTS.md"
+    agents_md.write_text("Answer in version one.\n", encoding="utf-8")
+    volatile = EnrichmentItem(key="silent_schedule_delivery", text="Stay quiet when nothing changed.")
+    provider.model.turns += [answer("ok") for _ in range(3)]
+
+    async def turn(prompt: str, *system_enrichment: EnrichmentItem) -> tuple[list[str], str]:
+        """Reply to ``prompt`` and return the request's system texts and the message that ends it."""
+        ctx = make_turn_context("test_agent", session_id="session-1", system_enrichment_items=system_enrichment)
+        with _no_memory():
+            await ai_response(replace(ctx, prompt=prompt), runtime_paths, config)
+        messages = provider.model.requests[-1].messages
+        return [str(message.content) for message in messages if message.role == "system"], str(messages[-1].content)
+
+    def idle_for(seconds: float) -> None:
+        [kept] = (runtime_paths.storage_root / "prompt_snapshots").iterdir()
+        os.utime(kept, (time.time() - seconds,) * 2)
+
+    first, _ = await turn("First prompt")
+    assert "Answer in version one." in first[0]
+    assert "<name>deploying</name>" in first[0]
+
+    agents_md.write_text("Answer in version two.\n", encoding="utf-8")
+    (skill / "references" / "rollback.md").write_text("How to roll back.\n", encoding="utf-8")
+    second, tail = await turn("Second prompt", volatile)
+    assert second == first
+    assert "-Answer in version one." in tail
+    assert "+Answer in version two." in tail
+    assert "Stay quiet when nothing changed." in tail
+    assert "rollback.md" not in tail
+
+    # The conversation heard the change once; its next turn adds nothing.
+    third, tail = await turn("Third prompt")
+    assert third == first
+    assert tail == "Third prompt"
+
+    # A compaction changes the request after the system prompt anyway, so its request takes the fresh prompt.
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = storage.load_session("session-1")
+    assert session is not None
+    storage.update_metadata(session, with_force_compaction)
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+        compacted, _ = await turn("Fourth prompt")
+    assert "Answer in version two." in compacted[0]
+    assert "Answer in version one." not in compacted[0]
+
+    # The scripted model keeps a cache for five minutes: within them the prompt stays, after them it is fresh.
+    agents_md.write_text("Answer in version three.\n", encoding="utf-8")
+    idle_for(200)
+    warm, tail = await turn("Fifth prompt")
+    assert warm == compacted
+    assert "+Answer in version three." in tail
+    idle_for(500)
+    cold, tail = await turn("Sixth prompt")
+    assert "Answer in version three." in cold[0]
+    assert tail == "Sixth prompt"
+
+    # A model with the extended cache keeps its prompt for an hour.
+    provider.model.model_params["extended_cache_time"] = True
+    agents_md.write_text("Answer in version four.\n", encoding="utf-8")
+    idle_for(500)
+    assert (await turn("Seventh prompt"))[0] == cold
+    idle_for(4000)
+    assert "Answer in version four." in (await turn("Eighth prompt"))[0][0]
+
+
+@pytest.mark.asyncio
+async def test_every_model_request_restarts_the_conversations_idle_time(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """The idle time follows the provider's cache, which every request of the conversation renews."""
+    stamps: list[tuple[str, str]] = []
+
+    def stamp(_store: Path, agent_name: str, session_id: str, *, now: float) -> None:
+        assert now == pytest.approx(time.time(), abs=60)
+        stamps.append((agent_name, session_id))
+
+    with patch("mindroom.ai.stamp_prompt_request", new=stamp):
+        await _three_turns(tmp_path, provider)
+
+    assert stamps == [("test_agent", "session-1")] * len(provider.model.requests)
+    assert len(stamps) == 3
 
 
 _SESSION_PREAMBLE = "[File memory entrypoint (agent)]\nStable MEMORY.md"

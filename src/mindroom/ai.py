@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import time
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -14,6 +17,7 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
+from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
@@ -54,7 +58,7 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_texts
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
@@ -62,9 +66,12 @@ from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import (
     ConversationRef,
+    FreshPrompt,
     MemoryPromptParts,
     build_memory_prompt_parts,
-    conversation_entrypoint_preamble,
+    held_system_prompt,
+    prompt_cache_ttl_seconds,
+    stamp_prompt_request,
     strip_user_turn_time_prefix,
 )
 from mindroom.metadata_merge import deep_merge_metadata
@@ -119,9 +126,10 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.model_loop import LoopHooks, LoopState
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
@@ -492,10 +500,12 @@ def _agent_loop_hooks(
 
     A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
     that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
+    Every model request of the run restarts the idle time after which its conversation takes a fresh system prompt
+    (``_held_system_messages``).
     """
     ctx = run_context.turn
     prepared = run_context.prepared_run
-    return agent_loop_hooks(
+    hooks = agent_loop_hooks(
         prepared.build,
         HookTurn(
             config=run_context.config,
@@ -514,6 +524,14 @@ def _agent_loop_hooks(
         # A delegated child leaves its owner's reply to the owner to end.
         steering=ctx.delegation_depth == 0,
     )
+    store = _prompt_snapshots(run_context.runtime_paths)
+
+    async def stamp_request(_state: LoopState) -> SendRequest:
+        """Restart the idle time of the conversation's prompt cache, last, so only for a request that is sent."""
+        stamp_prompt_request(store, ctx.entity_label, run_context.session_id, now=time.time())
+        return SendRequest()
+
+    return replace(hooks, before_request=(*hooks.before_request, stamp_request))
 
 
 async def _start_agent_run(
@@ -654,49 +672,98 @@ def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label:
 
 
 def _turn_system_messages(build: AgentBuild, ctx: ResponseTurnContext, session_preamble: str) -> tuple[Message, ...]:
-    """Render the turn's system messages: the build's prompt, the memory preamble, and the turn's system enrichment."""
-    return prompt_for_turn(
-        build,
-        session_preamble,
-        _render_system_enrichment_context(ctx.system_enrichment_items) if ctx.system_enrichment_items else "",
-    )
+    """Render the turn's system messages: the build's prompt, the memory preamble, and the stable system enrichment.
+
+    Volatile system enrichment follows the conversation instead (``_volatile_system_enrichment``).
+    """
+    stable = [item for item in ctx.system_enrichment_items if item.cache_policy == "stable"]
+    return prompt_for_turn(build, session_preamble, _render_system_enrichment_context(stable))
 
 
-def _memory_conversation(
+def _volatile_system_enrichment(ctx: ResponseTurnContext) -> str:
+    """Render the system enrichment that may differ from turn to turn, which the turn's transient context carries.
+
+    In the system prompt it would change the text before the conversation and with it miss the whole prompt cache.
+    """
+    return render_system_enrichment_block([item for item in ctx.system_enrichment_items if item.cache_policy != "stable"])
+
+
+def _prompt_snapshots(runtime_paths: RuntimePaths) -> Path:
+    """Return the directory that keeps each conversation's system prompt."""
+    return runtime_paths.storage_root / "prompt_snapshots"
+
+
+def _prompt_conversation(
     ctx: ResponseTurnContext,
     config: Config,
     scope_context: ScopeSessionContext | None,
 ) -> ConversationRef | None:
-    """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
+    """Name the conversation whose cached system prompt the turn should keep unchanged, or None when it has none.
 
-    Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
-    demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
-    system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
-    Without automatic compaction, fitting a long conversation into the context window is such a limit. Nor has a turn
-    that stores no run (``usage_kind``), as its later turns replay none of its memory writes.
+    A replay limit, configured or scheduled, moves the history after the system prompt every turn, so such a turn has
+    no cache to keep. Without automatic compaction, fitting a long conversation into the context window is such a
+    limit. Nor has a turn that stores no run (``usage_kind``), as later turns replay nothing of it, and a minimal
+    agent's short prompt is not kept.
     """
     if (
-        ctx.persona is not None
-        or ctx.agent_mode == "minimal"
+        ctx.agent_mode == "minimal"
         or ctx.scheduled_history_budget is not None
         or ctx.usage_kind is not None
         or scope_context is None
     ):
         return None
-    entity = config.resolve_scope(ctx.entity_label)
-    settings = entity.history_settings
-    if entity.memory_backend != "file" or not settings.replays_whole_history or not settings.automatic_compaction:
+    settings = config.resolve_scope(ctx.entity_label).history_settings
+    if not settings.replays_whole_history or not settings.automatic_compaction:
         return None
     session = scope_context.session
     compaction = compaction_marker(session) if session is not None else (None, None)
     return ConversationRef(scope_context.session_id, compaction)
 
 
-async def _prepare_turn_memory(
+async def _held_system_messages(
+    build: AgentBuild,
     ctx: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
+    memory: MemoryPromptParts,
+) -> tuple[tuple[Message, ...], str]:
+    """Return the system messages the turn sends, and a note of what changed in them that it does not send.
+
+    While the prompt cache of ``conversation`` may be warm it keeps the system messages it last sent, so an edited
+    AGENTS.md, a new skill, or a new memory does not make the provider read the whole conversation again; the note,
+    empty when nothing changed, tells the model the difference once, after the conversation. Other tool definitions,
+    another model, and a compaction miss the cache anyway and take the fresh messages, as a turn without a
+    conversation to keep does.
+    """
+    fresh = _turn_system_messages(build, ctx, memory.session_preamble)
+    if conversation is None:
+        return fresh, ""
+    model = build.spec.model
+    definitions = sorted((asdict(function.definition()) for function in build.spec.functions.values()), key=str)
+    system, changes = await asyncio.to_thread(
+        held_system_prompt,
+        _prompt_snapshots(runtime_paths),
+        ctx.entity_label,
+        conversation,
+        FreshPrompt(
+            system_texts(fresh),
+            model=f"{model.identity.provider}/{model.identity.id}",
+            tools=hashlib.sha256(json.dumps(definitions, sort_keys=True, default=str).encode()).hexdigest(),
+            memory_path=memory.entrypoint_path,
+            memory_body=memory.entrypoint_body,
+        ),
+        ttl=prompt_cache_ttl_seconds(extended_cache_time=bool(model.model_params.get("extended_cache_time"))),
+        now=time.time(),
+    )
+    note = config.render_prompt("SYSTEM_PROMPT_CHANGES_TEMPLATE", changes=changes) if changes else ""
+    return tuple(Message(role="system", content=text) for text in system), note
+
+
+async def _prepare_turn_memory(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
     counter: TokenCounter,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn whose model counts with ``counter``; a persona recalls none."""
@@ -708,37 +775,8 @@ async def _prepare_turn_memory(
         config,
         runtime_paths,
         execution_identity=ctx.execution_identity,
-        conversation=conversation,
         counter=counter,
     )
-
-
-async def _system_messages_after_compaction(
-    system_messages: tuple[Message, ...],
-    build: AgentBuild,
-    ctx: ResponseTurnContext,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    scope_context: ScopeSessionContext | None,
-    conversation: ConversationRef | None,
-) -> tuple[Message, ...]:
-    """Render the system messages again with the current MEMORY.md when this turn's history preparation compacted.
-
-    That compaction already changes the request after the system prompt, so reloading here costs nothing, while
-    waiting for the next turn would make it miss the cache on the whole compacted history.
-    """
-    compacted = _memory_conversation(ctx, config, scope_context)
-    if compacted is None or compacted == conversation:
-        return system_messages
-    fresh = await conversation_entrypoint_preamble(
-        ctx.entity_label,
-        config,
-        runtime_paths,
-        ctx.execution_identity,
-        conversation=compacted,
-        counter=build.spec.model.token_counter,
-    )
-    return _turn_system_messages(build, ctx, fresh)
 
 
 async def _turn_model_and_provider(
@@ -823,7 +861,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, build
 
     memory_backend = agent_memory_backend(config, agent_name)
-    memory_conversation = _memory_conversation(ctx, config, scope_context)
+    prompt_conversation = _prompt_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
@@ -856,7 +894,6 @@ async def _prepare_agent_and_prompt(
                         ctx,
                         config,
                         runtime_paths,
-                        memory_conversation,
                         provider.token_counter,
                     ),
                     build_agent=_build_agent,
@@ -871,7 +908,6 @@ async def _prepare_agent_and_prompt(
             ctx,
             config,
             runtime_paths,
-            memory_conversation,
             provider.token_counter,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
@@ -894,9 +930,21 @@ async def _prepare_agent_and_prompt(
             minimal.context_documents,
         )
     else:
-        system_messages = _turn_system_messages(build, ctx, prompt_parts.session_preamble)
+        system_messages, prompt_changes = await _held_system_messages(
+            build,
+            ctx,
+            config,
+            runtime_paths,
+            prompt_conversation,
+            prompt_parts,
+        )
         transient_turn_context = render_transient_context(
-            (prompt_parts.transient_turn_context, render_enrichment_block(list(ctx.transient_enrichment_items))),
+            (
+                prompt_parts.transient_turn_context,
+                render_enrichment_block(list(ctx.transient_enrichment_items)),
+                _volatile_system_enrichment(ctx),
+                prompt_changes,
+            ),
         )
     prepared_execution = await prepare_agent_execution_context(
         ctx,
@@ -922,15 +970,11 @@ async def _prepare_agent_and_prompt(
         outside_matrix=ctx.outside_matrix,
         pipeline_timing=pipeline_timing,
     )
-    system_messages = await _system_messages_after_compaction(
-        system_messages,
-        build,
-        ctx,
-        config,
-        runtime_paths,
-        scope_context,
-        memory_conversation,
-    )
+    compacted = _prompt_conversation(ctx, config, scope_context)
+    if compacted is not None and compacted != prompt_conversation:
+        # This turn's history preparation compacted, which changes the request after the system prompt anyway, so
+        # the fresh prompt costs nothing here, while the next turn would miss the cache on the compacted history.
+        system_messages, _ = await _held_system_messages(build, ctx, config, runtime_paths, compacted, prompt_parts)
     history, summary = (
         replayed_history(
             scope_context.session,

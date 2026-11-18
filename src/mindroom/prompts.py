@@ -28,7 +28,6 @@ __all__ = [
     "EXPLORATION_FIX_STEP",
     "EXPLORATION_PROMPT_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
-    "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
     "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
@@ -55,6 +54,7 @@ __all__ = [
     "ROUTER_THREAD_CONTEXT_HEADER",
     "SKILLS_TOOL_USAGE_PROMPT",
     "SKILL_REVIEW_PROMPT",
+    "SYSTEM_PROMPT_CHANGES_TEMPLATE",
     "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
     "THREAD_FORK_CONTEXT_TEMPLATE",
@@ -307,9 +307,12 @@ FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
     "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
     "or when a marker says lines were omitted."
 )
-FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
-    "This conversation keeps the copy it last loaded, so entries added from other conversations since then "
-    "may be missing; open the file to look for them."
+# Tells a conversation that keeps the system prompt it started with what changed in the current one.
+SYSTEM_PROMPT_CHANGES_TEMPLATE = (
+    "[System prompt update] This conversation keeps the system prompt it started with. "
+    "The current system prompt differs from what you were last shown as in the unified diff below: "
+    "lines starting with `+` are current and replace the lines starting with `-`, which no longer apply.\n"
+    "{changes}"
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "[Memory entrypoint truncated - showing {included_lines} of {total_lines} lines "
@@ -797,6 +800,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "MEMORY_CONTEXT_PROMPT_TEMPLATE": frozenset({"context_type", "memory_lines"}),
         "MEMORY_EXISTING_SNIPPETS_TEMPLATE": frozenset({"existing_context"}),
         "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": frozenset({"agents_info", "message"}),
+        "SYSTEM_PROMPT_CHANGES_TEMPLATE": frozenset({"changes"}),
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE": frozenset({"message", "agent_names"}),
         "THREAD_FORK_CONTEXT_TEMPLATE": frozenset({"parent_thread_id", "fork_point_event_id"}),
         "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE": frozenset({"omitted_count"}),
