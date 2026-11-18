@@ -137,7 +137,7 @@ class VoiceIngress:
             # transcript. Without one, what the message says and whom it mentions stay unknown.
             transcribed = normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True
             if may_be_for_me:
-                queued_notice_reservation = queued_notice_reservation_if_busy(
+                queued_notice_reservation = await queued_notice_reservation_if_busy(
                     self.deps.response_runner,
                     target=voice_target,
                     envelope=envelope,

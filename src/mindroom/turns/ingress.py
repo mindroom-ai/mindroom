@@ -241,7 +241,7 @@ class TurnIngress:
         # response short or show that it waits for this agent.
         may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
         if may_be_for_me:
-            ticket.notice = queued_notice_reservation_if_busy(
+            ticket.notice = await queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
@@ -458,10 +458,10 @@ class TurnIngress:
         )
         if edited is None:
             return False
-        self._renew_queued_notice(room, *edited)
+        await self._renew_queued_notice(room, *edited)
         return True
 
-    def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:
+    async def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:
         """Ask again whether an edited queued message waits for this agent's running response, as ingress asked."""
         if pending_event.selection is not None:
             # An answer to an interactive question never waits as a follow-up, and its dispatch releases no notice.
@@ -482,7 +482,7 @@ class TurnIngress:
             return
         mentions_nobody = event.for_another_participant is None
         if pending_event.notice is None:
-            pending_event.notice = queued_notice_reservation_if_busy(
+            pending_event.notice = await queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,

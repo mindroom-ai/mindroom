@@ -13,7 +13,6 @@ from mindroom import constants
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.cancellation import current_task_is_process_shutdown
-from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.final_delivery import (
     AwaitingApproval,
@@ -592,14 +591,6 @@ class ResponseLifecycleCoordinator:
         """Return whether one queued ingress should interrupt the active turn."""
         return response_envelope.origin.may_answer_interactive_prompt
 
-    def _may_notify_active_turn(self, response_envelope: MessageEnvelope) -> bool:
-        """Return whether a waiting message may tell the active turn that a newer message arrived.
-
-        A restart replays the messages it had not finished answering, including the one a resumed turn answers.
-        Nobody sent anything new, so a replay never asks another turn to wrap up for it.
-        """
-        return self._should_signal_queued_message(response_envelope) and not turn_dispatch_recovery_active()
-
     def _assert_target_matches_envelope(self, target: MessageTarget, response_envelope: MessageEnvelope) -> None:
         """Require lifecycle callers to use the envelope's canonical response target."""
         if target.lifecycle_key == response_envelope.target.lifecycle_key:
@@ -618,7 +609,7 @@ class ResponseLifecycleCoordinator:
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
-        if not self._may_notify_active_turn(response_envelope):
+        if not self._should_signal_queued_message(response_envelope):
             return None
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
             return None
@@ -646,7 +637,7 @@ class ResponseLifecycleCoordinator:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        if not self._may_notify_active_turn(response_envelope):
+        if not self._should_signal_queued_message(response_envelope):
             return None
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,

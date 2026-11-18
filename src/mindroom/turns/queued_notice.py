@@ -27,7 +27,7 @@ class _ApprovalWaitSupport(Protocol):
     delivery_gateway: DeliveryGateway
 
 
-def queued_notice_reservation_if_busy(
+async def queued_notice_reservation_if_busy(
     response_runner: ResponseRunner,
     *,
     target: MessageTarget,
@@ -44,6 +44,9 @@ def queued_notice_reservation_if_busy(
     if not envelope.origin.may_answer_interactive_prompt:
         return None
     if not response_runner.has_active_response_for_target(target):
+        return None
+    if await response_runner.is_answering(envelope.source_event_id):
+        # A restart's replay of the message a cut-short reply answers: nobody sent anything new.
         return None
     return response_runner.reserve_waiting_human_message(
         target=target,

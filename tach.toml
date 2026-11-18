@@ -161,7 +161,6 @@ path = "mindroom.dispatch_recovery_context"
 depends_on = []
 visibility = [
     "mindroom.journal_dispatch",
-    "mindroom.response_lifecycle",
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
     "mindroom.voice.visible_voice_echo",
@@ -3369,6 +3368,7 @@ expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
+    "thread_fork_item",
     "with_matrix_message_target",
     "with_silent_schedule_delivery",
 ]
@@ -3519,7 +3519,6 @@ path = "mindroom.response_lifecycle"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.dispatch_recovery_context",
     "mindroom.tool_jobs.control",
     "mindroom.mid_turn",
     "mindroom.ai_runtime",
@@ -6290,6 +6289,7 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_sources",
     "mindroom.teams",
+    "mindroom.thread_models",
     "mindroom.thread_summary",
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",

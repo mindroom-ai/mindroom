@@ -469,6 +469,14 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self.lifecycle_coordinator.has_active_response_for_target(target)
 
+    async def is_answering(self, source_event_id: str) -> bool:
+        """Return whether a reply to this source is under way, such as one a restart cut short that its replay resumes.
+
+        Such a source is not news to another turn of its conversation: it was answered from before that turn began.
+        """
+        reply = await self.deps.replies.store.replies.for_sources((source_event_id,))
+        return reply is not None and not reply.terminal
+
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self.lifecycle_coordinator.active_thread_ids_for_room(room_id)
@@ -527,6 +535,11 @@ class ResponseRunner:
         signal_queued_message: bool = True,
     ) -> SourceFate:
         """Admit one response, then run it under its conversation's lock; return what it did with its sources."""
+        signal_queued_message = (
+            signal_queued_message
+            and not request.quiet
+            and not await self.is_answering(request.response_envelope.source_event_id)
+        )
         gate = self.deps.runtime.response_admission_gate
         admission_deferred = False
         while not gate.admit():
@@ -584,7 +597,7 @@ class ResponseRunner:
                             target=target,
                             locked_operation=locked_operation,
                         ),
-                        signal_queued_message=signal_queued_message and not request.quiet,
+                        signal_queued_message=signal_queued_message,
                     )
                     handle = current_span()
                     if handle is not None and not handle.exited:
@@ -832,8 +845,7 @@ class ResponseRunner:
         if not waiting and runtime is not None and follow_up_jobs(await runtime.ended_jobs(key)):
             return True
         # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
-        reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))
-        return reply is not None and not reply.terminal
+        return await self.is_answering(request.response_envelope.source_event_id)
 
     def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:
         """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
