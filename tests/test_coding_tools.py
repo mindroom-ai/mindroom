@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import multiprocessing
 import re
 import subprocess
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -236,7 +237,7 @@ class TestEditFile:
             "swap.py",
             [{"old_text": "a = 1", "new_text": "b = 2"}, {"old_text": "b = 2", "new_text": "a = 1"}],
         )
-        assert result == "Applied 2 edits to swap.py: lines 1, 2."
+        assert result == "Applied 2 edits to swap.py: lines 1-2."
         assert (tmp_base / "swap.py").read_text() == "b = 2\na = 1\nc = 3\n"
 
     def test_reported_lines_are_in_the_new_file(self, tools: CodingTools, tmp_base: Path) -> None:
@@ -253,7 +254,7 @@ class TestEditFile:
         """replace_all replaces every match."""
         (tmp_base / "dup.py").write_text("foo\nbar\nfoo\n")
         result = tools.edit_file("dup.py", [{"old_text": "foo", "new_text": "baz", "replace_all": True}])
-        assert result == "Applied 1 edit to dup.py: lines 1, 3."
+        assert result == "Applied 1 edit (2 replacements) to dup.py: lines 1, 3."
         assert (tmp_base / "dup.py").read_text() == "baz\nbar\nbaz\n"
 
     def test_overlapping_edits_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
@@ -304,7 +305,7 @@ class TestEditFile:
         (tmp_base / "dup.py").write_text("foo\nx\nfoo\nfoo\n")
         result = tools.edit_file("dup.py", _one("foo", "bar"))
         assert result == (
-            "Error: old_text matches 3 places (lines 1, 3, 4). Add nearby lines to old_text to pick one, "
+            "Error: old_text matches 3 places (lines 1, 3-4). Add nearby lines to old_text to pick one, "
             "or set replace_all.\nNo changes written."
         )
         assert (tmp_base / "dup.py").read_text() == "foo\nx\nfoo\nfoo\n"
@@ -360,6 +361,135 @@ class TestEditFile:
         assert result == "Applied 1 edit to win.txt: lines 1-3."
         assert (tmp_base / "win.txt").read_bytes() == b"first\r\nsecond\r\nthird\r\nline three\r\n"
 
+    def test_crlf_leading_lf_never_splits_a_pair(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An old_text that starts with LF matches the whole CRLF, so no stray carriage return is left."""
+        (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\nc\r\n")
+        result = tools.edit_file("win.txt", _one("\nb", "\nB"))
+        assert result == "Applied 1 edit to win.txt: lines 1-2."
+        assert (tmp_base / "win.txt").read_bytes() == b"a\r\nB\r\nc\r\n"
+
+    def test_crlf_newline_only_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A newline-only edit of a CRLF file works on whole line endings."""
+        (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
+        result = tools.edit_file("win.txt", [{"old_text": "\n", "new_text": "\n\n", "replace_all": True}])
+        assert result == "Applied 1 edit (2 replacements) to win.txt: lines 1-4."
+        assert (tmp_base / "win.txt").read_bytes() == b"a\r\n\r\nb\r\n\r\n"
+
+    def test_crlf_identical_edit_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Swapping an LF for the CRLF it stands for changes nothing, so it is refused."""
+        (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
+        result = tools.edit_file("win.txt", _one("a\r\n", "a\n"))
+        assert "identical" in result
+        assert (tmp_base / "win.txt").read_bytes() == b"a\r\nb\r\n"
+
+    def test_mixed_endings_no_op_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """In a file with mixed endings an edit that changes nothing is refused, and no ending is rewritten."""
+        (tmp_base / "mixed.txt").write_bytes(b"a\nb\r\n")
+        result = tools.edit_file("mixed.txt", _one("a\n", "a\n"))
+        assert result.startswith("Error: the edits leave the file identical")
+        assert (tmp_base / "mixed.txt").read_bytes() == b"a\nb\r\n"
+
+    def test_mixed_endings_replace_all_keeps_each_ending(self, tools: CodingTools, tmp_base: Path) -> None:
+        """replace_all in a mixed file keeps the ending of every line."""
+        (tmp_base / "mixed.txt").write_bytes(b"a\r\nb\na\r\n")
+        result = tools.edit_file("mixed.txt", [{"old_text": "a", "new_text": "c", "replace_all": True}])
+        assert result == "Applied 1 edit (2 replacements) to mixed.txt: lines 1, 3."
+        assert (tmp_base / "mixed.txt").read_bytes() == b"c\r\nb\nc\r\n"
+
+    def test_mixed_endings_match_never_splits_a_pair(self, tools: CodingTools, tmp_base: Path) -> None:
+        """In a mixed file, a match that would start between CR and LF is not taken."""
+        (tmp_base / "mixed.txt").write_bytes(b"x\r\ny\nz\n")
+        result = tools.edit_file("mixed.txt", _one("\ny", "\nY"))
+        assert result.startswith("Error: old_text not found in the file.")
+        assert (tmp_base / "mixed.txt").read_bytes() == b"x\r\ny\nz\n"
+
+    def test_fuzzy_match_keeps_the_bom(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A fuzzy match at the start of the file leaves the byte order mark in place."""
+        (tmp_base / "bom.txt").write_bytes("\ufeff\u201calpha\u201d\r\nx\r\n".encode())
+        result = tools.edit_file("bom.txt", _one('"alpha"', '"beta"'))
+        assert result.startswith("Applied 1 edit to bom.txt: line 1 (matched after normalizing")
+        assert (tmp_base / "bom.txt").read_bytes() == b'\xef\xbb\xbf"beta"\r\nx\r\n'
+
+    def test_old_text_with_the_bom_keeps_it(self, tools: CodingTools, tmp_base: Path) -> None:
+        """The byte order mark is file metadata: an old_text that copies it does not remove it."""
+        (tmp_base / "bom.txt").write_bytes("\ufeffa\r\nb\r\n".encode())
+        tools.edit_file("bom.txt", _one("\ufeffa", "c"))
+        assert (tmp_base / "bom.txt").read_bytes() == b"\xef\xbb\xbfc\r\nb\r\n"
+
+    def test_fuzzy_end_stops_at_the_line_boundary(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A fuzzy match ending at a line boundary leaves the next line's whitespace alone."""
+        (tmp_base / "ws.txt").write_text("foo   \n   \nZ")
+        tools.edit_file("ws.txt", _one("foo\n", "X\n"))
+        assert (tmp_base / "ws.txt").read_bytes() == b"X\n   \nZ"
+
+    def test_many_replacements_merge_into_one_range(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Adjacent replaced lines merge into one range, and the result counts the replacements."""
+        (tmp_base / "many.txt").write_text("a\n" * 20000)
+        result = tools.edit_file("many.txt", [{"old_text": "a", "new_text": "b", "replace_all": True}])
+        assert result == "Applied 1 edit (20000 replacements) to many.txt: lines 1-20000."
+
+    def test_line_list_is_capped(self, tools: CodingTools, tmp_base: Path) -> None:
+        """At most ten ranges are listed, then how many more."""
+        (tmp_base / "many.txt").write_text("a\nx\n" * 30)
+        result = tools.edit_file("many.txt", [{"old_text": "a", "new_text": "b", "replace_all": True}])
+        assert result == (
+            "Applied 1 edit (30 replacements) to many.txt: lines 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, and 20 more."
+        )
+        several = tools.edit_file("many.txt", _one("x", "y"))
+        assert several.startswith(
+            "Error: old_text matches 30 places (lines 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, and 20 more).",
+        )
+
+    def test_deletion_reports_a_line_that_exists(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A deletion names the line it happened at, or the end of the file."""
+        (tmp_base / "del.txt").write_text("foo\nbar\nbaz\n")
+        assert tools.edit_file("del.txt", _one("bar\n", "")) == "Applied 1 edit to del.txt: line 2."
+        assert tools.edit_file("del.txt", _one("baz\n", "")) == "Applied 1 edit to del.txt: end of file."
+        assert (tmp_base / "del.txt").read_text() == "foo\n"
+
+    def test_lines_follow_read_file(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Lines are numbered as read_file numbers them, so a lone CR ends a line too."""
+        (tmp_base / "cr.txt").write_bytes(b"A\rB\rC\r")
+        assert tools.edit_file("cr.txt", _one("C", "D")) == "Applied 1 edit to cr.txt: line 3."
+        assert tools.read_file("cr.txt").splitlines()[2].endswith("D")
+
+    def test_unknown_edit_fields_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit item with a field it does not have is refused in one short line."""
+        result = tools.edit_file("hello.py", [{"old_text": "print('world')", "new_text": "x", "line": 2}])
+        assert result == (
+            "Error: edits[0].line: Extra inputs are not permitted. "
+            'Pass edits=[{"old_text": "...", "new_text": "..."}].\nNo changes written.'
+        )
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_missing_field_is_one_short_line(self, tools: CodingTools) -> None:
+        """A missing field gets one line naming it, not pydantic's report."""
+        result = tools.edit_file("hello.py", [{"old_text": "print('hello')"}])
+        assert result == (
+            "Error: edits[0].new_text: Field required. "
+            'Pass edits=[{"old_text": "...", "new_text": "..."}].\nNo changes written.'
+        )
+
+    def test_edits_and_flat_fields_together_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A call mixing edits with the old flat fields is refused, showing the one shape to use."""
+        call = validated_entrypoint(tools.edit_file)
+        result = call(path="hello.py", edits=_one("print('hello')", "x"), old_text="print('world')", new_text="y")
+        assert result.startswith("Error: edit_file takes path and edits, not new_text, old_text. Pass edits=[")
+        assert result.endswith("No changes written.")
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_unknown_top_level_argument_gets_the_shape(self, tools: CodingTools) -> None:
+        """A stray top-level argument of any type gets the shape, not a validation dump."""
+        result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=_one("print('hello')", "x"), force=True)
+        assert result.startswith("Error: edit_file takes path and edits, not force. Pass edits=[")
+
+    @pytest.mark.parametrize("empty", [[], "[]", None, ""])
+    def test_every_empty_edits_form_gets_the_empty_error(self, tools: CodingTools, empty: object) -> None:
+        """An empty list, its JSON, or no edits at all get the empty-edits error."""
+        result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=empty)
+        assert result.startswith("Error: edits is empty. Pass edits=[")
+        assert result.endswith("No changes written.")
+
     def test_fuzzy_edit_whitespace(self, tools: CodingTools, tmp_base: Path) -> None:
         """Handles trailing whitespace differences via fuzzy matching."""
         (tmp_base / "ws.py").write_text("def foo():   \n    pass\n")
@@ -374,7 +504,7 @@ class TestEditFile:
             "q.py",
             [{"old_text": "a = 1", "new_text": "a = 2"}, {"old_text": 'say("hi")', "new_text": 'say("bye")'}],
         )
-        assert result == "Applied 2 edits to q.py: lines 1, 2 (edits[1] matched after normalizing whitespace/quotes)."
+        assert result == "Applied 2 edits to q.py: lines 1-2 (edits[1] matched after normalizing whitespace/quotes)."
         assert (tmp_base / "q.py").read_text() == 'a = 2\nsay("bye")\n'
 
     def test_fuzzy_edit_multiline_preserves_line_boundaries(self, tools: CodingTools, tmp_base: Path) -> None:
@@ -403,10 +533,9 @@ class TestEditFile:
         assert (tmp_base / "unicode.py").read_text() == "Tea"
 
     def test_edit_missing_file(self, tools: CodingTools) -> None:
-        """Returns error for missing files."""
+        """Returns error for missing files, saying nothing was written."""
         result = tools.edit_file("missing.py", _one("old", "new"))
-        assert "Error" in result
-        assert "not found" in result
+        assert result == "Error: File not found: missing.py\nNo changes written."
 
     def test_edit_rejects_empty_old_text(self, tools: CodingTools, tmp_base: Path) -> None:
         """Rejects empty old_text instead of attempting a replacement."""
@@ -428,75 +557,122 @@ class TestEditFile:
         assert result.endswith("No changes written.")
 
 
+def _edit_after_both_read(
+    tools: CodingTools,
+    path: str,
+    old_text: str,
+    new_text: str,
+    results: Any,  # noqa: ANN401 - a multiprocessing queue, whose class the context makes.
+) -> None:
+    """Run in a forked process: edit ``path`` and report the result."""
+    results.put(tools.edit_file(path, _one(old_text, new_text)))
+
+
 class TestEditFileConcurrency:
-    """Concurrent edit_file calls on one file serialize; calls on different files still run in parallel."""
-
-    @staticmethod
-    def _run_concurrently(
-        tools: CodingTools,
-        calls: list[tuple[str, list[dict[str, str]]]],
-        monkeypatch: pytest.MonkeyPatch,
-        barrier_timeout: float,
-    ) -> threading.Barrier:
-        """Run edit_file calls in threads that wait for each other right after reading the file."""
-        barrier = threading.Barrier(len(calls))
-        read = coding_module.read_resolved_file
-
-        def read_then_wait(base_dir: Path, resolved: Path) -> bytes:
-            content = read(base_dir, resolved)
-            with contextlib.suppress(threading.BrokenBarrierError):
-                barrier.wait(timeout=barrier_timeout)
-            return content
-
-        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
-        results: list[str] = []
-        threads = [threading.Thread(target=lambda c=call: results.append(tools.edit_file(*c))) for call in calls]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        assert all(result.startswith("Applied") for result in results), results
-        return barrier
+    """Concurrent edit_file and write_file calls on one file serialize, across threads and processes."""
 
     @pytest.mark.parametrize("where", ["inside", "outside"])
-    def test_concurrent_edits_of_one_file_both_land(
+    def test_edits_from_two_processes_both_land(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         where: str,
     ) -> None:
-        """Two racing edits of one file both land, and no tail of a longer write is left behind."""
+        """Two worker processes editing one file both land, as each worker request runs in its own process."""
         base_dir = tmp_path / "base"
         base_dir.mkdir()
         target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
         target.write_text("AAAA\nBBBB\n")
         tools = CodingTools(base_dir=str(base_dir), file_access="workspace" if where == "inside" else "unrestricted")
+        context = multiprocessing.get_context("fork")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        read = coding_module.read_resolved_file
 
-        self._run_concurrently(
-            tools,
-            [(str(target), _one("AAAA", "A" * 50)), (str(target), _one("BBBB", "b"))],
-            monkeypatch,
-            barrier_timeout=0.5,
-        )
+        def read_then_wait(base: Path, resolved: Path) -> bytes:
+            content = read(base, resolved)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=1)
+            return content
 
+        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        processes = [
+            context.Process(target=_edit_after_both_read, args=(tools, str(target), old, new, results))
+            for old, new in (("AAAA", "A" * 50), ("BBBB", "b"))
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+        reports = [results.get(timeout=5) for _ in processes]
+
+        assert all(report.startswith("Applied") for report in reports), reports
         assert target.read_text() == "A" * 50 + "\nb\n"
 
-    def test_edits_of_different_files_run_in_parallel(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Calls on different files are not serialized: both reach the barrier together."""
-        (tmp_path / "one.txt").write_text("one\n")
-        (tmp_path / "two.txt").write_text("two\n")
+    def test_write_file_waits_for_an_edit_in_progress(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A write_file that starts while an edit is between its read and its write lands after the edit."""
+        target = tmp_path / "race.txt"
+        target.write_text("old\n")
         tools = CodingTools(base_dir=str(tmp_path))
+        edit_read, written = threading.Event(), threading.Event()
+        read = coding_module.read_resolved_file
 
-        barrier = self._run_concurrently(
-            tools,
-            [("one.txt", _one("one", "1")), ("two.txt", _one("two", "2"))],
-            monkeypatch,
-            barrier_timeout=10,
-        )
+        def read_then_wait(base: Path, resolved: Path) -> bytes:
+            content = read(base, resolved)
+            edit_read.set()
+            written.wait(timeout=0.5)
+            return content
+
+        def write() -> None:
+            edit_read.wait(timeout=10)
+            results.append(tools.write_file("race.txt", "new\n"))
+            written.set()
+
+        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        results: list[str] = []
+        threads = [
+            threading.Thread(target=lambda: results.append(tools.edit_file("race.txt", _one("old", "edited")))),
+            threading.Thread(target=write),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(result.split()[0] for result in results) == ["Applied", "Wrote"], results
+        assert target.read_text() == "new\n"
+
+    def test_edits_in_different_directories_run_in_parallel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Calls on files in different directories are not serialized: both reach the barrier together."""
+        for name in ("one", "two"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "f.txt").write_text(f"{name}\n")
+        tools = CodingTools(base_dir=str(tmp_path))
+        barrier = threading.Barrier(2)
+        read = coding_module.read_resolved_file
+
+        def read_then_wait(base: Path, resolved: Path) -> bytes:
+            content = read(base, resolved)
+            barrier.wait(timeout=10)
+            return content
+
+        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        results: list[str] = []
+        threads = [
+            threading.Thread(target=lambda n=name: results.append(tools.edit_file(f"{n}/f.txt", _one(n, n.upper()))))
+            for name in ("one", "two")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
         assert not barrier.broken
-        assert (tmp_path / "one.txt").read_text() == "1\n"
-        assert (tmp_path / "two.txt").read_text() == "2\n"
+        assert sorted(results) == ["Applied 1 edit to one/f.txt: line 1.", "Applied 1 edit to two/f.txt: line 1."]
 
 
 class TestWriteFile:
