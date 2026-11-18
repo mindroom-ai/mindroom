@@ -334,8 +334,10 @@ Messages in encrypted rooms are not readable: each shows as `[encrypted, not rea
 | `invite` | Invites `user_id` into `room_id` |
 | `create_room` | Creates a private room called `name`, inviting `user_id` if given |
 
+A DM made for a `send` that was not added to the owner's DMs, because that failed or the call was stopped right after the room was made, is not found by a later `send` to that person, which makes another; the first call's result names the room when it can.
+
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
-A message sent this way, or the name of a file sent, cannot start with `!` or `\`, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
+A message sent this way, or the name of a file sent, cannot start with `!` or `\`, even after quoted lines, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
 That token can act as every account the `users` pattern covers, administrators included.
