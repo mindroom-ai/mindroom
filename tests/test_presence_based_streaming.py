@@ -220,6 +220,7 @@ class TestBotIntegration:
         tmp_path: Path,
     ) -> None:
         """Test that bot streams its reply when user is online."""
+
         async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test"
             yield " streaming"
@@ -269,6 +270,7 @@ class TestBotIntegration:
         tmp_path: Path,
     ) -> None:
         """Test that bot delivers its reply whole when user is offline."""
+
         async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test response"
 
