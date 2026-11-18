@@ -174,22 +174,23 @@ class _CommandParser:
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
-    # Mentions before a command aim it at the agents they name: `@code !model`.
-    LEADING_MENTIONS_PATTERN = re.compile(r"^(?:@\S+\s+)+(?=[!/])")
 
-    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Parse a message for commands.
 
         Args:
             message: The message text to parse
+            mention_names: The names the agents and teams the message mentions can read as in its text
 
         Returns:
             Parsed command or None if no command found
 
         """
-        message = message.strip()
-
-        raw_text = self.LEADING_MENTIONS_PATTERN.sub("", message.removeprefix(VOICE_PREFIX))
+        raw_text = message.strip().removeprefix(VOICE_PREFIX)
+        if mention_names:
+            # Mentions before a command aim it at the agents they name: `@Research Expert !model`.
+            names = "|".join(re.escape(name) for name in sorted(mention_names, key=len, reverse=True))
+            raw_text = re.sub(rf"^(?:@?(?:{names})\s+)+(?=[!/])", "", raw_text, flags=re.IGNORECASE)
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")
         message = f"!{raw_text[1:]}" if is_slash else raw_text

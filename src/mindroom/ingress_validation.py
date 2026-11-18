@@ -209,7 +209,19 @@ class IngressValidator:
             or _final_reply_original_event_id(sender_entity_name, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
+            mention_names=self._mention_names(content.get("m.mentions")),
             contact_refused=contact is not None and contact.requester_id is None,
+        )
+
+    def _mention_names(self, mentions: object) -> tuple[str, ...]:
+        """Return the display name, entity name and Matrix ID of each agent and team an event's pills mention."""
+        config = self.deps.runtime.config
+        user_ids = mentions.get("user_ids") if isinstance(mentions, dict) else None
+        return tuple(
+            name
+            for user_id in (user_ids if isinstance(user_ids, list) else ())
+            if isinstance(user_id, str) and (entity := self.managed_entity_name_for_sender(user_id)) is not None
+            for name in (config.entity_display_name(entity), entity, user_id[1:], user_id[1:].partition(":")[0])
         )
 
     def _is_access_checked(self, user_id: str) -> bool:

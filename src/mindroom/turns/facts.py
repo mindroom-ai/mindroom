@@ -54,6 +54,8 @@ class IngressFacts:
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
     requester_entity_name: str | None = None
+    # The names the agents and teams this event's pills mention can read as in its text.
+    mention_names: tuple[str, ...] = ()
     # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
     # responder's owner start an active contact's turns, and a removed contact's room starts none.
     contact_refused: bool = False
@@ -160,4 +162,4 @@ def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -
     """
     if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND:
         return None
-    return command_parser.parse(command_text)
+    return command_parser.parse(command_text, facts.mention_names)

@@ -880,7 +880,7 @@ async def _command_owners(
     journal_store: EventJournalStore | None = None,
 ) -> list[str]:
     """Return the entities whose own policy says they run this command, each from its own copy of the room."""
-    command = command_parser.parse(text)
+    command = command_parser.parse(text, ("general", "research"))
     assert command is not None
     owners = []
     for name, room in rooms.items():
@@ -913,7 +913,6 @@ async def test_mentioned_agent_handles_command(config: Config) -> None:
     """A command that mentions an agent is run by that agent alone, though another has the lower Matrix ID."""
     context = _context(mentioned=[_entity_id(config, "research")])
 
-    assert command_parser.parse("@research !model").type is CommandType.MODEL
     assert await _command_owners(config, "@research !model", _shared_room(config, "general", "research"), context) == [
         "research",
     ]

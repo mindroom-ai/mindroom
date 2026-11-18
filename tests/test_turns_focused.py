@@ -146,6 +146,7 @@ from mindroom.turn_store import (
     TurnStoreDeps,
 )
 from mindroom.turns.dispatch import TurnDispatchDeps, TurnDispatcher
+from mindroom.turns.facts import command_for
 from mindroom.turns.ingress import TurnIngress, TurnIngressDeps
 from mindroom.turns.interactive_selection import (
     InteractiveSelectionDispatch,
@@ -2196,6 +2197,37 @@ async def test_command_target_not_ready_notice_comes_from_the_commands_owner(
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert len(harness.gateway.sent) == (agent_name == "general")
+
+
+@pytest.mark.parametrize(
+    ("body", "mentioned", "is_command"),
+    [
+        ("@Research Expert !help", ["research"], True),
+        ("@Research Expert @General /help", ["research", "general"], True),
+        ("@mindroom_general !help", ["general"], True),
+        # A leading name is stripped only for an agent or team the message's pills mention.
+        ("@bob !help", ["@bob:localhost"], False),
+        ("@Research Expert !help", [], False),
+        ("@Research Expert hello !help", ["research"], False),
+    ],
+)
+def test_leading_mention_pills_of_agents_aim_a_command(
+    tmp_path: Path,
+    body: str,
+    mentioned: list[str],
+    is_command: bool,
+) -> None:
+    """A command behind the mention pills of agents is a command, also when a display name has several words."""
+    agents = {"general": AgentConfig(display_name="General"), "research": AgentConfig(display_name="Research Expert")}
+    config = bind_runtime_paths(Config(agents=agents), test_runtime_paths(tmp_path))
+    harness = _build_harness(config, tmp_path)
+    user_ids = [name if name.startswith("@") else _entity_user_id(config, name) for name in mentioned]
+    event = _text_event(body)
+    event.source["content"]["m.mentions"] = {"user_ids": user_ids}
+
+    facts = harness.dispatcher.deps.ingress.classify(event, room_id=_ROOM_ID)
+
+    assert (command_for(facts, body) is not None) is is_command
 
 
 @pytest.mark.asyncio

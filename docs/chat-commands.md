@@ -41,8 +41,10 @@ A message starting with `/` that is not a command, such as a file path like `/ho
 
 The agent or team a command is aimed at answers it.
 A command that mentions agents or teams, such as `@code !model`, is answered by the one among them with the lowest Matrix ID.
+The mention is a mention pill from your Matrix client; a typed `@name` that is no pill before a command makes the message ordinary conversation.
 A command in a thread with one agent is answered by that agent.
 Any other command is answered by the agent or team in the room with the lowest Matrix ID, whatever the room's reply mode.
+The first MindRoom account that sees a command saves who answers it, and only that agent or team answers.
 `/desktop` has its own room requirements; see [`/desktop`](tools/desktop.md#desktop).
 A command that changes room state, such as `/thread_mode`, `/auto_approve` or `/encrypt confirm`, answers `I need moderator rights in this room to ...` and changes nothing when no MindRoom account in the room may send state events.
 
