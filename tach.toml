@@ -811,6 +811,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
@@ -1340,6 +1341,7 @@ depends_on = [
     "mindroom.delegation.execution",
     "mindroom.history.session_context",
     "mindroom.llm",
+    "mindroom.reply_scope",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.consumption",
@@ -1584,6 +1586,7 @@ depends_on = [
 visibility = [
     "mindroom.api.connections",
     "mindroom.api.egress_credentials",
+    "mindroom.api.github_requests",
     "mindroom.api.oauth",
     "mindroom.api.tools",
     "mindroom.custom_tools.slack",
@@ -2042,6 +2045,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.github_requests"
+depends_on = [
+    "mindroom.api.client_sessions",
+    "mindroom.api.config_lifecycle",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
     "mindroom.api.agent_cli",
@@ -2077,6 +2089,7 @@ depends_on = [
     "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
+    "mindroom.api.github_requests",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
@@ -3356,6 +3369,7 @@ expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
+    "thread_fork_item",
     "with_matrix_message_target",
     "with_silent_schedule_delivery",
 ]
@@ -5756,8 +5770,10 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",
     "mindroom.origins",
+    "mindroom.reply_scope",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.invocation",
 ]
 
 [[modules]]
@@ -6277,6 +6293,7 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_sources",
     "mindroom.teams",
+    "mindroom.thread_models",
     "mindroom.thread_summary",
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",
@@ -8164,6 +8181,7 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.run_checkpoint",
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
@@ -10104,7 +10122,9 @@ visibility = [
     "mindroom.agent_cli.checkpoint",
     "mindroom.conversation_state_writer",
     "mindroom.delegation.recovery",
+    "mindroom.history.conversation_text",
     "mindroom.loop_hooks",
+    "mindroom.response_turn",
 ]
 
 [[modules]]

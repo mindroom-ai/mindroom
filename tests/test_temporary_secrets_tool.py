@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.temporary_secrets import TemporarySecretsTools
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
     TemporaryTarget,
@@ -26,7 +27,8 @@ from mindroom.secret_requests import (
     secret_holder,
     secret_request_registry,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_callable, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -382,3 +384,56 @@ def test_the_tool_is_one_an_agent_can_list(tmp_path: Path) -> None:
     assert isinstance(toolkit, TemporarySecretsTools)
     functions = adapt_toolkit(toolkit, key="temporary_secrets").functions
     assert [function.name for function in functions] == ["request_temporary_secret"]
+
+
+def _call_context(call_id: str) -> ToolCallContext:
+    return ToolCallContext(run_id="run", session_id="session", user_id=_ALICE, call_id=call_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "cli-wrapped"])
+@pytest.mark.parametrize(("in_reply", "reply_event_id"), [(True, "$reply"), (True, None), (False, None)])
+async def test_a_card_names_the_reply_and_the_call_that_asked(
+    tmp_path: Path,
+    *,
+    wrapped: bool,
+    in_reply: bool,
+    reply_event_id: str | None,
+) -> None:
+    """A call made by a reply that shows an event names that event and its own call on the card and every edit.
+
+    A call made through the CLI from a Bash call has its own line in the reply, so the card names the inner call.
+    Without a shown reply the card names neither, and a client shows it as its own row.
+    """
+    tool, context = _asking(tmp_path)
+    (function,) = adapt_toolkit(tool, key="temporary_secrets").functions
+    arguments = {"name": "SUDO_PASSWORD", "reason": _REASON}
+
+    async def ask() -> object:
+        return await execute_tool_call(function, arguments, _call_context("call-ask"), middleware=())
+
+    async def bash() -> str:
+        """Run a shell command that calls an agent tool through the CLI."""
+        return (await ask()).content
+
+    handle = MagicMock(spec=SpanHandle)
+    handle.reply = MagicMock(event_id=reply_event_id)
+    token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
+    try:
+        with tool_runtime_context(context):
+            run = (
+                execute_tool_call(adapt_callable(bash), {}, _call_context("call-bash"), middleware=())
+                if wrapped
+                else ask()
+            )
+            task = asyncio.ensure_future(run)
+    finally:
+        _current_slot.reset(token)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    named = {"response_event_id": "$reply", "tool_call_id": "call-ask"} if reply_event_id is not None else {}
+    _card, edit = _sent(context)
+    for content in (card[SECRET_REQUEST_CONTENT_KEY], edit["m.new_content"][SECRET_REQUEST_CONTENT_KEY]):
+        assert {key: content[key] for key in ("response_event_id", "tool_call_id") if key in content} == named

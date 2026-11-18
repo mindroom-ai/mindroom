@@ -16,7 +16,7 @@ from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import CONFIG_RELOAD_SHUTDOWN
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import install_bots, install_model_providers, orchestrator_runtime_paths, published_config_load
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -201,8 +201,8 @@ class TestDynamicConfigUpdate:
         assert updated is True
         # Both bots stopped for a restart before the new config was published, so neither received it.
         assert not orchestrator.agent_bots
-        general_bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-        router_bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+        general_bot.stop.assert_awaited_once_with(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
+        router_bot.stop.assert_awaited_once_with(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
         mock_start.assert_awaited_once_with({"general", ROUTER_AGENT_NAME})
         general_bot.apply_published_config.assert_not_called()
         router_bot.apply_published_config.assert_not_called()

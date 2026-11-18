@@ -43,6 +43,7 @@ from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
+from mindroom.history.run_checkpoint import recover_stopped_run
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
@@ -454,6 +455,8 @@ class TurnSinks:
     persist_interrupted: bool = True
     # The event the turn's Matrix reply shows, which an interrupted record names.
     response_event_id: Callable[[], str | None] | None = None
+    # Whether a Stop of its user reached the reply the turn writes, asked when the turn is cancelled.
+    stopped_by_user: Callable[[], bool] | None = None
     # Collects what the subagent turns whose results the turn receives cost, which its run metadata reports; a turn
     # whose caller passes none keeps its own, and a delegated child's is the one its settlement reads.
     subagent_cost: SubagentCost | None = None
@@ -852,9 +855,10 @@ async def _record_interrupted(
     if not sinks.persist_interrupted:
         return
     response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
+    stopped = status is RunStatus.cancelled and sinks.stopped_by_user is not None and sinks.stopped_by_user()
     # A further cancellation, such as the one the streamer sends 0.5 s after a Stop, waits for the record too, so the
     # reply settles, and the conversation's next turn reads history, only once it is stored.
-    await run_blocking_until_complete(_persist_interrupted, ctx, adapter, run, response_event_id)
+    await run_blocking_until_complete(_persist_interrupted, ctx, adapter, run, response_event_id, stopped)
 
 
 def _persist_interrupted(
@@ -862,14 +866,27 @@ def _persist_interrupted(
     adapter: TurnAdapter[Any],
     run: TurnRunState,
     response_event_id: str | None,
+    stopped_by_user: bool,
 ) -> None:
-    """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not."""
+    """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not.
+
+    A turn its user stopped keeps the run its attempt stored instead, once a response of that run had begun
+    (``recover_stopped_run``): the next turn's request then starts with what the stopped run sent, which a provider's
+    prompt cache still holds, where the record's prose account of the same work would be new input.
+    """
     record = run.record
     try:
         scope_context = run.scope_context or adapter.load_scope()
+        storage, session = scope_context.storage, scope_context.stored_or_first_session()
+        if (
+            stopped_by_user
+            and record.run_id is not None
+            and recover_stopped_run(storage, session, record.run_id, response_event_id)
+        ):
+            return
         persist_interrupted_replay_snapshot(
-            storage=scope_context.storage,
-            session=scope_context.stored_or_first_session(),
+            storage=storage,
+            session=session,
             run_id=record.run_id or str(uuid4()),
             snapshot=record.interrupted_snapshot(response_event_id=response_event_id),
         )

@@ -69,6 +69,7 @@ from mindroom.reply_scope import (
     current_reply_event_id,
     current_slot,
     current_span,
+    current_span_stopped,
     initial_write,
     release_decision,
     suppress_decision,
@@ -78,6 +79,7 @@ from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
     prepare_memory_and_model_context,
+    thread_fork_item,
     with_matrix_message_target,
     with_silent_schedule_delivery,
 )
@@ -471,6 +473,14 @@ class ResponseRunner:
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self.lifecycle_coordinator.active_thread_ids_for_room(room_id)
+
+    def note_continued_sources(self, source_event_ids: frozenset[str]) -> None:
+        """Remember the sources of the replies an older instance left to continue, so their replays are no news."""
+        self.lifecycle_coordinator.continued_sources = source_event_ids
+
+    def note_edited_source(self, source_event_id: str) -> None:
+        """Count a continued reply's source as news again once its sender edits it."""
+        self.lifecycle_coordinator.continued_sources -= {source_event_id}
 
     def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
         """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
@@ -966,6 +976,9 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
         target = runtime.tool_context.target
+        fork_item = thread_fork_item(thread_history, target.resolved_thread_id, self.deps.runtime.config)
+        if fork_item is not None:
+            transient_enrichment_items = (*transient_enrichment_items, fork_item)
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
             session_id=runtime.tool_context.target.session_id,
@@ -1933,6 +1946,7 @@ class ResponseRunner:
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
             response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:

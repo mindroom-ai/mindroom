@@ -208,6 +208,7 @@ Matrix sync callback
 | `secret_requests.py` | In-memory registry of pending secret requests, the card content they post, and the store of temporary secrets requesters gave conversations (in memory, or also one private file each) |
 | `secret_request_cards.py` | The card a secret request posts and the wait for its answer, shared by `request_secret` and `request_temporary_secret` |
 | `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope, gives their temporary secret to the conversation that asked, or records a decline |
+| `api/github_requests.py` | `/api/github/request`, `/api/github/status`, and `/api/github/token`: sends a client session user's `/repos/<owner>/<repo>` or `/graphql` call to `api.github.com` with their own saved personal access token or else their connected GitHub account, reports which, and saves or removes that token |
 | `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
 | `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |

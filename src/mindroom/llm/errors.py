@@ -27,7 +27,7 @@ TOKENS_PER_MINUTE = "tokens_per_minute"
 # usage limit: no retry passes until the account's billing or limits change, and the request's media did not cause it.
 QUOTA_EXHAUSTED = "quota_exhausted"
 # The text of a safeguard refusal, which error runs store.
-MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
+MODEL_SAFEGUARD_REFUSAL_MESSAGE = "The model's safeguards refused the response"
 
 
 class ProviderError(Exception):

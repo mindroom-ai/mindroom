@@ -47,22 +47,23 @@ async def _joined_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom 
     return room
 
 
-async def _readable_root(client: nio.AsyncClient, room_id: str, thread_id: str) -> bool:
+async def _root_denial(client: nio.AsyncClient, room_id: str, thread_id: str) -> str | None:
+    """Return why the thread root is not a readable root of this room, or None."""
     response = await client.room_get_event(room_id, thread_id)
     if not isinstance(response, nio.RoomGetEventResponse):
-        return False
+        return "thread_root_unavailable"
     event = readable_event(client, response.event)
     if not isinstance(event, nio.RoomMessage) or event.event_id != thread_id:
-        return False
+        return "thread_root_unreadable"
     source = event.source
     if source.get("room_id", room_id) != room_id or "redacted_because" in source.get("unsigned", {}):
-        return False
+        return "thread_root_unreadable"
     # A thread child, edit, or plain reply is not proof of a root. Inspect the
     # readable event only: encrypted outer relation hints are untrusted.
-    return EventInfo.from_event(source).can_be_thread_root
+    return None if EventInfo.from_event(source).can_be_thread_root else "not_thread_root"
 
 
-async def validate_model_picker_scope(
+async def validate_model_picker_scope(  # noqa: PLR0911
     *,
     client: nio.AsyncClient,
     config: Config,
@@ -71,23 +72,30 @@ async def validate_model_picker_scope(
     room_id: str,
     requester_user_id: str,
     thread_id: str | None,
-) -> ModelPickerScope | None:
-    """Require actual joined requester/router/eligible agents and an optional root."""
+) -> ModelPickerScope | str:
+    """Require actual joined requester/router/eligible agents and an optional root.
+
+    A denied scope returns a short stable reason for diagnostic logs.
+    """
     registry = entity_identity_registry(config, runtime_paths)
     router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
     if client.user_id != router_id:
-        return None
+        return "not_router"
     try:
         before = await _joined_room(client, room_id)
-        if before is None or not {requester_user_id, router_id}.issubset(before.users):
-            return None
-        if thread_id is not None and not await _readable_root(client, room_id, thread_id):
-            return None
+        if before is None:
+            return "room_unavailable"
+        if not {requester_user_id, router_id}.issubset(before.users):
+            return "not_joined"
+        if thread_id is not None and (denial := await _root_denial(client, room_id, thread_id)) is not None:
+            return denial
         after = await _joined_room(client, room_id)
     except (nio.EncryptionError, OSError, TimeoutError):
-        return None
-    if after is None or not {requester_user_id, router_id}.issubset(after.users):
-        return None
+        return "scope_check_error"
+    if after is None:
+        return "room_unavailable"
+    if not {requester_user_id, router_id}.issubset(after.users):
+        return "not_joined"
     candidates = responder_candidate_entities_from_cached_room(
         after,
         requester_user_id,
@@ -102,4 +110,4 @@ async def validate_model_picker_scope(
         if (name := registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)) is not None
     )
     agents = tuple(user_id for user_id, name in entities if name in config.agents)
-    return ModelPickerScope(agents, tuple(name for _, name in entities)) if agents else None
+    return ModelPickerScope(agents, tuple(name for _, name in entities)) if agents else "no_addressable_agent"
