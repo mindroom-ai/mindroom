@@ -142,14 +142,11 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     stop_ending = run.messages[-1] if run.messages and not agent_work and is_recovered_run(run) else None
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
-    for message in run.messages:
+    # The agent's own thread message, which its input carried as a tagged message, is a reply of the agent.
+    for message in map(spoken_message, run.messages):
         if not message.add_to_agent_memory:
             continue
         content = message.content if isinstance(message.content, str) else ""
-        if (own_text := own_thread_message_text(message)) is not None:
-            if own_text.strip():
-                said.append(Utterance("reply", None, None, own_text, message))
-            continue
         if message is stop_ending:
             content = content.removesuffix(STOPPED_BY_USER_NOTE).rstrip()
         mindroom_wrote = (
