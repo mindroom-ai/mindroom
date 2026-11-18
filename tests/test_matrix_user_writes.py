@@ -1673,12 +1673,8 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
         "action": "send",
         "status": "ok",
         "event_id": "$sent",
-        "content_keys": sent["content_keys"],
-        "content_bytes": sent["content_bytes"],
         "attachments": 0,
     }
-    assert {"body", "formatted_body", AGENT_AUTHORED_KEY} <= set(sent["content_keys"])
-    assert sent["content_bytes"] > len("The secret plan")
     assert (refused["status"], refused["error"]) == ("error", ENCRYPTED)
     assert all("secret plan" not in str(entry) for entry in logs)
 

@@ -11,7 +11,6 @@ event would go out in plain text.
 from __future__ import annotations
 
 import asyncio
-import json
 import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -182,8 +181,6 @@ class _Written:
 
     room_id: str | None
     event_id: str | None = None
-    # The content of its event, unless it is a file's, which the send helper builds; only its keys and size are logged.
-    content: dict[str, Any] | None = None
     # Whom it invited: into a room, into a new room, or into a DM made for a send.
     invited: str | None = None
     # Why the DM made for a send could not be added to the person's `m.direct`, when it could not.
@@ -223,7 +220,6 @@ def _audit(
     status: str,
     error: str | None = None,
 ) -> None:
-    content = written.content or {}
     logger.warning(
         "matrix_user_write_audit",
         agent=actor.agent_name,
@@ -232,8 +228,6 @@ def _audit(
         action=write.action,
         status=status,
         event_id=written.event_id,
-        content_keys=sorted(content),
-        content_bytes=len(json.dumps(content).encode()) if content else 0,
         attachments=int(write.attachment is not None),
         **({} if written.invited is None else {"invited": written.invited}),
         **({} if written.dm_not_listed is None else {"dm_not_listed": written.dm_not_listed}),
@@ -435,7 +429,6 @@ async def _send_into(
     if write.event_id is not None and write.thread_id is None:
         # A reply that every client shows as one, not MindRoom's own unquoted kind.
         content["m.relates_to"] = {"m.in_reply_to": {"event_id": write.event_id}}
-    written.content = content
     # A message too long for one event goes out whole, with its full text uploaded, or not at all.
     outcome = await send_message_outcome(
         client,
@@ -462,9 +455,9 @@ async def _event_write(
         # A redaction carries no text that encryption would protect.
         await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=False)
         reason = (write.message or "").strip()
-        written.content = {**({"reason": reason} if reason else {}), **marker}
+        body = {**({"reason": reason} if reason else {}), **marker}
         path = f"/rooms/{quote(room_id, safe='')}/redact/{quote(event_id, safe='')}/{uuid4().hex}"
-        redaction = await matrix_json(client, "PUT", path, written.content)
+        redaction = await matrix_json(client, "PUT", path, body)
         if isinstance(redaction.get("event_id"), str):
             written.event_id = redaction["event_id"]
         return {"room_id": room_id, "event_id": redaction.get("event_id")}
@@ -473,11 +466,10 @@ async def _event_write(
         # The homeserver takes a reaction to an event the room does not hold, such as one of another room, and nobody
         # sees it, so the event is read in the room first, as the `react` tool reads it.
         await read_event(client, room_id, event_id)
-        written.content = {**build_reaction_content(event_id, str(write.emoji).strip()), **marker}
         outcome = await send_message_outcome(
             client,
             room_id,
-            written.content,
+            {**build_reaction_content(event_id, str(write.emoji).strip()), **marker},
             message_type="m.reaction",
             operation="matrix_user_react",
         )
@@ -496,7 +488,7 @@ async def _event_write(
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
         # ``extra_content`` puts the marker on both layers, as history keeps the edit's replacement content.
-        written.content = build_edit_event_content(
+        content = build_edit_event_content(
             event_id=event_id,
             new_content=new_content,
             new_text=text,
@@ -505,7 +497,7 @@ async def _event_write(
         outcome = await send_message_outcome(
             client,
             room_id,
-            written.content,
+            content,
             operation="matrix_user_edit",
             sidecar_required=True,
         )
