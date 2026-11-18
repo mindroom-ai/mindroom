@@ -208,6 +208,12 @@ _CANCELLED_REASON = (
     "This call was cancelled before it returned a result. Its effects so far stand: do not call it again unless "
     "the user asks."
 )
+# What a job ends with that a restart stopped and would have continued, had its user not stopped the reply that
+# started it. The interruption's own reason invites a follow-up, which would run the work the user stopped.
+_REPLY_STOPPED_REASON = (
+    "The user stopped the reply that started this job, so it was not continued after a restart interrupted it. "
+    "Do not continue it or repeat its work unless the user asks."
+)
 
 
 def _stopped_outcome(*, cancelled: bool, cause: Literal["restart", "shutdown"]) -> BackgroundOutcome:
@@ -496,7 +502,13 @@ class ToolJobRuntime:
         await run_coroutine_until_complete(publish())
 
     async def _publish_outcome(self, entry: _Entry, outcome: BackgroundOutcome) -> None:
-        """Publish work that already ran with a bounded summary; a failed save keeps it for a later publish to retry."""
+        """Publish work that already ran with a bounded summary; a failed save keeps it for a later publish to retry.
+
+        An interruption of a job that restarts continue, whose reply was stopped, says the user stopped it: every
+        path that ends such a job instead of continuing it publishes here.
+        """
+        if outcome.status == "interrupted" and entry.control.reply_stopped and self._continues(entry.job):
+            outcome = BackgroundOutcome("interrupted", _REPLY_STOPPED_REASON)
         text = outcome.result
         job = _updated(
             entry.job,
@@ -595,9 +607,10 @@ class ToolJobRuntime:
             and self._grant(entry.job) == "allowed"
         )
 
-    async def continue_stopped(self, job_id: str, spec: JobSpec | None) -> None:
+    async def continue_stopped(self, job_id: str, spec: JobSpec | None, *, reply_stopped: bool = False) -> None:
         """Run a job a restart stopped on as ``spec``, under its own ID, or end it interrupted when ``spec`` is None.
 
+        ``reply_stopped`` says the job's reply holds a Stop this process never saw, which then counts as one it saw.
         A job that was continued, cancelled, or settled since it was listed is left alone. A Stop of its reply that
         arrived meanwhile ends it, and it stays as it is while its requester's access is no longer allowed: revocation
         cancels it, or a later pass continues it.
@@ -607,6 +620,7 @@ class ToolJobRuntime:
             entry = self._entries.get(job_id)
             if entry is None or entry.interruption is None or not self._awaits_continuation(entry):
                 return
+            entry.control.reply_stopped |= reply_stopped
             if spec is None or entry.control.reply_stopped:
                 await self._publish_outcome(entry, entry.interruption)
             elif self._grant(entry.job) == "allowed":

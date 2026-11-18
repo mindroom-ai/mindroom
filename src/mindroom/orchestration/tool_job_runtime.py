@@ -59,6 +59,8 @@ logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
 # How long a stopped subagent job waits for its requester's access to resolve once its bot has synced.
 _ACCESS_WAIT_SECONDS = 600.0
+# Why a stopped subagent job ends when its reply's record holds a Stop from after the job began.
+_REPLY_STOPPED = "the reply that started it was stopped"
 
 
 def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
@@ -390,7 +392,7 @@ class ToolJobRuntimeCoordinator:
                     await runtime.continue_stopped(job.job_id, spec)
                     return
         logger.info("Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec)
-        await runtime.continue_stopped(job.job_id, None)
+        await runtime.continue_stopped(job.job_id, None, reply_stopped=spec == _REPLY_STOPPED)
 
     def _ready_bot(self, job: BackgroundJob) -> AgentBot | str | None:
         """Return the bot a stopped job continues under, why the job ends instead, or None while the job waits.
@@ -426,7 +428,7 @@ class ToolJobRuntimeCoordinator:
         if job.reply_id is not None:
             reply = await bot.journal_principal().replies.load(job.reply_id)
             if reply is not None and reply.stop_receipt_order != job.reply_stop_order:
-                return "the reply that started it was stopped"
+                return _REPLY_STOPPED
         try:
             return await continued_subagent_job(job, runtime)
         except Exception:

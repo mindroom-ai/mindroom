@@ -152,4 +152,8 @@ Two reviews of `87759d6d3` left five items; the identity and the round 2 rule st
   A subagent job's cards name the child's turn with the call (`child_card_id`), under the job as owner, so the job's end still denies them; the child resumes on the provider's own call IDs, since decisions are matched to calls by position.
   Reuse within one turn is main's behaviour and stays a limit.
 
-Measured: +116 −32 in `src` against `87759d6d3`, net +84.
+- **A stopped reply's job is not continued by its parent either.**
+  The live recheck found the parent's job-ended turn continuing the child after the user's Stop, because the job ended with the restart's reason, which says to send a follow-up.
+  Such a job now ends with a result that says its user stopped it; the runtime chooses it where it publishes a job's end, so the shutdown, a Stop of a waiting job, and the pass share it, and the pass hands the runtime a Stop it read in the reply's record.
+
+Measured: +136 −36 in `src` against `87759d6d3`, net +100.

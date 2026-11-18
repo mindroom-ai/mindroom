@@ -103,6 +103,7 @@ A follow-up sent while the child is still running or awaiting approval is refuse
 If MindRoom restarts while a child works as a background job, the child continues on its own after the restart, from the work it had done and under the same job, and no call it finished runs again.
 A child that was waiting for an approval, another decision of a person, or a subagent of its own, or whose job restarts have cut short three times, is reported as interrupted instead, and a follow-up continues it.
 So is a child whose parent reply was stopped: a Stop leaves a working child running, but no restart continues it.
+Its job then says that the user stopped it, so the parent does not continue it either unless the user asks.
 So is a child whose agent left the room meanwhile, or whose requester's room access stays unresolved for 10 minutes after the restart.
 Until the job ends, a follow-up to that child is refused as busy.
 A child turn that runs inside its parent's reply is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.

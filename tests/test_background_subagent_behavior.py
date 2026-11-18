@@ -39,7 +39,7 @@ from mindroom.tool_jobs.control import current_job_id
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import JobNotices, append_turn_start_job_note, job_notice_context
-from mindroom.tool_jobs.runtime import describe_job, register_background_runtime
+from mindroom.tool_jobs.runtime import _REPLY_STOPPED_REASON, describe_job, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -775,6 +775,8 @@ async def test_a_stopped_replys_subagent_is_not_continued_after_a_restart(
     """A Stop of the reply that started a working subagent keeps it working, and no restart continues it.
 
     The reply's record decides: it holds the Stop even when the process died before it applied the Stop to the job.
+    The job's result says its user stopped it, on the shutdown's path and the pass's alike, so the parent that reads
+    it does not continue the child itself.
     """
     started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
@@ -787,7 +789,7 @@ async def test_a_stopped_replys_subagent_is_not_continued_after_a_restart(
         with capture_logs() as logs:
             await _stop(conversation, stop)
         job = await conversation.job(job_id)
-        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert (job.status, job.result) == ("interrupted", _REPLY_STOPPED_REASON)
         assert len(conversation.agents.models["code"].requests) == 1
         # An orderly shutdown that saw the Stop ends the job itself; otherwise the next start reads the reply.
         seen_at_shutdown = applied and stop == "restart"
@@ -815,7 +817,7 @@ async def test_a_stop_that_arrives_while_the_process_shuts_down_ends_the_job(
             await runtime.cancel_stopped_reply(reply.span.reply_id)
             await quiescing
         saved = (await saved_jobs(tmp_path))[job_id]
-        assert (saved.status, saved.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert (saved.status, saved.result) == ("interrupted", _REPLY_STOPPED_REASON)
     finally:
         await conversation.close()
 
@@ -861,7 +863,7 @@ async def test_a_stop_ends_a_job_that_waits_to_continue(tmp_path: Path, monkeypa
         assert [job.job_id for job in conversation.runtime.awaiting_continuation()] == [job_id]
         await reply.stop()
         job = await conversation.job(job_id)
-        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert (job.status, job.result) == ("interrupted", _REPLY_STOPPED_REASON)
         await conversation.continue_stopped()
         assert len(conversation.agents.models["code"].requests) == 1
     finally:
@@ -893,7 +895,7 @@ async def test_a_stop_that_races_the_launch_of_a_continuation_wins(
         await asyncio.gather(stopping, return_exceptions=True)
         await conversation.continue_stopped()
         job = await conversation.job(job_id)
-        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert (job.status, job.result) == ("interrupted", _REPLY_STOPPED_REASON)
         assert len(conversation.agents.models["code"].requests) == 1
     finally:
         await conversation.close()
@@ -934,7 +936,7 @@ async def test_a_stop_during_the_save_before_a_continuation_launches_wins(
             saved.set()
             await asyncio.gather(launching, stopping)
         job = await conversation.job(job_id)
-        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert (job.status, job.result) == ("interrupted", _REPLY_STOPPED_REASON)
         assert len(conversation.agents.models["code"].requests) == 1
     finally:
         await conversation.close()
